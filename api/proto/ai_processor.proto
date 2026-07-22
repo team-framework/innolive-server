@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+option go_package = "inno-live-server/api/gen/aiv1;aiv1";
+
+service AiProcessor {
+  rpc ProcessVideo(stream VideoChunk) returns (stream ProcessedVideoChunk);
+  rpc AddWhitelist(FaceData) returns (WhitelistResponse);
+  // Remove a client's reference face(s). Empty face_id removes ALL faces for the client.
+  rpc RemoveWhitelist(RemoveWhitelistRequest) returns (WhitelistResponse);
+}
+
+message VideoChunk {
+  bytes data = 1;
+  int64 timestamp = 2;
+  // Frame metadata for the raw wire format (AI_FRAME_WIRE_FORMAT=raw).
+  // Unset (zero) when data is a self-describing JPEG image.
+  uint32 width = 3;
+  uint32 height = 4;
+  string pix_fmt = 5;
+  // Client whose reference-face exclusion set should be applied to this stream.
+  // Empty = global/default (no per-client scoping).
+  string client_id = 6;
+}
+
+message ProcessedVideoChunk {
+  bytes data = 1;
+  int64 timestamp = 2;
+  string status_message = 3;
+  // Mirrors VideoChunk metadata for raw frames; zero for JPEG responses.
+  uint32 width = 4;
+  uint32 height = 5;
+  string pix_fmt = 6;
+}
+
+message FaceData {
+  bytes data = 1;
+  // Per-client whitelist scoping. Empty = global/default.
+  string client_id = 2;
+  // Stable identity for this reference face, so it can be removed individually.
+  string face_id = 3;
+}
+
+message WhitelistResponse {
+  string status_message = 1;
+  int64 timestamp = 2;
+}
+
+message RemoveWhitelistRequest {
+  // Client whose reference face(s) to remove.
+  string client_id = 1;
+  // Specific face to remove; empty removes ALL reference faces for the client.
+  string face_id = 2;
+}

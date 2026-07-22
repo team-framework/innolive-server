@@ -42,6 +42,8 @@ type Config struct {
 	AIWireFormat            WireFormat
 	AIFailurePolicy         AIFailurePolicy
 	AITimeoutLatchThreshold int
+	AIPreflightTimeout      time.Duration
+	AIPreflightRequired     bool
 	FFmpegPath              string
 	STUNURLs                []string
 	TURNURLs                []string
@@ -65,6 +67,8 @@ func Load() (Config, error) {
 		AIWireFormat:            WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
 		AIFailurePolicy:         AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
 		AITimeoutLatchThreshold: envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
+		AIPreflightTimeout:      envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
+		AIPreflightRequired:     envBool("AI_PREFLIGHT_REQUIRED", false),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
 		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
 		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
@@ -143,6 +147,9 @@ func (c Config) Validate() error {
 	}
 	if c.AITimeoutLatchThreshold < 0 {
 		return errors.New("AI_TIMEOUT_LATCH_THRESHOLD must not be negative")
+	}
+	if c.AIPreflightTimeout <= 0 {
+		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")
 	}
 	if c.PrivacyMode == PrivacyModeReal {
 		for _, target := range c.AITargets {

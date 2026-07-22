@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/session"
@@ -26,15 +27,17 @@ type Server struct {
 	logger   *slog.Logger
 	metrics  *metrics.Registry
 	sessions *session.Manager
+	ai       *ai.Pool
 	handler  http.Handler
 }
 
-func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, sessions *session.Manager) *Server {
+func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, sessions *session.Manager, aiPool *ai.Pool) *Server {
 	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
 		metrics:  registry,
 		sessions: sessions,
+		ai:       aiPool,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleRoot)
@@ -61,6 +64,17 @@ func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	runtimes := make([]map[string]any, 0, 1)
+	if s.ai != nil {
+		for _, client := range s.ai.Clients() {
+			runtimes = append(runtimes, map[string]any{
+				"kind":    "external_grpc",
+				"address": client.Address(),
+				"mode":    s.cfg.PrivacyMode,
+				"state":   client.State(),
+				"ready":   client.Ready(),
+			})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":     "inno-live-server",
 		"status":      "ready",

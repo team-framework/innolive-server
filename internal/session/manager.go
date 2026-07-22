@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
@@ -104,6 +105,7 @@ type Manager struct {
 	cfg     config.Config
 	logger  *slog.Logger
 	metrics *metrics.Registry
+	ai      *ai.Pool
 	api     *webrtc.API
 	ice     []webrtc.ICEServer
 
@@ -111,7 +113,10 @@ type Manager struct {
 	sessions map[string]*Session
 }
 
-func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Registry) (*Manager, error) {
+func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, aiPool *ai.Pool) (*Manager, error) {
+	if cfg.PrivacyMode == config.PrivacyModeReal && aiPool == nil {
+		return nil, errors.New("real privacy mode requires an AI client pool")
+	}
 	var settingEngine webrtc.SettingEngine
 	if cfg.UDPMuxPort > 0 {
 		// Multiplex all ICE UDP traffic onto a single port. Spreading media
@@ -136,6 +141,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		cfg:      cfg,
 		logger:   logger,
 		metrics:  registry,
+		ai:       aiPool,
 		api:      webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		ice:      iceServers,
 		sessions: make(map[string]*Session),
@@ -266,8 +272,18 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		s.UpdatedAt = time.Now().UTC()
 		s.mu.Unlock()
 
-		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics)
-		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, m.metrics, m.logger.With("session_id", s.ID))
+		var aiStream media.AIStream
+		if m.cfg.PrivacyMode == config.PrivacyModeReal {
+			client := m.ai.Next()
+			m.metrics.IncAITargetSession(client.Address())
+			// Per-client whitelist scoping: the AI worker applies this client's
+			// reference-face exclusion set to the stream (empty = global default).
+			aiStream = client.NewStream(trackCtx, s.Metadata["client_id"])
+		}
+		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
+			WireFormat: m.cfg.AIWireFormat,
+		})
+		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat)
 		if err != nil {
 			m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
 			return

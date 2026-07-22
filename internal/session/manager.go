@@ -21,7 +21,8 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("session not found")
+	ErrNotFound         = errors.New("session not found")
+	ErrCapacityExceeded = errors.New("session capacity exceeded")
 )
 
 type Timing struct {
@@ -104,18 +105,25 @@ type Session struct {
 }
 
 type Manager struct {
-	cfg     config.Config
-	logger  *slog.Logger
-	metrics *metrics.Registry
-	ai      *ai.Pool
-	api     *webrtc.API
-	ice     []webrtc.ICEServer
+	cfg       config.Config
+	logger    *slog.Logger
+	metrics   *metrics.Registry
+	ai        *ai.Pool
+	spawnGate *media.SpawnGate
+	api       *webrtc.API
+	ice       []webrtc.ICEServer
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	pending  int
+	// pipelines tracks sessions whose media pipeline (FFmpeg pair) is still
+	// alive, including sessions already removed from the map but not yet
+	// torn down — those keep counting toward MaxSessions so reconnect churn
+	// cannot double-book processes during the teardown grace window.
+	pipelines map[string]struct{}
 }
 
-func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, aiPool *ai.Pool) (*Manager, error) {
+func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, aiPool *ai.Pool, spawnGate *media.SpawnGate) (*Manager, error) {
 	if cfg.PrivacyMode == config.PrivacyModeReal && aiPool == nil {
 		return nil, errors.New("real privacy mode requires an AI client pool")
 	}
@@ -140,13 +148,15 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 	}
 	iceServers := buildICEServers(cfg)
 	return &Manager{
-		cfg:      cfg,
-		logger:   logger,
-		metrics:  registry,
-		ai:       aiPool,
-		api:      webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
-		ice:      iceServers,
-		sessions: make(map[string]*Session),
+		cfg:       cfg,
+		logger:    logger,
+		metrics:   registry,
+		ai:        aiPool,
+		spawnGate: spawnGate,
+		api:       webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
+		ice:       iceServers,
+		sessions:  make(map[string]*Session),
+		pipelines: make(map[string]struct{}),
 	}, nil
 }
 
@@ -156,7 +166,45 @@ func (m *Manager) ICEServers() []webrtc.ICEServer {
 	return result
 }
 
+// Capacity reports the number of capacity-consuming sessions (live +
+// reserved) and the configured limit (0 means unlimited).
+func (m *Manager) Capacity() (active, limit int) {
+	m.mu.RLock()
+	active = len(m.sessions) + m.pending
+	m.mu.RUnlock()
+	return active, m.cfg.MaxSessions
+}
+
+// capacityInUseLocked counts live sessions, in-flight reservations, and
+// orphaned pipelines (deleted sessions whose FFmpeg pair is still tearing
+// down). Callers must hold m.mu.
+func (m *Manager) capacityInUseLocked() int {
+	inUse := len(m.sessions) + m.pending
+	for id := range m.pipelines {
+		if _, live := m.sessions[id]; !live {
+			inUse++
+		}
+	}
+	return inUse
+}
+
 func (m *Manager) Create(metadata map[string]string) (*Session, error) {
+	if limit := m.cfg.MaxSessions; limit > 0 {
+		m.mu.Lock()
+		if m.capacityInUseLocked() >= limit {
+			active := len(m.sessions)
+			m.mu.Unlock()
+			m.metrics.IncSessionsRejected()
+			return nil, fmt.Errorf("%w: active=%d limit=%d", ErrCapacityExceeded, active, limit)
+		}
+		m.pending++
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			m.pending--
+			m.mu.Unlock()
+		}()
+	}
 	pc, err := m.api.NewPeerConnection(webrtc.Configuration{ICEServers: m.ice})
 	if err != nil {
 		return nil, fmt.Errorf("create PeerConnection: %w", err)
@@ -191,8 +239,29 @@ func (m *Manager) Create(metadata map[string]string) (*Session, error) {
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(count)
 	m.metrics.IncConnections()
+	if timeout := m.cfg.NegotiationTimeout; timeout > 0 {
+		time.AfterFunc(timeout, func() { m.reapUnnegotiated(id) })
+	}
 	m.logger.Info("created live session", "session_id", id)
 	return s, nil
+}
+
+// reapUnnegotiated frees a session that never started negotiation within
+// SESSION_NEGOTIATION_TIMEOUT, so bare POST /sessions calls cannot pin
+// MAX_SESSIONS slots indefinitely.
+func (m *Manager) reapUnnegotiated(id string) {
+	s, err := m.Get(id)
+	if err != nil {
+		return
+	}
+	s.mu.RLock()
+	bare := s.offerReceivedAt.IsZero() && !s.wasConnected && !s.closed
+	s.mu.RUnlock()
+	if !bare {
+		return
+	}
+	m.logger.Info("reaping unnegotiated session", "session_id", id, "timeout", m.cfg.NegotiationTimeout)
+	_ = m.Delete(id, "negotiation_timeout")
 }
 
 func (m *Manager) Get(id string) (*Session, error) {
@@ -243,6 +312,24 @@ func (m *Manager) CloseAll() {
 	for _, s := range sessions {
 		s.close("application_shutdown", m.logger)
 	}
+	// Wait for the FFmpeg pairs' graceful teardown so process exit does not
+	// orphan children mid-shutdown (bounded slightly above the grace period).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.RLock()
+		remaining := len(m.pipelines)
+		m.mu.RUnlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	m.mu.RLock()
+	remaining := len(m.pipelines)
+	m.mu.RUnlock()
+	if remaining > 0 {
+		m.logger.Warn("media pipelines still draining at shutdown", "remaining", remaining)
+	}
 }
 
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
@@ -283,7 +370,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			aiStream = client.NewStream(trackCtx, s.Metadata["client_id"])
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
-			WireFormat: m.cfg.AIWireFormat,
+			Gate:           m.spawnGate,
+			EncoderThreads: m.cfg.FFmpegEncoderThreads,
+			WireFormat:     m.cfg.AIWireFormat,
 		})
 		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {
@@ -296,6 +385,14 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		go func() {
+			m.mu.Lock()
+			m.pipelines[s.ID] = struct{}{}
+			m.mu.Unlock()
+			defer func() {
+				m.mu.Lock()
+				delete(m.pipelines, s.ID)
+				m.mu.Unlock()
+			}()
 			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize)
 			s.mu.Lock()
 			// Only clear if we are still the active track — a replacement may have

@@ -13,6 +13,7 @@ import (
 
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/server"
 	"inno-live-server/internal/session"
@@ -60,7 +61,8 @@ func main() {
 		}
 	}
 
-	sessionManager, err := session.NewManager(cfg, logger, registry, aiPool)
+	spawnGate := media.NewSpawnGate(cfg.FFmpegSpawnConcurrency)
+	sessionManager, err := session.NewManager(cfg, logger, registry, aiPool, spawnGate)
 	if err != nil {
 		logger.Error("create session manager failed", "error", err)
 		os.Exit(1)
@@ -82,6 +84,8 @@ func main() {
 			"privacy_mode", cfg.PrivacyMode,
 			"ai_targets", cfg.AITargets,
 			"wire_format", cfg.AIWireFormat,
+			"max_sessions", cfg.MaxSessions,
+			"ffmpeg_spawn_concurrency", cfg.FFmpegSpawnConcurrency,
 		)
 		serverErrors <- httpServer.ListenAndServe()
 	}()

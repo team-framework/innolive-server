@@ -110,6 +110,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	liveSession, err := s.sessions.Create(request.Metadata)
+	if errors.Is(err, session.ErrCapacityExceeded) {
+		active, limit := s.sessions.Capacity()
+		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)
+		writeError(w, apiError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "capacity_exceeded",
+			Message: "The server has reached its maximum number of concurrent sessions.",
+			Details: map[string]any{"active_sessions": active, "max_sessions": limit},
+		})
+		return
+	}
 	if err != nil {
 		s.logger.Error("create session failed", "error", err)
 		writeError(w, internalError())

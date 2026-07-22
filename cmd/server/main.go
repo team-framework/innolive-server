@@ -46,6 +46,18 @@ func main() {
 			os.Exit(1)
 		}
 		defer aiPool.Close()
+
+		if err := aiPool.Preflight(context.Background(), string(cfg.AIWireFormat), cfg.AIPreflightTimeout); err != nil {
+			if cfg.AIPreflightRequired {
+				logger.Error("AI preflight failed; refusing to start (AI_PREFLIGHT_REQUIRED=true)",
+					"error", err, "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+				os.Exit(2)
+			}
+			logger.Warn("AI preflight failed; starting anyway (AI_PREFLIGHT_REQUIRED=false)",
+				"error", err, "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+		} else {
+			logger.Info("AI preflight passed", "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+		}
 	}
 
 	sessionManager, err := session.NewManager(cfg, logger, registry, aiPool)

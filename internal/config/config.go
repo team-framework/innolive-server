@@ -14,12 +14,25 @@ type PrivacyMode string
 const (
 	PrivacyModeBypass     PrivacyMode = "bypass"
 	PrivacyModeFixedDelay PrivacyMode = "fixed_delay"
+	PrivacyModeReal       PrivacyMode = "real"
+)
+
+type WireFormat string
+
+const (
+	WireFormatJPEG WireFormat = "jpeg"
+	WireFormatRaw  WireFormat = "raw"
 )
 
 type Config struct {
 	HTTPAddr                string
 	PrivacyMode             PrivacyMode
 	PrivacyFixedDelay       time.Duration
+	AIAddress               string
+	AITargets               []string
+	AITimeout               time.Duration
+	AIInsecure              bool
+	AIWireFormat            WireFormat
 	FFmpegPath              string
 	STUNURLs                []string
 	TURNURLs                []string
@@ -37,7 +50,10 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:                env("HTTP_ADDR", ":8000"),
-		PrivacyMode:             PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeBypass))),
+		PrivacyMode:             PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeReal))),
+		AIAddress:               env("AI_GRPC_ADDR", "localhost:50051"),
+		AIInsecure:              envBool("AI_GRPC_INSECURE", true),
+		AIWireFormat:            WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
 		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
 		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
@@ -45,6 +61,7 @@ func Load() (Config, error) {
 		TURNCredential:          strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
 		AnnouncedIP:             strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
 		DisconnectedGracePeriod: envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
+		AITimeout:               envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
@@ -62,6 +79,11 @@ func Load() (Config, error) {
 	cfg.UDPPortMin = minPort
 	cfg.UDPPortMax = maxPort
 
+	cfg.AITargets = splitList(env("AI_GRPC_TARGETS", ""))
+	if len(cfg.AITargets) == 0 {
+		cfg.AITargets = []string{cfg.AIAddress}
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -70,18 +92,24 @@ func Load() (Config, error) {
 
 func (c Config) Validate() error {
 	switch c.PrivacyMode {
-	case PrivacyModeBypass, PrivacyModeFixedDelay:
+	case PrivacyModeBypass, PrivacyModeFixedDelay, PrivacyModeReal:
 	default:
-		return fmt.Errorf("AI_PRIVACY_MODE must be one of bypass, fixed_delay: %q", c.PrivacyMode)
+		return fmt.Errorf("AI_PRIVACY_MODE must be one of bypass, fixed_delay, real: %q", c.PrivacyMode)
 	}
 	if c.HTTPAddr == "" {
 		return errors.New("HTTP_ADDR must not be empty")
+	}
+	if c.PrivacyMode == PrivacyModeReal && c.AIAddress == "" {
+		return errors.New("AI_GRPC_ADDR must not be empty in real mode")
 	}
 	if c.FFmpegPath == "" {
 		return errors.New("FFMPEG_PATH must not be empty")
 	}
 	if c.PrivacyFixedDelay < 0 {
 		return errors.New("AI_PRIVACY_FIXED_DELAY must not be negative")
+	}
+	if c.AITimeout <= 0 {
+		return errors.New("AI_GRPC_TIMEOUT must be positive")
 	}
 	if c.UDPPortMin == 0 || c.UDPPortMax == 0 || c.UDPPortMin > c.UDPPortMax {
 		return errors.New("WEBRTC UDP port range is invalid")
@@ -92,6 +120,18 @@ func (c Config) Validate() error {
 	if c.FrameQueueSize < 1 {
 		return errors.New("AI_FRAME_QUEUE_SIZE must be at least 1")
 	}
+	switch c.AIWireFormat {
+	case "", WireFormatJPEG, WireFormatRaw: // empty defaults to jpeg downstream
+	default:
+		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be one of jpeg, raw: %q", c.AIWireFormat)
+	}
+	if c.PrivacyMode == PrivacyModeReal {
+		for _, target := range c.AITargets {
+			if strings.TrimSpace(target) == "" {
+				return errors.New("AI_GRPC_TARGETS must not contain empty addresses")
+			}
+		}
+	}
 	return nil
 }
 
@@ -100,6 +140,18 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
@@ -149,6 +201,16 @@ func splitURLs(value string) []string {
 		}
 	}
 	return urls
+}
+
+func splitList(value string) []string {
+	var items []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func envDurationWithMillisecondsAlias(durationKey, millisecondsKey string, fallback time.Duration) time.Duration {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 )
 
@@ -28,10 +29,19 @@ var ErrKeyframeRequired = errors.New("a VP8 keyframe is required to initialize t
 
 type commandFactory func(ctx context.Context, name string, arguments ...string) *exec.Cmd
 
+// TranscoderOptions carries the per-process resource policy shared by every
+// session's FFmpeg pair.
+type TranscoderOptions struct {
+	// WireFormat selects the decoded-frame format exchanged with the AI
+	// boundary: JPEG (default) or raw yuv420p.
+	WireFormat config.WireFormat
+}
+
 type FFmpegTranscoder struct {
 	path       string
 	logger     *slog.Logger
 	metrics    *metrics.Registry
+	options    TranscoderOptions
 	newCommand commandFactory
 }
 
@@ -44,11 +54,15 @@ type ffmpegProcess struct {
 	metrics *metrics.Registry
 }
 
-func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Registry) *FFmpegTranscoder {
+func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions) *FFmpegTranscoder {
+	if options.WireFormat == "" {
+		options.WireFormat = config.WireFormatJPEG
+	}
 	return &FFmpegTranscoder{
 		path:       path,
 		logger:     logger,
 		metrics:    registry,
+		options:    options,
 		newCommand: exec.CommandContext,
 	}
 }
@@ -120,8 +134,14 @@ func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame,
 		}
 	}()
 
+	rawSize := rawFrameSize(width, height)
 	for item := range metadata {
-		decoded, err := readJPEG(process.stdout)
+		var decoded []byte
+		if t.options.WireFormat == config.WireFormatRaw {
+			decoded, err = readRawFrame(process.stdout, rawSize)
+		} else {
+			decoded, err = readJPEG(process.stdout)
+		}
 		if err != nil {
 			return fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 		}
@@ -158,13 +178,14 @@ func (t *FFmpegTranscoder) EncodeStream(ctx context.Context, input <-chan frame,
 	}
 	defer process.close()
 
+	expectedRawSize := rawFrameSize(first.width, first.height)
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
 		write := func(item frame) error {
-			if err := t.validateEncoderInput(item.data); err != nil {
+			if err := t.validateEncoderInput(item.data, expectedRawSize); err != nil {
 				return err
 			}
 			if _, err := process.stdin.Write(item.data); err != nil {
@@ -228,7 +249,13 @@ func (t *FFmpegTranscoder) EncodeStream(ctx context.Context, input <-chan frame,
 	return nil
 }
 
-func (t *FFmpegTranscoder) validateEncoderInput(data []byte) error {
+func (t *FFmpegTranscoder) validateEncoderInput(data []byte, expectedRawSize int) error {
+	if t.options.WireFormat == config.WireFormatRaw {
+		if len(data) != expectedRawSize {
+			return fmt.Errorf("AI response is not a raw yuv420p frame: got %d bytes, want %d", len(data), expectedRawSize)
+		}
+		return nil
+	}
 	if !isJPEG(data) {
 		return errors.New("AI response is not a complete JPEG image")
 	}
@@ -241,7 +268,11 @@ func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint1
 		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0", "-threads", "1",
 		"-f", "ivf", "-blocksize", "1024", "-i", "pipe:0",
 	}
-	arguments = append(arguments, "-an", "-strict", "unofficial", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p", "-flush_packets", "1", "-blocksize", "1024")
+	if t.options.WireFormat == config.WireFormatRaw {
+		arguments = append(arguments, "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-flush_packets", "1", "-blocksize", "1024")
+	} else {
+		arguments = append(arguments, "-an", "-strict", "unofficial", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p", "-flush_packets", "1", "-blocksize", "1024")
+	}
 	arguments = append(arguments, "pipe:1")
 	process, err := t.startFFmpeg(ctx, "decoder", arguments...)
 	if err != nil {
@@ -259,7 +290,15 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 		"-hide_banner", "-loglevel", "error",
 		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0",
 	}
-	arguments = append(arguments, "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", "30", "-blocksize", "1024", "-i", "pipe:0")
+	if t.options.WireFormat == config.WireFormatRaw {
+		arguments = append(arguments,
+			"-f", "rawvideo", "-pixel_format", "yuv420p",
+			"-video_size", fmt.Sprintf("%dx%d", width, height),
+			"-framerate", "30", "-blocksize", "1024", "-i", "pipe:0",
+		)
+	} else {
+		arguments = append(arguments, "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", "30", "-blocksize", "1024", "-i", "pipe:0")
+	}
 	arguments = append(arguments,
 		"-an", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
 		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", "2M",
@@ -393,6 +432,24 @@ func readIVFFrame(reader io.Reader) ([]byte, uint64, error) {
 		return nil, 0, err
 	}
 	return frame, binary.LittleEndian.Uint64(header[4:12]), nil
+}
+
+// rawFrameSize returns the byte size of one yuv420p frame, with chroma
+// planes rounded up for odd dimensions the way FFmpeg emits them.
+func rawFrameSize(width, height uint16) int {
+	w, h := int(width), int(height)
+	return w*h + 2*((w+1)/2)*((h+1)/2)
+}
+
+func readRawFrame(reader *bufio.Reader, size int) ([]byte, error) {
+	if size <= 0 {
+		return nil, errors.New("invalid raw frame size")
+	}
+	buffer := make([]byte, size)
+	if _, err := io.ReadFull(reader, buffer); err != nil {
+		return nil, err
+	}
+	return buffer, nil
 }
 
 // readJPEG extracts one JPEG image from a byte stream by scanning buffered

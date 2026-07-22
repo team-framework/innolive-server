@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/server"
@@ -33,13 +34,27 @@ func main() {
 	}
 	cfg.FFmpegPath = resolvedFFmpeg
 
-	sessionManager, err := session.NewManager(cfg, logger, registry)
+	var aiPool *ai.Pool
+	if cfg.PrivacyMode == config.PrivacyModeReal {
+		if !cfg.AIInsecure {
+			logger.Error("AI_GRPC_INSECURE=false is not supported until the AI server exposes TLS")
+			os.Exit(2)
+		}
+		aiPool, err = ai.NewPool(cfg.AITargets, cfg.AITimeout)
+		if err != nil {
+			logger.Error("create AI client pool failed", "error", err)
+			os.Exit(1)
+		}
+		defer aiPool.Close()
+	}
+
+	sessionManager, err := session.NewManager(cfg, logger, registry, aiPool)
 	if err != nil {
 		logger.Error("create session manager failed", "error", err)
 		os.Exit(1)
 	}
 	defer sessionManager.CloseAll()
-	application := server.New(cfg, logger, registry, sessionManager)
+	application := server.New(cfg, logger, registry, sessionManager, aiPool)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -53,6 +68,8 @@ func main() {
 		logger.Info("Go comparison server started",
 			"address", cfg.HTTPAddr,
 			"privacy_mode", cfg.PrivacyMode,
+			"ai_targets", cfg.AITargets,
+			"wire_format", cfg.AIWireFormat,
 		)
 		serverErrors <- httpServer.ListenAndServe()
 	}()

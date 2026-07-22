@@ -1,0 +1,8 @@
+.env
+.idea/
+/server
+/inno-live-server
+coverage.out
+*.prof
+loadtest/results/
+/bin/

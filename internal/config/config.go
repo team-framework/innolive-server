@@ -44,6 +44,8 @@ type Config struct {
 	AITimeoutLatchThreshold int
 	AIPreflightTimeout      time.Duration
 	AIPreflightRequired     bool
+	AIMeImagePath           string
+	ReferenceStorePath      string
 	FFmpegPath              string
 	FFmpegSpawnConcurrency  int
 	FFmpegEncoderThreads    int
@@ -73,6 +75,8 @@ func Load() (Config, error) {
 		AITimeoutLatchThreshold: envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		AIPreflightTimeout:      envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
 		AIPreflightRequired:     envBool("AI_PREFLIGHT_REQUIRED", false),
+		AIMeImagePath:           strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
+		ReferenceStorePath:      strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
 		FFmpegSpawnConcurrency:  envInt("FFMPEG_SPAWN_CONCURRENCY", 3),
 		FFmpegEncoderThreads:    envInt("FFMPEG_ENCODER_THREADS", 1),

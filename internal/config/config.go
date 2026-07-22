@@ -45,6 +45,10 @@ type Config struct {
 	AIPreflightTimeout      time.Duration
 	AIPreflightRequired     bool
 	FFmpegPath              string
+	FFmpegSpawnConcurrency  int
+	FFmpegEncoderThreads    int
+	MaxSessions             int
+	NegotiationTimeout      time.Duration
 	STUNURLs                []string
 	TURNURLs                []string
 	TURNUsername            string
@@ -70,6 +74,10 @@ func Load() (Config, error) {
 		AIPreflightTimeout:      envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
 		AIPreflightRequired:     envBool("AI_PREFLIGHT_REQUIRED", false),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
+		FFmpegSpawnConcurrency:  envInt("FFMPEG_SPAWN_CONCURRENCY", 3),
+		FFmpegEncoderThreads:    envInt("FFMPEG_ENCODER_THREADS", 1),
+		MaxSessions:             envInt("MAX_SESSIONS", 0),
+		NegotiationTimeout:      envDuration("SESSION_NEGOTIATION_TIMEOUT", 30*time.Second),
 		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
 		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
 		TURNUsername:            strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME")),
@@ -145,11 +153,23 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("AI_FAILURE_POLICY must be one of blackout_latch, freeze: %q", c.AIFailurePolicy)
 	}
+	if c.MaxSessions < 0 {
+		return errors.New("MAX_SESSIONS must not be negative")
+	}
+	if c.FFmpegSpawnConcurrency < 0 {
+		return errors.New("FFMPEG_SPAWN_CONCURRENCY must not be negative")
+	}
+	if c.FFmpegEncoderThreads < 0 {
+		return errors.New("FFMPEG_ENCODER_THREADS must not be negative")
+	}
 	if c.AITimeoutLatchThreshold < 0 {
 		return errors.New("AI_TIMEOUT_LATCH_THRESHOLD must not be negative")
 	}
 	if c.AIPreflightTimeout <= 0 {
 		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")
+	}
+	if c.NegotiationTimeout < 0 {
+		return errors.New("SESSION_NEGOTIATION_TIMEOUT must not be negative")
 	}
 	if c.PrivacyMode == PrivacyModeReal {
 		for _, target := range c.AITargets {

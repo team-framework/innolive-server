@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -32,6 +33,10 @@ type commandFactory func(ctx context.Context, name string, arguments ...string) 
 // TranscoderOptions carries the per-process resource policy shared by every
 // session's FFmpeg pair.
 type TranscoderOptions struct {
+	// Gate bounds concurrent FFmpeg process starts. nil means unlimited.
+	Gate *SpawnGate
+	// EncoderThreads caps libvpx encoder threads; 0 lets FFmpeg auto-detect.
+	EncoderThreads int
 	// WireFormat selects the decoded-frame format exchanged with the AI
 	// boundary: JPEG (default) or raw yuv420p.
 	WireFormat config.WireFormat
@@ -299,6 +304,9 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 	} else {
 		arguments = append(arguments, "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", "30", "-blocksize", "1024", "-i", "pipe:0")
 	}
+	if t.options.EncoderThreads > 0 {
+		arguments = append(arguments, "-threads", strconv.Itoa(t.options.EncoderThreads))
+	}
 	arguments = append(arguments,
 		"-an", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
 		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", "2M",
@@ -321,19 +329,29 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, argumen
 		return cmd.Process.Signal(os.Interrupt)
 	}
 	cmd.WaitDelay = ffmpegShutdownGrace
+	// Acquire the gate before creating any pipes: a start that is cancelled
+	// while queued must not have allocated file descriptors (exec only
+	// closes them via Start's own cleanup, which never runs on this path).
+	if err := t.options.Gate.Acquire(ctx); err != nil {
+		return nil, err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		t.options.Gate.Release()
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		t.options.Gate.Release()
 		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		t.options.Gate.Release()
 		return nil, err
 	}
 	err = cmd.Start()
+	t.options.Gate.Release()
 	if err != nil {
 		return nil, err
 	}

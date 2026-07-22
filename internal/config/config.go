@@ -24,6 +24,13 @@ const (
 	WireFormatRaw  WireFormat = "raw"
 )
 
+type AIFailurePolicy string
+
+const (
+	FailurePolicyBlackoutLatch AIFailurePolicy = "blackout_latch"
+	FailurePolicyFreeze        AIFailurePolicy = "freeze"
+)
+
 type Config struct {
 	HTTPAddr                string
 	PrivacyMode             PrivacyMode
@@ -33,6 +40,8 @@ type Config struct {
 	AITimeout               time.Duration
 	AIInsecure              bool
 	AIWireFormat            WireFormat
+	AIFailurePolicy         AIFailurePolicy
+	AITimeoutLatchThreshold int
 	FFmpegPath              string
 	STUNURLs                []string
 	TURNURLs                []string
@@ -54,6 +63,8 @@ func Load() (Config, error) {
 		AIAddress:               env("AI_GRPC_ADDR", "localhost:50051"),
 		AIInsecure:              envBool("AI_GRPC_INSECURE", true),
 		AIWireFormat:            WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
+		AIFailurePolicy:         AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
+		AITimeoutLatchThreshold: envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
 		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
 		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
@@ -124,6 +135,14 @@ func (c Config) Validate() error {
 	case "", WireFormatJPEG, WireFormatRaw: // empty defaults to jpeg downstream
 	default:
 		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be one of jpeg, raw: %q", c.AIWireFormat)
+	}
+	switch c.AIFailurePolicy {
+	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream
+	default:
+		return fmt.Errorf("AI_FAILURE_POLICY must be one of blackout_latch, freeze: %q", c.AIFailurePolicy)
+	}
+	if c.AITimeoutLatchThreshold < 0 {
+		return errors.New("AI_TIMEOUT_LATCH_THRESHOLD must not be negative")
 	}
 	if c.PrivacyMode == PrivacyModeReal {
 		for _, target := range c.AITargets {

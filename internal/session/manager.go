@@ -69,6 +69,7 @@ type Response struct {
 		VideoSenderActive      bool        `json:"video_sender_active"`
 		IgnoredTrackCount      int         `json:"ignored_track_count"`
 		UnsupportedTrackPolicy string      `json:"unsupported_track_policy"`
+		AIFallbackActive       bool        `json:"ai_fallback_active"`
 	} `json:"media"`
 	Stream StreamState `json:"stream"`
 }
@@ -89,6 +90,7 @@ type Session struct {
 
 	rawTrackID       string
 	processedTrackID string
+	processor        *media.Processor
 	ignoredTracks    int
 	offerReceivedAt  time.Time
 	answerCreatedAt  time.Time
@@ -283,11 +285,14 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 			WireFormat: m.cfg.AIWireFormat,
 		})
-		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat)
+		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {
 			m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
 			return
 		}
+		s.mu.Lock()
+		s.processor = processor
+		s.mu.Unlock()
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		go func() {
@@ -381,6 +386,9 @@ func (s *Session) Response() Response {
 	response.Media.VideoSenderActive = s.Sender != nil
 	response.Media.IgnoredTrackCount = s.ignoredTracks
 	response.Media.UnsupportedTrackPolicy = "ignore_and_stop"
+	if s.processor != nil {
+		response.Media.AIFallbackActive = s.processor.FallbackActive()
+	}
 	return response
 }
 

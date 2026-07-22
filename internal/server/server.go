@@ -57,6 +57,7 @@ func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, ses
 	mux.HandleFunc("DELETE /reference-face", s.handleDeleteReferenceFace)
 	mux.HandleFunc("DELETE /reference-face/{face_id}", s.handleDeleteReferenceFaceByID)
 	mux.HandleFunc("GET /signaling", s.handleSignaling)
+	mux.Handle("/client/", s.clientHandler())
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 	s.handler = recoverMiddleware(logger, corsMiddleware(requestIDMiddleware(mux)))
 	return s

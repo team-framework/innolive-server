@@ -70,6 +70,27 @@ func main() {
 	defer sessionManager.CloseAll()
 	application := server.New(cfg, logger, registry, sessionManager, aiPool)
 
+	// Preload the env-provided default reference face (AI_PRIVACY_ME_IMAGE_PATH)
+	// under the global bucket, so clients with no API-registered face fall back
+	// to it (matches the Python server's env reference). Done async so a slow
+	// first-registration JIT never blocks startup.
+	if aiPool != nil && cfg.AIMeImagePath != "" {
+		go func() {
+			data, err := os.ReadFile(cfg.AIMeImagePath)
+			if err != nil {
+				logger.Warn("env reference face not readable", "path", cfg.AIMeImagePath, "error", err)
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 130*time.Second)
+			defer cancel()
+			if _, err := aiPool.AddWhitelist(ctx, "", "env", data); err != nil {
+				logger.Warn("env reference face registration failed", "path", cfg.AIMeImagePath, "error", err)
+				return
+			}
+			logger.Info("env reference face registered", "path", cfg.AIMeImagePath)
+		}()
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           application.Handler(),

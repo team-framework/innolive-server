@@ -23,21 +23,23 @@ import (
 const maxJSONBody = 1 << 20
 
 type Server struct {
-	cfg      config.Config
-	logger   *slog.Logger
-	metrics  *metrics.Registry
-	sessions *session.Manager
-	ai       *ai.Pool
-	handler  http.Handler
+	cfg        config.Config
+	logger     *slog.Logger
+	metrics    *metrics.Registry
+	sessions   *session.Manager
+	ai         *ai.Pool
+	references *referenceStore
+	handler    http.Handler
 }
 
 func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, sessions *session.Manager, aiPool *ai.Pool) *Server {
 	s := &Server{
-		cfg:      cfg,
-		logger:   logger,
-		metrics:  registry,
-		sessions: sessions,
-		ai:       aiPool,
+		cfg:        cfg,
+		logger:     logger,
+		metrics:    registry,
+		sessions:   sessions,
+		ai:         aiPool,
+		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleRoot)
@@ -50,6 +52,10 @@ func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, ses
 	mux.HandleFunc("DELETE /sessions/{session_id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{session_id}/stream/start", s.handleStartStream)
 	mux.HandleFunc("POST /sessions/{session_id}/stream/stop", s.handleStopStream)
+	mux.HandleFunc("GET /reference-face", s.handleGetReferenceFace)
+	mux.HandleFunc("POST /reference-face", s.handlePostReferenceFace)
+	mux.HandleFunc("DELETE /reference-face", s.handleDeleteReferenceFace)
+	mux.HandleFunc("DELETE /reference-face/{face_id}", s.handleDeleteReferenceFaceByID)
 	mux.HandleFunc("GET /signaling", s.handleSignaling)
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
 	s.handler = recoverMiddleware(logger, corsMiddleware(requestIDMiddleware(mux)))

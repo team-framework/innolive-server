@@ -30,7 +30,7 @@ func main() {
 
 	resolvedFFmpeg, lookupErr := exec.LookPath(cfg.FFmpegPath)
 	if lookupErr != nil {
-		logger.Error("FFmpeg is required in every comparison mode", "path", cfg.FFmpegPath, "error", lookupErr)
+		logger.Error("FFmpeg is required in every privacy mode", "path", cfg.FFmpegPath, "error", lookupErr)
 		os.Exit(2)
 	}
 	cfg.FFmpegPath = resolvedFFmpeg
@@ -100,7 +100,7 @@ func main() {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("Go comparison server started",
+		logger.Info("InnoLive media server started",
 			"address", cfg.HTTPAddr,
 			"privacy_mode", cfg.PrivacyMode,
 			"ai_targets", cfg.AITargets,

@@ -1,0 +1,186 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type PrivacyMode string
+
+const (
+	PrivacyModeBypass     PrivacyMode = "bypass"
+	PrivacyModeFixedDelay PrivacyMode = "fixed_delay"
+)
+
+type Config struct {
+	HTTPAddr                string
+	PrivacyMode             PrivacyMode
+	PrivacyFixedDelay       time.Duration
+	FFmpegPath              string
+	STUNURLs                []string
+	TURNURLs                []string
+	TURNUsername            string
+	TURNCredential          string
+	AnnouncedIP             string
+	UDPPortMin              uint16
+	UDPPortMax              uint16
+	UDPMuxPort              int
+	DisconnectedGracePeriod time.Duration
+	FrameQueueSize          int
+	LogLevel                string
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		HTTPAddr:                env("HTTP_ADDR", ":8000"),
+		PrivacyMode:             PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeBypass))),
+		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
+		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
+		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
+		TURNUsername:            strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME")),
+		TURNCredential:          strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
+		AnnouncedIP:             strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
+		DisconnectedGracePeriod: envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
+		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
+		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
+		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
+		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
+	}
+
+	minPort, err := envUint16("WEBRTC_UDP_PORT_MIN", 50000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxPort, err := envUint16("WEBRTC_UDP_PORT_MAX", 60000)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UDPPortMin = minPort
+	cfg.UDPPortMax = maxPort
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func (c Config) Validate() error {
+	switch c.PrivacyMode {
+	case PrivacyModeBypass, PrivacyModeFixedDelay:
+	default:
+		return fmt.Errorf("AI_PRIVACY_MODE must be one of bypass, fixed_delay: %q", c.PrivacyMode)
+	}
+	if c.HTTPAddr == "" {
+		return errors.New("HTTP_ADDR must not be empty")
+	}
+	if c.FFmpegPath == "" {
+		return errors.New("FFMPEG_PATH must not be empty")
+	}
+	if c.PrivacyFixedDelay < 0 {
+		return errors.New("AI_PRIVACY_FIXED_DELAY must not be negative")
+	}
+	if c.UDPPortMin == 0 || c.UDPPortMax == 0 || c.UDPPortMin > c.UDPPortMax {
+		return errors.New("WEBRTC UDP port range is invalid")
+	}
+	if c.UDPMuxPort < 0 || c.UDPMuxPort > 65535 {
+		return errors.New("WEBRTC_UDP_MUX_PORT must be between 0 and 65535 (0 disables the mux)")
+	}
+	if c.FrameQueueSize < 1 {
+		return errors.New("AI_FRAME_QUEUE_SIZE must be at least 1")
+	}
+	return nil
+}
+
+func env(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envUint16(key string, fallback uint16) (uint16, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || parsed == 0 {
+		return 0, fmt.Errorf("%s must be a port between 1 and 65535", key)
+	}
+	return uint16(parsed), nil
+}
+
+func splitURLs(value string) []string {
+	var urls []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			if strings.EqualFold(item, "none") || strings.EqualFold(item, "off") {
+				continue
+			}
+			urls = append(urls, item)
+		}
+	}
+	return urls
+}
+
+func envDurationWithMillisecondsAlias(durationKey, millisecondsKey string, fallback time.Duration) time.Duration {
+	if value := strings.TrimSpace(os.Getenv(durationKey)); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err == nil {
+			return parsed
+		}
+		return fallback
+	}
+	if value := strings.TrimSpace(os.Getenv(millisecondsKey)); value != "" {
+		milliseconds, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return time.Duration(milliseconds * float64(time.Millisecond))
+		}
+	}
+	return fallback
+}
+
+func envDurationWithSecondsAlias(durationKey, secondsKey string, fallback time.Duration) time.Duration {
+	if value := strings.TrimSpace(os.Getenv(durationKey)); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err == nil {
+			return parsed
+		}
+		return fallback
+	}
+	if value := strings.TrimSpace(os.Getenv(secondsKey)); value != "" {
+		seconds, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return time.Duration(seconds * float64(time.Second))
+		}
+	}
+	return fallback
+}

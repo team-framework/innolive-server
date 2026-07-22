@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Inno Live WebRTC Client</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Inno Live</p>
+          <h1>WebRTC Client</h1>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <div class="status-pill" data-state="idle" id="healthState">HTTP idle</div>
+          <div class="status-pill" data-state="idle" id="websocketState">WS idle</div>
+          <div class="status-pill" data-state="idle" id="peerState">Peer idle</div>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="Connection controls">
+        <label class="field field-wide">
+          <span>Server</span>
+          <input id="serverUrl" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Session label</span>
+          <input id="sessionLabel" autocomplete="off" placeholder="demo" />
+        </label>
+        <label class="field">
+          <span>Camera</span>
+          <select id="cameraSelect">
+            <option value="">Default camera</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Resolution</span>
+          <select id="resolutionSelect">
+            <option value="default">Default</option>
+            <option value="hd" selected>1280 x 720</option>
+            <option value="sd">640 x 360</option>
+          </select>
+        </label>
+        <label class="check-row">
+          <input id="sendAudio" type="checkbox" />
+          <span>Send audio track</span>
+        </label>
+        <label class="check-row">
+          <input id="autoPoll" type="checkbox" checked />
+          <span>Poll session</span>
+        </label>
+      </section>
+
+      <section class="actions" aria-label="Session actions">
+        <button id="startBtn" class="button button-primary" type="button">Start WebRTC</button>
+        <button id="healthBtn" class="button" type="button">Health Check</button>
+        <button id="createSessionBtn" class="button" type="button">Create Session</button>
+        <button id="refreshSessionsBtn" class="button" type="button">Refresh Sessions</button>
+        <button id="errorProbeBtn" class="button" type="button" disabled>Probe WS Error</button>
+        <button id="disconnectBtn" class="button button-danger" type="button" disabled>Disconnect</button>
+        <button id="deleteSessionBtn" class="button button-danger" type="button" disabled>Delete Session</button>
+      </section>
+
+      <aside id="runtimeNotice" class="runtime-notice" hidden>
+        <div>
+          <strong>카메라는 file:// 페이지에서 사용할 수 없습니다.</strong>
+          <span>
+            서버를 실행한 뒤 HTTP(S)로 제공되는 클라이언트를 열어 테스트하세요.
+          </span>
+        </div>
+        <a id="servedClientLink" class="button button-primary" href="#">
+          HTTP 클라이언트 열기
+        </a>
+      </aside>
+
+      <section class="reference-face-panel" aria-labelledby="referenceFaceTitle">
+        <div class="reference-face-copy">
+          <p class="eyebrow">Privacy exception</p>
+          <h2 id="referenceFaceTitle">본인 얼굴은 블러하지 않기</h2>
+          <p>
+            얼굴이 선명하게 보이는 사진을 등록한 뒤 WebRTC를 시작하세요.
+            등록된 사람들의 얼굴은 블러 제외 대상으로 처리됩니다.
+          </p>
+          <div class="reference-face-status" aria-live="polite">
+            <span class="status-pill" data-state="idle" id="referenceFaceState">확인 중</span>
+            <span id="referenceFaceDetail">등록 상태를 불러오는 중입니다.</span>
+          </div>
+          <div id="referenceFaceList" class="reference-face-list"></div>
+        </div>
+        <div class="reference-face-controls">
+          <label class="reference-face-picker" for="referenceFaceInput">
+            <img id="referenceFacePreview" alt="" hidden />
+            <span id="referenceFacePreviewText">JPEG, PNG, WebP · 파일당 최대 10MB</span>
+          </label>
+          <input
+            id="referenceFaceInput"
+            type="file"
+            multiple
+            accept="image/jpeg,image/png,image/webp"
+          />
+          <div class="reference-face-actions">
+            <button id="uploadReferenceFaceBtn" class="button button-primary" type="button" disabled>
+              사진 등록
+            </button>
+            <button id="refreshReferenceFaceBtn" class="button" type="button">
+              상태 새로고침
+            </button>
+            <button id="deleteReferenceFaceBtn" class="button button-danger" type="button" disabled>
+              등록 해제
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="video-grid" aria-label="Video preview">
+        <article class="video-panel">
+          <div class="panel-head">
+            <h2>Local camera</h2>
+            <span id="localTrackState">no track</span>
+          </div>
+          <video id="localVideo" autoplay muted playsinline></video>
+        </article>
+        <article class="video-panel">
+          <div class="panel-head">
+            <h2>Server processed</h2>
+            <span id="remoteTrackState">waiting</span>
+          </div>
+          <video id="remoteVideo" autoplay muted playsinline></video>
+        </article>
+      </section>
+
+      <section class="dashboard" aria-label="Session diagnostics">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Session</h2>
+            <span id="sessionId">none</span>
+          </div>
+          <dl class="kv-grid">
+            <div>
+              <dt>Status</dt>
+              <dd id="sessionStatus">idle</dd>
+            </div>
+            <div>
+              <dt>Connection</dt>
+              <dd id="connectionState">idle</dd>
+            </div>
+            <div>
+              <dt>ICE</dt>
+              <dd id="iceState">idle</dd>
+            </div>
+            <div>
+              <dt>Signaling</dt>
+              <dd id="signalingState">idle</dd>
+            </div>
+            <div>
+              <dt>AI fallback</dt>
+              <dd id="aiFallback">false</dd>
+            </div>
+            <div>
+              <dt>Sender active</dt>
+              <dd id="videoSenderActive">false</dd>
+            </div>
+            <div>
+              <dt>Ignored tracks</dt>
+              <dd id="ignoredTracks">0</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Timing</h2>
+            <span>ms</span>
+          </div>
+          <dl class="kv-grid">
+            <div>
+              <dt>Session to offer</dt>
+              <dd id="sessionToOffer">-</dd>
+            </div>
+            <div>
+              <dt>Offer to answer</dt>
+              <dd id="offerToAnswer">-</dd>
+            </div>
+            <div>
+              <dt>Offer to connected</dt>
+              <dd id="offerToConnected">-</dd>
+            </div>
+            <div>
+              <dt>Answer to connected</dt>
+              <dd id="answerToConnected">-</dd>
+            </div>
+            <div>
+              <dt>Offer to ICE done</dt>
+              <dd id="offerToIceDone">-</dd>
+            </div>
+            <div>
+              <dt>Answer to ICE done</dt>
+              <dd id="answerToIceDone">-</dd>
+            </div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="lower-grid" aria-label="Raw diagnostics">
+        <article class="panel panel-scroll">
+          <div class="panel-head">
+            <h2>Sessions</h2>
+            <span id="sessionCount">0</span>
+          </div>
+          <div id="sessionsList" class="sessions-list"></div>
+        </article>
+
+        <article class="panel panel-scroll">
+          <div class="panel-head">
+            <h2>Event log</h2>
+            <button id="clearLogBtn" class="text-button" type="button">Clear</button>
+          </div>
+          <ol id="eventLog" class="event-log"></ol>
+        </article>
+
+        <article class="panel panel-scroll raw-panel">
+          <div class="panel-head">
+            <h2>Last session JSON</h2>
+            <button id="copyJsonBtn" class="text-button" type="button" disabled>Copy</button>
+          </div>
+          <pre id="sessionJson">{}</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

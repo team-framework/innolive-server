@@ -168,7 +168,7 @@ func runTranscodedTrack(
 ) {
 	if transcoder == nil {
 		registry.IncFrameFailure(string(mode))
-		logger.Error("comparison mode requires an FFmpeg transcoder", "mode", mode)
+		logger.Error("privacy mode requires an FFmpeg transcoder", "mode", mode)
 		return
 	}
 	pipelineContext, cancel := context.WithCancel(ctx)

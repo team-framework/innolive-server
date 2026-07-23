@@ -174,7 +174,7 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": liveSession.ID}})
 		return
 	}
-	writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "RTMP publishing is not part of the Go comparison server."})
+	writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "RTMP publishing is not supported by the media server."})
 }
 
 func (s *Server) handleStopStream(w http.ResponseWriter, r *http.Request) {

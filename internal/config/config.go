@@ -61,6 +61,7 @@ type Config struct {
 	UDPMuxPort              int
 	DisconnectedGracePeriod time.Duration
 	FrameQueueSize          int
+	YoutubeStreamKey        string
 	LogLevel                string
 }
 
@@ -91,6 +92,7 @@ func Load() (Config, error) {
 		AITimeout:               envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
+		YoutubeStreamKey:        strings.TrimSpace(os.Getenv("YOUTUBE_STREAM_KEY")),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
 	}

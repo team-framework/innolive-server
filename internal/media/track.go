@@ -147,12 +147,13 @@ func RunTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
+	egress *RTMPEgress,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
 ) {
 	defer processor.Close()
-	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, registry, mode, queueSize)
+	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, egress, registry, mode, queueSize)
 }
 
 func runTranscodedTrack(
@@ -162,6 +163,7 @@ func runTranscodedTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
+	egress *RTMPEgress,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
@@ -203,7 +205,7 @@ func runTranscodedTrack(
 	}()
 	go func() {
 		defer queueWorkers.Done()
-		processImages(pipelineContext, logger, processor, decoded, processed, registry, mode)
+		processImages(pipelineContext, logger, processor, decoded, processed, egress, registry, mode)
 	}()
 	go func() {
 		defer streamWorkers.Done()
@@ -303,6 +305,7 @@ func processImages(
 	processor *Processor,
 	decoded <-chan frame,
 	processed chan<- frame,
+	egress *RTMPEgress,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 ) {
@@ -326,6 +329,9 @@ func processImages(
 			registry.IncFrameProcessed(string(mode))
 			item.data = output
 			item.stageAt = time.Now()
+			if egress != nil {
+				egress.Enqueue(item)
+			}
 			select {
 			case processed <- item:
 			case <-ctx.Done():

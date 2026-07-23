@@ -5,6 +5,56 @@ import (
 	"time"
 )
 
+func TestLoadAudioEgressFlags(t *testing.T) {
+	t.Setenv("ENABLE_AUDIO_EGRESS", "true")
+	t.Setenv("EGRESS_LATENCY_LOG", "true")
+	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "200")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.EnableAudioEgress {
+		t.Error("EnableAudioEgress should be true")
+	}
+	if !cfg.EgressLatencyLog {
+		t.Error("EgressLatencyLog should be true")
+	}
+	if cfg.EgressAudioOffset != 200*time.Millisecond {
+		t.Errorf("EgressAudioOffset = %v, want 200ms", cfg.EgressAudioOffset)
+	}
+}
+
+func TestLoadAudioEgressDefaultsOff(t *testing.T) {
+	t.Setenv("ENABLE_AUDIO_EGRESS", "")
+	t.Setenv("EGRESS_LATENCY_LOG", "")
+	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.EnableAudioEgress {
+		t.Error("EnableAudioEgress should default to false")
+	}
+	if cfg.EgressLatencyLog {
+		t.Error("EgressLatencyLog should default to false")
+	}
+	if cfg.EgressAudioOffset != 0 {
+		t.Errorf("EgressAudioOffset = %v, want 0", cfg.EgressAudioOffset)
+	}
+}
+
+// The offset is signed so tuning can shift audio either way.
+func TestLoadAudioOffsetAcceptsNegative(t *testing.T) {
+	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "-50")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.EgressAudioOffset != -50*time.Millisecond {
+		t.Errorf("EgressAudioOffset = %v, want -50ms", cfg.EgressAudioOffset)
+	}
+}
+
 func TestValidateRejectsUnknownPrivacyMode(t *testing.T) {
 	cfg := validConfig()
 	cfg.PrivacyMode = "unknown"

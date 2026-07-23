@@ -66,17 +66,22 @@ func (s *Server) handleSignalingMessage(data []byte) (any, *apiError) {
 
 func (s *Server) handleOffer(payload map[string]json.RawMessage) (any, *apiError) {
 	var request struct {
-		SessionID string `json:"session_id"`
-		SDP       string `json:"sdp"`
+		SessionID  string `json:"session_id"`
+		OwnerToken string `json:"owner_token"`
+		SDP        string `json:"sdp"`
 	}
 	data, _ := json.Marshal(payload)
 	if err := json.Unmarshal(data, &request); err != nil || strings.TrimSpace(request.SessionID) == "" || !validSDP(request.SDP) {
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
 	}
-	answer, err := s.sessions.CreateAnswer(strings.TrimSpace(request.SessionID), request.SDP)
+	answer, err := s.sessions.CreateAnswer(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP)
 	if errors.Is(err, session.ErrNotFound) {
 		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": request.SessionID}}
+		return nil, &result
+	}
+	if errors.Is(err, session.ErrUnauthorized) {
+		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": request.SessionID}}
 		return nil, &result
 	}
 	if err != nil {
@@ -95,6 +100,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 	}
 	var request struct {
 		SessionID    string  `json:"session_id"`
+		OwnerToken   string  `json:"owner_token"`
 		Candidate    *string `json:"candidate"`
 		SDPMid       *string `json:"sdpMid"`
 		SDPLineIndex *uint16 `json:"sdpMLineIndex"`
@@ -116,13 +122,17 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 		result := badRequest("Invalid ICE candidate.", nil)
 		return nil, &result
 	}
-	result, err := s.sessions.AddICECandidate(strings.TrimSpace(request.SessionID), webrtc.ICECandidateInit{
+	result, err := s.sessions.AddICECandidate(strings.TrimSpace(request.SessionID), request.OwnerToken, webrtc.ICECandidateInit{
 		Candidate:     candidateValue,
 		SDPMid:        request.SDPMid,
 		SDPMLineIndex: request.SDPLineIndex,
 	})
 	if errors.Is(err, session.ErrNotFound) {
 		apiErr := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": request.SessionID}}
+		return nil, &apiErr
+	}
+	if errors.Is(err, session.ErrUnauthorized) {
+		apiErr := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": request.SessionID}}
 		return nil, &apiErr
 	}
 	if err != nil {

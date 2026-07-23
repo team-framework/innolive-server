@@ -28,6 +28,10 @@ func main() {
 	logger := newLogger(cfg.LogLevel)
 	registry := metrics.New()
 
+	if !cfg.RequireSessionAuth {
+		logger.Warn("session ownership auth is DISABLED (INNOLIVE_REQUIRE_SESSION_AUTH=false); any client can control or hijack any session — for local development only")
+	}
+
 	resolvedFFmpeg, lookupErr := exec.LookPath(cfg.FFmpegPath)
 	if lookupErr != nil {
 		logger.Error("FFmpeg is required in every privacy mode", "path", cfg.FFmpegPath, "error", lookupErr)

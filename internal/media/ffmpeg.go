@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -279,7 +280,7 @@ func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint1
 		arguments = append(arguments, "-an", "-strict", "unofficial", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p", "-flush_packets", "1", "-blocksize", "1024")
 	}
 	arguments = append(arguments, "pipe:1")
-	process, err := t.startFFmpeg(ctx, "decoder", nil, arguments...)
+	process, err := t.startFFmpeg(ctx, "decoder", nil, nil, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("start FFmpeg VP8 decoder: %w", err)
 	}
@@ -312,7 +313,7 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", "2M",
 		"-pix_fmt", "yuv420p", "-flush_packets", "1", "-f", "ivf", "-blocksize", "1024", "pipe:1",
 	)
-	process, err := t.startFFmpeg(ctx, "encoder", nil, arguments...)
+	process, err := t.startFFmpeg(ctx, "encoder", nil, nil, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("start FFmpeg VP8 encoder: %w", err)
 	}
@@ -321,10 +322,22 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 
 // startFFmpeg spawns one FFmpeg child. stderrLine, when non-nil, receives each
 // stderr line instead of the default warning log (used by the RTMP egress to
-// separate -progress output from real errors).
-func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrLine func(string), arguments ...string) (*ffmpegProcess, error) {
+// separate -progress output from real errors). extraFiles are passed to the
+// child as fds starting at 3 (extraFiles[0] == fd 3) and are closed in the
+// parent once the child has been started; callers that keep the write end of
+// such a pipe hold their own copy separately.
+func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrLine func(string), extraFiles []*os.File, arguments ...string) (*ffmpegProcess, error) {
 	logger := t.logger.With("ffmpeg_role", role)
 	cmd := t.newCommand(ctx, t.path, arguments...)
+	cmd.ExtraFiles = extraFiles
+	// os.Pipe() returns non-blocking, runtime-poller-managed descriptors. FFmpeg
+	// reads its pipe:N inputs with plain blocking syscalls and treats an EAGAIN
+	// as end-of-file, so a child that reads fd 3 before data is buffered would
+	// abort with "Error opening input: End of file". Detach each extra file from
+	// the poller and restore blocking mode before the child inherits it.
+	for _, file := range extraFiles {
+		_ = syscall.SetNonblock(int(file.Fd()), false)
+	}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -355,6 +368,11 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 	}
 	err = cmd.Start()
 	t.options.Gate.Release()
+	// The child has inherited (dup'd) any extra fds; close the parent's copies
+	// so the read end of an audio pipe reaches EOF once the writer closes it.
+	for _, file := range extraFiles {
+		_ = file.Close()
+	}
 	if err != nil {
 		return nil, err
 	}

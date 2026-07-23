@@ -13,7 +13,7 @@ import (
 
 func newTestEgress(wire config.WireFormat, url string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url)
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0)
 }
 
 func TestMeasureFPS(t *testing.T) {

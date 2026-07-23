@@ -26,6 +26,10 @@ type Registry struct {
 	reconnects        atomic.Uint64
 	sessionsRejected  atomic.Uint64
 	queueSize         atomic.Int64
+	egressReconnects  atomic.Uint64
+	egressDropped     atomic.Uint64
+	egressDupFrames   atomic.Int64
+	egressDropFrames  atomic.Int64
 	processTree       processTreeTracker
 
 	mu                  sync.RWMutex
@@ -77,6 +81,11 @@ func (r *Registry) IncConnectionFailures()      { r.connectionFailure.Add(1) }
 func (r *Registry) IncReconnects()              { r.reconnects.Add(1) }
 func (r *Registry) IncSessionsRejected()        { r.sessionsRejected.Add(1) }
 func (r *Registry) AddQueue(delta int64)        { r.queueSize.Add(delta) }
+
+func (r *Registry) IncEgressReconnect()             { r.egressReconnects.Add(1) }
+func (r *Registry) IncEgressFrameDropped()          { r.egressDropped.Add(1) }
+func (r *Registry) SetEgressDupFrames(value int64)  { r.egressDupFrames.Store(value) }
+func (r *Registry) SetEgressDropFrames(value int64) { r.egressDropFrames.Store(value) }
 
 func (r *Registry) IncAIFallbackLatched(mode string) {
 	r.increment(r.aiFallbackLatched, mode)
@@ -188,6 +197,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "innolive_reconnect_total", "Number of WebRTC sessions that recovered after disconnecting.", r.reconnects.Load())
 	writeCounter(w, "innolive_sessions_rejected_total", "Number of session creations rejected by the MAX_SESSIONS admission control.", r.sessionsRejected.Load())
 	writeGauge(w, "innolive_processing_queue_size", "Number of complete video frames waiting for processing.", r.queueSize.Load())
+	writeCounter(w, "innolive_egress_reconnect_total", "Number of times the RTMP egress FFmpeg process was restarted.", r.egressReconnects.Load())
+	writeCounter(w, "innolive_egress_frames_dropped_total", "Number of frames the RTMP egress discarded (full queue, invalid frame, or disconnected).", r.egressDropped.Load())
+	writeGauge(w, "innolive_egress_dup_frames", "Frames duplicated by the egress CFR pacing in the current FFmpeg process.", r.egressDupFrames.Load())
+	writeGauge(w, "innolive_egress_drop_frames", "Frames dropped by the egress CFR pacing in the current FFmpeg process.", r.egressDropFrames.Load())
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()

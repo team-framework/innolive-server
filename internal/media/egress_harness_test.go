@@ -103,7 +103,7 @@ func harnessFrameData(t *testing.T, index int, wire config.WireFormat) []byte {
 
 func newHarnessEgress(t *testing.T, output string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output)
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0)
 }
 
 // TestEgressHarnessStream feeds synthetic frames at real-time pace for

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,30 +32,45 @@ const (
 )
 
 // RTMPEgress pushes processed (blurred) frames to an RTMP endpoint through a
-// dedicated FFmpeg child, following the FFmpegTranscoder process pattern. The
-// audio track is generated silence: the WebRTC ingest discards audio tracks,
-// so no real audio ever reaches this stage, and YouTube rejects streams
-// without an audio track.
+// dedicated FFmpeg child, following the FFmpegTranscoder process pattern.
+//
+// When audio is nil, or no microphone audio has been received, the audio track
+// is generated silence (YouTube rejects streams without an audio track). When
+// the publisher's Opus microphone is flowing, audio carries it through an
+// Ogg/Opus pipe on fd 3 (pipe:3) instead.
 type RTMPEgress struct {
 	transcoder *FFmpegTranscoder
 	logger     *slog.Logger
 	metrics    *metrics.Registry
 	wireFormat config.WireFormat
 	outputURL  string
-	input      chan frame
+	audio      *AudioPipe
+	// audioWriteEnd is the pipe write end attached to the current FFmpeg child,
+	// so teardown detaches exactly this stream and not a successor's.
+	audioWriteEnd *os.File
+	latency       *latencyTracker
+	// audioOffset delays the microphone relative to the (blur-delayed) video via
+	// FFmpeg -itsoffset, compensating for the audio leading the video. Positive
+	// delays audio; tunable at runtime via EGRESS_AUDIO_OFFSET_MS.
+	audioOffset time.Duration
+	input       chan frame
 }
 
-func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string) *RTMPEgress {
+func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration) *RTMPEgress {
 	if options.WireFormat == "" {
 		options.WireFormat = config.WireFormatJPEG
 	}
+	egressLogger := logger.With("ffmpeg_role", "egress")
 	return &RTMPEgress{
-		transcoder: NewFFmpegTranscoder(path, logger, registry, options),
-		logger:     logger.With("ffmpeg_role", "egress"),
-		metrics:    registry,
-		wireFormat: options.WireFormat,
-		outputURL:  outputURL,
-		input:      make(chan frame, egressQueueSize),
+		transcoder:  NewFFmpegTranscoder(path, logger, registry, options),
+		logger:      egressLogger,
+		metrics:     registry,
+		wireFormat:  options.WireFormat,
+		outputURL:   outputURL,
+		audio:       audio,
+		latency:     newLatencyTracker(egressLogger, latencyLog),
+		audioOffset: audioOffset,
+		input:       make(chan frame, egressQueueSize),
 	}
 }
 
@@ -107,6 +123,11 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 		written, err := e.writeFrames(ctx, process, pending)
 		pending = nil
 		process.close()
+		// Give the child EOF on pipe:3 so it exits, and free the Ogg stream so
+		// the next spawn attaches a fresh one.
+		if e.audio != nil {
+			e.audio.Detach(e.audioWriteEnd)
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -144,6 +165,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			return err
 		}
 		written++
+		e.latency.observe(item.ingestAt)
 		return nil
 	}
 	for _, item := range pending {
@@ -193,9 +215,19 @@ func (e *RTMPEgress) waitBackoff(ctx context.Context, backoff *time.Duration) {
 }
 
 func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (*ffmpegProcess, error) {
+	useAudio := e.audio != nil && e.audio.PacketSeen()
 	arguments := []string{
 		"-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:2", "-y",
 		"-thread_queue_size", "512", "-use_wallclock_as_timestamps", "1",
+	}
+	if useAudio {
+		// FFmpeg opens inputs sequentially and, at the default probesize (5 MB),
+		// reads several seconds of video before it even opens pipe:3. During that
+		// window the microphone would be muxed late (or the child killed before
+		// pipe:3 opens at all). The codec and frame rate are already forced, so
+		// bounding the video probe lets pipe:3 open promptly. This is scoped to
+		// the audio path to leave the silence path's timing untouched.
+		arguments = append(arguments, "-analyzeduration", "0", "-probesize", "1000000")
 	}
 	if e.wireFormat == config.WireFormatRaw {
 		arguments = append(arguments,
@@ -209,10 +241,35 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 			"-framerate", strconv.Itoa(fps), "-i", "pipe:0",
 		)
 	}
-	arguments = append(arguments,
-		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-		"-map", "0:v", "-map", "1:a",
-	)
+	// Second input: the publisher's Opus microphone on pipe:3 when it is
+	// flowing, otherwise generated silence. The audio input deliberately omits
+	// -use_wallclock_as_timestamps so it keeps its own Opus timeline (the video
+	// input above consumed that flag); A/V sync is deferred to Phase 4.
+	var extraFiles []*os.File
+	var audioWriteEnd *os.File
+	if useAudio {
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			return nil, fmt.Errorf("create audio egress pipe: %w", err)
+		}
+		extraFiles = []*os.File{readEnd}
+		audioWriteEnd = writeEnd
+		arguments = append(arguments, "-thread_queue_size", "512")
+		if e.audioOffset != 0 {
+			// -itsoffset shifts the audio input's timestamps to line it up with
+			// the blur-delayed video. It must precede the audio -i.
+			arguments = append(arguments, "-itsoffset", fmt.Sprintf("%.3f", e.audioOffset.Seconds()))
+		}
+		arguments = append(arguments,
+			"-f", "ogg", "-i", "pipe:3",
+			"-map", "0:v", "-map", "1:a",
+		)
+	} else {
+		arguments = append(arguments,
+			"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+			"-map", "0:v", "-map", "1:a",
+		)
+	}
 	if e.wireFormat != config.WireFormatRaw {
 		// MJPEG decodes to full-range yuvj420p; compress to limited range so
 		// the FLV stream carries plain yuv420p.
@@ -224,13 +281,33 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		"-b:v", egressVideoBitrate, "-maxrate", egressVideoBitrate, "-bufsize", egressVideoBitrate,
 		"-g", strconv.Itoa(fps*2), "-bf", "0",
 		"-r", strconv.Itoa(fps), "-fps_mode", "cfr",
-		"-c:a", "aac", "-b:a", egressAudioBitrate, "-ar", "44100",
-		"-shortest",
-		"-f", "flv", e.outputURL,
+		"-c:a", "aac", "-b:a", egressAudioBitrate, "-ar", "44100", "-ac", "2",
 	)
-	process, err := e.transcoder.startFFmpeg(ctx, "egress", e.handleStderrLine, arguments...)
+	if useAudio {
+		// Let FFmpeg absorb Opus clock drift and DTX gaps against the video
+		// clock instead of tearing the stream down.
+		arguments = append(arguments, "-af", "aresample=async=1")
+	} else {
+		// Silence tracks the video length; end the stream when video ends.
+		arguments = append(arguments, "-shortest")
+	}
+	arguments = append(arguments, "-f", "flv", e.outputURL)
+
+	process, err := e.transcoder.startFFmpeg(ctx, "egress", e.handleStderrLine, extraFiles, arguments...)
 	if err != nil {
+		if audioWriteEnd != nil {
+			_ = audioWriteEnd.Close()
+		}
 		return nil, fmt.Errorf("start FFmpeg RTMP egress: %w", err)
+	}
+	e.audioWriteEnd = audioWriteEnd
+	if audioWriteEnd != nil {
+		if err := e.audio.Attach(audioWriteEnd); err != nil {
+			_ = audioWriteEnd.Close()
+			process.close()
+			return nil, fmt.Errorf("attach audio egress pipe: %w", err)
+		}
+		e.logger.Info("audio egress pipe attached", "channels", e.audio.Channels(), "itsoffset_ms", e.audioOffset.Milliseconds())
 	}
 	return process, nil
 }

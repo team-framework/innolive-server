@@ -30,6 +30,8 @@ type Registry struct {
 	egressDropped     atomic.Uint64
 	egressDupFrames   atomic.Int64
 	egressDropFrames  atomic.Int64
+	audioSamplesOut   atomic.Uint64
+	audioSamplesDrop  atomic.Uint64
 	processTree       processTreeTracker
 
 	mu                  sync.RWMutex
@@ -86,6 +88,9 @@ func (r *Registry) IncEgressReconnect()             { r.egressReconnects.Add(1) 
 func (r *Registry) IncEgressFrameDropped()          { r.egressDropped.Add(1) }
 func (r *Registry) SetEgressDupFrames(value int64)  { r.egressDupFrames.Store(value) }
 func (r *Registry) SetEgressDropFrames(value int64) { r.egressDropFrames.Store(value) }
+
+func (r *Registry) IncAudioSampleWritten() { r.audioSamplesOut.Add(1) }
+func (r *Registry) IncAudioSampleDropped() { r.audioSamplesDrop.Add(1) }
 
 func (r *Registry) IncAIFallbackLatched(mode string) {
 	r.increment(r.aiFallbackLatched, mode)
@@ -201,6 +206,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "innolive_egress_frames_dropped_total", "Number of frames the RTMP egress discarded (full queue, invalid frame, or disconnected).", r.egressDropped.Load())
 	writeGauge(w, "innolive_egress_dup_frames", "Frames duplicated by the egress CFR pacing in the current FFmpeg process.", r.egressDupFrames.Load())
 	writeGauge(w, "innolive_egress_drop_frames", "Frames dropped by the egress CFR pacing in the current FFmpeg process.", r.egressDropFrames.Load())
+	writeCounter(w, "innolive_audio_samples_written_total", "Number of Opus samples written to the RTMP egress audio pipe.", r.audioSamplesOut.Load())
+	writeCounter(w, "innolive_audio_samples_dropped_total", "Number of Opus samples dropped before the audio pipe (full queue, detached, non-monotonic, or pipe error).", r.audioSamplesDrop.Load())
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()

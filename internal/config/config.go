@@ -62,6 +62,9 @@ type Config struct {
 	DisconnectedGracePeriod time.Duration
 	FrameQueueSize          int
 	YoutubeStreamKey        string
+	EnableAudioEgress       bool
+	EgressLatencyLog        bool
+	EgressAudioOffset       time.Duration
 	RequireSessionAuth      bool
 	LogLevel                string
 }
@@ -94,6 +97,9 @@ func Load() (Config, error) {
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
 		YoutubeStreamKey:        strings.TrimSpace(os.Getenv("YOUTUBE_STREAM_KEY")),
+		EnableAudioEgress:       envBool("ENABLE_AUDIO_EGRESS", false),
+		EgressLatencyLog:        envBool("EGRESS_LATENCY_LOG", false),
+		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),

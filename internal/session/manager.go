@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,6 +96,8 @@ type Session struct {
 	ownerHash        [32]byte
 	rawTrackID       string
 	processedTrackID string
+	audioTrackID     string
+	audioPipe        *media.AudioPipe
 	processor        *media.Processor
 	ignoredTracks    int
 	offerReceivedAt  time.Time
@@ -243,6 +247,14 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 		ownerHash: ownerHash,
 		cancel:    cancel,
 	}
+	// The audio pipe is created up front (decoupled from track arrival order)
+	// so the egress can attach it regardless of whether the video or the audio
+	// track's OnTrack fires first. It idles, dropping samples, until a mic track
+	// feeds it and the egress attaches a pipe.
+	if m.cfg.EnableAudioEgress && m.cfg.YoutubeStreamKey != "" {
+		s.audioPipe = media.NewAudioPipe(m.logger.With("session_id", id), m.metrics, 2)
+		go s.audioPipe.Run(ctx)
+	}
 	m.installHandlers(ctx, s)
 	m.mu.Lock()
 	m.sessions[id] = s
@@ -359,6 +371,60 @@ func (m *Manager) CloseAll() {
 	}
 }
 
+// handleAudioTrack captures the publisher's Opus microphone and feeds it to the
+// session's audio pipe for RTMP egress. Only the first Opus track is used;
+// non-Opus or additional audio tracks are ignored (and counted). The read loop
+// exits on EOF (track/PeerConnection closed) or session teardown, following the
+// video path's ReadRTP semantics. No PLI/keyframe RTCP is sent for audio.
+func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrtc.TrackRemote) {
+	codec := track.Codec()
+	s.mu.Lock()
+	pipe := s.audioPipe
+	switch {
+	case pipe == nil:
+		// Audio egress disabled: preserve the prior ignore-and-count behaviour.
+		s.ignoredTracks++
+		s.UpdatedAt = time.Now().UTC()
+		s.mu.Unlock()
+		return
+	case !strings.EqualFold(codec.MimeType, webrtc.MimeTypeOpus):
+		s.ignoredTracks++
+		s.mu.Unlock()
+		m.logger.Warn("ignoring non-Opus audio track", "session_id", s.ID, "codec", codec.MimeType)
+		return
+	case s.audioTrackID != "":
+		s.ignoredTracks++
+		s.mu.Unlock()
+		m.logger.Info("ignoring additional audio track", "session_id", s.ID, "track_id", track.ID())
+		return
+	}
+	s.audioTrackID = track.ID()
+	s.UpdatedAt = time.Now().UTC()
+	s.mu.Unlock()
+
+	pipe.SetChannels(codec.Channels)
+	m.logger.Info("received WebRTC audio track", "session_id", s.ID, "track_id", track.ID(),
+		"codec", codec.MimeType, "clock_rate", codec.ClockRate, "channels", codec.Channels)
+
+	go func() {
+		for {
+			packet, _, err := track.ReadRTP()
+			if err != nil {
+				if ctx.Err() == nil && !errors.Is(err, io.EOF) {
+					m.logger.Error("audio RTP read failed", "session_id", s.ID, "error", err)
+				}
+				s.mu.Lock()
+				if s.audioTrackID == track.ID() {
+					s.audioTrackID = ""
+				}
+				s.mu.Unlock()
+				return
+			}
+			pipe.WritePacket(packet)
+		}
+	}()
+}
+
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 	s.PC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		// RTPReceiver.ReadRTCP runs Pion's receiver-report interceptors. Those
@@ -366,6 +432,10 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		// with a LastSenderReport value, which lets the Pion load client calculate
 		// RTCP RTT. The media loop reads RTP separately, so drain RTCP concurrently.
 		go drainReceiverRTCP(receiver)
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			m.handleAudioTrack(ctx, s, track)
+			return
+		}
 		if track.Kind() != webrtc.RTPCodecTypeVideo {
 			s.mu.Lock()
 			s.ignoredTracks++
@@ -419,7 +489,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			egress = media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 				Gate:       m.spawnGate,
 				WireFormat: m.cfg.AIWireFormat,
-			}, youtubeIngestURL+m.cfg.YoutubeStreamKey)
+			}, youtubeIngestURL+m.cfg.YoutubeStreamKey, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset)
 			go egress.Run(trackCtx)
 			m.logger.Info("YouTube RTMP egress enabled", "session_id", s.ID, "url", youtubeIngestURL+"****")
 		}

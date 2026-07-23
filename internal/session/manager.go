@@ -25,6 +25,8 @@ var (
 	ErrCapacityExceeded = errors.New("session capacity exceeded")
 )
 
+const youtubeIngestURL = "rtmp://a.rtmp.youtube.com/live2/"
+
 type Timing struct {
 	SessionToOfferMS       *int64 `json:"session_to_offer_ms"`
 	OfferToAnswerMS        *int64 `json:"offer_to_answer_ms"`
@@ -382,6 +384,15 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		s.mu.Lock()
 		s.processor = processor
 		s.mu.Unlock()
+		var egress *media.RTMPEgress
+		if m.cfg.YoutubeStreamKey != "" {
+			egress = media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
+				Gate:       m.spawnGate,
+				WireFormat: m.cfg.AIWireFormat,
+			}, youtubeIngestURL+m.cfg.YoutubeStreamKey)
+			go egress.Run(trackCtx)
+			m.logger.Info("YouTube RTMP egress enabled", "session_id", s.ID, "url", youtubeIngestURL+"****")
+		}
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		go func() {
@@ -393,7 +404,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				delete(m.pipelines, s.ID)
 				m.mu.Unlock()
 			}()
-			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize)
+			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, egress, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize)
 			s.mu.Lock()
 			// Only clear if we are still the active track — a replacement may have
 			// taken over while this old pipeline was draining.

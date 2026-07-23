@@ -279,7 +279,7 @@ func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint1
 		arguments = append(arguments, "-an", "-strict", "unofficial", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p", "-flush_packets", "1", "-blocksize", "1024")
 	}
 	arguments = append(arguments, "pipe:1")
-	process, err := t.startFFmpeg(ctx, "decoder", arguments...)
+	process, err := t.startFFmpeg(ctx, "decoder", nil, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("start FFmpeg VP8 decoder: %w", err)
 	}
@@ -312,14 +312,17 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", "2M",
 		"-pix_fmt", "yuv420p", "-flush_packets", "1", "-f", "ivf", "-blocksize", "1024", "pipe:1",
 	)
-	process, err := t.startFFmpeg(ctx, "encoder", arguments...)
+	process, err := t.startFFmpeg(ctx, "encoder", nil, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("start FFmpeg VP8 encoder: %w", err)
 	}
 	return process, nil
 }
 
-func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, arguments ...string) (*ffmpegProcess, error) {
+// startFFmpeg spawns one FFmpeg child. stderrLine, when non-nil, receives each
+// stderr line instead of the default warning log (used by the RTMP egress to
+// separate -progress output from real errors).
+func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrLine func(string), arguments ...string) (*ffmpegProcess, error) {
 	logger := t.logger.With("ffmpeg_role", role)
 	cmd := t.newCommand(ctx, t.path, arguments...)
 	cmd.Cancel = func() error {
@@ -361,6 +364,10 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, argumen
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
+			if stderrLine != nil {
+				stderrLine(scanner.Text())
+				continue
+			}
 			logger.Warn("FFmpeg reported an error", "message", scanner.Text())
 		}
 	}()

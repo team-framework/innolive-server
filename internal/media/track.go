@@ -31,8 +31,13 @@ type frame struct {
 	data      []byte
 	timestamp uint32
 	stageAt   time.Time
-	width     uint16
-	height    uint16
+	// ingestAt is when this frame was first assembled from RTP, preserved
+	// unchanged through decode/blur/encode so the egress can measure the full
+	// ingest→pipe-write latency (the blur pipeline delay that A/V sync must
+	// compensate for). Unlike stageAt it is never reset.
+	ingestAt time.Time
+	width    uint16
+	height   uint16
 }
 
 type rtpSequenceObservation struct {
@@ -131,10 +136,12 @@ func (a *rtpFrameAssembler) pop() []frame {
 			a.registry.AddRTPPacketsDiscarded(a.mode, uint64(sample.PrevDroppedPackets))
 		}
 		a.registry.IncRTPFramesAssembled(a.mode)
+		now := time.Now()
 		frames = append(frames, frame{
 			data:      sample.Data,
 			timestamp: sample.PacketTimestamp,
-			stageAt:   time.Now(),
+			stageAt:   now,
+			ingestAt:  now,
 		})
 	}
 	return frames

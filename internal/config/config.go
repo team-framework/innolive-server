@@ -62,6 +62,7 @@ type Config struct {
 	DisconnectedGracePeriod time.Duration
 	FrameQueueSize          int
 	YoutubeStreamKey        string
+	RequireSessionAuth      bool
 	LogLevel                string
 }
 
@@ -93,6 +94,7 @@ func Load() (Config, error) {
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
 		YoutubeStreamKey:        strings.TrimSpace(os.Getenv("YOUTUBE_STREAM_KEY")),
+		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
 	}

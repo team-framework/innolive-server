@@ -32,14 +32,14 @@ func newTestManager(t *testing.T, maxSessions int) *Manager {
 
 func TestCreateEnforcesMaxSessions(t *testing.T) {
 	manager := newTestManager(t, 2)
-	first, err := manager.Create(nil)
+	first, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Create(nil); err != nil {
+	if _, _, err := manager.Create(nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Create(nil); !errors.Is(err, ErrCapacityExceeded) {
+	if _, _, err := manager.Create(nil); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("third Create() error = %v, want ErrCapacityExceeded", err)
 	}
 	if active, limit := manager.Capacity(); active != 2 || limit != 2 {
@@ -52,7 +52,7 @@ func TestCreateEnforcesMaxSessions(t *testing.T) {
 	if err := manager.Delete(first.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Create(nil); err != nil {
+	if _, _, err := manager.Create(nil); err != nil {
 		t.Fatalf("Create() after Delete() error = %v, want slot freed", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestCreateEnforcesMaxSessions(t *testing.T) {
 func TestCreateUnlimitedWhenMaxSessionsZero(t *testing.T) {
 	manager := newTestManager(t, 0)
 	for i := 0; i < 3; i++ {
-		if _, err := manager.Create(nil); err != nil {
+		if _, _, err := manager.Create(nil); err != nil {
 			t.Fatalf("Create() #%d error = %v", i, err)
 		}
 	}
@@ -79,7 +79,7 @@ func TestConcurrentCreateNeverExceedsLimit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := manager.Create(nil)
+			_, _, err := manager.Create(nil)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -130,7 +130,7 @@ func TestReapsUnnegotiatedSessions(t *testing.T) {
 	}
 	t.Cleanup(manager.CloseAll)
 
-	created, err := manager.Create(nil)
+	created, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

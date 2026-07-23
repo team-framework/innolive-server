@@ -32,7 +32,7 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()
 
-	created := createTestSession(t, httpServer.URL, map[string]string{"source": "test"})
+	created, ownerToken := createTestSession(t, httpServer.URL, map[string]string{"source": "test"})
 	if created.Status != "active" || created.Metadata["source"] != "test" {
 		t.Fatalf("unexpected session response: %+v", created)
 	}
@@ -40,14 +40,13 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 		t.Fatalf("new session unexpectedly has media tracks: %+v", created.Media)
 	}
 
-	response := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions", nil, nil)
-	defer response.Body.Close()
-	var listed struct {
-		Sessions []session.Response `json:"sessions"`
-	}
-	mustDecode(t, response.Body, &listed)
-	if len(listed.Sessions) != 1 || listed.Sessions[0].SessionID != created.SessionID {
-		t.Fatalf("list response = %+v", listed)
+	// The owner can read their own session with the token.
+	response := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(ownerToken))
+	var fetched session.Response
+	mustDecode(t, response.Body, &fetched)
+	response.Body.Close()
+	if fetched.SessionID != created.SessionID {
+		t.Fatalf("GET own session = %+v", fetched)
 	}
 
 	response = mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
@@ -57,12 +56,12 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 		t.Fatalf("metrics response missing required series:\n%s", metricsBody)
 	}
 
-	response = mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+created.SessionID, nil, nil)
+	response = mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(ownerToken))
 	response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d", response.StatusCode)
 	}
-	response = mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, nil)
+	response = mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(ownerToken))
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET deleted session status = %d", response.StatusCode)
@@ -114,7 +113,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	defer manager.CloseAll()
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()
-	liveSession := createTestSession(t, httpServer.URL, nil)
+	liveSession, ownerToken := createTestSession(t, httpServer.URL, nil)
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
 	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
@@ -145,7 +144,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 	})
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "candidate": nil}
+		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "candidate": nil}
 		if candidate != nil {
 			jsonCandidate := candidate.ToJSON()
 			message["candidate"] = jsonCandidate.Candidate
@@ -203,7 +202,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "sdp": offer.SDP}); err != nil {
+	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -261,7 +260,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 	}
 
-	deleteResponse := mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+liveSession.SessionID, nil, nil)
+	deleteResponse := mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+liveSession.SessionID, nil, bearer(ownerToken))
 	deleteResponse.Body.Close()
 	if deleteResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE session status = %d", deleteResponse.StatusCode)
@@ -349,6 +348,7 @@ func newTestApplication(t *testing.T) (*Server, *session.Manager) {
 		UDPPortMax:              41100,
 		DisconnectedGracePeriod: 100 * time.Millisecond,
 		FrameQueueSize:          2,
+		RequireSessionAuth:      true,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry := metrics.New()
@@ -359,7 +359,9 @@ func newTestApplication(t *testing.T) (*Server, *session.Manager) {
 	return New(cfg, logger, registry, manager, nil), manager
 }
 
-func createTestSession(t *testing.T, baseURL string, metadata map[string]string) session.Response {
+// createTestSession creates a session and returns its response plus the
+// one-time owner token that later session-scoped calls must present.
+func createTestSession(t *testing.T, baseURL string, metadata map[string]string) (session.Response, string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"metadata": metadata})
 	if err != nil {
@@ -371,9 +373,20 @@ func createTestSession(t *testing.T, baseURL string, metadata map[string]string)
 		data, _ := io.ReadAll(response.Body)
 		t.Fatalf("POST /sessions status=%d body=%s", response.StatusCode, data)
 	}
-	var result session.Response
+	var result struct {
+		session.Response
+		OwnerToken string `json:"owner_token"`
+	}
 	mustDecode(t, response.Body, &result)
-	return result
+	if result.OwnerToken == "" {
+		t.Fatal("POST /sessions did not return an owner_token")
+	}
+	return result.Response, result.OwnerToken
+}
+
+// bearer builds an Authorization header carrying the owner token.
+func bearer(token string) http.Header {
+	return http.Header{"Authorization": []string{"Bearer " + token}}
 }
 
 func mustRequest(t *testing.T, method, url string, body io.Reader, headers http.Header) *http.Response {

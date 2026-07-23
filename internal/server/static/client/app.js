@@ -12,6 +12,7 @@ const state = {
   referenceFace: null,
   referenceFacePreviewUrl: null,
   session: null,
+  ownerToken: null,
   pc: null,
   ws: null,
   localStream: null,
@@ -231,6 +232,11 @@ async function apiFetch(path, options = {}) {
     !headers.has("Content-Type")
   ) {
     headers.set("Content-Type", "application/json");
+  }
+  // Session-scoped routes require the owner token minted at session creation.
+  // Attaching it to token-agnostic routes is harmless (the server ignores it).
+  if (state.ownerToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${state.ownerToken}`);
   }
 
   const response = await fetch(apiUrl(path), {
@@ -480,6 +486,10 @@ async function createSession() {
     method: "POST",
     body: JSON.stringify({ metadata }),
   });
+  // owner_token is returned exactly once, here. Keep it in memory so later
+  // session-scoped requests (and signaling) can prove ownership; a session
+  // refresh response will not carry it again.
+  state.ownerToken = session.owner_token || null;
   logEvent("ok", "Session created", {
     session_id: session.session_id,
     metadata: session.metadata,
@@ -501,19 +511,15 @@ function buildSessionMetadata() {
 }
 
 async function refreshSessions({ quiet = false } = {}) {
-  try {
-    const payload = await apiFetch("/sessions");
-    renderSessions(payload?.sessions || []);
-    if (!quiet) {
-      logEvent("ok", "Sessions refreshed", {
-        count: payload?.sessions?.length || 0,
-      });
-    }
-    return payload;
-  } catch (error) {
-    logError("Failed to refresh sessions", error);
-    throw error;
+  // The GET /sessions listing endpoint was removed server-side (it leaked every
+  // active session_id). This viewer only owns the session it created, so the
+  // panel now reflects just the current session.
+  const sessions = state.session ? [state.session] : [];
+  renderSessions(sessions);
+  if (!quiet) {
+    logEvent("ok", "Sessions refreshed", { count: sessions.length });
   }
+  return { sessions };
 }
 
 async function refreshCurrentSession({ quiet = true } = {}) {
@@ -738,6 +744,7 @@ async function connectPeer(sessionId) {
   sendSignaling({
     type: "offer",
     session_id: sessionId,
+    owner_token: state.ownerToken,
     sdp: pc.localDescription.sdp,
   });
   state.offerSent = true;
@@ -1045,6 +1052,7 @@ function queueOrSendCandidate(candidate) {
     ? {
         type: "ice_candidate",
         session_id: state.session?.session_id,
+        owner_token: state.ownerToken,
         candidate: candidate.candidate,
         sdpMid: candidate.sdpMid,
         sdpMLineIndex: candidate.sdpMLineIndex,
@@ -1052,6 +1060,7 @@ function queueOrSendCandidate(candidate) {
     : {
         type: "ice_candidate",
         session_id: state.session?.session_id,
+        owner_token: state.ownerToken,
         candidate: null,
       };
 
@@ -1212,6 +1221,7 @@ function setCurrentSession(session) {
 
 function clearCurrentSession() {
   state.session = null;
+  state.ownerToken = null;
   state.lastSessionJson = null;
   renderSessionDetails(null);
   updateButtons();

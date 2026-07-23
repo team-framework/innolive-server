@@ -91,6 +91,7 @@ type Session struct {
 	Timing    Timing
 	Stream    StreamState
 
+	ownerHash        [32]byte
 	rawTrackID       string
 	processedTrackID string
 	processor        *media.Processor
@@ -190,14 +191,17 @@ func (m *Manager) capacityInUseLocked() int {
 	return inUse
 }
 
-func (m *Manager) Create(metadata map[string]string) (*Session, error) {
+// Create provisions a new session and returns it together with the plaintext
+// owner token. The token is returned exactly once here; the server must relay
+// it to the creator in the creation response and never expose it again.
+func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
 		if m.capacityInUseLocked() >= limit {
 			active := len(m.sessions)
 			m.mu.Unlock()
 			m.metrics.IncSessionsRejected()
-			return nil, fmt.Errorf("%w: active=%d limit=%d", ErrCapacityExceeded, active, limit)
+			return nil, "", fmt.Errorf("%w: active=%d limit=%d", ErrCapacityExceeded, active, limit)
 		}
 		m.pending++
 		m.mu.Unlock()
@@ -207,9 +211,13 @@ func (m *Manager) Create(metadata map[string]string) (*Session, error) {
 			m.mu.Unlock()
 		}()
 	}
+	ownerToken, ownerHash, err := newOwnerToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate owner token: %w", err)
+	}
 	pc, err := m.api.NewPeerConnection(webrtc.Configuration{ICEServers: m.ice})
 	if err != nil {
-		return nil, fmt.Errorf("create PeerConnection: %w", err)
+		return nil, "", fmt.Errorf("create PeerConnection: %w", err)
 	}
 	id := uuid.NewString()
 	output, err := webrtc.NewTrackLocalStaticSample(
@@ -219,7 +227,7 @@ func (m *Manager) Create(metadata map[string]string) (*Session, error) {
 	)
 	if err != nil {
 		_ = pc.Close()
-		return nil, fmt.Errorf("create processed video track: %w", err)
+		return nil, "", fmt.Errorf("create processed video track: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
@@ -232,6 +240,7 @@ func (m *Manager) Create(metadata map[string]string) (*Session, error) {
 		PC:        pc,
 		Output:    output,
 		Stream:    StreamState{Status: "idle", UpdatedAt: now},
+		ownerHash: ownerHash,
 		cancel:    cancel,
 	}
 	m.installHandlers(ctx, s)
@@ -245,7 +254,7 @@ func (m *Manager) Create(metadata map[string]string) (*Session, error) {
 		time.AfterFunc(timeout, func() { m.reapUnnegotiated(id) })
 	}
 	m.logger.Info("created live session", "session_id", id)
-	return s, nil
+	return s, ownerToken, nil
 }
 
 // reapUnnegotiated frees a session that never started negotiation within
@@ -272,6 +281,22 @@ func (m *Manager) Get(id string) (*Session, error) {
 	m.mu.RUnlock()
 	if s == nil {
 		return nil, ErrNotFound
+	}
+	return s, nil
+}
+
+// VerifyOwner resolves a session and confirms the caller owns it. It returns
+// ErrNotFound when no such session exists and ErrUnauthorized when the token
+// does not match. When session auth is disabled (local dev only) the token is
+// not checked, but the session must still exist. This is the single gate used
+// by both the HTTP middleware and the WebRTC signaling path.
+func (m *Manager) VerifyOwner(id, token string) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if m.cfg.RequireSessionAuth && !s.verifyOwnerToken(token) {
+		return nil, ErrUnauthorized
 	}
 	return s, nil
 }
@@ -369,6 +394,11 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			m.metrics.IncAITargetSession(client.Address())
 			// Per-client whitelist scoping: the AI worker applies this client's
 			// reference-face exclusion set to the stream (empty = global default).
+			// NOTE: client_id is caller-supplied metadata, NOT an authenticated
+			// identity — it selects a whitelist bucket only and must never gate
+			// session ownership or access control (that is the owner token's job,
+			// see VerifyOwner). Reference-face bucket isolation is a separate,
+			// tracked concern.
 			aiStream = client.NewStream(trackCtx, s.Metadata["client_id"])
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{

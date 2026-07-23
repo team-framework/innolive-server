@@ -47,11 +47,13 @@ func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, ses
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /webrtc/config", s.handleWebRTCConfig)
 	mux.HandleFunc("POST /sessions", s.handleCreateSession)
-	mux.HandleFunc("GET /sessions", s.handleListSessions)
-	mux.HandleFunc("GET /sessions/{session_id}", s.handleGetSession)
-	mux.HandleFunc("DELETE /sessions/{session_id}", s.handleDeleteSession)
-	mux.HandleFunc("POST /sessions/{session_id}/stream/start", s.handleStartStream)
-	mux.HandleFunc("POST /sessions/{session_id}/stream/stop", s.handleStopStream)
+	// Every session-scoped route goes through requireSessionOwner so ownership
+	// is enforced structurally. The list endpoint is intentionally removed: it
+	// leaked every active session_id, defeating the token model.
+	mux.HandleFunc("GET /sessions/{session_id}", s.requireSessionOwner(s.handleGetSession))
+	mux.HandleFunc("DELETE /sessions/{session_id}", s.requireSessionOwner(s.handleDeleteSession))
+	mux.HandleFunc("POST /sessions/{session_id}/stream/start", s.requireSessionOwner(s.handleStartStream))
+	mux.HandleFunc("POST /sessions/{session_id}/stream/stop", s.requireSessionOwner(s.handleStopStream))
 	mux.HandleFunc("GET /reference-face", s.handleGetReferenceFace)
 	mux.HandleFunc("POST /reference-face", s.handlePostReferenceFace)
 	mux.HandleFunc("DELETE /reference-face", s.handleDeleteReferenceFace)
@@ -116,7 +118,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("Invalid session request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	liveSession, err := s.sessions.Create(request.Metadata)
+	liveSession, ownerToken, err := s.sessions.Create(request.Metadata)
 	if errors.Is(err, session.ErrCapacityExceeded) {
 		active, limit := s.sessions.Capacity()
 		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)
@@ -133,42 +135,26 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, internalError())
 		return
 	}
-	writeJSON(w, http.StatusCreated, liveSession.Response())
+	// owner_token is returned exactly once, here, and never re-exposed.
+	writeJSON(w, http.StatusCreated, struct {
+		session.Response
+		OwnerToken string `json:"owner_token"`
+	}{Response: liveSession.Response(), OwnerToken: ownerToken})
 }
 
-func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
-	items := s.sessions.List()
-	responses := make([]session.Response, 0, len(items))
-	for _, item := range items {
-		responses = append(responses, item.Response())
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": responses})
-}
-
-func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	liveSession, err := s.sessions.Get(r.PathValue("session_id"))
-	if err != nil {
-		writeSessionError(w, err, r.PathValue("session_id"))
-		return
-	}
+func (s *Server) handleGetSession(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
 	writeJSON(w, http.StatusOK, liveSession.Response())
 }
 
-func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("session_id")
-	if err := s.sessions.Delete(id, "delete_session"); err != nil {
-		writeSessionError(w, err, id)
+func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
+	if err := s.sessions.Delete(liveSession.ID, "delete_session"); err != nil {
+		writeSessionError(w, err, liveSession.ID)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request) {
-	liveSession, err := s.sessions.Get(r.PathValue("session_id"))
-	if err != nil {
-		writeSessionError(w, err, r.PathValue("session_id"))
-		return
-	}
+func (s *Server) handleStartStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
 	response := liveSession.Response()
 	if response.Media.RawVideoTrack == nil {
 		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": liveSession.ID}})
@@ -177,12 +163,7 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request) {
 	writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "RTMP publishing is not supported by the media server."})
 }
 
-func (s *Server) handleStopStream(w http.ResponseWriter, r *http.Request) {
-	liveSession, err := s.sessions.Get(r.PathValue("session_id"))
-	if err != nil {
-		writeSessionError(w, err, r.PathValue("session_id"))
-		return
-	}
+func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
 }
 

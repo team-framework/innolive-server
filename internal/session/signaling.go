@@ -22,8 +22,8 @@ type CandidateResult struct {
 	ConnectionState    string `json:"connection_state"`
 }
 
-func (m *Manager) CreateAnswer(sessionID, offerSDP string) (Answer, error) {
-	s, err := m.Get(sessionID)
+func (m *Manager) CreateAnswer(sessionID, ownerToken, offerSDP string) (Answer, error) {
+	s, err := m.VerifyOwner(sessionID, ownerToken)
 	if err != nil {
 		return Answer{}, err
 	}
@@ -89,8 +89,8 @@ func (m *Manager) CreateAnswer(sessionID, offerSDP string) (Answer, error) {
 	return Answer{SessionID: sessionID, Type: "answer", SDP: local.SDP}, nil
 }
 
-func (m *Manager) AddICECandidate(sessionID string, candidate webrtc.ICECandidateInit) (CandidateResult, error) {
-	s, err := m.Get(sessionID)
+func (m *Manager) AddICECandidate(sessionID, ownerToken string, candidate webrtc.ICECandidateInit) (CandidateResult, error) {
+	s, err := m.VerifyOwner(sessionID, ownerToken)
 	if err != nil {
 		return CandidateResult{}, err
 	}

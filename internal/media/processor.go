@@ -159,11 +159,18 @@ func (p *Processor) ProcessImage(frame []byte, timestamp int64, width, height ui
 	}
 
 	pixFmt := ""
+	wireWidth, wireHeight := width, height
 	if p.wireFormat == config.WireFormatRaw {
 		pixFmt = "yuv420p"
+	} else {
+		// jpeg is self-describing; width/height only carry meaning for raw
+		// frames. Some AI servers reuse this VideoChunk's field numbers for
+		// unrelated data (e.g. batch_size), so leaving these non-zero in jpeg
+		// mode can corrupt that field on the wire.
+		wireWidth, wireHeight = 0, 0
 	}
 	aiStartedAt := time.Now()
-	response, err := p.ai.Process(frame, timestamp, width, height, pixFmt)
+	response, err := p.ai.Process(frame, timestamp, wireWidth, wireHeight, pixFmt)
 	p.metrics.ObserveAI(string(p.mode), time.Since(aiStartedAt))
 	p.metrics.ObserveStage("grpc", time.Since(aiStartedAt))
 	if err != nil {

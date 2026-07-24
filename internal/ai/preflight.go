@@ -101,5 +101,8 @@ func syntheticFrame(wireFormat string) (data []byte, width, height uint16, pixFm
 	if err := jpeg.Encode(&encoded, image.NewGray(image.Rect(0, 0, preflightDim, preflightDim)), &jpeg.Options{Quality: 75}); err != nil {
 		return nil, 0, 0, "", fmt.Errorf("encode preflight jpeg: %w", err)
 	}
-	return encoded.Bytes(), preflightDim, preflightDim, "", nil
+	// jpeg is self-describing; width/height only carry meaning for raw
+	// frames (see the same convention in Processor.ProcessImage), so they
+	// stay zero here to match what real jpeg-mode traffic actually sends.
+	return encoded.Bytes(), 0, 0, "", nil
 }

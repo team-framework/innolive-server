@@ -13,6 +13,8 @@ import (
 
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/database"
+	"inno-live-server/internal/database/migration"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/server"
@@ -25,73 +27,207 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(2)
 	}
+
 	logger := newLogger(cfg.LogLevel)
 	registry := metrics.New()
 
+	// PostgreSQL 연결과 마이그레이션에 사용할 시작 컨텍스트다.
+	startupContext, startupCancel := context.WithTimeout(
+		context.Background(),
+		30*time.Second,
+	)
+
+	databaseConnection, err := database.Open(
+		startupContext,
+		database.Options{
+			URL:             cfg.DatabaseURL,
+			MaxOpenConns:    cfg.DatabaseMaxOpenConns,
+			MaxIdleConns:    cfg.DatabaseMaxIdleConns,
+			ConnMaxLifetime: cfg.DatabaseConnMaxLifetime,
+			ConnMaxIdleTime: cfg.DatabaseConnMaxIdleTime,
+			Debug:           cfg.LogLevel == "DEBUG",
+		},
+	)
+	if err != nil {
+		startupCancel()
+		logger.Error("connect PostgreSQL failed", "error", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		if err := databaseConnection.Close(); err != nil {
+			logger.Error("close PostgreSQL failed", "error", err)
+		}
+	}()
+
+	// DATABASE_MIGRATION_MODE에 따라 auto, versioned, off 중 하나를 실행한다.
+	if err := migration.Run(
+		startupContext,
+		databaseConnection.DB,
+		cfg.DatabaseURL,
+		cfg.DatabaseMigrationMode,
+	); err != nil {
+		startupCancel()
+		logger.Error(
+			"database migration failed",
+			"mode", cfg.DatabaseMigrationMode,
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
+	startupCancel()
+
+	logger.Info(
+		"PostgreSQL ready",
+		"migration_mode", cfg.DatabaseMigrationMode,
+		"max_open_connections", cfg.DatabaseMaxOpenConns,
+		"max_idle_connections", cfg.DatabaseMaxIdleConns,
+	)
+
 	if !cfg.RequireSessionAuth {
-		logger.Warn("session ownership auth is DISABLED (INNOLIVE_REQUIRE_SESSION_AUTH=false); any client can control or hijack any session — for local development only")
+		logger.Warn(
+			"session ownership auth is DISABLED " +
+				"(INNOLIVE_REQUIRE_SESSION_AUTH=false); " +
+				"any client can control or hijack any session — " +
+				"for local development only",
+		)
 	}
 
 	resolvedFFmpeg, lookupErr := exec.LookPath(cfg.FFmpegPath)
 	if lookupErr != nil {
-		logger.Error("FFmpeg is required in every privacy mode", "path", cfg.FFmpegPath, "error", lookupErr)
+		logger.Error(
+			"FFmpeg is required in every privacy mode",
+			"path", cfg.FFmpegPath,
+			"error", lookupErr,
+		)
 		os.Exit(2)
 	}
 	cfg.FFmpegPath = resolvedFFmpeg
 
 	var aiPool *ai.Pool
+
 	if cfg.PrivacyMode == config.PrivacyModeReal {
 		if !cfg.AIInsecure {
-			logger.Error("AI_GRPC_INSECURE=false is not supported until the AI server exposes TLS")
+			logger.Error(
+				"AI_GRPC_INSECURE=false is not supported " +
+					"until the AI server exposes TLS",
+			)
 			os.Exit(2)
 		}
-		aiPool, err = ai.NewPool(cfg.AITargets, cfg.AITimeout)
+
+		aiPool, err = ai.NewPool(
+			cfg.AITargets,
+			cfg.AITimeout,
+		)
 		if err != nil {
-			logger.Error("create AI client pool failed", "error", err)
+			logger.Error(
+				"create AI client pool failed",
+				"error", err,
+			)
 			os.Exit(1)
 		}
 		defer aiPool.Close()
 
-		if err := aiPool.Preflight(context.Background(), string(cfg.AIWireFormat), cfg.AIPreflightTimeout); err != nil {
+		err = aiPool.Preflight(
+			context.Background(),
+			string(cfg.AIWireFormat),
+			cfg.AIPreflightTimeout,
+		)
+		if err != nil {
 			if cfg.AIPreflightRequired {
-				logger.Error("AI preflight failed; refusing to start (AI_PREFLIGHT_REQUIRED=true)",
-					"error", err, "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+				logger.Error(
+					"AI preflight failed; refusing to start "+
+						"(AI_PREFLIGHT_REQUIRED=true)",
+					"error", err,
+					"wire_format", cfg.AIWireFormat,
+					"targets", cfg.AITargets,
+				)
 				os.Exit(2)
 			}
-			logger.Warn("AI preflight failed; starting anyway (AI_PREFLIGHT_REQUIRED=false)",
-				"error", err, "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+
+			logger.Warn(
+				"AI preflight failed; starting anyway "+
+					"(AI_PREFLIGHT_REQUIRED=false)",
+				"error", err,
+				"wire_format", cfg.AIWireFormat,
+				"targets", cfg.AITargets,
+			)
 		} else {
-			logger.Info("AI preflight passed", "wire_format", cfg.AIWireFormat, "targets", cfg.AITargets)
+			logger.Info(
+				"AI preflight passed",
+				"wire_format", cfg.AIWireFormat,
+				"targets", cfg.AITargets,
+			)
 		}
 	}
 
-	spawnGate := media.NewSpawnGate(cfg.FFmpegSpawnConcurrency)
-	sessionManager, err := session.NewManager(cfg, logger, registry, aiPool, spawnGate)
+	spawnGate := media.NewSpawnGate(
+		cfg.FFmpegSpawnConcurrency,
+	)
+
+	sessionManager, err := session.NewManager(
+		cfg,
+		logger,
+		registry,
+		aiPool,
+		spawnGate,
+	)
 	if err != nil {
-		logger.Error("create session manager failed", "error", err)
+		logger.Error(
+			"create session manager failed",
+			"error", err,
+		)
 		os.Exit(1)
 	}
 	defer sessionManager.CloseAll()
-	application := server.New(cfg, logger, registry, sessionManager, aiPool)
 
-	// Preload the env-provided default reference face (AI_PRIVACY_ME_IMAGE_PATH)
-	// under the global bucket, so clients with no API-registered face fall back
-	// to it (matches the Python server's env reference). Done async so a slow
-	// first-registration JIT never blocks startup.
+	application := server.New(
+		cfg,
+		logger,
+		registry,
+		sessionManager,
+		aiPool,
+	)
+
+	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
+	// 등록 시간이 HTTP 서버 시작을 막지 않도록 비동기로 실행한다.
 	if aiPool != nil && cfg.AIMeImagePath != "" {
 		go func() {
 			data, err := os.ReadFile(cfg.AIMeImagePath)
 			if err != nil {
-				logger.Warn("env reference face not readable", "path", cfg.AIMeImagePath, "error", err)
+				logger.Warn(
+					"env reference face not readable",
+					"path", cfg.AIMeImagePath,
+					"error", err,
+				)
 				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 130*time.Second)
+
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				130*time.Second,
+			)
 			defer cancel()
-			if _, err := aiPool.AddWhitelist(ctx, "", "env", data); err != nil {
-				logger.Warn("env reference face registration failed", "path", cfg.AIMeImagePath, "error", err)
+
+			if _, err := aiPool.AddWhitelist(
+				ctx,
+				"",
+				"env",
+				data,
+			); err != nil {
+				logger.Warn(
+					"env reference face registration failed",
+					"path", cfg.AIMeImagePath,
+					"error", err,
+				)
 				return
 			}
-			logger.Info("env reference face registered", "path", cfg.AIMeImagePath)
+
+			logger.Info(
+				"env reference face registered",
+				"path", cfg.AIMeImagePath,
+			)
 		}()
 	}
 
@@ -103,39 +239,60 @@ func main() {
 	}
 
 	serverErrors := make(chan error, 1)
+
 	go func() {
-		logger.Info("InnoLive media server started",
+		logger.Info(
+			"InnoLive media server started",
 			"address", cfg.HTTPAddr,
 			"privacy_mode", cfg.PrivacyMode,
 			"ai_targets", cfg.AITargets,
 			"wire_format", cfg.AIWireFormat,
 			"max_sessions", cfg.MaxSessions,
-			"ffmpeg_spawn_concurrency", cfg.FFmpegSpawnConcurrency,
+			"ffmpeg_spawn_concurrency",
+			cfg.FFmpegSpawnConcurrency,
 		)
+
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
-	signalContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalContext, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer stop()
+
 	select {
 	case <-signalContext.Done():
 		logger.Info("shutdown signal received")
+
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("HTTP server stopped unexpectedly", "error", err)
+			logger.Error(
+				"HTTP server stopped unexpectedly",
+				"error", err,
+			)
 			os.Exit(1)
 		}
 	}
 
-	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownContext, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
 	defer cancel()
+
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
-		logger.Error("graceful HTTP shutdown failed", "error", err)
+		logger.Error(
+			"graceful HTTP shutdown failed",
+			"error", err,
+		)
 	}
 }
 
 func newLogger(level string) *slog.Logger {
 	logLevel := slog.LevelInfo
+
 	switch level {
 	case "DEBUG":
 		logLevel = slog.LevelDebug
@@ -144,5 +301,13 @@ func newLogger(level string) *slog.Logger {
 	case "ERROR":
 		logLevel = slog.LevelError
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+
+	return slog.New(
+		slog.NewJSONHandler(
+			os.Stdout,
+			&slog.HandlerOptions{
+				Level: logLevel,
+			},
+		),
+	)
 }

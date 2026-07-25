@@ -5,7 +5,18 @@ import (
 	"time"
 )
 
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+
+	t.Setenv(
+		"DATABASE_URL",
+		"postgres://test:test@localhost:5432/test?sslmode=disable",
+	)
+}
+
 func TestLoadAudioEgressFlags(t *testing.T) {
+	setRequiredEnv(t)
+
 	t.Setenv("ENABLE_AUDIO_EGRESS", "true")
 	t.Setenv("EGRESS_LATENCY_LOG", "true")
 	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "200")
@@ -25,6 +36,8 @@ func TestLoadAudioEgressFlags(t *testing.T) {
 }
 
 func TestLoadAudioEgressDefaultsOff(t *testing.T) {
+	setRequiredEnv(t)
+
 	t.Setenv("ENABLE_AUDIO_EGRESS", "")
 	t.Setenv("EGRESS_LATENCY_LOG", "")
 	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "")
@@ -45,6 +58,8 @@ func TestLoadAudioEgressDefaultsOff(t *testing.T) {
 
 // The offset is signed so tuning can shift audio either way.
 func TestLoadAudioOffsetAcceptsNegative(t *testing.T) {
+	setRequiredEnv(t)
+
 	t.Setenv("EGRESS_AUDIO_OFFSET_MS", "-50")
 	cfg, err := Load()
 	if err != nil {
@@ -89,6 +104,8 @@ func TestValidateRequiresFFmpegInAllModes(t *testing.T) {
 }
 
 func TestLoadAcceptsPythonServerDelayAlias(t *testing.T) {
+	setRequiredEnv(t)
+
 	t.Setenv("AI_PRIVACY_MODE", "fixed_delay")
 	t.Setenv("AI_PRIVACY_FIXED_DELAY", "")
 	t.Setenv("AI_PRIVACY_FIXED_DELAY_MS", "12.5")
@@ -107,6 +124,62 @@ func TestSplitURLsCanDisableDefaultSTUNExplicitly(t *testing.T) {
 	}
 }
 
+func TestLoadDatabaseConfig(t *testing.T) {
+	databaseURL :=
+		"postgres://test:test@localhost:5432/test?sslmode=disable"
+
+	t.Setenv("DATABASE_URL", databaseURL)
+	t.Setenv("DATABASE_MAX_OPEN_CONNS", "20")
+	t.Setenv("DATABASE_MAX_IDLE_CONNS", "8")
+	t.Setenv("DATABASE_CONN_MAX_LIFETIME", "45m")
+	t.Setenv("DATABASE_CONN_MAX_IDLE_TIME", "10m")
+	t.Setenv("DATABASE_MIGRATION_MODE", "versioned")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DatabaseURL != databaseURL {
+		t.Errorf(
+			"DatabaseURL = %q, want %q",
+			cfg.DatabaseURL,
+			databaseURL,
+		)
+	}
+	if cfg.DatabaseMaxOpenConns != 20 {
+		t.Errorf(
+			"DatabaseMaxOpenConns = %d, want 20",
+			cfg.DatabaseMaxOpenConns,
+		)
+	}
+	if cfg.DatabaseMaxIdleConns != 8 {
+		t.Errorf(
+			"DatabaseMaxIdleConns = %d, want 8",
+			cfg.DatabaseMaxIdleConns,
+		)
+	}
+	if cfg.DatabaseConnMaxLifetime != 45*time.Minute {
+		t.Errorf(
+			"DatabaseConnMaxLifetime = %v, want 45m",
+			cfg.DatabaseConnMaxLifetime,
+		)
+	}
+	if cfg.DatabaseConnMaxIdleTime != 10*time.Minute {
+		t.Errorf(
+			"DatabaseConnMaxIdleTime = %v, want 10m",
+			cfg.DatabaseConnMaxIdleTime,
+		)
+	}
+	if cfg.DatabaseMigrationMode != DatabaseMigrationModeVersioned {
+		t.Errorf(
+			"DatabaseMigrationMode = %q, want %q",
+			cfg.DatabaseMigrationMode,
+			DatabaseMigrationModeVersioned,
+		)
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		HTTPAddr:           ":8000",
@@ -119,5 +192,13 @@ func validConfig() Config {
 		UDPPortMin:         50000,
 		UDPPortMax:         60000,
 		FrameQueueSize:     2,
+
+		DatabaseURL:             "postgres://test:test@localhost:5432/test?sslmode=disable",
+		DatabaseMaxOpenConns:    10,
+		DatabaseMaxIdleConns:    5,
+		DatabaseConnMaxLifetime: 30 * time.Minute,
+		DatabaseConnMaxIdleTime: 5 * time.Minute,
+
+		DatabaseMigrationMode: DatabaseMigrationModeAuto,
 	}
 }

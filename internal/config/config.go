@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+type DatabaseMigrationMode string
+
+const (
+	DatabaseMigrationModeAuto      DatabaseMigrationMode = "auto"
+	DatabaseMigrationModeVersioned DatabaseMigrationMode = "versioned"
+	DatabaseMigrationModeOff       DatabaseMigrationMode = "off"
+)
+
 type PrivacyMode string
 
 const (
@@ -67,6 +75,12 @@ type Config struct {
 	EgressAudioOffset       time.Duration
 	RequireSessionAuth      bool
 	LogLevel                string
+	DatabaseURL             string
+	DatabaseMaxOpenConns    int
+	DatabaseMaxIdleConns    int
+	DatabaseConnMaxLifetime time.Duration
+	DatabaseConnMaxIdleTime time.Duration
+	DatabaseMigrationMode   DatabaseMigrationMode
 }
 
 func Load() (Config, error) {
@@ -103,6 +117,14 @@ func Load() (Config, error) {
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
+		DatabaseURL:             strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DatabaseMaxOpenConns:    envInt("DATABASE_MAX_OPEN_CONNS", 10),
+		DatabaseMaxIdleConns:    envInt("DATABASE_MAX_IDLE_CONNS", 5),
+		DatabaseConnMaxLifetime: envDuration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
+		DatabaseConnMaxIdleTime: envDuration("DATABASE_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		DatabaseMigrationMode: DatabaseMigrationMode(
+			env("DATABASE_MIGRATION_MODE", string(DatabaseMigrationModeAuto)),
+		),
 	}
 
 	minPort, err := envUint16("WEBRTC_UDP_PORT_MIN", 50000)
@@ -191,6 +213,35 @@ func (c Config) Validate() error {
 				return errors.New("AI_GRPC_TARGETS must not contain empty addresses")
 			}
 		}
+	}
+	if c.DatabaseURL == "" {
+		return errors.New("DATABASE_URL must not be empty")
+	}
+	if c.DatabaseMaxOpenConns < 1 {
+		return errors.New("DATABASE_MAX_OPEN_CONNS must be at least 1")
+	}
+	if c.DatabaseMaxIdleConns < 0 {
+		return errors.New("DATABASE_MAX_IDLE_CONNS must not be negative")
+	}
+	if c.DatabaseMaxIdleConns > c.DatabaseMaxOpenConns {
+		return errors.New("DATABASE_MAX_IDLE_CONNS must not exceed DATABASE_MAX_OPEN_CONNS")
+	}
+	if c.DatabaseConnMaxLifetime <= 0 {
+		return errors.New("DATABASE_CONN_MAX_LIFETIME must be positive")
+	}
+	if c.DatabaseConnMaxIdleTime <= 0 {
+		return errors.New("DATABASE_CONN_MAX_IDLE_TIME must be positive")
+	}
+	switch c.DatabaseMigrationMode {
+	case DatabaseMigrationModeAuto,
+		DatabaseMigrationModeVersioned,
+		DatabaseMigrationModeOff:
+		// valid
+	default:
+		return fmt.Errorf(
+			"DATABASE_MIGRATION_MODE must be one of auto, versioned, off: %q",
+			c.DatabaseMigrationMode,
+		)
 	}
 	return nil
 }

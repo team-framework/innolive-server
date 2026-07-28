@@ -1,0 +1,204 @@
+package auth
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+)
+
+const maxTokenRequestBody = 8 << 10
+
+type tokenHTTPHandler struct {
+	service *TokenService
+	logger  *slog.Logger
+	config  TokenHTTPConfig
+}
+
+func MountTokenHTTP(next http.Handler, service *TokenService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	h := &tokenHTTPHandler{service: service, logger: logger, config: config}
+	mux := http.NewServeMux()
+	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
+	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
+	mux.Handle("/", next)
+	return mux
+}
+
+func (h *tokenHTTPHandler) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		h.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+		return
+	}
+
+	raw, err := decodeRefreshRequest(w, r)
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid refresh token request.")
+		return
+	}
+	pair, err := h.service.Rotate(r.Context(), raw, requestClientInfo(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRefreshTokenReused):
+			h.logger.Warn("refresh token reuse detected", "request_id", tokenRequestID(r))
+			h.writeError(w, r, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid.")
+		case errors.Is(err, ErrInvalidRefreshToken),
+			errors.Is(err, ErrRefreshTokenExpired),
+			errors.Is(err, ErrRefreshTokenRevoked),
+			errors.Is(err, ErrUserInactive):
+			h.writeError(w, r, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid.")
+		default:
+			h.logger.Error("refresh token rotation failed", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
+		}
+		return
+	}
+	h.writeJSON(w, http.StatusOK, pair)
+}
+
+func (h *tokenHTTPHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		h.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+		return
+	}
+
+	raw, err := decodeRefreshRequest(w, r)
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid logout request.")
+		return
+	}
+	if err := h.service.Logout(r.Context(), raw); err != nil {
+		if !errors.Is(err, ErrInvalidRefreshToken) &&
+			!errors.Is(err, ErrRefreshTokenExpired) &&
+			!errors.Is(err, ErrRefreshTokenRevoked) &&
+			!errors.Is(err, ErrRefreshTokenReused) &&
+			!errors.Is(err, ErrUserInactive) {
+			h.logger.Error("refresh token logout failed", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (string, error) {
+	request := struct {
+		RefreshToken string `json:"refresh_token"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTokenRequestBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return "", err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return "", errors.New("request body must contain one JSON object")
+	}
+	request.RefreshToken = strings.TrimSpace(request.RefreshToken)
+	if request.RefreshToken == "" {
+		return "", errors.New("refresh_token is required")
+	}
+	return request.RefreshToken, nil
+}
+
+func requestClientInfo(r *http.Request) ClientInfo {
+	return ClientInfo{
+		UserAgent: truncateTokenMetadata(strings.TrimSpace(r.UserAgent()), 512),
+		IPAddress: tokenRemoteIP(r.RemoteAddr),
+	}
+}
+
+func tokenRemoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+func truncateTokenMetadata(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "")
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func (h *tokenHTTPHandler) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if id == "" {
+			id = uuid.NewString()
+			r.Header.Set("X-Request-ID", id)
+		}
+		w.Header().Set("X-Request-ID", id)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" {
+			allowedOrigin, ok := h.config.AllowedOrigin(origin)
+			if !ok {
+				h.writeError(w, r, http.StatusForbidden, "origin_not_allowed", "Origin is not allowed.")
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
+			if allowedOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Max-Age", "600")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func tokenRequestID(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Request-ID"))
+}
+
+func (h *tokenHTTPHandler) writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	h.writeJSON(w, status, map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+		"request_id": tokenRequestID(r),
+	})
+}
+
+func (h *tokenHTTPHandler) writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		_, _ = fmt.Fprintln(w, `{}`)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/origin"
 	"inno-live-server/internal/session"
 )
 
@@ -29,10 +30,22 @@ type Server struct {
 	sessions   *session.Manager
 	ai         *ai.Pool
 	references *referenceStore
+	origins    origin.Config
 	handler    http.Handler
 }
 
-func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, sessions *session.Manager, aiPool *ai.Pool) *Server {
+func New(
+	cfg config.Config,
+	logger *slog.Logger,
+	registry *metrics.Registry,
+	sessions *session.Manager,
+	aiPool *ai.Pool,
+	origins origin.Config,
+	requireUser func(http.Handler) http.Handler,
+) *Server {
+	if requireUser == nil {
+		requireUser = func(next http.Handler) http.Handler { return next }
+	}
 	s := &Server{
 		cfg:        cfg,
 		logger:     logger,
@@ -40,13 +53,14 @@ func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, ses
 		sessions:   sessions,
 		ai:         aiPool,
 		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
+		origins:    origins,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /webrtc/config", s.handleWebRTCConfig)
-	mux.HandleFunc("POST /sessions", s.handleCreateSession)
+	mux.Handle("GET /webrtc/config", requireUser(http.HandlerFunc(s.handleWebRTCConfig)))
+	mux.Handle("POST /sessions", requireUser(http.HandlerFunc(s.handleCreateSession)))
 	// Every session-scoped route goes through requireSessionOwner so ownership
 	// is enforced structurally. The list endpoint is intentionally removed: it
 	// leaked every active session_id, defeating the token model.
@@ -54,14 +68,14 @@ func New(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, ses
 	mux.HandleFunc("DELETE /sessions/{session_id}", s.requireSessionOwner(s.handleDeleteSession))
 	mux.HandleFunc("POST /sessions/{session_id}/stream/start", s.requireSessionOwner(s.handleStartStream))
 	mux.HandleFunc("POST /sessions/{session_id}/stream/stop", s.requireSessionOwner(s.handleStopStream))
-	mux.HandleFunc("GET /reference-face", s.handleGetReferenceFace)
-	mux.HandleFunc("POST /reference-face", s.handlePostReferenceFace)
-	mux.HandleFunc("DELETE /reference-face", s.handleDeleteReferenceFace)
-	mux.HandleFunc("DELETE /reference-face/{face_id}", s.handleDeleteReferenceFaceByID)
+	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
+	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
+	mux.Handle("DELETE /reference-face", requireUser(http.HandlerFunc(s.handleDeleteReferenceFace)))
+	mux.Handle("DELETE /reference-face/{face_id}", requireUser(http.HandlerFunc(s.handleDeleteReferenceFaceByID)))
 	mux.HandleFunc("GET /signaling", s.handleSignaling)
 	mux.Handle("/client/", s.clientHandler())
 	mux.Handle("/debug/pprof/", http.DefaultServeMux)
-	s.handler = recoverMiddleware(logger, corsMiddleware(requestIDMiddleware(mux)))
+	s.handler = recoverMiddleware(logger, corsMiddleware(origins, requestIDMiddleware(mux)))
 	return s
 }
 
@@ -232,14 +246,20 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+func corsMiddleware(origins origin.Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		requestOrigin := strings.TrimSpace(r.Header.Get("Origin"))
+		if requestOrigin != "" {
+			allowedOrigin, ok := origins.AllowedOrigin(requestOrigin)
+			if !ok {
+				writeError(w, apiError{Status: http.StatusForbidden, Code: "origin_not_allowed", Message: "Origin is not allowed."})
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
-			w.Header().Add("Vary", "Origin")
+			if allowedOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
 		}
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")

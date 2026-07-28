@@ -16,10 +16,14 @@ import (
 	"testing"
 	"time"
 
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/origin"
 	"inno-live-server/internal/session"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
@@ -85,6 +89,12 @@ func TestCORSAndSignalingValidation(t *testing.T) {
 		t.Fatalf("unexpected CORS response: status=%d headers=%v", response.StatusCode, response.Header)
 	}
 
+	disallowedResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/webrtc/config", nil, http.Header{"Origin": []string{"https://evil.example"}})
+	disallowedResponse.Body.Close()
+	if disallowedResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("disallowed HTTP origin status = %d, want %d", disallowedResponse.StatusCode, http.StatusForbidden)
+	}
+
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
 	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -106,6 +116,148 @@ func TestCORSAndSignalingValidation(t *testing.T) {
 	if signalError.Type != "error" || signalError.Error.Code != "bad_request" {
 		t.Fatalf("unexpected signaling error: %+v", signalError)
 	}
+}
+
+type testUserChecker struct {
+	status auth.UserStatus
+	seen   []uuid.UUID
+}
+
+func (c *testUserChecker) UserStatus(_ context.Context, userID uuid.UUID) (auth.UserStatus, error) {
+	c.seen = append(c.seen, userID)
+	return c.status, nil
+}
+
+func testRequireUser(t *testing.T) (func(http.Handler) http.Handler, http.Header, *testUserChecker, uuid.UUID) {
+	t.Helper()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	userID := uuid.New()
+	now := time.Now().UTC()
+	claims := auth.AccessClaims{
+		SessionID: uuid.NewString(),
+		TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "test-server",
+			Subject:   userID.String(),
+			Audience:  jwt.ClaimStrings{"test-api"},
+			ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute)),
+			NotBefore: jwt.NewNumericDate(now.Add(-time.Second)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ID:        uuid.NewString(),
+		},
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := auth.NewTokenService(nil, auth.TokenConfig{
+		AccessKey: key, AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshAbsoluteTTL: time.Hour,
+		Issuer: "test-server", Audience: "test-api",
+	})
+	checker := &testUserChecker{status: auth.UserStatusActive}
+	return auth.RequireUser(service, checker), bearer(token), checker, userID
+}
+
+func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
+	requireUser, accessHeader, checker, userID := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	protectedRoutes := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{method: http.MethodPost, path: "/sessions", want: http.StatusCreated},
+		{method: http.MethodGet, path: "/webrtc/config", want: http.StatusOK},
+		{method: http.MethodGet, path: "/reference-face", want: http.StatusOK},
+		{method: http.MethodPost, path: "/reference-face", want: http.StatusBadRequest},
+		{method: http.MethodDelete, path: "/reference-face", want: http.StatusBadRequest},
+		{method: http.MethodDelete, path: "/reference-face/not-found", want: http.StatusBadRequest},
+	}
+	for _, protected := range protectedRoutes {
+		response := mustRequest(t, protected.method, httpServer.URL+protected.path, nil, nil)
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s %s status = %d, want %d", protected.method, protected.path, response.StatusCode, http.StatusUnauthorized)
+		}
+
+		response = mustRequest(t, protected.method, httpServer.URL+protected.path, nil, accessHeader)
+		response.Body.Close()
+		if response.StatusCode != protected.want {
+			t.Fatalf("authenticated %s %s status = %d, want %d", protected.method, protected.path, response.StatusCode, protected.want)
+		}
+	}
+	// Session-scoped routes keep their owner-token contract even when the
+	// application also has requireUser installed. The two credentials share the
+	// Authorization header and therefore deliberately protect different routes.
+	createResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
+	var created struct {
+		session.Response
+		OwnerToken string `json:"owner_token"`
+	}
+	mustDecode(t, createResponse.Body, &created)
+	createResponse.Body.Close()
+	ownerResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(created.OwnerToken))
+	ownerResponse.Body.Close()
+	if ownerResponse.StatusCode != http.StatusOK {
+		t.Fatalf("session owner status = %d, want %d", ownerResponse.StatusCode, http.StatusOK)
+	}
+	accessOnlyResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, accessHeader)
+	accessOnlyResponse.Body.Close()
+	if accessOnlyResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("access token must not replace session owner token: status = %d, want %d", accessOnlyResponse.StatusCode, http.StatusForbidden)
+	}
+
+	if len(checker.seen) != len(protectedRoutes)+1 {
+		t.Fatalf("active-user checks = %d, want %d", len(checker.seen), len(protectedRoutes)+1)
+	}
+	for _, seenUserID := range checker.seen {
+		if seenUserID != userID {
+			t.Fatalf("checked user ID = %s, want %s", seenUserID, userID)
+		}
+	}
+
+	for _, path := range []string{"/", "/health", "/metrics"} {
+		response := mustRequest(t, http.MethodGet, httpServer.URL+path, nil, nil)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("public GET %s status = %d, want %d", path, response.StatusCode, http.StatusOK)
+		}
+	}
+}
+
+func TestSignalingOriginPolicyRejectsDisallowedWebSocketOrigin(t *testing.T) {
+	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+
+	// Mount the signaling handler directly so this test exercises the
+	// websocket.Upgrader CheckOrigin callback, independently of HTTP CORS.
+	httpServer := httptest.NewServer(http.HandlerFunc(application.handleSignaling))
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
+
+	_, response, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{"https://evil.example"}})
+	if err == nil {
+		t.Fatal("disallowed websocket origin unexpectedly connected")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		if response == nil {
+			t.Fatal("disallowed websocket origin returned no HTTP response")
+		}
+		t.Fatalf("disallowed websocket status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+
+	connection, response, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{"https://client.invalid"}})
+	if err != nil {
+		if response != nil {
+			t.Fatalf("allowed websocket origin status = %d: %v", response.StatusCode, err)
+		}
+		t.Fatal(err)
+	}
+	connection.Close()
 }
 
 func TestBypassWebRTCEndToEnd(t *testing.T) {
@@ -237,7 +389,10 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		t.Fatal("PeerConnection did not reach connected state")
 	}
 
-	for _, input := range generateVP8Frames(t, 10) {
+	// SampleBuilder retains the newest incomplete sample until it sees a later
+	// RTP timestamp. Send a short stream rather than a single GOP so the final
+	// frames are also released to the decoder while the peer remains connected.
+	for _, input := range generateVP8Frames(t, 30) {
 		if err := track.WriteSample(media.Sample{Data: input, Duration: time.Second / 30}); err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +403,10 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 			t.Fatalf("received frame is not a complete VP8 keyframe: %x", output)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("did not receive transcoded bypass video frame")
+		metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
+		metricsBody, _ := io.ReadAll(metricsResponse.Body)
+		metricsResponse.Body.Close()
+		t.Fatalf("did not receive transcoded bypass video frame:\n%s", metricsBody)
 	}
 
 	metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
@@ -293,7 +451,10 @@ func generateVP8Frames(t *testing.T, count int) [][]byte {
 		ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=30",
-		"-frames:v", fmt.Sprintf("%d", count), "-c:v", "libvpx", "-deadline", "realtime", "-g", "30",
+		// The sender emits this finite burst immediately after ICE connects. Make
+		// every fixture frame a keyframe so a receiver that begins reading after
+		// the first RTP packet can still initialize its VP8 decoder.
+		"-frames:v", fmt.Sprintf("%d", count), "-c:v", "libvpx", "-deadline", "realtime", "-g", "1",
 		"-f", "ivf", "pipe:1",
 	)
 	stream, err := command.Output()
@@ -337,6 +498,10 @@ func prometheusValue(t *testing.T, text, name string) float64 {
 }
 
 func newTestApplication(t *testing.T) (*Server, *session.Manager) {
+	return newTestApplicationWithUserMiddleware(t, nil)
+}
+
+func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Handler) http.Handler) (*Server, *session.Manager) {
 	t.Helper()
 	cfg := config.Config{
 		HTTPAddr:                ":0",
@@ -356,7 +521,11 @@ func newTestApplication(t *testing.T) (*Server, *session.Manager) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, logger, registry, manager, nil), manager
+	origins, err := origin.NewConfig(false, []string{"https://client.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(cfg, logger, registry, manager, nil, origins, requireUser), manager
 }
 
 // createTestSession creates a session and returns its response plus the

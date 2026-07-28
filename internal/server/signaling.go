@@ -12,10 +12,11 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-var signalingUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-
 func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
-	connection, err := signalingUpgrader.Upgrade(w, r, nil)
+	upgrader := websocket.Upgrader{CheckOrigin: func(request *http.Request) bool {
+		return s.origins.Allows(request.Header.Get("Origin"))
+	}}
+	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}

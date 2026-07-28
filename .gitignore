@@ -6,3 +6,7 @@ coverage.out
 *.prof
 loadtest/results/
 /bin/
+
+# 로컬 전용 (공개 레포에서 제외)
+/CLAUDE.md
+/docs/

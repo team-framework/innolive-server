@@ -64,7 +64,6 @@ internal/
 ├── database/          PostgreSQL 연결·커넥션 풀, 마이그레이션
 └── metrics/           Prometheus 레지스트리, 프로세스 메트릭
 api/proto/             AI 프로세서 gRPC 정의 (+ 생성된 코드)
-docs/                  아키텍처·API·운영·개발 문서
 ```
 
 ## 시작하기
@@ -132,10 +131,6 @@ make proto        # protobuf 코드 생성
 | `POST` | `/sessions/{id}/stream/start`\|`/stop` | RTMP 송출 시작/중지 |
 | `GET`/`POST`/`DELETE` | `/reference-face` | 참조(본인) 얼굴 등록/조회/삭제 |
 | `GET` | `/signaling` | WebRTC 시그널링(WebSocket) |
-
-## 문서
-
-세부 문서는 [`docs/`](docs/)에 있습니다 — 아키텍처, API, 배포/운영, 개발/테스트/성능 가이드.
 
 ## 라이선스
 

@@ -11,6 +11,7 @@ import (
 
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/origin"
 	"inno-live-server/internal/session"
 
 	"github.com/gorilla/websocket"
@@ -119,7 +120,11 @@ func TestSessionAuthDisabledBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.CloseAll()
-	httpServer := httptest.NewServer(New(cfg, logger, registry, manager, nil).Handler())
+	origins, err := origin.NewConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(New(cfg, logger, registry, manager, nil, origins, nil).Handler())
 	defer httpServer.Close()
 
 	created, _ := createTestSession(t, httpServer.URL, nil)

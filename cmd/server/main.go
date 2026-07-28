@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"inno-live-server/internal/ai"
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/database"
 	"inno-live-server/internal/database/migration"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/origin"
 	"inno-live-server/internal/server"
 	"inno-live-server/internal/session"
 )
@@ -182,12 +184,34 @@ func main() {
 	}
 	defer sessionManager.CloseAll()
 
+	tokenConfig, err := auth.LoadTokenConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid token configuration", "error", err)
+		os.Exit(2)
+	}
+	originConfig, err := origin.LoadFromEnv()
+	if err != nil {
+		logger.Error("invalid token HTTP configuration", "error", err)
+		os.Exit(2)
+	}
+	tokenService := auth.NewTokenService(databaseConnection.DB, tokenConfig)
+	logger.Info(
+		"authentication token service ready",
+		"access_ttl", tokenConfig.AccessTTL,
+		"refresh_idle_ttl", tokenConfig.RefreshTTL,
+		"refresh_absolute_ttl", tokenConfig.RefreshAbsoluteTTL,
+		"cors_allow_all_origins", originConfig.AllowAllOrigins,
+		"cors_allowed_origins", originConfig.AllowedOrigins,
+	)
+
 	application := server.New(
 		cfg,
 		logger,
 		registry,
 		sessionManager,
 		aiPool,
+		originConfig,
+		auth.RequireUser(tokenService, auth.NewGormUserStatusChecker(databaseConnection.DB)),
 	)
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
@@ -233,7 +257,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           application.Handler(),
+		Handler:           auth.MountTokenHTTP(application.Handler(), tokenService, logger, originConfig),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

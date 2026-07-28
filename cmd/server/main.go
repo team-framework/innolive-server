@@ -195,6 +195,28 @@ func main() {
 		os.Exit(2)
 	}
 	tokenService := auth.NewTokenService(databaseConnection.DB, tokenConfig)
+	googleOAuthConfig, err := auth.LoadGoogleOAuthConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid Google OAuth configuration", "error", err)
+		os.Exit(2)
+	}
+	var googleLogin *auth.GoogleLoginService
+	if googleOAuthConfig.Enabled() {
+		googleVerifier, err := auth.NewGoogleIDTokenVerifier(context.Background(), googleOAuthConfig)
+		if err != nil {
+			logger.Error("create Google ID token verifier failed", "error", err)
+			os.Exit(2)
+		}
+		googleLogin, err = auth.NewGoogleLoginService(
+			googleVerifier,
+			auth.NewGormGoogleAccountResolver(databaseConnection.DB),
+			tokenService,
+		)
+		if err != nil {
+			logger.Error("create Google login service failed", "error", err)
+			os.Exit(2)
+		}
+	}
 	logger.Info(
 		"authentication token service ready",
 		"access_ttl", tokenConfig.AccessTTL,
@@ -202,6 +224,7 @@ func main() {
 		"refresh_absolute_ttl", tokenConfig.RefreshAbsoluteTTL,
 		"cors_allow_all_origins", originConfig.AllowAllOrigins,
 		"cors_allowed_origins", originConfig.AllowedOrigins,
+		"google_oauth_enabled", googleOAuthConfig.Enabled(),
 	)
 
 	application := server.New(
@@ -257,7 +280,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountTokenHTTP(application.Handler(), tokenService, logger, originConfig),
+		Handler:           auth.MountAuthHTTP(application.Handler(), tokenService, googleLogin, logger, originConfig),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

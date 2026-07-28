@@ -35,18 +35,18 @@
 ## 아키텍처
 
 ```
-[Publisher] --WebRTC--> ┌──────────────── inno-live-server ────────────────┐
+[Publisher] --WebRTC--> ┌──────────────── inno-live-server ─────────────────┐
                         │                                                   │
                         │  signaling ─► session.Manager ─► media.Processor  │
                         │                                        │          │
                         │                                        ▼          │
-                        │                              gRPC ─► [AI Server]   │  얼굴 블러/치환
+                        │                              gRPC ─► [AI Server]  │  얼굴 블러/치환
                         │                                        │          │
-                        │                          (처리된 프레임)           │
+                        │                               (처리된 프레임)        │
                         │                          ├─► WebRTC ──────────────┼──► [Viewer]
                         │                          └─► RTMP 송출 (FFmpeg) ───┼──► [YouTube]
                         │                                                   │
-                        │  server (HTTP/REST) ◄──► PostgreSQL (auth)         │
+                        │  server (HTTP/REST) ◄──► PostgreSQL (auth)        │
                         └───────────────────────────────────────────────────┘
 ```
 

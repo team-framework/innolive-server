@@ -18,18 +18,26 @@ const maxTokenRequestBody = 8 << 10
 
 type tokenHTTPHandler struct {
 	service *TokenService
+	google  *GoogleLoginService
 	logger  *slog.Logger
 	config  TokenHTTPConfig
 }
 
 func MountTokenHTTP(next http.Handler, service *TokenService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+	return MountAuthHTTP(next, service, nil, logger, config)
+}
+
+func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &tokenHTTPHandler{service: service, logger: logger, config: config}
+	h := &tokenHTTPHandler{service: service, google: google, logger: logger, config: config}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
 	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
+	if google != nil {
+		mux.Handle("/auth/google", h.middleware(http.HandlerFunc(h.handleGoogleLogin)))
+	}
 	mux.Handle("/", next)
 	return mux
 }

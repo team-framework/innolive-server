@@ -72,6 +72,21 @@ func (OAuthAccount) TableName() string {
 	return "oauth_accounts"
 }
 
+// EmailAccount stores credentials for a password-based account separately
+// from OAuth identities. A user is created only after email verification.
+type EmailAccount struct {
+	UserID uuid.UUID `gorm:"type:uuid;primaryKey"`
+	User   *User     `gorm:"foreignKey:UserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+
+	Email        string `gorm:"type:varchar(320);not null;uniqueIndex"`
+	PasswordHash string `gorm:"type:text;not null"`
+
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+func (EmailAccount) TableName() string { return "email_accounts" }
+
 // RefreshSession은 InnoLive Refresh Token 한 개에 대응한다.
 type RefreshSession struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey"`

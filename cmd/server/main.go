@@ -308,8 +308,7 @@ func main() {
 
 			if _, err := aiPool.AddWhitelist(
 				ctx,
-				"",
-				"env",
+				"default",
 				data,
 			); err != nil {
 				logger.Warn(

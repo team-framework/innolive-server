@@ -11,6 +11,7 @@ import (
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -19,19 +20,35 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AiProcessor_ProcessVideo_FullMethodName    = "/AiProcessor/ProcessVideo"
-	AiProcessor_AddWhitelist_FullMethodName    = "/AiProcessor/AddWhitelist"
-	AiProcessor_RemoveWhitelist_FullMethodName = "/AiProcessor/RemoveWhitelist"
+	AiProcessor_ProcessVideo_FullMethodName       = "/AiProcessor/ProcessVideo"
+	AiProcessor_AddWhitelist_FullMethodName       = "/AiProcessor/AddWhitelist"
+	AiProcessor_DeleteWhitelist_FullMethodName    = "/AiProcessor/DeleteWhitelist"
+	AiProcessor_GetWhitelistStatus_FullMethodName = "/AiProcessor/GetWhitelistStatus"
+	AiProcessor_CreateSession_FullMethodName      = "/AiProcessor/CreateSession"
+	AiProcessor_ListSessions_FullMethodName       = "/AiProcessor/ListSessions"
+	AiProcessor_DeleteSession_FullMethodName      = "/AiProcessor/DeleteSession"
 )
 
 // AiProcessorClient is the client API for AiProcessor service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Intentionally no package: existing clients call /AiProcessor/ProcessVideo.
 type AiProcessorClient interface {
+	// One ordered, long-lived video flow per call. A call owns its tracker state.
 	ProcessVideo(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[VideoChunk, ProcessedVideoChunk], error)
+	// Adds one face exemplar to the session-scoped in-memory whitelist.
 	AddWhitelist(ctx context.Context, in *FaceData, opts ...grpc.CallOption) (*WhitelistResponse, error)
-	// Remove a client's reference face(s). Empty face_id removes ALL faces for the client.
-	RemoveWhitelist(ctx context.Context, in *RemoveWhitelistRequest, opts ...grpc.CallOption) (*WhitelistResponse, error)
+	// Removes one face exemplar from a session-scoped in-memory whitelist.
+	DeleteWhitelist(ctx context.Context, in *DeleteWhitelistRequest, opts ...grpc.CallOption) (*WhitelistResponse, error)
+	// Returns non-sensitive whitelist metadata for one session.
+	GetWhitelistStatus(ctx context.Context, in *GetWhitelistStatusRequest, opts ...grpc.CallOption) (*GetWhitelistStatusResponse, error)
+	// Atomically creates an opaque session ID.
+	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*SessionInfo, error)
+	// Lists bounded in-memory sessions for a trusted management client.
+	ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error)
+	// Deletes an idle in-memory session. Active video streams prevent deletion.
+	DeleteSession(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type aiProcessorClient struct {
@@ -65,10 +82,50 @@ func (c *aiProcessorClient) AddWhitelist(ctx context.Context, in *FaceData, opts
 	return out, nil
 }
 
-func (c *aiProcessorClient) RemoveWhitelist(ctx context.Context, in *RemoveWhitelistRequest, opts ...grpc.CallOption) (*WhitelistResponse, error) {
+func (c *aiProcessorClient) DeleteWhitelist(ctx context.Context, in *DeleteWhitelistRequest, opts ...grpc.CallOption) (*WhitelistResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WhitelistResponse)
-	err := c.cc.Invoke(ctx, AiProcessor_RemoveWhitelist_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, AiProcessor_DeleteWhitelist_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aiProcessorClient) GetWhitelistStatus(ctx context.Context, in *GetWhitelistStatusRequest, opts ...grpc.CallOption) (*GetWhitelistStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWhitelistStatusResponse)
+	err := c.cc.Invoke(ctx, AiProcessor_GetWhitelistStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aiProcessorClient) CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*SessionInfo, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionInfo)
+	err := c.cc.Invoke(ctx, AiProcessor_CreateSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aiProcessorClient) ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSessionsResponse)
+	err := c.cc.Invoke(ctx, AiProcessor_ListSessions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aiProcessorClient) DeleteSession(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, AiProcessor_DeleteSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +135,23 @@ func (c *aiProcessorClient) RemoveWhitelist(ctx context.Context, in *RemoveWhite
 // AiProcessorServer is the server API for AiProcessor service.
 // All implementations must embed UnimplementedAiProcessorServer
 // for forward compatibility.
+//
+// Intentionally no package: existing clients call /AiProcessor/ProcessVideo.
 type AiProcessorServer interface {
+	// One ordered, long-lived video flow per call. A call owns its tracker state.
 	ProcessVideo(grpc.BidiStreamingServer[VideoChunk, ProcessedVideoChunk]) error
+	// Adds one face exemplar to the session-scoped in-memory whitelist.
 	AddWhitelist(context.Context, *FaceData) (*WhitelistResponse, error)
-	// Remove a client's reference face(s). Empty face_id removes ALL faces for the client.
-	RemoveWhitelist(context.Context, *RemoveWhitelistRequest) (*WhitelistResponse, error)
+	// Removes one face exemplar from a session-scoped in-memory whitelist.
+	DeleteWhitelist(context.Context, *DeleteWhitelistRequest) (*WhitelistResponse, error)
+	// Returns non-sensitive whitelist metadata for one session.
+	GetWhitelistStatus(context.Context, *GetWhitelistStatusRequest) (*GetWhitelistStatusResponse, error)
+	// Atomically creates an opaque session ID.
+	CreateSession(context.Context, *CreateSessionRequest) (*SessionInfo, error)
+	// Lists bounded in-memory sessions for a trusted management client.
+	ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error)
+	// Deletes an idle in-memory session. Active video streams prevent deletion.
+	DeleteSession(context.Context, *DeleteSessionRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedAiProcessorServer()
 }
 
@@ -99,8 +168,20 @@ func (UnimplementedAiProcessorServer) ProcessVideo(grpc.BidiStreamingServer[Vide
 func (UnimplementedAiProcessorServer) AddWhitelist(context.Context, *FaceData) (*WhitelistResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddWhitelist not implemented")
 }
-func (UnimplementedAiProcessorServer) RemoveWhitelist(context.Context, *RemoveWhitelistRequest) (*WhitelistResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RemoveWhitelist not implemented")
+func (UnimplementedAiProcessorServer) DeleteWhitelist(context.Context, *DeleteWhitelistRequest) (*WhitelistResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteWhitelist not implemented")
+}
+func (UnimplementedAiProcessorServer) GetWhitelistStatus(context.Context, *GetWhitelistStatusRequest) (*GetWhitelistStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWhitelistStatus not implemented")
+}
+func (UnimplementedAiProcessorServer) CreateSession(context.Context, *CreateSessionRequest) (*SessionInfo, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSession not implemented")
+}
+func (UnimplementedAiProcessorServer) ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSessions not implemented")
+}
+func (UnimplementedAiProcessorServer) DeleteSession(context.Context, *DeleteSessionRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSession not implemented")
 }
 func (UnimplementedAiProcessorServer) mustEmbedUnimplementedAiProcessorServer() {}
 func (UnimplementedAiProcessorServer) testEmbeddedByValue()                     {}
@@ -148,20 +229,92 @@ func _AiProcessor_AddWhitelist_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AiProcessor_RemoveWhitelist_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RemoveWhitelistRequest)
+func _AiProcessor_DeleteWhitelist_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteWhitelistRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AiProcessorServer).RemoveWhitelist(ctx, in)
+		return srv.(AiProcessorServer).DeleteWhitelist(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AiProcessor_RemoveWhitelist_FullMethodName,
+		FullMethod: AiProcessor_DeleteWhitelist_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AiProcessorServer).RemoveWhitelist(ctx, req.(*RemoveWhitelistRequest))
+		return srv.(AiProcessorServer).DeleteWhitelist(ctx, req.(*DeleteWhitelistRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AiProcessor_GetWhitelistStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWhitelistStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AiProcessorServer).GetWhitelistStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AiProcessor_GetWhitelistStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AiProcessorServer).GetWhitelistStatus(ctx, req.(*GetWhitelistStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AiProcessor_CreateSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AiProcessorServer).CreateSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AiProcessor_CreateSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AiProcessorServer).CreateSession(ctx, req.(*CreateSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AiProcessor_ListSessions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSessionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AiProcessorServer).ListSessions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AiProcessor_ListSessions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AiProcessorServer).ListSessions(ctx, req.(*ListSessionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AiProcessor_DeleteSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AiProcessorServer).DeleteSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AiProcessor_DeleteSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AiProcessorServer).DeleteSession(ctx, req.(*DeleteSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -178,8 +331,24 @@ var AiProcessor_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AiProcessor_AddWhitelist_Handler,
 		},
 		{
-			MethodName: "RemoveWhitelist",
-			Handler:    _AiProcessor_RemoveWhitelist_Handler,
+			MethodName: "DeleteWhitelist",
+			Handler:    _AiProcessor_DeleteWhitelist_Handler,
+		},
+		{
+			MethodName: "GetWhitelistStatus",
+			Handler:    _AiProcessor_GetWhitelistStatus_Handler,
+		},
+		{
+			MethodName: "CreateSession",
+			Handler:    _AiProcessor_CreateSession_Handler,
+		},
+		{
+			MethodName: "ListSessions",
+			Handler:    _AiProcessor_ListSessions_Handler,
+		},
+		{
+			MethodName: "DeleteSession",
+			Handler:    _AiProcessor_DeleteSession_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

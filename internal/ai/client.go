@@ -45,8 +45,8 @@ func (c *Client) Ready() bool { return c.conn.GetState() == connectivity.Ready }
 
 func (c *Client) Address() string { return c.address }
 
-func (c *Client) NewStream(ctx context.Context, clientID string) *Stream {
-	return &Stream{ctx: ctx, client: c.client, timeout: c.timeout, clientID: clientID}
+func (c *Client) NewStream(ctx context.Context, sessionID string) *Stream {
+	return &Stream{ctx: ctx, client: c.client, timeout: c.timeout, sessionID: sessionID}
 }
 
 // whitelistTimeout allows far longer than the per-frame stream timeout: the
@@ -59,38 +59,38 @@ func (c *Client) whitelistTimeout() time.Duration {
 	return c.timeout
 }
 
-func (c *Client) AddWhitelist(ctx context.Context, clientID, faceID string, data []byte) (*aiv1.WhitelistResponse, error) {
+func (c *Client) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*aiv1.WhitelistResponse, error) {
 	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
 	defer cancel()
-	response, err := c.client.AddWhitelist(callCtx, &aiv1.FaceData{Data: data, ClientId: clientID, FaceId: faceID})
+	response, err := c.client.AddWhitelist(callCtx, &aiv1.FaceData{Data: data, SessionId: sessionID})
 	if err != nil {
 		return nil, fmt.Errorf("call AI AddWhitelist: %w", err)
 	}
 	return response, nil
 }
 
-func (c *Client) RemoveWhitelist(ctx context.Context, clientID, faceID string) (*aiv1.WhitelistResponse, error) {
+func (c *Client) DeleteWhitelist(ctx context.Context, sessionID, entryID string) (*aiv1.WhitelistResponse, error) {
 	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
 	defer cancel()
-	response, err := c.client.RemoveWhitelist(callCtx, &aiv1.RemoveWhitelistRequest{ClientId: clientID, FaceId: faceID})
+	response, err := c.client.DeleteWhitelist(callCtx, &aiv1.DeleteWhitelistRequest{SessionId: sessionID, EntryId: entryID})
 	if err != nil {
-		return nil, fmt.Errorf("call AI RemoveWhitelist: %w", err)
+		return nil, fmt.Errorf("call AI DeleteWhitelist: %w", err)
 	}
 	return response, nil
 }
 
 type Stream struct {
-	ctx      context.Context
-	client   aiv1.AiProcessorClient
-	timeout  time.Duration
-	clientID string
+	ctx       context.Context
+	client    aiv1.AiProcessorClient
+	timeout   time.Duration
+	sessionID string
 
 	mu           sync.Mutex
 	stream       aiv1.AiProcessor_ProcessVideoClient
 	streamCancel context.CancelFunc
 }
 
-func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
+func (s *Stream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -103,10 +103,7 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 	request := &aiv1.VideoChunk{
 		Data:      data,
 		Timestamp: timestamp,
-		Width:     uint32(width),
-		Height:    uint32(height),
-		PixFmt:    pixFmt,
-		ClientId:  s.clientID,
+		SessionId: s.sessionID,
 	}
 	if err := runWithContext(callCtx, func() error { return s.stream.Send(request) }); err != nil {
 		s.reset()

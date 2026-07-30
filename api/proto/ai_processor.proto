@@ -2,52 +2,165 @@ syntax = "proto3";
 
 option go_package = "inno-live-server/api/gen/aiv1;aiv1";
 
+import "google/protobuf/empty.proto";
+
+// Intentionally no package: existing clients call /AiProcessor/ProcessVideo.
 service AiProcessor {
+  // One ordered, long-lived video flow per call. A call owns its tracker state.
   rpc ProcessVideo(stream VideoChunk) returns (stream ProcessedVideoChunk);
+  // Adds one face exemplar to the session-scoped in-memory whitelist.
   rpc AddWhitelist(FaceData) returns (WhitelistResponse);
-  // Remove a client's reference face(s). Empty face_id removes ALL faces for the client.
-  rpc RemoveWhitelist(RemoveWhitelistRequest) returns (WhitelistResponse);
+  // Removes one face exemplar from a session-scoped in-memory whitelist.
+  rpc DeleteWhitelist(DeleteWhitelistRequest) returns (WhitelistResponse);
+  // Returns non-sensitive whitelist metadata for one session.
+  rpc GetWhitelistStatus(GetWhitelistStatusRequest) returns (GetWhitelistStatusResponse);
+  // Atomically creates an opaque session ID.
+  rpc CreateSession(CreateSessionRequest) returns (SessionInfo);
+  // Lists bounded in-memory sessions for a trusted management client.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // Deletes an idle in-memory session. Active video streams prevent deletion.
+  rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
 }
 
 message VideoChunk {
+  // One complete JPEG frame.
   bytes data = 1;
+  // Opaque client value echoed in the response. Its historical unit is not fixed.
   int64 timestamp = 2;
-  // Frame metadata for the raw wire format (AI_FRAME_WIRE_FORMAT=raw).
-  // Unset (zero) when data is a self-describing JPEG image.
-  uint32 width = 3;
-  uint32 height = 4;
-  string pix_fmt = 5;
-  // Client whose reference-face exclusion set should be applied to this stream.
-  // Empty = global/default (no per-client scoping).
-  string client_id = 6;
+  // Opaque client frame identifier echoed in the response.
+  int64 frame_id = 3;
+  // Legacy B4 scheduling hint. The B1 serving profile accepts only zero or one.
+  uint32 batch_size = 4 [deprecated = true];
+  // Authenticated caller session; fixed for the lifetime of one ProcessVideo RPC.
+  string session_id = 5;
+  // Response payload requested for this stream. Unspecified returns a server-processed JPEG.
+  VideoOutputMode output_mode = 6;
+}
+
+enum VideoOutputMode {
+  VIDEO_OUTPUT_MODE_UNSPECIFIED = 0;
+  VIDEO_OUTPUT_MODE_METADATA_ONLY = 1;
+  VIDEO_OUTPUT_MODE_MOSAIC_JPEG = 2;
 }
 
 message ProcessedVideoChunk {
+  // Server-composited JPEG. Empty only for metadata-only mode or failed frames.
   bytes data = 1;
   int64 timestamp = 2;
   string status_message = 3;
-  // Mirrors VideoChunk metadata for raw frames; zero for JPEG responses.
-  uint32 width = 4;
-  uint32 height = 5;
-  string pix_fmt = 6;
+  repeated FaceMetadata faces = 4;
+  int32 width = 5;
+  int32 height = 6;
+  int64 frame_id = 7;
+  double processing_ms = 8;
+  ProcessingTiming timing = 9;
+  string error_code = 10;
+  string error_message = 11;
+  FrameStats stats = 12;
+  // Transitional alias retained for wire compatibility. Servers leave this empty.
+  bytes mosaic_jpeg = 13 [deprecated = true];
+}
+
+message ProcessingTiming {
+  double queue_ms = 1;
+  double decode_ms = 2;
+  double inference_ms = 3;
+  double tracking_ms = 4;
+  // Server-side mask union, Gaussian blur, composition, and JPEG encoding.
+  double blur_encode_ms = 5;
+  uint32 inference_batch_size = 6;
+  double serialize_ms = 7;
+  double server_total_ms = 8;
+  double runtime_total_ms = 9;
+}
+
+message Point {
+  float x = 1;
+  float y = 2;
+}
+
+message BoundingBox {
+  float x1 = 1;
+  float y1 = 2;
+  float x2 = 3;
+  float y2 = 4;
+}
+
+message FaceMetadata {
+  BoundingBox bbox = 1;
+  float confidence = 2;
+  repeated Point polygon = 3;
+  optional int64 track_id = 4;
+  string source = 5;
+  bool held = 6;
+  uint32 hold_frames = 7;
+  string class_name = 8;
+  float mask_area_px = 9;
+  bool whitelisted = 10;
+}
+
+message FrameStats {
+  uint32 detections = 1;
+  uint32 raw_detections = 2;
+  uint32 continuation_candidates = 3;
+  uint32 detector_backed_tracks = 4;
+  uint32 low_confidence_continuations = 5;
+  uint32 held_tracks = 6;
+  uint32 tracks = 7;
+  uint64 tracker_frame = 8;
+  uint32 adaface_calls = 9;
+  uint32 adaface_queue_overflow = 10;
+  uint32 whitelisted_tracks = 11;
 }
 
 message FaceData {
+  // Legacy message name retained for RPC path and generated-client compatibility.
+  // Contains one complete JPEG, PNG, or WebP image with exactly one detectable face.
   bytes data = 1;
-  // Per-client whitelist scoping. Empty = global/default.
-  string client_id = 2;
-  // Stable identity for this reference face, so it can be removed individually.
-  string face_id = 3;
+  string session_id = 2;
 }
 
 message WhitelistResponse {
+  // Legacy fields retained for generated-client compatibility.
   string status_message = 1;
   int64 timestamp = 2;
+  string entry_id = 3;
+  uint32 entry_count = 4;
+  uint64 whitelist_version = 5;
 }
 
-message RemoveWhitelistRequest {
-  // Client whose reference face(s) to remove.
-  string client_id = 1;
-  // Specific face to remove; empty removes ALL reference faces for the client.
-  string face_id = 2;
+message GetWhitelistStatusRequest {
+  string session_id = 1;
+}
+
+message GetWhitelistStatusResponse {
+  string session_id = 1;
+  uint32 entry_count = 2;
+  uint64 whitelist_version = 3;
+  repeated string entry_ids = 4;
+}
+
+message DeleteWhitelistRequest {
+  string session_id = 1;
+  string entry_id = 2;
+}
+
+message CreateSessionRequest {}
+
+message ListSessionsRequest {}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+message SessionInfo {
+  string session_id = 1;
+  uint32 entry_count = 2;
+  uint64 whitelist_version = 3;
+  int64 created_at_unix_ms = 4;
+  uint32 active_stream_count = 5;
+}
+
+message ListSessionsResponse {
+  repeated SessionInfo sessions = 1;
 }

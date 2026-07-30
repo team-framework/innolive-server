@@ -60,14 +60,27 @@ func preflightClient(t *testing.T, impl aiv1.AiProcessorServer) *Client {
 
 func TestPreflightPassesAgainstSuccessServer(t *testing.T) {
 	client := preflightClient(t, echoAIServer{})
-	for _, wireFormat := range []string{"jpeg", "raw"} {
-		t.Run(wireFormat, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := client.Preflight(ctx, wireFormat); err != nil {
-				t.Fatalf("Preflight(%s) error = %v, want nil", wireFormat, err)
-			}
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Preflight(ctx, "jpeg"); err != nil {
+		t.Fatalf("Preflight(jpeg) error = %v, want nil", err)
+	}
+}
+
+// TestPreflightRejectsRawWireFormat: this AI server's proto has no
+// width/height/pix_fmt fields, so raw yuv420p cannot be conveyed at all —
+// Preflight must reject it loudly rather than silently sending jpeg data
+// under a raw label.
+func TestPreflightRejectsRawWireFormat(t *testing.T) {
+	client := preflightClient(t, echoAIServer{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := client.Preflight(ctx, "raw")
+	if err == nil {
+		t.Fatal("Preflight(raw) error = nil, want a not-supported error")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("Preflight(raw) error = %v, want it to say raw is not supported", err)
 	}
 }
 

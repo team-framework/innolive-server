@@ -20,7 +20,11 @@ import (
 const maxReferenceUpload = 10 << 20
 
 type referenceFace struct {
-	FaceID       string    `json:"face_id"`
+	FaceID string `json:"face_id"`
+	// EntryID is the AI worker's own server-generated identifier for this
+	// whitelist entry (returned by AddWhitelist), used to delete exactly this
+	// entry later. Internal bookkeeping only — not part of the public API.
+	EntryID      string    `json:"-"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
@@ -101,7 +105,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	if replace {
 		// Clear the client's existing worker whitelist first so stale faces stop
 		// being excluded (matches Python's replace semantics).
-		if _, err := s.ai.RemoveWhitelist(r.Context(), clientID, ""); err != nil {
+		if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, ""); err != nil {
 			s.logger.Warn("clear whitelist before replace failed", "client_id", clientID, "error", err)
 		}
 	}
@@ -124,7 +128,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		faceID := uuid.NewString()
-		response, err := s.ai.AddWhitelist(r.Context(), clientID, faceID, data)
+		response, err := s.ai.AddWhitelist(r.Context(), clientID, data)
 		if err != nil {
 			s.logger.Error("AI AddWhitelist failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist registration failed."})
@@ -142,7 +146,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			writeError(w, apiError{Status: http.StatusBadRequest, Code: code, Message: "AI 서버가 기준 얼굴 등록을 거부했습니다.", Details: map[string]any{"reason": msg}})
 			return
 		}
-		registered = append(registered, referenceFace{FaceID: faceID, RegisteredAt: time.Now().UTC()})
+		registered = append(registered, referenceFace{FaceID: faceID, EntryID: response.GetEntryId(), RegisteredAt: time.Now().UTC()})
 	}
 
 	s.references.mu.Lock()
@@ -166,8 +170,8 @@ func (s *Server) handleDeleteReferenceFace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clientID := referenceClientID(r)
-	if _, err := s.ai.RemoveWhitelist(r.Context(), clientID, ""); err != nil {
-		s.logger.Error("AI RemoveWhitelist(all) failed", "client_id", clientID, "error", err)
+	if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, ""); err != nil {
+		s.logger.Error("AI DeleteWhitelist(all) failed", "client_id", clientID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}
@@ -187,9 +191,11 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	faceID := r.PathValue("face_id")
 	s.references.mu.RLock()
 	found := false
+	var entryID string
 	for _, f := range s.references.faces[clientID] {
 		if f.FaceID == faceID {
 			found = true
+			entryID = f.EntryID
 			break
 		}
 	}
@@ -198,8 +204,8 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "기준 얼굴을 찾을 수 없습니다.", Details: map[string]any{"face_id": faceID}})
 		return
 	}
-	if _, err := s.ai.RemoveWhitelist(r.Context(), clientID, faceID); err != nil {
-		s.logger.Error("AI RemoveWhitelist failed", "client_id", clientID, "face_id", faceID, "error", err)
+	if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, entryID); err != nil {
+		s.logger.Error("AI DeleteWhitelist failed", "client_id", clientID, "face_id", faceID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}

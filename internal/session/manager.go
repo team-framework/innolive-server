@@ -499,8 +499,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		if m.cfg.PrivacyMode == config.PrivacyModeReal {
 			client := m.ai.Next()
 			m.metrics.IncAITargetSession(client.Address())
-			// The AI worker receives the server-derived bucket ID for the session
-			// owner. Request metadata is intentionally never consulted here.
+			// The AI server requires a non-empty session scope. Use the
+			// server-derived AI client ID so its per-user reference-face bucket
+			// and stream identity cannot be selected through request metadata.
 			aiStream = client.NewStream(trackCtx, s.AIClientID)
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{

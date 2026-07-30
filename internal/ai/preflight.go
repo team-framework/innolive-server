@@ -47,7 +47,10 @@ func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Du
 // Preflight runs one synthetic ProcessVideo round trip against this worker. The
 // caller controls the deadline via ctx.
 func (c *Client) Preflight(ctx context.Context, wireFormat string) error {
-	data, width, height, pixFmt, err := syntheticFrame(wireFormat)
+	if wireFormat == "raw" {
+		return errors.New("AI_FRAME_WIRE_FORMAT=raw is not supported by this AI server's proto (no width/height/pix_fmt fields) — use jpeg")
+	}
+	data, err := syntheticFrame()
 	if err != nil {
 		return err
 	}
@@ -59,9 +62,7 @@ func (c *Client) Preflight(ctx context.Context, wireFormat string) error {
 	request := &aiv1.VideoChunk{
 		Data:      data,
 		Timestamp: timestamp,
-		Width:     uint32(width),
-		Height:    uint32(height),
-		PixFmt:    pixFmt,
+		SessionId: "preflight",
 	}
 	if err := stream.Send(request); err != nil {
 		return fmt.Errorf("send preflight frame: %w", err)
@@ -74,8 +75,11 @@ func (c *Client) Preflight(ctx context.Context, wireFormat string) error {
 	if response.GetTimestamp() != timestamp {
 		return fmt.Errorf("preflight timestamp not echoed: sent=%d received=%d (the AI server must echo the request timestamp unmodified)", timestamp, response.GetTimestamp())
 	}
+	if response.GetErrorCode() != "" {
+		return fmt.Errorf("preflight failed: error_code=%s error_message=%q", response.GetErrorCode(), response.GetErrorMessage())
+	}
 	if !strings.EqualFold(response.GetStatusMessage(), "success") {
-		return fmt.Errorf("preflight status=%q, want \"success\" (wire_format=%s; a PIL/OpenCV AI server cannot decode raw yuv420p — use jpeg)", response.GetStatusMessage(), wireFormat)
+		return fmt.Errorf("preflight status=%q, want \"success\"", response.GetStatusMessage())
 	}
 	if len(response.GetData()) == 0 {
 		return errors.New("preflight response returned an empty frame")
@@ -83,26 +87,14 @@ func (c *Client) Preflight(ctx context.Context, wireFormat string) error {
 	return nil
 }
 
-// syntheticFrame builds a minimal probe frame for the given wire format: a real
-// self-describing (grayscale) JPEG for jpeg mode, or a correctly sized headerless
-// yuv420p buffer for raw mode. The yuv420p size mirrors media.rawFrameSize
-// (kept inline to avoid an ai->media import cycle).
-func syntheticFrame(wireFormat string) (data []byte, width, height uint16, pixFmt string, err error) {
-	if wireFormat == "raw" {
-		w, h := preflightDim, preflightDim
-		size := w*h + 2*(((w+1)/2)*((h+1)/2))
-		buffer := make([]byte, size)
-		for i := range buffer {
-			buffer[i] = 0x80
-		}
-		return buffer, preflightDim, preflightDim, "yuv420p", nil
-	}
+// syntheticFrame builds a minimal grayscale JPEG probe frame. Only jpeg is
+// supported: this AI server's proto has no width/height/pix_fmt fields, so a
+// raw yuv420p wire format cannot be conveyed at all (Client.Preflight rejects
+// wireFormat=="raw" before calling this).
+func syntheticFrame() ([]byte, error) {
 	var encoded bytes.Buffer
 	if err := jpeg.Encode(&encoded, image.NewGray(image.Rect(0, 0, preflightDim, preflightDim)), &jpeg.Options{Quality: 75}); err != nil {
-		return nil, 0, 0, "", fmt.Errorf("encode preflight jpeg: %w", err)
+		return nil, fmt.Errorf("encode preflight jpeg: %w", err)
 	}
-	// jpeg is self-describing; width/height only carry meaning for raw
-	// frames (see the same convention in Processor.ProcessImage), so they
-	// stay zero here to match what real jpeg-mode traffic actually sends.
-	return encoded.Bytes(), 0, 0, "", nil
+	return encoded.Bytes(), nil
 }

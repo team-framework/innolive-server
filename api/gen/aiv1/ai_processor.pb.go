@@ -9,6 +9,7 @@ package aiv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -21,18 +22,71 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type VideoOutputMode int32
+
+const (
+	VideoOutputMode_VIDEO_OUTPUT_MODE_UNSPECIFIED   VideoOutputMode = 0
+	VideoOutputMode_VIDEO_OUTPUT_MODE_METADATA_ONLY VideoOutputMode = 1
+	VideoOutputMode_VIDEO_OUTPUT_MODE_MOSAIC_JPEG   VideoOutputMode = 2
+)
+
+// Enum value maps for VideoOutputMode.
+var (
+	VideoOutputMode_name = map[int32]string{
+		0: "VIDEO_OUTPUT_MODE_UNSPECIFIED",
+		1: "VIDEO_OUTPUT_MODE_METADATA_ONLY",
+		2: "VIDEO_OUTPUT_MODE_MOSAIC_JPEG",
+	}
+	VideoOutputMode_value = map[string]int32{
+		"VIDEO_OUTPUT_MODE_UNSPECIFIED":   0,
+		"VIDEO_OUTPUT_MODE_METADATA_ONLY": 1,
+		"VIDEO_OUTPUT_MODE_MOSAIC_JPEG":   2,
+	}
+)
+
+func (x VideoOutputMode) Enum() *VideoOutputMode {
+	p := new(VideoOutputMode)
+	*p = x
+	return p
+}
+
+func (x VideoOutputMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (VideoOutputMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_proto_ai_processor_proto_enumTypes[0].Descriptor()
+}
+
+func (VideoOutputMode) Type() protoreflect.EnumType {
+	return &file_api_proto_ai_processor_proto_enumTypes[0]
+}
+
+func (x VideoOutputMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use VideoOutputMode.Descriptor instead.
+func (VideoOutputMode) EnumDescriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{0}
+}
+
 type VideoChunk struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Data      []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
-	Timestamp int64                  `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	// Frame metadata for the raw wire format (AI_FRAME_WIRE_FORMAT=raw).
-	// Unset (zero) when data is a self-describing JPEG image.
-	Width  uint32 `protobuf:"varint,3,opt,name=width,proto3" json:"width,omitempty"`
-	Height uint32 `protobuf:"varint,4,opt,name=height,proto3" json:"height,omitempty"`
-	PixFmt string `protobuf:"bytes,5,opt,name=pix_fmt,json=pixFmt,proto3" json:"pix_fmt,omitempty"`
-	// Client whose reference-face exclusion set should be applied to this stream.
-	// Empty = global/default (no per-client scoping).
-	ClientId      string `protobuf:"bytes,6,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One complete JPEG frame.
+	Data []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	// Opaque client value echoed in the response. Its historical unit is not fixed.
+	Timestamp int64 `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// Opaque client frame identifier echoed in the response.
+	FrameId int64 `protobuf:"varint,3,opt,name=frame_id,json=frameId,proto3" json:"frame_id,omitempty"`
+	// Legacy B4 scheduling hint. The B1 serving profile accepts only zero or one.
+	//
+	// Deprecated: Marked as deprecated in api/proto/ai_processor.proto.
+	BatchSize uint32 `protobuf:"varint,4,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`
+	// Authenticated caller session; fixed for the lifetime of one ProcessVideo RPC.
+	SessionId string `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// Response payload requested for this stream. Unspecified returns a server-processed JPEG.
+	OutputMode    VideoOutputMode `protobuf:"varint,6,opt,name=output_mode,json=outputMode,proto3,enum=VideoOutputMode" json:"output_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -81,43 +135,54 @@ func (x *VideoChunk) GetTimestamp() int64 {
 	return 0
 }
 
-func (x *VideoChunk) GetWidth() uint32 {
+func (x *VideoChunk) GetFrameId() int64 {
 	if x != nil {
-		return x.Width
+		return x.FrameId
 	}
 	return 0
 }
 
-func (x *VideoChunk) GetHeight() uint32 {
+// Deprecated: Marked as deprecated in api/proto/ai_processor.proto.
+func (x *VideoChunk) GetBatchSize() uint32 {
 	if x != nil {
-		return x.Height
+		return x.BatchSize
 	}
 	return 0
 }
 
-func (x *VideoChunk) GetPixFmt() string {
+func (x *VideoChunk) GetSessionId() string {
 	if x != nil {
-		return x.PixFmt
+		return x.SessionId
 	}
 	return ""
 }
 
-func (x *VideoChunk) GetClientId() string {
+func (x *VideoChunk) GetOutputMode() VideoOutputMode {
 	if x != nil {
-		return x.ClientId
+		return x.OutputMode
 	}
-	return ""
+	return VideoOutputMode_VIDEO_OUTPUT_MODE_UNSPECIFIED
 }
 
 type ProcessedVideoChunk struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	StatusMessage string                 `protobuf:"bytes,3,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
-	// Mirrors VideoChunk metadata for raw frames; zero for JPEG responses.
-	Width         uint32 `protobuf:"varint,4,opt,name=width,proto3" json:"width,omitempty"`
-	Height        uint32 `protobuf:"varint,5,opt,name=height,proto3" json:"height,omitempty"`
-	PixFmt        string `protobuf:"bytes,6,opt,name=pix_fmt,json=pixFmt,proto3" json:"pix_fmt,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server-composited JPEG. Empty only for metadata-only mode or failed frames.
+	Data          []byte            `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	Timestamp     int64             `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	StatusMessage string            `protobuf:"bytes,3,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
+	Faces         []*FaceMetadata   `protobuf:"bytes,4,rep,name=faces,proto3" json:"faces,omitempty"`
+	Width         int32             `protobuf:"varint,5,opt,name=width,proto3" json:"width,omitempty"`
+	Height        int32             `protobuf:"varint,6,opt,name=height,proto3" json:"height,omitempty"`
+	FrameId       int64             `protobuf:"varint,7,opt,name=frame_id,json=frameId,proto3" json:"frame_id,omitempty"`
+	ProcessingMs  float64           `protobuf:"fixed64,8,opt,name=processing_ms,json=processingMs,proto3" json:"processing_ms,omitempty"`
+	Timing        *ProcessingTiming `protobuf:"bytes,9,opt,name=timing,proto3" json:"timing,omitempty"`
+	ErrorCode     string            `protobuf:"bytes,10,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	ErrorMessage  string            `protobuf:"bytes,11,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	Stats         *FrameStats       `protobuf:"bytes,12,opt,name=stats,proto3" json:"stats,omitempty"`
+	// Transitional alias retained for wire compatibility. Servers leave this empty.
+	//
+	// Deprecated: Marked as deprecated in api/proto/ai_processor.proto.
+	MosaicJpeg    []byte `protobuf:"bytes,13,opt,name=mosaic_jpeg,json=mosaicJpeg,proto3" json:"mosaic_jpeg,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -173,41 +238,559 @@ func (x *ProcessedVideoChunk) GetStatusMessage() string {
 	return ""
 }
 
-func (x *ProcessedVideoChunk) GetWidth() uint32 {
+func (x *ProcessedVideoChunk) GetFaces() []*FaceMetadata {
+	if x != nil {
+		return x.Faces
+	}
+	return nil
+}
+
+func (x *ProcessedVideoChunk) GetWidth() int32 {
 	if x != nil {
 		return x.Width
 	}
 	return 0
 }
 
-func (x *ProcessedVideoChunk) GetHeight() uint32 {
+func (x *ProcessedVideoChunk) GetHeight() int32 {
 	if x != nil {
 		return x.Height
 	}
 	return 0
 }
 
-func (x *ProcessedVideoChunk) GetPixFmt() string {
+func (x *ProcessedVideoChunk) GetFrameId() int64 {
 	if x != nil {
-		return x.PixFmt
+		return x.FrameId
+	}
+	return 0
+}
+
+func (x *ProcessedVideoChunk) GetProcessingMs() float64 {
+	if x != nil {
+		return x.ProcessingMs
+	}
+	return 0
+}
+
+func (x *ProcessedVideoChunk) GetTiming() *ProcessingTiming {
+	if x != nil {
+		return x.Timing
+	}
+	return nil
+}
+
+func (x *ProcessedVideoChunk) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
 	}
 	return ""
 }
 
+func (x *ProcessedVideoChunk) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *ProcessedVideoChunk) GetStats() *FrameStats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
+// Deprecated: Marked as deprecated in api/proto/ai_processor.proto.
+func (x *ProcessedVideoChunk) GetMosaicJpeg() []byte {
+	if x != nil {
+		return x.MosaicJpeg
+	}
+	return nil
+}
+
+type ProcessingTiming struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	QueueMs     float64                `protobuf:"fixed64,1,opt,name=queue_ms,json=queueMs,proto3" json:"queue_ms,omitempty"`
+	DecodeMs    float64                `protobuf:"fixed64,2,opt,name=decode_ms,json=decodeMs,proto3" json:"decode_ms,omitempty"`
+	InferenceMs float64                `protobuf:"fixed64,3,opt,name=inference_ms,json=inferenceMs,proto3" json:"inference_ms,omitempty"`
+	TrackingMs  float64                `protobuf:"fixed64,4,opt,name=tracking_ms,json=trackingMs,proto3" json:"tracking_ms,omitempty"`
+	// Server-side mask union, Gaussian blur, composition, and JPEG encoding.
+	BlurEncodeMs       float64 `protobuf:"fixed64,5,opt,name=blur_encode_ms,json=blurEncodeMs,proto3" json:"blur_encode_ms,omitempty"`
+	InferenceBatchSize uint32  `protobuf:"varint,6,opt,name=inference_batch_size,json=inferenceBatchSize,proto3" json:"inference_batch_size,omitempty"`
+	SerializeMs        float64 `protobuf:"fixed64,7,opt,name=serialize_ms,json=serializeMs,proto3" json:"serialize_ms,omitempty"`
+	ServerTotalMs      float64 `protobuf:"fixed64,8,opt,name=server_total_ms,json=serverTotalMs,proto3" json:"server_total_ms,omitempty"`
+	RuntimeTotalMs     float64 `protobuf:"fixed64,9,opt,name=runtime_total_ms,json=runtimeTotalMs,proto3" json:"runtime_total_ms,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *ProcessingTiming) Reset() {
+	*x = ProcessingTiming{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessingTiming) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessingTiming) ProtoMessage() {}
+
+func (x *ProcessingTiming) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessingTiming.ProtoReflect.Descriptor instead.
+func (*ProcessingTiming) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ProcessingTiming) GetQueueMs() float64 {
+	if x != nil {
+		return x.QueueMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetDecodeMs() float64 {
+	if x != nil {
+		return x.DecodeMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetInferenceMs() float64 {
+	if x != nil {
+		return x.InferenceMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetTrackingMs() float64 {
+	if x != nil {
+		return x.TrackingMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetBlurEncodeMs() float64 {
+	if x != nil {
+		return x.BlurEncodeMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetInferenceBatchSize() uint32 {
+	if x != nil {
+		return x.InferenceBatchSize
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetSerializeMs() float64 {
+	if x != nil {
+		return x.SerializeMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetServerTotalMs() float64 {
+	if x != nil {
+		return x.ServerTotalMs
+	}
+	return 0
+}
+
+func (x *ProcessingTiming) GetRuntimeTotalMs() float64 {
+	if x != nil {
+		return x.RuntimeTotalMs
+	}
+	return 0
+}
+
+type Point struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	X             float32                `protobuf:"fixed32,1,opt,name=x,proto3" json:"x,omitempty"`
+	Y             float32                `protobuf:"fixed32,2,opt,name=y,proto3" json:"y,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Point) Reset() {
+	*x = Point{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Point) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Point) ProtoMessage() {}
+
+func (x *Point) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Point.ProtoReflect.Descriptor instead.
+func (*Point) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Point) GetX() float32 {
+	if x != nil {
+		return x.X
+	}
+	return 0
+}
+
+func (x *Point) GetY() float32 {
+	if x != nil {
+		return x.Y
+	}
+	return 0
+}
+
+type BoundingBox struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	X1            float32                `protobuf:"fixed32,1,opt,name=x1,proto3" json:"x1,omitempty"`
+	Y1            float32                `protobuf:"fixed32,2,opt,name=y1,proto3" json:"y1,omitempty"`
+	X2            float32                `protobuf:"fixed32,3,opt,name=x2,proto3" json:"x2,omitempty"`
+	Y2            float32                `protobuf:"fixed32,4,opt,name=y2,proto3" json:"y2,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BoundingBox) Reset() {
+	*x = BoundingBox{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BoundingBox) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BoundingBox) ProtoMessage() {}
+
+func (x *BoundingBox) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BoundingBox.ProtoReflect.Descriptor instead.
+func (*BoundingBox) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BoundingBox) GetX1() float32 {
+	if x != nil {
+		return x.X1
+	}
+	return 0
+}
+
+func (x *BoundingBox) GetY1() float32 {
+	if x != nil {
+		return x.Y1
+	}
+	return 0
+}
+
+func (x *BoundingBox) GetX2() float32 {
+	if x != nil {
+		return x.X2
+	}
+	return 0
+}
+
+func (x *BoundingBox) GetY2() float32 {
+	if x != nil {
+		return x.Y2
+	}
+	return 0
+}
+
+type FaceMetadata struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bbox          *BoundingBox           `protobuf:"bytes,1,opt,name=bbox,proto3" json:"bbox,omitempty"`
+	Confidence    float32                `protobuf:"fixed32,2,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Polygon       []*Point               `protobuf:"bytes,3,rep,name=polygon,proto3" json:"polygon,omitempty"`
+	TrackId       *int64                 `protobuf:"varint,4,opt,name=track_id,json=trackId,proto3,oneof" json:"track_id,omitempty"`
+	Source        string                 `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`
+	Held          bool                   `protobuf:"varint,6,opt,name=held,proto3" json:"held,omitempty"`
+	HoldFrames    uint32                 `protobuf:"varint,7,opt,name=hold_frames,json=holdFrames,proto3" json:"hold_frames,omitempty"`
+	ClassName     string                 `protobuf:"bytes,8,opt,name=class_name,json=className,proto3" json:"class_name,omitempty"`
+	MaskAreaPx    float32                `protobuf:"fixed32,9,opt,name=mask_area_px,json=maskAreaPx,proto3" json:"mask_area_px,omitempty"`
+	Whitelisted   bool                   `protobuf:"varint,10,opt,name=whitelisted,proto3" json:"whitelisted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FaceMetadata) Reset() {
+	*x = FaceMetadata{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FaceMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FaceMetadata) ProtoMessage() {}
+
+func (x *FaceMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FaceMetadata.ProtoReflect.Descriptor instead.
+func (*FaceMetadata) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *FaceMetadata) GetBbox() *BoundingBox {
+	if x != nil {
+		return x.Bbox
+	}
+	return nil
+}
+
+func (x *FaceMetadata) GetConfidence() float32 {
+	if x != nil {
+		return x.Confidence
+	}
+	return 0
+}
+
+func (x *FaceMetadata) GetPolygon() []*Point {
+	if x != nil {
+		return x.Polygon
+	}
+	return nil
+}
+
+func (x *FaceMetadata) GetTrackId() int64 {
+	if x != nil && x.TrackId != nil {
+		return *x.TrackId
+	}
+	return 0
+}
+
+func (x *FaceMetadata) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *FaceMetadata) GetHeld() bool {
+	if x != nil {
+		return x.Held
+	}
+	return false
+}
+
+func (x *FaceMetadata) GetHoldFrames() uint32 {
+	if x != nil {
+		return x.HoldFrames
+	}
+	return 0
+}
+
+func (x *FaceMetadata) GetClassName() string {
+	if x != nil {
+		return x.ClassName
+	}
+	return ""
+}
+
+func (x *FaceMetadata) GetMaskAreaPx() float32 {
+	if x != nil {
+		return x.MaskAreaPx
+	}
+	return 0
+}
+
+func (x *FaceMetadata) GetWhitelisted() bool {
+	if x != nil {
+		return x.Whitelisted
+	}
+	return false
+}
+
+type FrameStats struct {
+	state                      protoimpl.MessageState `protogen:"open.v1"`
+	Detections                 uint32                 `protobuf:"varint,1,opt,name=detections,proto3" json:"detections,omitempty"`
+	RawDetections              uint32                 `protobuf:"varint,2,opt,name=raw_detections,json=rawDetections,proto3" json:"raw_detections,omitempty"`
+	ContinuationCandidates     uint32                 `protobuf:"varint,3,opt,name=continuation_candidates,json=continuationCandidates,proto3" json:"continuation_candidates,omitempty"`
+	DetectorBackedTracks       uint32                 `protobuf:"varint,4,opt,name=detector_backed_tracks,json=detectorBackedTracks,proto3" json:"detector_backed_tracks,omitempty"`
+	LowConfidenceContinuations uint32                 `protobuf:"varint,5,opt,name=low_confidence_continuations,json=lowConfidenceContinuations,proto3" json:"low_confidence_continuations,omitempty"`
+	HeldTracks                 uint32                 `protobuf:"varint,6,opt,name=held_tracks,json=heldTracks,proto3" json:"held_tracks,omitempty"`
+	Tracks                     uint32                 `protobuf:"varint,7,opt,name=tracks,proto3" json:"tracks,omitempty"`
+	TrackerFrame               uint64                 `protobuf:"varint,8,opt,name=tracker_frame,json=trackerFrame,proto3" json:"tracker_frame,omitempty"`
+	AdafaceCalls               uint32                 `protobuf:"varint,9,opt,name=adaface_calls,json=adafaceCalls,proto3" json:"adaface_calls,omitempty"`
+	AdafaceQueueOverflow       uint32                 `protobuf:"varint,10,opt,name=adaface_queue_overflow,json=adafaceQueueOverflow,proto3" json:"adaface_queue_overflow,omitempty"`
+	WhitelistedTracks          uint32                 `protobuf:"varint,11,opt,name=whitelisted_tracks,json=whitelistedTracks,proto3" json:"whitelisted_tracks,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
+}
+
+func (x *FrameStats) Reset() {
+	*x = FrameStats{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FrameStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FrameStats) ProtoMessage() {}
+
+func (x *FrameStats) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FrameStats.ProtoReflect.Descriptor instead.
+func (*FrameStats) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *FrameStats) GetDetections() uint32 {
+	if x != nil {
+		return x.Detections
+	}
+	return 0
+}
+
+func (x *FrameStats) GetRawDetections() uint32 {
+	if x != nil {
+		return x.RawDetections
+	}
+	return 0
+}
+
+func (x *FrameStats) GetContinuationCandidates() uint32 {
+	if x != nil {
+		return x.ContinuationCandidates
+	}
+	return 0
+}
+
+func (x *FrameStats) GetDetectorBackedTracks() uint32 {
+	if x != nil {
+		return x.DetectorBackedTracks
+	}
+	return 0
+}
+
+func (x *FrameStats) GetLowConfidenceContinuations() uint32 {
+	if x != nil {
+		return x.LowConfidenceContinuations
+	}
+	return 0
+}
+
+func (x *FrameStats) GetHeldTracks() uint32 {
+	if x != nil {
+		return x.HeldTracks
+	}
+	return 0
+}
+
+func (x *FrameStats) GetTracks() uint32 {
+	if x != nil {
+		return x.Tracks
+	}
+	return 0
+}
+
+func (x *FrameStats) GetTrackerFrame() uint64 {
+	if x != nil {
+		return x.TrackerFrame
+	}
+	return 0
+}
+
+func (x *FrameStats) GetAdafaceCalls() uint32 {
+	if x != nil {
+		return x.AdafaceCalls
+	}
+	return 0
+}
+
+func (x *FrameStats) GetAdafaceQueueOverflow() uint32 {
+	if x != nil {
+		return x.AdafaceQueueOverflow
+	}
+	return 0
+}
+
+func (x *FrameStats) GetWhitelistedTracks() uint32 {
+	if x != nil {
+		return x.WhitelistedTracks
+	}
+	return 0
+}
+
 type FaceData struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Data  []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
-	// Per-client whitelist scoping. Empty = global/default.
-	ClientId string `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	// Stable identity for this reference face, so it can be removed individually.
-	FaceId        string `protobuf:"bytes,3,opt,name=face_id,json=faceId,proto3" json:"face_id,omitempty"`
+	// Legacy message name retained for RPC path and generated-client compatibility.
+	// Contains one complete JPEG, PNG, or WebP image with exactly one detectable face.
+	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	SessionId     string `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FaceData) Reset() {
 	*x = FaceData{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[2]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -219,7 +802,7 @@ func (x *FaceData) String() string {
 func (*FaceData) ProtoMessage() {}
 
 func (x *FaceData) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[2]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -232,7 +815,7 @@ func (x *FaceData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FaceData.ProtoReflect.Descriptor instead.
 func (*FaceData) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{2}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *FaceData) GetData() []byte {
@@ -242,31 +825,28 @@ func (x *FaceData) GetData() []byte {
 	return nil
 }
 
-func (x *FaceData) GetClientId() string {
+func (x *FaceData) GetSessionId() string {
 	if x != nil {
-		return x.ClientId
-	}
-	return ""
-}
-
-func (x *FaceData) GetFaceId() string {
-	if x != nil {
-		return x.FaceId
+		return x.SessionId
 	}
 	return ""
 }
 
 type WhitelistResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StatusMessage string                 `protobuf:"bytes,1,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Legacy fields retained for generated-client compatibility.
+	StatusMessage    string `protobuf:"bytes,1,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
+	Timestamp        int64  `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	EntryId          string `protobuf:"bytes,3,opt,name=entry_id,json=entryId,proto3" json:"entry_id,omitempty"`
+	EntryCount       uint32 `protobuf:"varint,4,opt,name=entry_count,json=entryCount,proto3" json:"entry_count,omitempty"`
+	WhitelistVersion uint64 `protobuf:"varint,5,opt,name=whitelist_version,json=whitelistVersion,proto3" json:"whitelist_version,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *WhitelistResponse) Reset() {
 	*x = WhitelistResponse{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -278,7 +858,7 @@ func (x *WhitelistResponse) String() string {
 func (*WhitelistResponse) ProtoMessage() {}
 
 func (x *WhitelistResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -291,7 +871,7 @@ func (x *WhitelistResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WhitelistResponse.ProtoReflect.Descriptor instead.
 func (*WhitelistResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WhitelistResponse) GetStatusMessage() string {
@@ -308,31 +888,49 @@ func (x *WhitelistResponse) GetTimestamp() int64 {
 	return 0
 }
 
-type RemoveWhitelistRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Client whose reference face(s) to remove.
-	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	// Specific face to remove; empty removes ALL reference faces for the client.
-	FaceId        string `protobuf:"bytes,2,opt,name=face_id,json=faceId,proto3" json:"face_id,omitempty"`
+func (x *WhitelistResponse) GetEntryId() string {
+	if x != nil {
+		return x.EntryId
+	}
+	return ""
+}
+
+func (x *WhitelistResponse) GetEntryCount() uint32 {
+	if x != nil {
+		return x.EntryCount
+	}
+	return 0
+}
+
+func (x *WhitelistResponse) GetWhitelistVersion() uint64 {
+	if x != nil {
+		return x.WhitelistVersion
+	}
+	return 0
+}
+
+type GetWhitelistStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RemoveWhitelistRequest) Reset() {
-	*x = RemoveWhitelistRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+func (x *GetWhitelistStatusRequest) Reset() {
+	*x = GetWhitelistStatusRequest{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RemoveWhitelistRequest) String() string {
+func (x *GetWhitelistStatusRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RemoveWhitelistRequest) ProtoMessage() {}
+func (*GetWhitelistStatusRequest) ProtoMessage() {}
 
-func (x *RemoveWhitelistRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+func (x *GetWhitelistStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -343,59 +941,513 @@ func (x *RemoveWhitelistRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RemoveWhitelistRequest.ProtoReflect.Descriptor instead.
-func (*RemoveWhitelistRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{4}
+// Deprecated: Use GetWhitelistStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetWhitelistStatusRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{9}
 }
 
-func (x *RemoveWhitelistRequest) GetClientId() string {
+func (x *GetWhitelistStatusRequest) GetSessionId() string {
 	if x != nil {
-		return x.ClientId
+		return x.SessionId
 	}
 	return ""
 }
 
-func (x *RemoveWhitelistRequest) GetFaceId() string {
+type GetWhitelistStatusResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	SessionId        string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	EntryCount       uint32                 `protobuf:"varint,2,opt,name=entry_count,json=entryCount,proto3" json:"entry_count,omitempty"`
+	WhitelistVersion uint64                 `protobuf:"varint,3,opt,name=whitelist_version,json=whitelistVersion,proto3" json:"whitelist_version,omitempty"`
+	EntryIds         []string               `protobuf:"bytes,4,rep,name=entry_ids,json=entryIds,proto3" json:"entry_ids,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *GetWhitelistStatusResponse) Reset() {
+	*x = GetWhitelistStatusResponse{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWhitelistStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWhitelistStatusResponse) ProtoMessage() {}
+
+func (x *GetWhitelistStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
 	if x != nil {
-		return x.FaceId
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWhitelistStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetWhitelistStatusResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetWhitelistStatusResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
+}
+
+func (x *GetWhitelistStatusResponse) GetEntryCount() uint32 {
+	if x != nil {
+		return x.EntryCount
+	}
+	return 0
+}
+
+func (x *GetWhitelistStatusResponse) GetWhitelistVersion() uint64 {
+	if x != nil {
+		return x.WhitelistVersion
+	}
+	return 0
+}
+
+func (x *GetWhitelistStatusResponse) GetEntryIds() []string {
+	if x != nil {
+		return x.EntryIds
+	}
+	return nil
+}
+
+type DeleteWhitelistRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	EntryId       string                 `protobuf:"bytes,2,opt,name=entry_id,json=entryId,proto3" json:"entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteWhitelistRequest) Reset() {
+	*x = DeleteWhitelistRequest{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteWhitelistRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteWhitelistRequest) ProtoMessage() {}
+
+func (x *DeleteWhitelistRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteWhitelistRequest.ProtoReflect.Descriptor instead.
+func (*DeleteWhitelistRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DeleteWhitelistRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *DeleteWhitelistRequest) GetEntryId() string {
+	if x != nil {
+		return x.EntryId
+	}
+	return ""
+}
+
+type CreateSessionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateSessionRequest) Reset() {
+	*x = CreateSessionRequest{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateSessionRequest) ProtoMessage() {}
+
+func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateSessionRequest.ProtoReflect.Descriptor instead.
+func (*CreateSessionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{12}
+}
+
+type ListSessionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionsRequest) Reset() {
+	*x = ListSessionsRequest{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionsRequest) ProtoMessage() {}
+
+func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
+func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{13}
+}
+
+type DeleteSessionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteSessionRequest) Reset() {
+	*x = DeleteSessionRequest{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteSessionRequest) ProtoMessage() {}
+
+func (x *DeleteSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteSessionRequest.ProtoReflect.Descriptor instead.
+func (*DeleteSessionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DeleteSessionRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+type SessionInfo struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SessionId         string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	EntryCount        uint32                 `protobuf:"varint,2,opt,name=entry_count,json=entryCount,proto3" json:"entry_count,omitempty"`
+	WhitelistVersion  uint64                 `protobuf:"varint,3,opt,name=whitelist_version,json=whitelistVersion,proto3" json:"whitelist_version,omitempty"`
+	CreatedAtUnixMs   int64                  `protobuf:"varint,4,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
+	ActiveStreamCount uint32                 `protobuf:"varint,5,opt,name=active_stream_count,json=activeStreamCount,proto3" json:"active_stream_count,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SessionInfo) Reset() {
+	*x = SessionInfo{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionInfo) ProtoMessage() {}
+
+func (x *SessionInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionInfo.ProtoReflect.Descriptor instead.
+func (*SessionInfo) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SessionInfo) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionInfo) GetEntryCount() uint32 {
+	if x != nil {
+		return x.EntryCount
+	}
+	return 0
+}
+
+func (x *SessionInfo) GetWhitelistVersion() uint64 {
+	if x != nil {
+		return x.WhitelistVersion
+	}
+	return 0
+}
+
+func (x *SessionInfo) GetCreatedAtUnixMs() int64 {
+	if x != nil {
+		return x.CreatedAtUnixMs
+	}
+	return 0
+}
+
+func (x *SessionInfo) GetActiveStreamCount() uint32 {
+	if x != nil {
+		return x.ActiveStreamCount
+	}
+	return 0
+}
+
+type ListSessionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sessions      []*SessionInfo         `protobuf:"bytes,1,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionsResponse) Reset() {
+	*x = ListSessionsResponse{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionsResponse) ProtoMessage() {}
+
+func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
+func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ListSessionsResponse) GetSessions() []*SessionInfo {
+	if x != nil {
+		return x.Sessions
+	}
+	return nil
 }
 
 var File_api_proto_ai_processor_proto protoreflect.FileDescriptor
 
 const file_api_proto_ai_processor_proto_rawDesc = "" +
 	"\n" +
-	"\x1capi/proto/ai_processor.proto\"\xa2\x01\n" +
+	"\x1capi/proto/ai_processor.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xce\x01\n" +
 	"\n" +
 	"VideoChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1c\n" +
-	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x14\n" +
-	"\x05width\x18\x03 \x01(\rR\x05width\x12\x16\n" +
-	"\x06height\x18\x04 \x01(\rR\x06height\x12\x17\n" +
-	"\apix_fmt\x18\x05 \x01(\tR\x06pixFmt\x12\x1b\n" +
-	"\tclient_id\x18\x06 \x01(\tR\bclientId\"\xb5\x01\n" +
+	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x19\n" +
+	"\bframe_id\x18\x03 \x01(\x03R\aframeId\x12!\n" +
+	"\n" +
+	"batch_size\x18\x04 \x01(\rB\x02\x18\x01R\tbatchSize\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x121\n" +
+	"\voutput_mode\x18\x06 \x01(\x0e2\x10.VideoOutputModeR\n" +
+	"outputMode\"\xb8\x03\n" +
 	"\x13ProcessedVideoChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12%\n" +
-	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage\x12\x14\n" +
-	"\x05width\x18\x04 \x01(\rR\x05width\x12\x16\n" +
-	"\x06height\x18\x05 \x01(\rR\x06height\x12\x17\n" +
-	"\apix_fmt\x18\x06 \x01(\tR\x06pixFmt\"T\n" +
+	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage\x12#\n" +
+	"\x05faces\x18\x04 \x03(\v2\r.FaceMetadataR\x05faces\x12\x14\n" +
+	"\x05width\x18\x05 \x01(\x05R\x05width\x12\x16\n" +
+	"\x06height\x18\x06 \x01(\x05R\x06height\x12\x19\n" +
+	"\bframe_id\x18\a \x01(\x03R\aframeId\x12#\n" +
+	"\rprocessing_ms\x18\b \x01(\x01R\fprocessingMs\x12)\n" +
+	"\x06timing\x18\t \x01(\v2\x11.ProcessingTimingR\x06timing\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\n" +
+	" \x01(\tR\terrorCode\x12#\n" +
+	"\rerror_message\x18\v \x01(\tR\ferrorMessage\x12!\n" +
+	"\x05stats\x18\f \x01(\v2\v.FrameStatsR\x05stats\x12#\n" +
+	"\vmosaic_jpeg\x18\r \x01(\fB\x02\x18\x01R\n" +
+	"mosaicJpeg\"\xdb\x02\n" +
+	"\x10ProcessingTiming\x12\x19\n" +
+	"\bqueue_ms\x18\x01 \x01(\x01R\aqueueMs\x12\x1b\n" +
+	"\tdecode_ms\x18\x02 \x01(\x01R\bdecodeMs\x12!\n" +
+	"\finference_ms\x18\x03 \x01(\x01R\vinferenceMs\x12\x1f\n" +
+	"\vtracking_ms\x18\x04 \x01(\x01R\n" +
+	"trackingMs\x12$\n" +
+	"\x0eblur_encode_ms\x18\x05 \x01(\x01R\fblurEncodeMs\x120\n" +
+	"\x14inference_batch_size\x18\x06 \x01(\rR\x12inferenceBatchSize\x12!\n" +
+	"\fserialize_ms\x18\a \x01(\x01R\vserializeMs\x12&\n" +
+	"\x0fserver_total_ms\x18\b \x01(\x01R\rserverTotalMs\x12(\n" +
+	"\x10runtime_total_ms\x18\t \x01(\x01R\x0eruntimeTotalMs\"#\n" +
+	"\x05Point\x12\f\n" +
+	"\x01x\x18\x01 \x01(\x02R\x01x\x12\f\n" +
+	"\x01y\x18\x02 \x01(\x02R\x01y\"M\n" +
+	"\vBoundingBox\x12\x0e\n" +
+	"\x02x1\x18\x01 \x01(\x02R\x02x1\x12\x0e\n" +
+	"\x02y1\x18\x02 \x01(\x02R\x02y1\x12\x0e\n" +
+	"\x02x2\x18\x03 \x01(\x02R\x02x2\x12\x0e\n" +
+	"\x02y2\x18\x04 \x01(\x02R\x02y2\"\xcf\x02\n" +
+	"\fFaceMetadata\x12 \n" +
+	"\x04bbox\x18\x01 \x01(\v2\f.BoundingBoxR\x04bbox\x12\x1e\n" +
+	"\n" +
+	"confidence\x18\x02 \x01(\x02R\n" +
+	"confidence\x12 \n" +
+	"\apolygon\x18\x03 \x03(\v2\x06.PointR\apolygon\x12\x1e\n" +
+	"\btrack_id\x18\x04 \x01(\x03H\x00R\atrackId\x88\x01\x01\x12\x16\n" +
+	"\x06source\x18\x05 \x01(\tR\x06source\x12\x12\n" +
+	"\x04held\x18\x06 \x01(\bR\x04held\x12\x1f\n" +
+	"\vhold_frames\x18\a \x01(\rR\n" +
+	"holdFrames\x12\x1d\n" +
+	"\n" +
+	"class_name\x18\b \x01(\tR\tclassName\x12 \n" +
+	"\fmask_area_px\x18\t \x01(\x02R\n" +
+	"maskAreaPx\x12 \n" +
+	"\vwhitelisted\x18\n" +
+	" \x01(\bR\vwhitelistedB\v\n" +
+	"\t_track_id\"\xec\x03\n" +
+	"\n" +
+	"FrameStats\x12\x1e\n" +
+	"\n" +
+	"detections\x18\x01 \x01(\rR\n" +
+	"detections\x12%\n" +
+	"\x0eraw_detections\x18\x02 \x01(\rR\rrawDetections\x127\n" +
+	"\x17continuation_candidates\x18\x03 \x01(\rR\x16continuationCandidates\x124\n" +
+	"\x16detector_backed_tracks\x18\x04 \x01(\rR\x14detectorBackedTracks\x12@\n" +
+	"\x1clow_confidence_continuations\x18\x05 \x01(\rR\x1alowConfidenceContinuations\x12\x1f\n" +
+	"\vheld_tracks\x18\x06 \x01(\rR\n" +
+	"heldTracks\x12\x16\n" +
+	"\x06tracks\x18\a \x01(\rR\x06tracks\x12#\n" +
+	"\rtracker_frame\x18\b \x01(\x04R\ftrackerFrame\x12#\n" +
+	"\radaface_calls\x18\t \x01(\rR\fadafaceCalls\x124\n" +
+	"\x16adaface_queue_overflow\x18\n" +
+	" \x01(\rR\x14adafaceQueueOverflow\x12-\n" +
+	"\x12whitelisted_tracks\x18\v \x01(\rR\x11whitelistedTracks\"=\n" +
 	"\bFaceData\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1b\n" +
-	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x17\n" +
-	"\aface_id\x18\x03 \x01(\tR\x06faceId\"X\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xc1\x01\n" +
 	"\x11WhitelistResponse\x12%\n" +
 	"\x0estatus_message\x18\x01 \x01(\tR\rstatusMessage\x12\x1c\n" +
-	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\"N\n" +
-	"\x16RemoveWhitelistRequest\x12\x1b\n" +
-	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x17\n" +
-	"\aface_id\x18\x02 \x01(\tR\x06faceId2\xb3\x01\n" +
+	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x19\n" +
+	"\bentry_id\x18\x03 \x01(\tR\aentryId\x12\x1f\n" +
+	"\ventry_count\x18\x04 \x01(\rR\n" +
+	"entryCount\x12+\n" +
+	"\x11whitelist_version\x18\x05 \x01(\x04R\x10whitelistVersion\":\n" +
+	"\x19GetWhitelistStatusRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xa6\x01\n" +
+	"\x1aGetWhitelistStatusResponse\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
+	"\ventry_count\x18\x02 \x01(\rR\n" +
+	"entryCount\x12+\n" +
+	"\x11whitelist_version\x18\x03 \x01(\x04R\x10whitelistVersion\x12\x1b\n" +
+	"\tentry_ids\x18\x04 \x03(\tR\bentryIds\"R\n" +
+	"\x16DeleteWhitelistRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bentry_id\x18\x02 \x01(\tR\aentryId\"\x16\n" +
+	"\x14CreateSessionRequest\"\x15\n" +
+	"\x13ListSessionsRequest\"5\n" +
+	"\x14DeleteSessionRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xd7\x01\n" +
+	"\vSessionInfo\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
+	"\ventry_count\x18\x02 \x01(\rR\n" +
+	"entryCount\x12+\n" +
+	"\x11whitelist_version\x18\x03 \x01(\x04R\x10whitelistVersion\x12+\n" +
+	"\x12created_at_unix_ms\x18\x04 \x01(\x03R\x0fcreatedAtUnixMs\x12.\n" +
+	"\x13active_stream_count\x18\x05 \x01(\rR\x11activeStreamCount\"@\n" +
+	"\x14ListSessionsResponse\x12(\n" +
+	"\bsessions\x18\x01 \x03(\v2\f.SessionInfoR\bsessions*|\n" +
+	"\x0fVideoOutputMode\x12!\n" +
+	"\x1dVIDEO_OUTPUT_MODE_UNSPECIFIED\x10\x00\x12#\n" +
+	"\x1fVIDEO_OUTPUT_MODE_METADATA_ONLY\x10\x01\x12!\n" +
+	"\x1dVIDEO_OUTPUT_MODE_MOSAIC_JPEG\x10\x022\xb5\x03\n" +
 	"\vAiProcessor\x125\n" +
 	"\fProcessVideo\x12\v.VideoChunk\x1a\x14.ProcessedVideoChunk(\x010\x01\x12-\n" +
 	"\fAddWhitelist\x12\t.FaceData\x1a\x12.WhitelistResponse\x12>\n" +
-	"\x0fRemoveWhitelist\x12\x17.RemoveWhitelistRequest\x1a\x12.WhitelistResponseB$Z\"inno-live-server/api/gen/aiv1;aiv1b\x06proto3"
+	"\x0fDeleteWhitelist\x12\x17.DeleteWhitelistRequest\x1a\x12.WhitelistResponse\x12M\n" +
+	"\x12GetWhitelistStatus\x12\x1a.GetWhitelistStatusRequest\x1a\x1b.GetWhitelistStatusResponse\x124\n" +
+	"\rCreateSession\x12\x15.CreateSessionRequest\x1a\f.SessionInfo\x12;\n" +
+	"\fListSessions\x12\x14.ListSessionsRequest\x1a\x15.ListSessionsResponse\x12>\n" +
+	"\rDeleteSession\x12\x15.DeleteSessionRequest\x1a\x16.google.protobuf.EmptyB$Z\"inno-live-server/api/gen/aiv1;aiv1b\x06proto3"
 
 var (
 	file_api_proto_ai_processor_proto_rawDescOnce sync.Once
@@ -409,26 +1461,56 @@ func file_api_proto_ai_processor_proto_rawDescGZIP() []byte {
 	return file_api_proto_ai_processor_proto_rawDescData
 }
 
-var file_api_proto_ai_processor_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_api_proto_ai_processor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_api_proto_ai_processor_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_api_proto_ai_processor_proto_goTypes = []any{
-	(*VideoChunk)(nil),             // 0: VideoChunk
-	(*ProcessedVideoChunk)(nil),    // 1: ProcessedVideoChunk
-	(*FaceData)(nil),               // 2: FaceData
-	(*WhitelistResponse)(nil),      // 3: WhitelistResponse
-	(*RemoveWhitelistRequest)(nil), // 4: RemoveWhitelistRequest
+	(VideoOutputMode)(0),               // 0: VideoOutputMode
+	(*VideoChunk)(nil),                 // 1: VideoChunk
+	(*ProcessedVideoChunk)(nil),        // 2: ProcessedVideoChunk
+	(*ProcessingTiming)(nil),           // 3: ProcessingTiming
+	(*Point)(nil),                      // 4: Point
+	(*BoundingBox)(nil),                // 5: BoundingBox
+	(*FaceMetadata)(nil),               // 6: FaceMetadata
+	(*FrameStats)(nil),                 // 7: FrameStats
+	(*FaceData)(nil),                   // 8: FaceData
+	(*WhitelistResponse)(nil),          // 9: WhitelistResponse
+	(*GetWhitelistStatusRequest)(nil),  // 10: GetWhitelistStatusRequest
+	(*GetWhitelistStatusResponse)(nil), // 11: GetWhitelistStatusResponse
+	(*DeleteWhitelistRequest)(nil),     // 12: DeleteWhitelistRequest
+	(*CreateSessionRequest)(nil),       // 13: CreateSessionRequest
+	(*ListSessionsRequest)(nil),        // 14: ListSessionsRequest
+	(*DeleteSessionRequest)(nil),       // 15: DeleteSessionRequest
+	(*SessionInfo)(nil),                // 16: SessionInfo
+	(*ListSessionsResponse)(nil),       // 17: ListSessionsResponse
+	(*emptypb.Empty)(nil),              // 18: google.protobuf.Empty
 }
 var file_api_proto_ai_processor_proto_depIdxs = []int32{
-	0, // 0: AiProcessor.ProcessVideo:input_type -> VideoChunk
-	2, // 1: AiProcessor.AddWhitelist:input_type -> FaceData
-	4, // 2: AiProcessor.RemoveWhitelist:input_type -> RemoveWhitelistRequest
-	1, // 3: AiProcessor.ProcessVideo:output_type -> ProcessedVideoChunk
-	3, // 4: AiProcessor.AddWhitelist:output_type -> WhitelistResponse
-	3, // 5: AiProcessor.RemoveWhitelist:output_type -> WhitelistResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: VideoChunk.output_mode:type_name -> VideoOutputMode
+	6,  // 1: ProcessedVideoChunk.faces:type_name -> FaceMetadata
+	3,  // 2: ProcessedVideoChunk.timing:type_name -> ProcessingTiming
+	7,  // 3: ProcessedVideoChunk.stats:type_name -> FrameStats
+	5,  // 4: FaceMetadata.bbox:type_name -> BoundingBox
+	4,  // 5: FaceMetadata.polygon:type_name -> Point
+	16, // 6: ListSessionsResponse.sessions:type_name -> SessionInfo
+	1,  // 7: AiProcessor.ProcessVideo:input_type -> VideoChunk
+	8,  // 8: AiProcessor.AddWhitelist:input_type -> FaceData
+	12, // 9: AiProcessor.DeleteWhitelist:input_type -> DeleteWhitelistRequest
+	10, // 10: AiProcessor.GetWhitelistStatus:input_type -> GetWhitelistStatusRequest
+	13, // 11: AiProcessor.CreateSession:input_type -> CreateSessionRequest
+	14, // 12: AiProcessor.ListSessions:input_type -> ListSessionsRequest
+	15, // 13: AiProcessor.DeleteSession:input_type -> DeleteSessionRequest
+	2,  // 14: AiProcessor.ProcessVideo:output_type -> ProcessedVideoChunk
+	9,  // 15: AiProcessor.AddWhitelist:output_type -> WhitelistResponse
+	9,  // 16: AiProcessor.DeleteWhitelist:output_type -> WhitelistResponse
+	11, // 17: AiProcessor.GetWhitelistStatus:output_type -> GetWhitelistStatusResponse
+	16, // 18: AiProcessor.CreateSession:output_type -> SessionInfo
+	17, // 19: AiProcessor.ListSessions:output_type -> ListSessionsResponse
+	18, // 20: AiProcessor.DeleteSession:output_type -> google.protobuf.Empty
+	14, // [14:21] is the sub-list for method output_type
+	7,  // [7:14] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_ai_processor_proto_init() }
@@ -436,18 +1518,20 @@ func file_api_proto_ai_processor_proto_init() {
 	if File_api_proto_ai_processor_proto != nil {
 		return
 	}
+	file_api_proto_ai_processor_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_ai_processor_proto_rawDesc), len(file_api_proto_ai_processor_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   5,
+			NumEnums:      1,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_api_proto_ai_processor_proto_goTypes,
 		DependencyIndexes: file_api_proto_ai_processor_proto_depIdxs,
+		EnumInfos:         file_api_proto_ai_processor_proto_enumTypes,
 		MessageInfos:      file_api_proto_ai_processor_proto_msgTypes,
 	}.Build()
 	File_api_proto_ai_processor_proto = out.File

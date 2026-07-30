@@ -22,7 +22,7 @@ import (
 )
 
 type AIStream interface {
-	Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error)
+	Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error)
 	Close()
 }
 
@@ -119,7 +119,7 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 		if p.fallback.Load() {
 			return p.serveBlackout(frame, width, height, nil)
 		}
-		output, err := p.ProcessImage(frame, timestamp, width, height)
+		output, err := p.ProcessImage(frame, timestamp)
 		if err == nil {
 			p.consecutiveTimeouts.Store(0)
 			return output, nil
@@ -151,26 +151,15 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 	}
 }
 
-func (p *Processor) ProcessImage(frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
+func (p *Processor) ProcessImage(frame []byte, timestamp int64) ([]byte, error) {
 	startedAt := time.Now()
 	defer func() { p.metrics.ObserveProcessing(string(p.mode), time.Since(startedAt)) }()
 	if p.mode != config.PrivacyModeReal {
 		return nil, fmt.Errorf("ProcessDecoded is only valid in real mode")
 	}
 
-	pixFmt := ""
-	wireWidth, wireHeight := width, height
-	if p.wireFormat == config.WireFormatRaw {
-		pixFmt = "yuv420p"
-	} else {
-		// jpeg is self-describing; width/height only carry meaning for raw
-		// frames. Some AI servers reuse this VideoChunk's field numbers for
-		// unrelated data (e.g. batch_size), so leaving these non-zero in jpeg
-		// mode can corrupt that field on the wire.
-		wireWidth, wireHeight = 0, 0
-	}
 	aiStartedAt := time.Now()
-	response, err := p.ai.Process(frame, timestamp, wireWidth, wireHeight, pixFmt)
+	response, err := p.ai.Process(frame, timestamp)
 	p.metrics.ObserveAI(string(p.mode), time.Since(aiStartedAt))
 	p.metrics.ObserveStage("grpc", time.Since(aiStartedAt))
 	if err != nil {
@@ -178,6 +167,13 @@ func (p *Processor) ProcessImage(frame []byte, timestamp int64, width, height ui
 	}
 	if response.GetTimestamp() != timestamp {
 		return nil, fmt.Errorf("AI response timestamp mismatch: sent=%d received=%d", timestamp, response.GetTimestamp())
+	}
+	// error_code is set when the AI server completed the RPC but the frame
+	// itself failed processing (e.g. decode failure) — the call succeeding
+	// at the transport level does not mean the frame was safely processed,
+	// so this must latch fail-closed exactly like a transport error does.
+	if response.GetErrorCode() != "" {
+		return nil, fmt.Errorf("AI processing failed: error_code=%s error_message=%q", response.GetErrorCode(), response.GetErrorMessage())
 	}
 	if !strings.EqualFold(response.GetStatusMessage(), "success") {
 		return nil, fmt.Errorf("AI processing failed: status=%q", response.GetStatusMessage())

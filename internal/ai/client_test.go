@@ -60,14 +60,14 @@ func TestClientUsesStreamingAndWhitelistContracts(t *testing.T) {
 
 	stream := client.NewStream(ctx, "")
 	defer stream.Close()
-	response, err := stream.Process([]byte("frame"), 123, 0, 0, "")
+	response, err := stream.Process([]byte("frame"), 123)
 	if err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}
 	if string(response.GetData()) != "frame" || response.GetTimestamp() != 123 {
 		t.Fatalf("unexpected ProcessVideo response: %+v", response)
 	}
-	whitelist, err := client.AddWhitelist(ctx, "", "", []byte("face"))
+	whitelist, err := client.AddWhitelist(ctx, "", []byte("face"))
 	if err != nil {
 		t.Fatalf("AddWhitelist() error = %v", err)
 	}

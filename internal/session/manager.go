@@ -469,7 +469,17 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			// session ownership or access control (that is the owner token's job,
 			// see VerifyOwner). Reference-face bucket isolation is a separate,
 			// tracked concern.
-			aiStream = client.NewStream(trackCtx, s.Metadata["client_id"])
+			//
+			// This value also becomes the AI server's session_id (required,
+			// non-empty on its proto). Falls back to "default" so a caller that
+			// omits client_id gets the same global bucket reference_face.go's
+			// referenceClientID falls back to, instead of sending an empty
+			// session_id that the AI server rejects outright.
+			sessionScope := s.Metadata["client_id"]
+			if sessionScope == "" {
+				sessionScope = "default"
+			}
+			aiStream = client.NewStream(trackCtx, sessionScope)
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 			Gate:           m.spawnGate,

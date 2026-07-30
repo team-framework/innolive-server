@@ -136,6 +136,8 @@ make proto        # protobuf 코드 생성
 | `GET` | `/signaling` | WebRTC 시그널링(WebSocket) |
 | `POST` | `/auth/sign-up` | 이메일·비밀번호로 인증 코드를 발송하고 `signup_token` HttpOnly 쿠키 설정 |
 | `POST` | `/auth/verify-email` | 쿠키의 가입 토큰과 인증 코드를 검증해 User 생성 및 Redis 상태 정리 |
+| `POST` | `/auth/native/sign-up` | 네이티브 앱용. JSON 본문의 `signup_token`을 반환 |
+| `POST` | `/auth/native/verify-email` | 네이티브 앱용. JSON의 `signup_token`, `verification_code`를 검증 |
 | `POST` | `/auth/sign-in` | 이메일·비밀번호 로그인 및 토큰 발급 |
 
 ## 라이선스

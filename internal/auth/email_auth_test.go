@@ -53,6 +53,47 @@ func TestEmailSignupClashContract(t *testing.T) {
 	}
 }
 
+func TestNativeEmailSignupUsesJSONSignupToken(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	accounts := &memoryEmailAccountStore{}
+	sender := &recordingVerificationEmailSender{}
+	tokens := testTokenService(newMemoryRefreshStore())
+	service := newTestEmailAuthService(t, pending, accounts, sender, tokens)
+	config, _ := NewTokenHTTPConfig(false, nil)
+	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, service, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	signup := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/sign-up", map[string]string{"email": "native@example.com", "password": "correct horse battery staple"}, nil)
+	if signup.Code != http.StatusOK {
+		t.Fatalf("native signup = %d, %s", signup.Code, signup.Body.String())
+	}
+	if cookies := signup.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("native signup set cookies = %#v", cookies)
+	}
+	var signupResponse struct {
+		Status      string `json:"status"`
+		SignupToken string `json:"signup_token"`
+	}
+	if err := json.Unmarshal(signup.Body.Bytes(), &signupResponse); err != nil {
+		t.Fatal(err)
+	}
+	if signupResponse.Status != "verification_email_sent" || signupResponse.SignupToken == "" {
+		t.Fatalf("native signup response = %#v", signupResponse)
+	}
+
+	webVerify := serveEmailJSON(t, handler, http.MethodPost, "/auth/verify-email", map[string]string{"signup_token": signupResponse.SignupToken, "verification_code": sender.code}, nil)
+	if webVerify.Code != http.StatusBadRequest || !strings.Contains(webVerify.Body.String(), "invalid_signup_token") {
+		t.Fatalf("web verification accepted JSON token = %d, %s", webVerify.Code, webVerify.Body.String())
+	}
+
+	verify := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/verify-email", map[string]string{"signup_token": signupResponse.SignupToken, "verification_code": sender.code}, nil)
+	if verify.Code != http.StatusOK || !strings.Contains(verify.Body.String(), "email_verified") {
+		t.Fatalf("native verify = %d, %s", verify.Code, verify.Body.String())
+	}
+	if accounts.user == nil || pending.has(signupResponse.SignupToken) {
+		t.Fatal("native verification did not save the user then clean Redis state")
+	}
+}
+
 func TestEmailSignupVerificationCodeIsConsumedOnce(t *testing.T) {
 	pending := newMemoryPendingEmailSignupStore()
 	accounts := &memoryEmailAccountStore{}

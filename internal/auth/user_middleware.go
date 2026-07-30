@@ -20,6 +20,11 @@ type UserStatusChecker interface {
 	UserStatus(context.Context, uuid.UUID) (UserStatus, error)
 }
 
+// ErrAuthenticationRequired is returned when a token cannot establish an
+// active InnoLive user. Callers deliberately map it to the same response for
+// malformed, expired, and inactive credentials.
+var ErrAuthenticationRequired = errors.New("authentication required")
+
 type gormUserStatusChecker struct {
 	db *gorm.DB
 }
@@ -54,27 +59,13 @@ func RequireUser(service *TokenService, users UserStatusChecker) func(http.Handl
 				next.ServeHTTP(w, r)
 				return
 			}
-			if service == nil || users == nil {
-				writeUserMiddlewareError(w, http.StatusInternalServerError, "Authentication is unavailable.")
-				return
-			}
 			raw, ok := accessBearerToken(r)
 			if !ok {
 				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
 				return
 			}
-			claims, err := service.ValidateAccessToken(raw)
-			if err != nil {
-				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
-				return
-			}
-			userID, err := uuid.Parse(claims.Subject)
-			if err != nil {
-				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
-				return
-			}
-			status, err := users.UserStatus(r.Context(), userID)
-			if errors.Is(err, ErrUserInactive) {
+			userID, err := AuthenticateUser(r.Context(), service, users, raw)
+			if errors.Is(err, ErrAuthenticationRequired) || errors.Is(err, ErrUserInactive) {
 				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
 				return
 			}
@@ -82,13 +73,37 @@ func RequireUser(service *TokenService, users UserStatusChecker) func(http.Handl
 				writeUserMiddlewareError(w, http.StatusInternalServerError, "Authentication is unavailable.")
 				return
 			}
-			if status != UserStatusActive {
-				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
-				return
-			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey{}, userID)))
 		})
 	}
+}
+
+// AuthenticateUser validates an access token and confirms its user is still
+// active. It is shared by HTTP middleware and WebSocket signaling, whose
+// credentials arrive inside a signaling message rather than an HTTP header.
+func AuthenticateUser(ctx context.Context, service *TokenService, users UserStatusChecker, raw string) (uuid.UUID, error) {
+	if service == nil || users == nil {
+		return uuid.Nil, errors.New("authentication service is unavailable")
+	}
+	claims, err := service.ValidateAccessToken(raw)
+	if err != nil {
+		return uuid.Nil, ErrAuthenticationRequired
+	}
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return uuid.Nil, ErrAuthenticationRequired
+	}
+	status, err := users.UserStatus(ctx, userID)
+	if errors.Is(err, ErrUserInactive) {
+		return uuid.Nil, ErrAuthenticationRequired
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if status != UserStatusActive {
+		return uuid.Nil, ErrAuthenticationRequired
+	}
+	return userID, nil
 }
 
 // UserIDFromContext returns the authenticated user set by RequireUser.

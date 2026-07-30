@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -128,7 +129,7 @@ func (c *testUserChecker) UserStatus(_ context.Context, userID uuid.UUID) (auth.
 	return c.status, nil
 }
 
-func testRequireUser(t *testing.T) (func(http.Handler) http.Handler, http.Header, *testUserChecker, uuid.UUID) {
+func testRequireUser(t *testing.T) (func(http.Handler) http.Handler, func(context.Context, string) (uuid.UUID, error), http.Header, *testUserChecker, uuid.UUID) {
 	t.Helper()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	userID := uuid.New()
@@ -155,12 +156,14 @@ func testRequireUser(t *testing.T) (func(http.Handler) http.Handler, http.Header
 		Issuer: "test-server", Audience: "test-api",
 	})
 	checker := &testUserChecker{status: auth.UserStatusActive}
-	return auth.RequireUser(service, checker), bearer(token), checker, userID
+	return auth.RequireUser(service, checker), func(ctx context.Context, raw string) (uuid.UUID, error) {
+		return auth.AuthenticateUser(ctx, service, checker, raw)
+	}, bearer(token), checker, userID
 }
 
 func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
-	requireUser, accessHeader, checker, userID := testRequireUser(t)
-	application, manager := newTestApplicationWithUserMiddleware(t, requireUser)
+	requireUser, authenticateUser, accessHeader, checker, userID := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser, authenticateUser)
 	defer manager.CloseAll()
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()
@@ -190,9 +193,9 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 			t.Fatalf("authenticated %s %s status = %d, want %d", protected.method, protected.path, response.StatusCode, protected.want)
 		}
 	}
-	// Session-scoped routes keep their owner-token contract even when the
-	// application also has requireUser installed. The two credentials share the
-	// Authorization header and therefore deliberately protect different routes.
+	// Session-scoped routes require both an access token and the separate
+	// capability token. Keeping the latter out of Authorization prevents one
+	// credential from replacing the other.
 	createResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
 	var created struct {
 		session.Response
@@ -200,23 +203,54 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 	}
 	mustDecode(t, createResponse.Body, &created)
 	createResponse.Body.Close()
-	ownerResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(created.OwnerToken))
+	liveSession, err := manager.Get(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if liveSession.UserID != userID {
+		t.Fatalf("session user ID = %s, want %s", liveSession.UserID, userID)
+	}
+	if liveSession.AIClientID != session.AIClientIDForUser(userID) {
+		t.Fatalf("session AI client ID = %q, want %q", liveSession.AIClientID, session.AIClientIDForUser(userID))
+	}
+	ownerHeaders := accessHeader.Clone()
+	ownerHeaders.Set("X-Session-Owner-Token", created.OwnerToken)
+	ownerResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, ownerHeaders)
 	ownerResponse.Body.Close()
 	if ownerResponse.StatusCode != http.StatusOK {
 		t.Fatalf("session owner status = %d, want %d", ownerResponse.StatusCode, http.StatusOK)
 	}
+	_, _, attackerHeader, _, attackerID := testRequireUser(t)
+	attackerHeaders := attackerHeader.Clone()
+	attackerHeaders.Set("X-Session-Owner-Token", created.OwnerToken)
+	attackerResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, attackerHeaders)
+	attackerResponse.Body.Close()
+	if attackerResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("different authenticated user status = %d, want %d", attackerResponse.StatusCode, http.StatusForbidden)
+	}
+	if attackerID == userID {
+		t.Fatal("test users unexpectedly have the same ID")
+	}
 	accessOnlyResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, accessHeader)
 	accessOnlyResponse.Body.Close()
-	if accessOnlyResponse.StatusCode != http.StatusForbidden {
-		t.Fatalf("access token must not replace session owner token: status = %d, want %d", accessOnlyResponse.StatusCode, http.StatusForbidden)
+	if accessOnlyResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("access token must not replace session owner token: status = %d, want %d", accessOnlyResponse.StatusCode, http.StatusUnauthorized)
 	}
 
-	if len(checker.seen) != len(protectedRoutes)+1 {
-		t.Fatalf("active-user checks = %d, want %d", len(checker.seen), len(protectedRoutes)+1)
+	if len(checker.seen) != len(protectedRoutes)+4 {
+		t.Fatalf("active-user checks = %d, want %d", len(checker.seen), len(protectedRoutes)+4)
+	}
+
+	referenceResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/reference-face?client_id=another-user", nil, accessHeader)
+	var reference referenceStatus
+	mustDecode(t, referenceResponse.Body, &reference)
+	referenceResponse.Body.Close()
+	if reference.ClientID != session.AIClientIDForUser(userID) {
+		t.Fatalf("reference client ID = %q, want server-derived %q", reference.ClientID, session.AIClientIDForUser(userID))
 	}
 	for _, seenUserID := range checker.seen {
-		if seenUserID != userID {
-			t.Fatalf("checked user ID = %s, want %s", seenUserID, userID)
+		if seenUserID != userID && seenUserID != attackerID {
+			t.Fatalf("checked unexpected user ID = %s", seenUserID)
 		}
 	}
 
@@ -226,6 +260,70 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("public GET %s status = %d, want %d", path, response.StatusCode, http.StatusOK)
 		}
+	}
+}
+
+func TestSignalingRequiresSessionOwnerUser(t *testing.T) {
+	requireUser, authenticateUser, accessHeader, _, _ := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser, authenticateUser)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	created, ownerToken := createTestSessionWithHeaders(t, httpServer.URL, nil, accessHeader)
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
+	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	send := func(values map[string]any) map[string]any {
+		t.Helper()
+		if err := connection.WriteJSON(values); err != nil {
+			t.Fatal(err)
+		}
+		if err := connection.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		if err := connection.ReadJSON(&response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	base := map[string]any{"type": "offer", "session_id": created.SessionID, "owner_token": ownerToken, "sdp": offer.SDP}
+	if response := send(base); response["type"] != "error" || errorCode(response) != "unauthorized" {
+		t.Fatalf("missing access token response = %v, want error/unauthorized", response)
+	}
+	_, _, attackerHeader, _, _ := testRequireUser(t)
+	attackerToken, _ := bearerToken(&http.Request{Header: attackerHeader})
+	attacker := maps.Clone(base)
+	attacker["access_token"] = attackerToken
+	if response := send(attacker); response["type"] != "error" || errorCode(response) != "forbidden" {
+		t.Fatalf("different user response = %v, want error/forbidden", response)
+	}
+	accessToken, _ := bearerToken(&http.Request{Header: accessHeader})
+	owner := maps.Clone(base)
+	owner["access_token"] = accessToken
+	if response := send(owner); response["type"] != "answer" {
+		t.Fatalf("session owner response = %v, want answer", response)
 	}
 }
 
@@ -501,7 +599,7 @@ func newTestApplication(t *testing.T) (*Server, *session.Manager) {
 	return newTestApplicationWithUserMiddleware(t, nil)
 }
 
-func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Handler) http.Handler) (*Server, *session.Manager) {
+func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Handler) http.Handler, authenticateUsers ...func(context.Context, string) (uuid.UUID, error)) (*Server, *session.Manager) {
 	t.Helper()
 	cfg := config.Config{
 		HTTPAddr:                ":0",
@@ -525,18 +623,24 @@ func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Ha
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, logger, registry, manager, nil, origins, requireUser), manager
+	return New(cfg, logger, registry, manager, nil, origins, requireUser, authenticateUsers...), manager
 }
 
 // createTestSession creates a session and returns its response plus the
 // one-time owner token that later session-scoped calls must present.
 func createTestSession(t *testing.T, baseURL string, metadata map[string]string) (session.Response, string) {
+	return createTestSessionWithHeaders(t, baseURL, metadata, http.Header{"Content-Type": []string{"application/json"}})
+}
+
+func createTestSessionWithHeaders(t *testing.T, baseURL string, metadata map[string]string, headers http.Header) (session.Response, string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"metadata": metadata})
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := mustRequest(t, http.MethodPost, baseURL+"/sessions", bytes.NewReader(body), http.Header{"Content-Type": []string{"application/json"}})
+	headers = headers.Clone()
+	headers.Set("Content-Type", "application/json")
+	response := mustRequest(t, http.MethodPost, baseURL+"/sessions", bytes.NewReader(body), headers)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
 		data, _ := io.ReadAll(response.Body)

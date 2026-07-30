@@ -82,16 +82,18 @@ type Response struct {
 type Session struct {
 	mu sync.RWMutex
 
-	ID        string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Metadata  map[string]string
-	Status    string
-	PC        *webrtc.PeerConnection
-	Output    *webrtc.TrackLocalStaticSample
-	Sender    *webrtc.RTPSender
-	Timing    Timing
-	Stream    StreamState
+	ID         string
+	UserID     uuid.UUID
+	AIClientID string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	Metadata   map[string]string
+	Status     string
+	PC         *webrtc.PeerConnection
+	Output     *webrtc.TrackLocalStaticSample
+	Sender     *webrtc.RTPSender
+	Timing     Timing
+	Stream     StreamState
 
 	ownerHash        [32]byte
 	rawTrackID       string
@@ -199,6 +201,13 @@ func (m *Manager) capacityInUseLocked() int {
 // owner token. The token is returned exactly once here; the server must relay
 // it to the creator in the creation response and never expose it again.
 func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
+	return m.CreateForUser(uuid.Nil, metadata)
+}
+
+// CreateForUser provisions a session owned by userID. The AI client ID is
+// deliberately derived here rather than accepted as request metadata so the
+// face whitelist and the media stream always use the same authenticated scope.
+func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*Session, string, error) {
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
 		if m.capacityInUseLocked() >= limit {
@@ -236,16 +245,18 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
 	s := &Session{
-		ID:        id,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Metadata:  copyMetadata(metadata),
-		Status:    "active",
-		PC:        pc,
-		Output:    output,
-		Stream:    StreamState{Status: "idle", UpdatedAt: now},
-		ownerHash: ownerHash,
-		cancel:    cancel,
+		ID:         id,
+		UserID:     userID,
+		AIClientID: AIClientIDForUser(userID),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Metadata:   copyMetadata(metadata),
+		Status:     "active",
+		PC:         pc,
+		Output:     output,
+		Stream:     StreamState{Status: "idle", UpdatedAt: now},
+		ownerHash:  ownerHash,
+		cancel:     cancel,
 	}
 	// The audio pipe is created up front (decoupled from track arrival order)
 	// so the egress can attach it regardless of whether the video or the audio
@@ -265,8 +276,15 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 	if timeout := m.cfg.NegotiationTimeout; timeout > 0 {
 		time.AfterFunc(timeout, func() { m.reapUnnegotiated(id) })
 	}
-	m.logger.Info("created live session", "session_id", id)
+	m.logger.Info("created live session", "session_id", id, "user_id", userID)
 	return s, ownerToken, nil
+}
+
+// AIClientIDForUser is the only whitelist bucket identifier used for an
+// authenticated user. The prefix keeps it distinct from the legacy global
+// bucket (an empty client ID) without exposing a caller-controlled selector.
+func AIClientIDForUser(userID uuid.UUID) string {
+	return "user:" + userID.String()
 }
 
 // reapUnnegotiated frees a session that never started negotiation within
@@ -322,6 +340,25 @@ func (m *Manager) List() []*Session {
 	m.mu.RUnlock()
 	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result
+}
+
+// CloseUserSessions tears down every live session belonging to a withdrawn
+// user. Session ownership is in-memory, so this complements the database
+// account-status check that rejects all future API requests.
+func (m *Manager) CloseUserSessions(userID uuid.UUID) {
+	m.mu.RLock()
+	ids := make([]string, 0)
+	for id, liveSession := range m.sessions {
+		if liveSession.UserID == userID {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		if err := m.Delete(id, "user_withdrawal"); err != nil && !errors.Is(err, ErrNotFound) {
+			m.logger.Warn("close withdrawn user session failed", "session_id", id, "user_id", userID, "error", err)
+		}
+	}
 }
 
 func (m *Manager) Delete(id, reason string) error {
@@ -462,24 +499,10 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		if m.cfg.PrivacyMode == config.PrivacyModeReal {
 			client := m.ai.Next()
 			m.metrics.IncAITargetSession(client.Address())
-			// Per-client whitelist scoping: the AI worker applies this client's
-			// reference-face exclusion set to the stream (empty = global default).
-			// NOTE: client_id is caller-supplied metadata, NOT an authenticated
-			// identity — it selects a whitelist bucket only and must never gate
-			// session ownership or access control (that is the owner token's job,
-			// see VerifyOwner). Reference-face bucket isolation is a separate,
-			// tracked concern.
-			//
-			// This value also becomes the AI server's session_id (required,
-			// non-empty on its proto). Falls back to "default" so a caller that
-			// omits client_id gets the same global bucket reference_face.go's
-			// referenceClientID falls back to, instead of sending an empty
-			// session_id that the AI server rejects outright.
-			sessionScope := s.Metadata["client_id"]
-			if sessionScope == "" {
-				sessionScope = "default"
-			}
-			aiStream = client.NewStream(trackCtx, sessionScope)
+			// The AI server requires a non-empty session scope. Use the
+			// server-derived AI client ID so its per-user reference-face bucket
+			// and stream identity cannot be selected through request metadata.
+			aiStream = client.NewStream(trackCtx, s.AIClientID)
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 			Gate:           m.spawnGate,

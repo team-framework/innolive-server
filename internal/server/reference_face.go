@@ -11,6 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"inno-live-server/internal/auth"
+	"inno-live-server/internal/session"
+
 	"github.com/google/uuid"
 )
 
@@ -246,10 +249,11 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 }
 
 func referenceClientID(r *http.Request) string {
-	for _, value := range []string{r.URL.Query().Get("client_id"), r.FormValue("client_id"), r.Header.Get("X-Client-ID")} {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
+	if userID, ok := auth.UserIDFromContext(r.Context()); ok {
+		return session.AIClientIDForUser(userID)
 	}
+	// Reference-face endpoints are mounted behind RequireUser in production.
+	// A deterministic fallback keeps direct handler tests independent from the
+	// authentication package without accepting a caller-controlled bucket.
 	return "default"
 }

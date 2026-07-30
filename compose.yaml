@@ -65,6 +65,16 @@ services:
       EGRESS_AUDIO_OFFSET_MS: "${EGRESS_AUDIO_OFFSET_MS:-0}"
 
       GOOGLE_OAUTH_WEB_CLIENT_ID: "${GOOGLE_OAUTH_WEB_CLIENT_ID:-}"
+      APPLE_TEAM_ID: "${APPLE_TEAM_ID:-}"
+      APPLE_CLIENT_ID: "${APPLE_CLIENT_ID:-}"
+      APPLE_KEY_ID: "${APPLE_KEY_ID:-}"
+      APPLE_PRIVATE_KEY_PATH: "${APPLE_PRIVATE_KEY_PATH:-}"
+      AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64: "${AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64:-}"
+
+    # Apple OAuth를 쓸 때 host의 .p8 파일을 컨테이너 안의 동일 경로로 read-only mount한다.
+    # 비활성 상태에서는 /dev/null을 mount하므로 compose 환경에서도 Apple 설정 없이 기동할 수 있다.
+    volumes:
+      - "${APPLE_PRIVATE_KEY_PATH:-/dev/null}:${APPLE_PRIVATE_KEY_PATH:-/dev/null}:ro"
 
     ports:
       - "${HTTP_PORT:-8000}:8000"

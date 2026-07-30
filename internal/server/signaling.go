@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	"inno-live-server/internal/session"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 )
@@ -67,14 +69,18 @@ func (s *Server) handleSignalingMessage(data []byte) (any, *apiError) {
 
 func (s *Server) handleOffer(payload map[string]json.RawMessage) (any, *apiError) {
 	var request struct {
-		SessionID  string `json:"session_id"`
-		OwnerToken string `json:"owner_token"`
-		SDP        string `json:"sdp"`
+		SessionID   string `json:"session_id"`
+		OwnerToken  string `json:"owner_token"`
+		AccessToken string `json:"access_token"`
+		SDP         string `json:"sdp"`
 	}
 	data, _ := json.Marshal(payload)
 	if err := json.Unmarshal(data, &request); err != nil || strings.TrimSpace(request.SessionID) == "" || !validSDP(request.SDP) {
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
+	}
+	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
+		return nil, apiErr
 	}
 	answer, err := s.sessions.CreateAnswer(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP)
 	if errors.Is(err, session.ErrNotFound) {
@@ -102,6 +108,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 	var request struct {
 		SessionID    string  `json:"session_id"`
 		OwnerToken   string  `json:"owner_token"`
+		AccessToken  string  `json:"access_token"`
 		Candidate    *string `json:"candidate"`
 		SDPMid       *string `json:"sdpMid"`
 		SDPLineIndex *uint16 `json:"sdpMLineIndex"`
@@ -123,6 +130,9 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 		result := badRequest("Invalid ICE candidate.", nil)
 		return nil, &result
 	}
+	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
+		return nil, apiErr
+	}
 	result, err := s.sessions.AddICECandidate(strings.TrimSpace(request.SessionID), request.OwnerToken, webrtc.ICECandidateInit{
 		Candidate:     candidateValue,
 		SDPMid:        request.SDPMid,
@@ -142,6 +152,43 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 		return nil, &apiErr
 	}
 	return result, nil
+}
+
+// verifySignalingSession binds each WebSocket action to the same active user
+// that created the session, in addition to the session's one-time owner token.
+// access_token is part of the encrypted WebSocket message because browsers
+// cannot attach an Authorization header to WebSocket upgrade requests.
+func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string) *apiError {
+	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
+	if errors.Is(err, session.ErrNotFound) {
+		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": sessionID}}
+		return &result
+	}
+	if errors.Is(err, session.ErrUnauthorized) {
+		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": sessionID}}
+		return &result
+	}
+	if err != nil {
+		result := internalError()
+		return &result
+	}
+	if s.authenticateUser == nil {
+		return nil
+	}
+	userID, err := s.authenticateUser(ctx, strings.TrimSpace(accessToken))
+	if err != nil {
+		result := apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "Authentication is required."}
+		return &result
+	}
+	if !sameSessionUser(liveSession.UserID, userID) {
+		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session does not belong to the authenticated user.", Details: map[string]any{"session_id": sessionID}}
+		return &result
+	}
+	return nil
+}
+
+func sameSessionUser(owner, caller uuid.UUID) bool {
+	return owner != uuid.Nil && owner == caller
 }
 
 func signalingErrorResponse(err apiError) map[string]any {

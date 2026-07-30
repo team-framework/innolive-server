@@ -17,26 +17,49 @@ import (
 const maxTokenRequestBody = 8 << 10
 
 type tokenHTTPHandler struct {
-	service *TokenService
-	google  *GoogleLoginService
-	logger  *slog.Logger
-	config  TokenHTTPConfig
+	service    *TokenService
+	google     *GoogleLoginService
+	apple      *AppleLoginService
+	withdrawal *AccountWithdrawalService
+	logger     *slog.Logger
+	config     TokenHTTPConfig
 }
 
 func MountTokenHTTP(next http.Handler, service *TokenService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	return MountAuthHTTP(next, service, nil, logger, config)
 }
 
-func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, logger *slog.Logger, config TokenHTTPConfig, appleServices ...*AppleLoginService) http.Handler {
+	var apple *AppleLoginService
+	if len(appleServices) > 0 {
+		apple = appleServices[0]
+	}
+	return mountAuthHTTP(next, service, google, apple, nil, logger, config)
+}
+
+// MountAuthHTTPWithWithdrawal adds account deletion to the authentication
+// routes. It is kept separate to preserve the existing constructor used by
+// smaller deployments and focused handler tests.
+func MountAuthHTTPWithWithdrawal(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+	return mountAuthHTTP(next, service, google, apple, withdrawal, logger, config)
+}
+
+func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &tokenHTTPHandler{service: service, google: google, logger: logger, config: config}
+	h := &tokenHTTPHandler{service: service, google: google, apple: apple, withdrawal: withdrawal, logger: logger, config: config}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
 	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
 	if google != nil {
 		mux.Handle("/auth/google", h.middleware(http.HandlerFunc(h.handleGoogleLogin)))
+	}
+	if h.apple != nil {
+		mux.Handle("/auth/apple", h.middleware(http.HandlerFunc(h.handleAppleLogin)))
+	}
+	if h.withdrawal != nil {
+		mux.Handle("DELETE /auth/me", h.middleware(http.HandlerFunc(h.handleWithdrawal)))
 	}
 	mux.Handle("/", next)
 	return mux
@@ -181,7 +204,7 @@ func (h *tokenHTTPHandler) middleware(next http.Handler) http.Handler {
 			}
 		}
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"inno-live-server/internal/ai"
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
@@ -24,14 +26,15 @@ import (
 const maxJSONBody = 1 << 20
 
 type Server struct {
-	cfg        config.Config
-	logger     *slog.Logger
-	metrics    *metrics.Registry
-	sessions   *session.Manager
-	ai         *ai.Pool
-	references *referenceStore
-	origins    origin.Config
-	handler    http.Handler
+	cfg              config.Config
+	logger           *slog.Logger
+	metrics          *metrics.Registry
+	sessions         *session.Manager
+	ai               *ai.Pool
+	references       *referenceStore
+	origins          origin.Config
+	authenticateUser func(context.Context, string) (uuid.UUID, error)
+	handler          http.Handler
 }
 
 func New(
@@ -42,6 +45,7 @@ func New(
 	aiPool *ai.Pool,
 	origins origin.Config,
 	requireUser func(http.Handler) http.Handler,
+	userAuthenticators ...func(context.Context, string) (uuid.UUID, error),
 ) *Server {
 	if requireUser == nil {
 		requireUser = func(next http.Handler) http.Handler { return next }
@@ -55,6 +59,9 @@ func New(
 		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
 		origins:    origins,
 	}
+	if len(userAuthenticators) > 0 {
+		s.authenticateUser = userAuthenticators[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -64,10 +71,10 @@ func New(
 	// Every session-scoped route goes through requireSessionOwner so ownership
 	// is enforced structurally. The list endpoint is intentionally removed: it
 	// leaked every active session_id, defeating the token model.
-	mux.HandleFunc("GET /sessions/{session_id}", s.requireSessionOwner(s.handleGetSession))
-	mux.HandleFunc("DELETE /sessions/{session_id}", s.requireSessionOwner(s.handleDeleteSession))
-	mux.HandleFunc("POST /sessions/{session_id}/stream/start", s.requireSessionOwner(s.handleStartStream))
-	mux.HandleFunc("POST /sessions/{session_id}/stream/stop", s.requireSessionOwner(s.handleStopStream))
+	mux.Handle("GET /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleGetSession)))
+	mux.Handle("DELETE /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleDeleteSession)))
+	mux.Handle("POST /sessions/{session_id}/stream/start", requireUser(s.requireSessionOwner(s.handleStartStream)))
+	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
 	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
 	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
 	mux.Handle("DELETE /reference-face", requireUser(http.HandlerFunc(s.handleDeleteReferenceFace)))
@@ -132,7 +139,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("Invalid session request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	liveSession, ownerToken, err := s.sessions.Create(request.Metadata)
+	userID, _ := auth.UserIDFromContext(r.Context())
+	liveSession, ownerToken, err := s.sessions.CreateForUser(userID, request.Metadata)
 	if errors.Is(err, session.ErrCapacityExceeded) {
 		active, limit := s.sessions.Capacity()
 		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)

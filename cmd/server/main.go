@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
@@ -217,6 +219,48 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	appleOAuthConfig, err := auth.LoadAppleOAuthConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid Apple OAuth configuration", "error", err)
+		os.Exit(2)
+	}
+	var appleLogin *auth.AppleLoginService
+	var appleRevoker auth.AppleTokenRevoker
+	var providerTokenCipher *auth.ProviderTokenCipher
+	if appleOAuthConfig.Enabled() {
+		providerTokenCipher, err = auth.NewProviderTokenCipherFromBase64(os.Getenv("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"))
+		if err != nil {
+			logger.Error("invalid provider token encryption configuration", "error", err)
+			os.Exit(2)
+		}
+		appleClient, err := auth.NewAppleOAuthClient(appleOAuthConfig)
+		if err != nil {
+			logger.Error("create Apple OAuth client failed", "error", err)
+			os.Exit(2)
+		}
+		appleRevoker = appleClient
+		appleLogin, err = auth.NewAppleLoginService(
+			appleClient,
+			appleClient,
+			auth.NewGormAppleAccountResolver(databaseConnection.DB),
+			tokenService,
+			providerTokenCipher,
+		)
+		if err != nil {
+			logger.Error("create Apple login service failed", "error", err)
+			os.Exit(2)
+		}
+	}
+	withdrawal, err := auth.NewAccountWithdrawalService(
+		auth.NewGormWithdrawalAccountStore(databaseConnection.DB),
+		providerTokenCipher,
+		appleRevoker,
+		sessionManager.CloseUserSessions,
+	)
+	if err != nil {
+		logger.Error("create account withdrawal service failed", "error", err)
+		os.Exit(2)
+	}
 	logger.Info(
 		"authentication token service ready",
 		"access_ttl", tokenConfig.AccessTTL,
@@ -225,8 +269,10 @@ func main() {
 		"cors_allow_all_origins", originConfig.AllowAllOrigins,
 		"cors_allowed_origins", originConfig.AllowedOrigins,
 		"google_oauth_enabled", googleOAuthConfig.Enabled(),
+		"apple_oauth_enabled", appleOAuthConfig.Enabled(),
 	)
 
+	userStatusChecker := auth.NewGormUserStatusChecker(databaseConnection.DB)
 	application := server.New(
 		cfg,
 		logger,
@@ -234,7 +280,10 @@ func main() {
 		sessionManager,
 		aiPool,
 		originConfig,
-		auth.RequireUser(tokenService, auth.NewGormUserStatusChecker(databaseConnection.DB)),
+		auth.RequireUser(tokenService, userStatusChecker),
+		func(ctx context.Context, raw string) (uuid.UUID, error) {
+			return auth.AuthenticateUser(ctx, tokenService, userStatusChecker, raw)
+		},
 	)
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
@@ -280,7 +329,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTP(application.Handler(), tokenService, googleLogin, logger, originConfig),
+		Handler:           auth.MountAuthHTTPWithWithdrawal(application.Handler(), tokenService, googleLogin, appleLogin, withdrawal, logger, originConfig),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

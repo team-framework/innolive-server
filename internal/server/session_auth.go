@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
 )
 
@@ -18,7 +19,7 @@ type sessionHandler func(w http.ResponseWriter, r *http.Request, sess *session.S
 // verification. Every route under /sessions/{session_id} is registered through
 // this wrapper, so a session-mutating route cannot ship without the auth check.
 //
-//   - missing/malformed Authorization header -> 401
+//   - missing owner token                   -> 401
 //   - unknown session_id                     -> 404
 //   - known session, wrong token             -> 403
 //
@@ -27,14 +28,23 @@ type sessionHandler func(w http.ResponseWriter, r *http.Request, sess *session.S
 func (s *Server) requireSessionOwner(next sessionHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("session_id")
-		token := ""
+		token := strings.TrimSpace(r.Header.Get("X-Session-Owner-Token"))
 		if s.cfg.RequireSessionAuth {
-			bearer, ok := bearerToken(r)
-			if !ok {
-				writeError(w, apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "Missing or malformed Authorization header."})
+			// User-scoped routes reserve Authorization for the access token. Keep
+			// the Authorization fallback only for local/test servers that do not
+			// mount RequireUser, preserving the explicit auth-disabled workflow.
+			if token == "" {
+				if _, authenticated := auth.UserIDFromContext(r.Context()); !authenticated {
+					bearer, ok := bearerToken(r)
+					if ok {
+						token = bearer
+					}
+				}
+			}
+			if token == "" {
+				writeError(w, apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "Session owner token is required."})
 				return
 			}
-			token = bearer
 		}
 		sess, err := s.sessions.VerifyOwner(id, token)
 		if errors.Is(err, session.ErrNotFound) {
@@ -47,6 +57,10 @@ func (s *Server) requireSessionOwner(next sessionHandler) http.HandlerFunc {
 		}
 		if err != nil {
 			writeError(w, internalError())
+			return
+		}
+		if userID, authenticated := auth.UserIDFromContext(r.Context()); authenticated && sess.UserID != userID {
+			writeError(w, apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session does not belong to the authenticated user.", Details: map[string]any{"session_id": id}})
 			return
 		}
 		next(w, r, sess)

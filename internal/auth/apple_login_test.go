@@ -1,0 +1,162 @@
+package auth
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
+
+type stubAppleExchanger struct {
+	response AppleTokenResponse
+	err      error
+	seen     string
+}
+
+func (s *stubAppleExchanger) Exchange(_ context.Context, code string) (AppleTokenResponse, error) {
+	s.seen = code
+	return s.response, s.err
+}
+
+type stubAppleVerifier struct {
+	identity  AppleIdentity
+	err       error
+	seenID    string
+	seenNonce string
+}
+
+func (s *stubAppleVerifier) Verify(_ context.Context, idToken, nonce string) (AppleIdentity, error) {
+	s.seenID, s.seenNonce = idToken, nonce
+	return s.identity, s.err
+}
+
+type stubAppleAccounts struct {
+	user       appleLoginUser
+	err        error
+	identity   AppleIdentity
+	ciphertext []byte
+	version    *int16
+}
+
+func (s *stubAppleAccounts) ResolveAppleIdentity(_ context.Context, identity AppleIdentity, ciphertext []byte, version *int16) (appleLoginUser, error) {
+	s.identity, s.ciphertext, s.version = identity, ciphertext, version
+	return s.user, s.err
+}
+
+func TestAppleLoginIssuesTokensAndEncryptsProviderRefreshToken(t *testing.T) {
+	cipher := &ProviderTokenCipher{key: []byte("0123456789abcdef0123456789abcdef")}
+	exchanger := &stubAppleExchanger{response: AppleTokenResponse{IDToken: "apple-id-token", RefreshToken: "apple-refresh-token"}}
+	verifier := &stubAppleVerifier{identity: AppleIdentity{Subject: "apple-stable-subject", Email: "person@privaterelay.appleid.com", EmailVerified: true, IsPrivateEmail: true}}
+	accounts := &stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive}}
+	service, err := NewAppleLoginService(exchanger, verifier, accounts, testTokenService(newMemoryRefreshStore()), cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := service.Login(context.Background(), "authorization-code", "nonce-value", "Ada Lovelace", ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.AccessToken == "" || pair.RefreshToken == "" {
+		t.Fatalf("incomplete token pair: %+v", pair)
+	}
+	if exchanger.seen != "authorization-code" || verifier.seenID != "apple-id-token" || verifier.seenNonce != "nonce-value" {
+		t.Fatalf("unexpected exchange/verifier inputs: code=%q id=%q nonce=%q", exchanger.seen, verifier.seenID, verifier.seenNonce)
+	}
+	if accounts.identity.DisplayName != "Ada Lovelace" || len(accounts.ciphertext) == 0 || accounts.version == nil {
+		t.Fatalf("resolver data = %+v ciphertext=%d version=%v", accounts.identity, len(accounts.ciphertext), accounts.version)
+	}
+	plaintext, err := cipher.Decrypt(accounts.ciphertext, accounts.version)
+	if err != nil || plaintext != "apple-refresh-token" {
+		t.Fatalf("decrypt stored refresh token = %q, %v", plaintext, err)
+	}
+}
+
+func TestAppleLoginRejectsInvalidIDTokenAndInactiveUser(t *testing.T) {
+	cipher := &ProviderTokenCipher{key: []byte("0123456789abcdef0123456789abcdef")}
+	invalid, err := NewAppleLoginService(
+		&stubAppleExchanger{response: AppleTokenResponse{IDToken: "forged"}},
+		&stubAppleVerifier{err: ErrInvalidAppleIDToken},
+		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive}},
+		testTokenService(newMemoryRefreshStore()), cipher,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invalid.Login(context.Background(), "code", "", "", ClientInfo{}); !errors.Is(err, ErrInvalidAppleIDToken) {
+		t.Fatalf("invalid ID token error = %v", err)
+	}
+	inactive, err := NewAppleLoginService(
+		&stubAppleExchanger{response: AppleTokenResponse{IDToken: "valid"}},
+		&stubAppleVerifier{identity: AppleIdentity{Subject: "apple-subject"}},
+		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusDisabled}},
+		testTokenService(newMemoryRefreshStore()), cipher,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inactive.Login(context.Background(), "code", "", "", ClientInfo{}); !errors.Is(err, ErrUserInactive) {
+		t.Fatalf("inactive user error = %v", err)
+	}
+}
+
+func TestAppleIDTokenVerifierChecksSignatureClaimsAndNonce(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	client := &appleOAuthClient{
+		config:    AppleOAuthConfig{ClientID: "com.innolive.app"},
+		keys:      map[string]*ecdsa.PublicKey{"apple-kid": &privateKey.PublicKey},
+		keysUntil: now.Add(time.Hour), now: func() time.Time { return now },
+	}
+	claims := appleIDTokenClaims{
+		Email: "person@example.com", EmailVerified: "true", IsPrivateEmail: "false", Nonce: "expected-nonce",
+		RegisteredClaims: jwt.RegisteredClaims{Issuer: appleIssuer, Subject: "apple-subject", Audience: jwt.ClaimStrings{"com.innolive.app"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute))},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token.Header["kid"] = "apple-kid"
+	raw, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := client.Verify(context.Background(), raw, "expected-nonce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Subject != "apple-subject" || !identity.EmailVerified || identity.IsPrivateEmail {
+		t.Fatalf("identity = %+v", identity)
+	}
+	if _, err := client.Verify(context.Background(), raw, "wrong-nonce"); !errors.Is(err, ErrInvalidAppleIDToken) {
+		t.Fatalf("nonce mismatch error = %v", err)
+	}
+}
+
+func TestAppleClientSecretUsesES256AppleClaims(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	client := &appleOAuthClient{config: AppleOAuthConfig{TeamID: "TEAMID", ClientID: "com.innolive.app", KeyID: "KEYID"}, privateKey: privateKey, now: func() time.Time { return now }}
+	raw, err := client.clientSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := &jwt.RegisteredClaims{}
+	parsed, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
+		if token.Method != jwt.SigningMethodES256 || token.Header["kid"] != "KEYID" {
+			return nil, errors.New("unexpected client secret header")
+		}
+		return &privateKey.PublicKey, nil
+	})
+	if err != nil || !parsed.Valid || claims.Issuer != "TEAMID" || claims.Subject != "com.innolive.app" || len(claims.Audience) != 1 || claims.Audience[0] != appleIssuer {
+		t.Fatalf("client secret claims=%+v valid=%v err=%v", claims, parsed != nil && parsed.Valid, err)
+	}
+}

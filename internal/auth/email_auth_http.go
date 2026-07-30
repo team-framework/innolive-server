@@ -16,6 +16,14 @@ const (
 // handleEmailSignup follows Clash's /auth/sign-up contract. The signup token
 // is deliberately kept out of the JSON response and sent as an HttpOnly cookie.
 func (h *tokenHTTPHandler) handleEmailSignup(w http.ResponseWriter, r *http.Request) {
+	h.handleEmailSignupMode(w, r, false)
+}
+
+func (h *tokenHTTPHandler) handleNativeEmailSignup(w http.ResponseWriter, r *http.Request) {
+	h.handleEmailSignupMode(w, r, true)
+}
+
+func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.Request, native bool) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -47,6 +55,10 @@ func (h *tokenHTTPHandler) handleEmailSignup(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if native {
+		h.writeJSON(w, http.StatusOK, map[string]string{"status": "verification_email_sent", "signup_token": token})
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     signupTokenCookieName,
 		Value:    token,
@@ -62,6 +74,14 @@ func (h *tokenHTTPHandler) handleEmailSignup(w http.ResponseWriter, r *http.Requ
 // handleEmailSignupVerification follows Clash's /auth/verify-email contract:
 // it reads signup_token from the HttpOnly cookie and accepts only the code.
 func (h *tokenHTTPHandler) handleEmailSignupVerification(w http.ResponseWriter, r *http.Request) {
+	h.handleEmailSignupVerificationMode(w, r, false)
+}
+
+func (h *tokenHTTPHandler) handleNativeEmailSignupVerification(w http.ResponseWriter, r *http.Request) {
+	h.handleEmailSignupVerificationMode(w, r, true)
+}
+
+func (h *tokenHTTPHandler) handleEmailSignupVerificationMode(w http.ResponseWriter, r *http.Request, native bool) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -77,12 +97,20 @@ func (h *tokenHTTPHandler) handleEmailSignupVerification(w http.ResponseWriter, 
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email verification request.")
 		return
 	}
-	cookie, err := r.Cookie(signupTokenCookieName)
-	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+	var signupToken string
+	if native {
+		signupToken = strings.TrimSpace(request.SignupToken)
+	} else {
+		cookie, err := r.Cookie(signupTokenCookieName)
+		if err == nil {
+			signupToken = strings.TrimSpace(cookie.Value)
+		}
+	}
+	if signupToken == "" {
 		h.writeError(w, r, http.StatusBadRequest, "invalid_signup_token", "Signup verification session is invalid or expired.")
 		return
 	}
-	if err := h.email.CompleteSignup(r.Context(), cookie.Value, request.VerificationCode); err != nil {
+	if err := h.email.CompleteSignup(r.Context(), signupToken, request.VerificationCode); err != nil {
 		switch {
 		case errors.Is(err, ErrEmailVerificationInvalid):
 			h.writeError(w, r, http.StatusBadRequest, "invalid_verification_code", "Verification code is invalid or expired.")
@@ -97,7 +125,9 @@ func (h *tokenHTTPHandler) handleEmailSignupVerification(w http.ResponseWriter, 
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{Name: signupTokenCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode})
+	if !native {
+		http.SetCookie(w, &http.Cookie{Name: signupTokenCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteNoneMode})
+	}
 	h.writeJSON(w, http.StatusOK, map[string]string{"status": "email_verified"})
 }
 
@@ -139,6 +169,7 @@ type emailSignupRequest struct {
 }
 
 type emailVerificationRequest struct {
+	SignupToken      string `json:"signup_token"`
 	VerificationCode string `json:"verification_code"`
 }
 

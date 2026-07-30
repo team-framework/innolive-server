@@ -67,6 +67,8 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if h.email != nil {
 		mux.Handle("/auth/sign-up", h.middleware(http.HandlerFunc(h.handleEmailSignup)))
 		mux.Handle("/auth/verify-email", h.middleware(http.HandlerFunc(h.handleEmailSignupVerification)))
+		mux.Handle("/auth/native/sign-up", h.middleware(http.HandlerFunc(h.handleNativeEmailSignup)))
+		mux.Handle("/auth/native/verify-email", h.middleware(http.HandlerFunc(h.handleNativeEmailSignupVerification)))
 		mux.Handle("/auth/sign-in", h.middleware(http.HandlerFunc(h.handleEmailLogin)))
 	}
 	if h.withdrawal != nil {

@@ -20,6 +20,7 @@ type tokenHTTPHandler struct {
 	service    *TokenService
 	google     *GoogleLoginService
 	apple      *AppleLoginService
+	email      *EmailAuthService
 	withdrawal *AccountWithdrawalService
 	logger     *slog.Logger
 	config     TokenHTTPConfig
@@ -34,21 +35,26 @@ func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if len(appleServices) > 0 {
 		apple = appleServices[0]
 	}
-	return mountAuthHTTP(next, service, google, apple, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, nil, logger, config)
 }
 
 // MountAuthHTTPWithWithdrawal adds account deletion to the authentication
 // routes. It is kept separate to preserve the existing constructor used by
 // smaller deployments and focused handler tests.
 func MountAuthHTTPWithWithdrawal(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
-	return mountAuthHTTP(next, service, google, apple, withdrawal, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, logger, config)
 }
 
-func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+// MountAuthHTTPWithServices mounts all configured authentication services.
+func MountAuthHTTPWithServices(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+	return mountAuthHTTP(next, service, google, apple, email, withdrawal, logger, config)
+}
+
+func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &tokenHTTPHandler{service: service, google: google, apple: apple, withdrawal: withdrawal, logger: logger, config: config}
+	h := &tokenHTTPHandler{service: service, google: google, apple: apple, email: email, withdrawal: withdrawal, logger: logger, config: config}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
 	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
@@ -57,6 +63,11 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	}
 	if h.apple != nil {
 		mux.Handle("/auth/apple", h.middleware(http.HandlerFunc(h.handleAppleLogin)))
+	}
+	if h.email != nil {
+		mux.Handle("/auth/sign-up", h.middleware(http.HandlerFunc(h.handleEmailSignup)))
+		mux.Handle("/auth/verify-email", h.middleware(http.HandlerFunc(h.handleEmailSignupVerification)))
+		mux.Handle("/auth/sign-in", h.middleware(http.HandlerFunc(h.handleEmailLogin)))
 	}
 	if h.withdrawal != nil {
 		mux.Handle("DELETE /auth/me", h.middleware(http.HandlerFunc(h.handleWithdrawal)))

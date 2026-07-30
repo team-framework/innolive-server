@@ -18,7 +18,7 @@
 - **YouTube RTMP 송출** — 처리된 영상 + 발행자 마이크(Opus) 오디오를 FFmpeg로 라이브 송출.
 - **참조 얼굴 관리** — 블러에서 제외할 "본인 얼굴"을 REST API로 등록/삭제.
 - **세션 소유권 인증** — 세션마다 발급되는 토큰으로 소유자만 제어 가능.
-- **인증 기반 사용자 관리** — PostgreSQL + GORM. Google/Apple OAuth 계정과 로그인 세션 관리.
+- **인증 기반 사용자 관리** — PostgreSQL + GORM. Google/Apple OAuth 및 이메일 인증 기반 계정과 로그인 세션 관리.
 - **관측성** — Prometheus 메트릭, 구조화 JSON 로그, pprof 프로파일링.
 
 ## 기술 스택
@@ -118,6 +118,9 @@ make proto        # protobuf 코드 생성
 | `ENABLE_AUDIO_EGRESS` | `false` | 발행자 마이크 오디오 송출 여부 |
 | `DATABASE_URL` | — | PostgreSQL 연결 문자열 |
 | `DATABASE_MIGRATION_MODE` | `auto` | `auto` / `versioned` / `off` |
+| `AUTH_EMAIL_SMTP_HOST` | — | SMTP 호스트. 비어 있으면 이메일 로그인 API가 비활성화됨 |
+| `AUTH_EMAIL_REDIS_ADDR` | — | 가입 대기 정보·인증 코드를 보관하는 Redis 주소 |
+| `AUTH_EMAIL_VERIFICATION_CODE_TTL` | `5m` | 회원가입 인증 코드 만료 시간 |
 
 ## 주요 HTTP 엔드포인트
 
@@ -131,6 +134,9 @@ make proto        # protobuf 코드 생성
 | `POST` | `/sessions/{id}/stream/start`\|`/stop` | RTMP 송출 시작/중지 |
 | `GET`/`POST`/`DELETE` | `/reference-face` | 참조(본인) 얼굴 등록/조회/삭제 |
 | `GET` | `/signaling` | WebRTC 시그널링(WebSocket) |
+| `POST` | `/auth/sign-up` | 이메일·비밀번호로 인증 코드를 발송하고 `signup_token` HttpOnly 쿠키 설정 |
+| `POST` | `/auth/verify-email` | 쿠키의 가입 토큰과 인증 코드를 검증해 User 생성 및 Redis 상태 정리 |
+| `POST` | `/auth/sign-in` | 이메일·비밀번호 로그인 및 토큰 발급 |
 
 ## 라이선스
 

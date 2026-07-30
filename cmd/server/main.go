@@ -251,6 +251,40 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	emailAuthConfig, err := auth.LoadEmailAuthConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid email authentication configuration", "error", err)
+		os.Exit(2)
+	}
+	var emailLogin *auth.EmailAuthService
+	if emailAuthConfig.Enabled() {
+		pendingEmailSignupStore, err := auth.NewRedisPendingEmailSignupStore(context.Background(), emailAuthConfig)
+		if err != nil {
+			logger.Error("connect email signup Redis failed", "error", err)
+			os.Exit(2)
+		}
+		defer func() {
+			if err := pendingEmailSignupStore.Close(); err != nil {
+				logger.Error("close email signup Redis failed", "error", err)
+			}
+		}()
+		emailSender, err := auth.NewSMTPVerificationEmailSender(emailAuthConfig)
+		if err != nil {
+			logger.Error("create email verification sender failed", "error", err)
+			os.Exit(2)
+		}
+		emailLogin, err = auth.NewEmailAuthService(
+			pendingEmailSignupStore,
+			auth.NewGormEmailAccountStore(databaseConnection.DB),
+			emailSender,
+			tokenService,
+			emailAuthConfig,
+		)
+		if err != nil {
+			logger.Error("create email authentication service failed", "error", err)
+			os.Exit(2)
+		}
+	}
 	withdrawal, err := auth.NewAccountWithdrawalService(
 		auth.NewGormWithdrawalAccountStore(databaseConnection.DB),
 		providerTokenCipher,
@@ -270,6 +304,7 @@ func main() {
 		"cors_allowed_origins", originConfig.AllowedOrigins,
 		"google_oauth_enabled", googleOAuthConfig.Enabled(),
 		"apple_oauth_enabled", appleOAuthConfig.Enabled(),
+		"email_auth_enabled", emailAuthConfig.Enabled(),
 	)
 
 	userStatusChecker := auth.NewGormUserStatusChecker(databaseConnection.DB)
@@ -328,7 +363,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithWithdrawal(application.Handler(), tokenService, googleLogin, appleLogin, withdrawal, logger, originConfig),
+		Handler:           auth.MountAuthHTTPWithServices(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, logger, originConfig),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

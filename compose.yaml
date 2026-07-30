@@ -70,6 +70,20 @@ services:
       APPLE_KEY_ID: "${APPLE_KEY_ID:-}"
       APPLE_PRIVATE_KEY_PATH: "${APPLE_PRIVATE_KEY_PATH:-}"
       AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64: "${AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64:-}"
+      AUTH_EMAIL_SMTP_HOST: "${AUTH_EMAIL_SMTP_HOST:-}"
+      AUTH_EMAIL_SMTP_PORT: "${AUTH_EMAIL_SMTP_PORT:-587}"
+      AUTH_EMAIL_SMTP_USERNAME: "${AUTH_EMAIL_SMTP_USERNAME:-}"
+      AUTH_EMAIL_SMTP_PASSWORD: "${AUTH_EMAIL_SMTP_PASSWORD:-}"
+      AUTH_EMAIL_SMTP_STARTTLS: "${AUTH_EMAIL_SMTP_STARTTLS:-true}"
+      AUTH_EMAIL_SMTP_IMPLICIT_TLS: "${AUTH_EMAIL_SMTP_IMPLICIT_TLS:-false}"
+      AUTH_EMAIL_SENDER_ADDRESS: "${AUTH_EMAIL_SENDER_ADDRESS:-}"
+      AUTH_EMAIL_SENDER_NAME: "${AUTH_EMAIL_SENDER_NAME:-InnoLive}"
+      AUTH_EMAIL_REDIS_ADDR: "${AUTH_EMAIL_REDIS_ADDR:-redis:6379}"
+      AUTH_EMAIL_REDIS_USERNAME: "${AUTH_EMAIL_REDIS_USERNAME:-}"
+      AUTH_EMAIL_REDIS_PASSWORD: "${AUTH_EMAIL_REDIS_PASSWORD:-}"
+      AUTH_EMAIL_REDIS_DB: "${AUTH_EMAIL_REDIS_DB:-0}"
+      AUTH_EMAIL_VERIFICATION_CODE_TTL: "${AUTH_EMAIL_VERIFICATION_CODE_TTL:-5m}"
+      AUTH_EMAIL_PENDING_USER_TTL: "${AUTH_EMAIL_PENDING_USER_TTL:-30m}"
 
     # Apple OAuth를 쓸 때 host의 .p8 파일을 컨테이너 안의 동일 경로로 read-only mount한다.
     # 비활성 상태에서는 /dev/null을 mount하므로 compose 환경에서도 Apple 설정 없이 기동할 수 있다.
@@ -82,6 +96,8 @@ services:
 
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
     extra_hosts:
@@ -105,6 +121,16 @@ services:
           "CMD-SHELL",
           "pg_isready -U ${POSTGRES_USER:-innolive} -d ${POSTGRES_DB:-innolive}"
         ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10

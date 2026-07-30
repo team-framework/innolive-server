@@ -10,3 +10,5 @@ loadtest/results/
 # 로컬 전용 (공개 레포에서 제외)
 /CLAUDE.md
 /docs/
+secrets/
+*.p8

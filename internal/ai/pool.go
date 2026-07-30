@@ -61,17 +61,27 @@ func (p *Pool) Close() error {
 
 // AddWhitelist registers a client's reference face on every AI worker (sessions
 // spread round-robin across targets, so the whitelist must exist on all of them).
-func (p *Pool) AddWhitelist(ctx context.Context, clientID, faceID string, data []byte) (*aiv1.WhitelistResponse, error) {
+//
+// Each worker generates its own entry_id for this face (server-authoritative,
+// unlike the old client-supplied face_id), so the id in the returned response
+// is only guaranteed valid on whichever worker happened to be picked as the
+// representative response in broadcast(). DeleteWhitelist re-sends that same
+// id to every worker; a worker whose own id differs will not find a match for
+// this specific entry and silently no-ops, leaving that copy until the next
+// session-wide (empty entry_id) cleanup. Acceptable for now: it is a stale
+// in-memory entry on one worker, not a whitelist leak across sessions.
+func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*aiv1.WhitelistResponse, error) {
 	return p.broadcast("add", func(c *Client) (*aiv1.WhitelistResponse, error) {
-		return c.AddWhitelist(ctx, clientID, faceID, data)
+		return c.AddWhitelist(ctx, sessionID, data)
 	})
 }
 
-// RemoveWhitelist removes a client's reference face(s) from every AI worker.
-// Empty faceID removes all reference faces for the client.
-func (p *Pool) RemoveWhitelist(ctx context.Context, clientID, faceID string) (*aiv1.WhitelistResponse, error) {
-	return p.broadcast("remove", func(c *Client) (*aiv1.WhitelistResponse, error) {
-		return c.RemoveWhitelist(ctx, clientID, faceID)
+// DeleteWhitelist removes a whitelist entry from every AI worker. Empty
+// entryID removes all entries for the session (see AddWhitelist doc for the
+// per-worker entry_id caveat on non-empty entryID).
+func (p *Pool) DeleteWhitelist(ctx context.Context, sessionID, entryID string) (*aiv1.WhitelistResponse, error) {
+	return p.broadcast("delete", func(c *Client) (*aiv1.WhitelistResponse, error) {
+		return c.DeleteWhitelist(ctx, sessionID, entryID)
 	})
 }
 

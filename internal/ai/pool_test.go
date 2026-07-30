@@ -77,7 +77,7 @@ func TestPoolAddWhitelistBroadcastsToEveryWorker(t *testing.T) {
 		newBufconnClient(t, "worker-b", serverB),
 	}}
 
-	response, err := pool.AddWhitelist(context.Background(), "", "", []byte("face"))
+	response, err := pool.AddWhitelist(context.Background(), "", []byte("face"))
 	if err != nil {
 		t.Fatalf("AddWhitelist() error = %v", err)
 	}
@@ -102,7 +102,7 @@ func TestPoolAddWhitelistReportsFailedTarget(t *testing.T) {
 	}}
 	defer unreachable.Close()
 
-	if _, err := pool.AddWhitelist(context.Background(), "", "", []byte("face")); err == nil {
+	if _, err := pool.AddWhitelist(context.Background(), "", []byte("face")); err == nil {
 		t.Fatal("AddWhitelist() with an unreachable worker should fail")
 	} else if !strings.Contains(err.Error(), "127.0.0.1:1") {
 		t.Fatalf("error should name the failed target, got: %v", err)

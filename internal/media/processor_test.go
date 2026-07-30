@@ -12,13 +12,9 @@ import (
 
 type fakeAIStream struct {
 	process func([]byte, int64) (*aiv1.ProcessedVideoChunk, error)
-
-	lastWidth, lastHeight uint16
-	lastPixFmt            string
 }
 
-func (f *fakeAIStream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
-	f.lastWidth, f.lastHeight, f.lastPixFmt = width, height, pixFmt
+func (f *fakeAIStream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
 	return f.process(data, timestamp)
 }
 func (f *fakeAIStream) Close() {}
@@ -44,47 +40,26 @@ func TestRealProcessorCallsAIWithImage(t *testing.T) {
 	}
 }
 
-// TestProcessImageJPEGModeSendsZeroDimensions guards against a real bug: some
-// AI servers reuse VideoChunk's width/height field numbers for unrelated data
-// (e.g. batch_size). jpeg is self-describing, so width/height must stay zero
-// in jpeg mode regardless of the frame's actual decoded size.
-func TestProcessImageJPEGModeSendsZeroDimensions(t *testing.T) {
+// TestProcessImageRejectsNonEmptyErrorCode guards the fail-closed path added
+// for the AI server's error_code field: the RPC can succeed at the transport
+// level (status_message=="success"-shaped response) while still reporting a
+// per-frame failure via error_code, and that must be treated as a failure,
+// not a successfully processed frame.
+func TestProcessImageRejectsNonEmptyErrorCode(t *testing.T) {
 	ai := &fakeAIStream{process: func(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
-		return &aiv1.ProcessedVideoChunk{Data: []byte("out"), Timestamp: timestamp, StatusMessage: "success"}, nil
+		return &aiv1.ProcessedVideoChunk{
+			Data:         []byte("out"),
+			Timestamp:    timestamp,
+			ErrorCode:    "decode_failed",
+			ErrorMessage: "could not decode frame",
+		}, nil
 	}}
 	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyFreeze, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processor.ProcessImage([]byte("in"), 1, 1280, 720); err != nil {
-		t.Fatalf("ProcessImage() error = %v", err)
-	}
-	if ai.lastWidth != 0 || ai.lastHeight != 0 {
-		t.Fatalf("jpeg mode sent width=%d height=%d, want 0,0", ai.lastWidth, ai.lastHeight)
-	}
-	if ai.lastPixFmt != "" {
-		t.Fatalf("jpeg mode sent pix_fmt=%q, want empty", ai.lastPixFmt)
-	}
-}
-
-// TestProcessImageRawModeSendsRealDimensions confirms the fix above didn't
-// zero out width/height for the raw wire format, which needs them to decode.
-func TestProcessImageRawModeSendsRealDimensions(t *testing.T) {
-	ai := &fakeAIStream{process: func(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
-		return &aiv1.ProcessedVideoChunk{Data: []byte("out"), Timestamp: timestamp, StatusMessage: "success"}, nil
-	}}
-	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatRaw, config.FailurePolicyFreeze, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := processor.ProcessImage([]byte("in"), 1, 1280, 720); err != nil {
-		t.Fatalf("ProcessImage() error = %v", err)
-	}
-	if ai.lastWidth != 1280 || ai.lastHeight != 720 {
-		t.Fatalf("raw mode sent width=%d height=%d, want 1280,720", ai.lastWidth, ai.lastHeight)
-	}
-	if ai.lastPixFmt != "yuv420p" {
-		t.Fatalf("raw mode sent pix_fmt=%q, want yuv420p", ai.lastPixFmt)
+	if _, err := processor.ProcessImage([]byte("in"), 1); err == nil {
+		t.Fatal("ProcessImage() error = nil, want a failure for non-empty error_code")
 	}
 }
 

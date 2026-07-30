@@ -180,9 +180,11 @@ func (c Config) Validate() error {
 		return errors.New("AI_FRAME_QUEUE_SIZE must be at least 1")
 	}
 	switch c.AIWireFormat {
-	case "", WireFormatJPEG, WireFormatRaw: // empty defaults to jpeg downstream
+	case "", WireFormatJPEG: // empty defaults to jpeg downstream
+	case WireFormatRaw:
+		return errors.New("AI_FRAME_WIRE_FORMAT=raw is not supported by this AI server's proto (VideoChunk has no width/height/pix_fmt fields to carry raw yuv420p) — use jpeg")
 	default:
-		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be one of jpeg, raw: %q", c.AIWireFormat)
+		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be jpeg: %q", c.AIWireFormat)
 	}
 	switch c.AIFailurePolicy {
 	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream

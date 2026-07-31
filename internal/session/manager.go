@@ -91,6 +91,7 @@ type Session struct {
 	Status     string
 	PC         *webrtc.PeerConnection
 	Output     *webrtc.TrackLocalStaticSample
+	VideoCodec media.VideoCodec
 	Sender     *webrtc.RTPSender
 	Timing     Timing
 	Stream     StreamState
@@ -233,15 +234,6 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		return nil, "", fmt.Errorf("create PeerConnection: %w", err)
 	}
 	id := uuid.NewString()
-	output, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
-		"processed-video",
-		id,
-	)
-	if err != nil {
-		_ = pc.Close()
-		return nil, "", fmt.Errorf("create processed video track: %w", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
 	s := &Session{
@@ -253,7 +245,6 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		Metadata:   copyMetadata(metadata),
 		Status:     "active",
 		PC:         pc,
-		Output:     output,
 		Stream:     StreamState{Status: "idle", UpdatedAt: now},
 		ownerHash:  ownerHash,
 		cancel:     cancel,
@@ -480,6 +471,17 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			s.mu.Unlock()
 			return
 		}
+		codec := media.VideoCodec(track.Codec().MimeType)
+		s.mu.RLock()
+		expectedCodec := s.VideoCodec
+		s.mu.RUnlock()
+		if !codec.Valid() || codec != expectedCodec {
+			s.mu.Lock()
+			s.ignoredTracks++
+			s.mu.Unlock()
+			m.logger.Warn("ignoring video track outside negotiated codec", "session_id", s.ID, "codec", track.Codec().MimeType, "expected_codec", expectedCodec)
+			return
+		}
 		s.mu.Lock()
 		if s.rawTrackID != "" && s.trackCancel != nil {
 			// Replacement track (e.g. camera switch): stop the old pipeline and
@@ -491,7 +493,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		trackCtx, trackCancel := context.WithCancel(ctx)
 		s.trackCancel = trackCancel
 		s.rawTrackID = track.ID()
-		s.processedTrackID = s.Output.ID()
+		if s.Output != nil {
+			s.processedTrackID = s.Output.ID()
+		}
 		s.UpdatedAt = time.Now().UTC()
 		s.mu.Unlock()
 
@@ -508,6 +512,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			Gate:           m.spawnGate,
 			EncoderThreads: m.cfg.FFmpegEncoderThreads,
 			WireFormat:     m.cfg.AIWireFormat,
+			VideoCodec:     codec,
 		})
 		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {

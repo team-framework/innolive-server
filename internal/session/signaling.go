@@ -49,21 +49,11 @@ func (m *Manager) CreateAnswer(sessionID, ownerToken, offerSDP string) (Answer, 
 	if err := s.PC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
 		return Answer{}, fmt.Errorf("set remote offer: %w", err)
 	}
-	if err := s.applyPendingICE(); err != nil {
+	if err := s.prepareOutputForOffer(offerSDP); err != nil {
 		return Answer{}, err
 	}
-	s.mu.RLock()
-	senderMissing := s.Sender == nil
-	s.mu.RUnlock()
-	if senderMissing {
-		sender, err := s.PC.AddTrack(s.Output)
-		if err != nil {
-			return Answer{}, fmt.Errorf("add processed video track: %w", err)
-		}
-		s.mu.Lock()
-		s.Sender = sender
-		s.mu.Unlock()
-		go drainRTCP(sender)
+	if err := s.applyPendingICE(); err != nil {
+		return Answer{}, err
 	}
 	answer, err := s.PC.CreateAnswer(nil)
 	if err != nil {

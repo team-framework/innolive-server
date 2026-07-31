@@ -10,6 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/logging v0.2.3
 	github.com/pion/rtp v1.8.22
+	github.com/pion/sdp/v3 v3.0.13
 	github.com/pion/webrtc/v4 v4.1.2
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/crypto v0.54.0
@@ -48,7 +49,6 @@ require (
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.15 // indirect
 	github.com/pion/sctp v1.8.39 // indirect
-	github.com/pion/sdp/v3 v3.0.13 // indirect
 	github.com/pion/srtp/v3 v3.0.5 // indirect
 	github.com/pion/stun/v3 v3.0.0 // indirect
 	github.com/pion/transport/v3 v3.0.7 // indirect

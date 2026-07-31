@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -92,10 +93,11 @@ type rtpFrameAssembler struct {
 	mode     string
 }
 
-func newRTPFrameAssembler(registry *metrics.Registry, mode config.PrivacyMode) *rtpFrameAssembler {
+func newRTPFrameAssembler(registry *metrics.Registry, mode config.PrivacyMode, codec VideoCodec) (*rtpFrameAssembler, error) {
 	return newRTPFrameAssemblerWithLimits(
 		registry,
 		mode,
+		codec,
 		rtpReorderMaxLatePackets,
 		rtpReorderMaxDelay,
 	)
@@ -104,19 +106,29 @@ func newRTPFrameAssembler(registry *metrics.Registry, mode config.PrivacyMode) *
 func newRTPFrameAssemblerWithLimits(
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
+	codec VideoCodec,
 	maxLatePackets uint16,
 	maxLateDelay time.Duration,
-) *rtpFrameAssembler {
+) (*rtpFrameAssembler, error) {
+	var depacketizer rtp.Depacketizer
+	switch codec {
+	case VideoCodecVP8:
+		depacketizer = &codecs.VP8Packet{}
+	case VideoCodecH264:
+		depacketizer = &codecs.H264Packet{}
+	default:
+		return nil, fmt.Errorf("unsupported video codec %q", codec)
+	}
 	return &rtpFrameAssembler{
 		builder: samplebuilder.New(
 			maxLatePackets,
-			&codecs.VP8Packet{},
+			depacketizer,
 			videoClockRate,
 			samplebuilder.WithMaxTimeDelay(maxLateDelay),
 		),
 		registry: registry,
 		mode:     string(mode),
-	}
+	}, nil
 }
 
 func (a *rtpFrameAssembler) push(packet *rtp.Packet) []frame {
@@ -360,7 +372,12 @@ func readFrames(
 	packets := make(chan *rtp.Packet, rtpIngressQueueSize)
 	go readRTPPackets(ctx, logger, remote, packets, registry, mode)
 
-	assembler := newRTPFrameAssembler(registry, mode)
+	codec := VideoCodec(remote.Codec().MimeType)
+	assembler, err := newRTPFrameAssembler(registry, mode, codec)
+	if err != nil {
+		logger.Error("unsupported WebRTC video codec", "codec", remote.Codec().MimeType)
+		return
+	}
 	for packet := range packets {
 		if !emitFrames(ctx, frames, assembler.push(packet)) {
 			return

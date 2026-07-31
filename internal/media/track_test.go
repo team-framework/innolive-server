@@ -31,12 +31,16 @@ func TestRTPSequenceTrackerRecordsGapRecoveryAndOutOfOrder(t *testing.T) {
 
 func TestRTPFrameAssemblerReordersLateVP8Packet(t *testing.T) {
 	registry := metrics.New()
-	assembler := newRTPFrameAssemblerWithLimits(
+	assembler, err := newRTPFrameAssemblerWithLimits(
 		registry,
 		config.PrivacyModeBypass,
+		VideoCodecVP8,
 		16,
 		100*time.Millisecond,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var completed []frame
 	var tracker rtpSequenceTracker

@@ -1,0 +1,59 @@
+name: 이슈 담당자·마감일 확인
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  assign-owner:
+    name: 이슈 담당자·마감일 확인
+    runs-on: ubuntu-latest
+    steps:
+      - name: 담당자 자동 지정 및 마감일 검증
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body ?? '';
+            const field = (label) => {
+              const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const match = body.match(new RegExp(`### ${escaped}\\s*\\n+([^\\n]+)`, 'i'));
+              return match?.[1]?.trim() ?? '';
+            };
+            const type = field('작업 유형');
+            const assignee = field('담당자');
+            const deadline = field('마감일');
+            const types = new Set(['feat', 'fix', 'refactor', 'hotfix', 'docs', 'style', 'remove', 'delete', 'test', 'chore', 'comment']);
+            const allowed = new Set(['chaeyn', 'itzjb', 'Finefinee', 'hjbin-25', 'daehyeong2', 'jdw09']);
+            const deadlineFormat = /^20\\d{2}-(0[1-9]|1[0-2])-([0-2]\\d|3[01]) ([01]\\d|2[0-3]):[0-5]\\d$/;
+            const problems = [];
+            if (!types.has(type)) problems.push('작업 유형을 목록에서 선택해 주세요.');
+            if (!allowed.has(assignee)) problems.push('담당자를 목록에서 선택해 주세요.');
+            if (!deadlineFormat.test(deadline)) problems.push('마감일은 `YYYY-MM-DD HH:mm` 형식으로 입력해 주세요.');
+            if (problems.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `이슈 자동화 확인 실패\\n\\n${problems.map((item) => `- ${item}`).join('\\n')}`
+              });
+              core.setFailed(problems.join(' '));
+              return;
+            }
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, assignees: [assignee]
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, labels: ['작업']
+            });
+            const cleanTitle = context.payload.issue.title
+              .replace(/^\\[(?:feat|fix|refactor|hotfix|docs|style|remove|delete|test|chore|comment)\\]\\s*/i, '')
+              .trim();
+            await github.rest.issues.update({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              title: `[${type}] ${cleanTitle}`
+            });

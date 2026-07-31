@@ -1,0 +1,48 @@
+name: 컨벤션 검사
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: 컨벤션 검사
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: PR 제목·브랜치·커밋 컨벤션 검사
+        uses: actions/github-script@v7
+        env:
+          ALLOWED_TYPES: feat|fix|refactor|hotfix|docs|style|remove|delete|test|chore|comment
+        with:
+          script: |
+            const types = process.env.ALLOWED_TYPES;
+            const branch = context.payload.pull_request.head.ref;
+            const title = context.payload.pull_request.title;
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: context.issue.number, per_page: 100
+            });
+            const errors = [];
+            const branchMatch = branch.match(new RegExp(`^(${types})/[a-z0-9]+(?:-[a-z0-9]+)*/#(\\d+)$`));
+            const titleMatch = title.match(new RegExp(`^(${types}):\\s+[a-z0-9]+(?:-[a-z0-9]+)*/#(\\d+)$`));
+            if (!branchMatch) errors.push('브랜치명: <type>/<english-slug>/#<issue-number>');
+            if (!titleMatch) errors.push('PR 제목: <type>: <english-slug>/#<issue-number>');
+            if (branchMatch && titleMatch && branchMatch[2] !== titleMatch[2]) errors.push('브랜치와 PR 제목의 이슈 번호가 서로 다릅니다.');
+            if (branchMatch) {
+              try {
+                await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: Number(branchMatch[2]) });
+              } catch {
+                errors.push(`연결 이슈 #${branchMatch[2]}를 찾을 수 없습니다.`);
+              }
+            }
+            for (const commit of commits) {
+              if (!(new RegExp(`^(${types}):\\s+.*[가-힣].*$`)).test(commit.commit.message.split('\\n')[0])) errors.push(`커밋 제목: ${commit.sha.slice(0, 7)}`);
+            }
+            if (errors.length) core.setFailed(`컨벤션 위반\\n- ${errors.join('\\n- ')}`);

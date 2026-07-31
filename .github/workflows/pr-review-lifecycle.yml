@@ -1,0 +1,31 @@
+name: PR 리뷰 흐름
+
+on:
+  pull_request:
+    types: [ready_for_review]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-team-review:
+    runs-on: ubuntu-latest
+    env:
+      REVIEW_TEAM: ${{ vars.REVIEW_TEAM }}
+    steps:
+      - name: 담당 팀에 리뷰 요청
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const team = process.env.REVIEW_TEAM;
+            if (!team) {
+              core.notice('REVIEW_TEAM이 설정되지 않아 자동 리뷰 요청을 건너뛰어요.');
+              return;
+            }
+            await github.rest.pulls.requestReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              team_reviewers: [team]
+            });
+            core.notice(`${team} 에 리뷰를 요청했어요.`);

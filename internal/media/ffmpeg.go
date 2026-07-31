@@ -27,7 +27,21 @@ const (
 	ffmpegShutdownGrace = 2 * time.Second
 )
 
-var ErrKeyframeRequired = errors.New("a VP8 keyframe is required to initialize the decoder")
+var ErrKeyframeRequired = errors.New("a video keyframe is required to initialize the decoder")
+
+// VideoCodec is the compressed WebRTC video codec used for one session. The
+// codec is selected from the offer before the answer is created, then remains
+// fixed for the lifetime of that negotiated media section.
+type VideoCodec string
+
+const (
+	VideoCodecVP8  VideoCodec = "video/VP8"
+	VideoCodecH264 VideoCodec = "video/H264"
+)
+
+func (c VideoCodec) Valid() bool {
+	return c == VideoCodecVP8 || c == VideoCodecH264
+}
 
 type commandFactory func(ctx context.Context, name string, arguments ...string) *exec.Cmd
 
@@ -41,6 +55,9 @@ type TranscoderOptions struct {
 	// WireFormat selects the decoded-frame format exchanged with the AI
 	// boundary: JPEG (default) or raw yuv420p.
 	WireFormat config.WireFormat
+	// VideoCodec is the negotiated WebRTC codec. VP8 remains the zero-value
+	// default for callers that do not participate in SDP codec selection.
+	VideoCodec VideoCodec
 }
 
 type FFmpegTranscoder struct {
@@ -64,6 +81,9 @@ func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Reg
 	if options.WireFormat == "" {
 		options.WireFormat = config.WireFormatJPEG
 	}
+	if !options.VideoCodec.Valid() {
+		options.VideoCodec = VideoCodecVP8
+	}
 	return &FFmpegTranscoder{
 		path:       path,
 		logger:     logger,
@@ -74,6 +94,13 @@ func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Reg
 }
 
 func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame, output chan<- frame) error {
+	if t.options.VideoCodec == VideoCodecH264 {
+		return t.decodeH264Stream(ctx, input, output)
+	}
+	return t.decodeVP8Stream(ctx, input, output)
+}
+
+func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
 	first, ok := <-input
 	if !ok {
 		return nil
@@ -165,6 +192,13 @@ func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame,
 }
 
 func (t *FFmpegTranscoder) EncodeStream(ctx context.Context, input <-chan frame, output chan<- frame) error {
+	if t.options.VideoCodec == VideoCodecH264 {
+		return t.encodeH264Stream(ctx, input, output)
+	}
+	return t.encodeVP8Stream(ctx, input, output)
+}
+
+func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
 	// The encoder process is spawned only once the first processed frame
 	// exists, mirroring the decoder's keyframe wait. This keeps a cold spike
 	// of N sessions from forking N encoders before any media flows.

@@ -166,3 +166,73 @@ func TestFFmpegTranscoderHandlesVP8Interframes(t *testing.T) {
 		t.Fatalf("encoded frame count = %d, want 10", count)
 	}
 }
+
+func TestFFmpegTranscoderHandlesH264AccessUnits(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is not installed")
+	}
+	stream, err := exec.Command(
+		ffmpegPath,
+		"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=30",
+		"-frames:v", "10", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		"-profile:v", "baseline", "-g", "1", "-bf", "0", "-x264-params", "repeat-headers=1:aud=1:annexb=1",
+		"-f", "h264", "pipe:1",
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate H.264 fixture: %v: %s", err, stream)
+	}
+	reader := h264AccessUnitReader{reader: bufio.NewReader(bytes.NewReader(stream))}
+	frames := make([][]byte, 0, 10)
+	for {
+		frame, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+	}
+	if len(frames) != 10 {
+		t.Fatalf("H.264 access units = %d, want 10", len(frames))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	transcoder := NewFFmpegTranscoder(ffmpegPath, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), TranscoderOptions{VideoCodec: VideoCodecH264})
+	input := make(chan frame, len(frames))
+	decoderOutput := make(chan frame, len(frames))
+	encoded := make(chan frame, len(frames))
+	decodeError := make(chan error, 1)
+	encodeError := make(chan error, 1)
+	go func() {
+		decodeError <- transcoder.DecodeStream(ctx, input, decoderOutput)
+		close(decoderOutput)
+	}()
+	go func() {
+		encodeError <- transcoder.EncodeStream(ctx, decoderOutput, encoded)
+		close(encoded)
+	}()
+	for index, data := range frames {
+		input <- frame{data: data, timestamp: uint32(index * 3000)}
+	}
+	close(input)
+	count := 0
+	for output := range encoded {
+		if len(output.data) == 0 || len(splitAnnexBNALUs(output.data)) == 0 {
+			t.Fatalf("encoded H.264 frame %d is invalid", count)
+		}
+		count++
+	}
+	if err := <-decodeError; err != nil {
+		t.Fatalf("DecodeStream() error = %v", err)
+	}
+	if err := <-encodeError; err != nil {
+		t.Fatalf("EncodeStream() error = %v", err)
+	}
+	if count != len(frames) {
+		t.Fatalf("encoded H.264 frames = %d, want %d", count, len(frames))
+	}
+}

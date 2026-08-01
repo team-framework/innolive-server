@@ -13,6 +13,11 @@ const state = {
   referenceFacePreviewUrl: null,
   session: null,
   ownerToken: null,
+  accessToken: null,
+  refreshToken: null,
+  authEmail: null,
+  refreshPromise: null,
+  signupToken: null,
   pc: null,
   ws: null,
   localStream: null,
@@ -32,16 +37,26 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeRuntimeNotice();
   bindEvents();
   resetRemoteStream();
-  updateButtons();
+  renderAuth();
   updatePeerUi();
   void loadCameras();
   void healthCheck({ quiet: true }).catch(() => null);
   void refreshSessions({ quiet: true }).catch(() => null);
-  void refreshReferenceFace({ quiet: true }).catch(() => null);
+  // Reference-face status is behind RequireUser; fetch it only once signed in.
 });
 
 function bindElements() {
   for (const id of [
+    "authState",
+    "authEmail",
+    "authPassword",
+    "authDetail",
+    "signInBtn",
+    "signUpBtn",
+    "signOutBtn",
+    "verifyRow",
+    "verifyCode",
+    "verifyBtn",
     "healthState",
     "websocketState",
     "peerState",
@@ -119,6 +134,15 @@ function bindEvents() {
     updateServedClientLink();
     void healthCheck().catch(() => null);
     void refreshReferenceFace({ quiet: true }).catch(() => null);
+  });
+  els.signInBtn.addEventListener("click", () => void signIn());
+  els.signUpBtn.addEventListener("click", () => void requestSignup());
+  els.verifyBtn.addEventListener("click", () => void verifySignup());
+  els.signOutBtn.addEventListener("click", () => void signOut());
+  els.authPassword.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      void signIn();
+    }
   });
   els.healthBtn.addEventListener("click", () =>
     void healthCheck().catch(() => null),
@@ -233,10 +257,15 @@ async function apiFetch(path, options = {}) {
   ) {
     headers.set("Content-Type", "application/json");
   }
-  // Session-scoped routes require the owner token minted at session creation.
-  // Attaching it to token-agnostic routes is harmless (the server ignores it).
-  if (state.ownerToken && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${state.ownerToken}`);
+  // User identity: the JWT access token proves an active InnoLive user and is
+  // required by RequireUser on every session and reference-face route.
+  if (state.accessToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${state.accessToken}`);
+  }
+  // Session ownership: the owner token minted once at session creation goes in
+  // its own header. Attaching it to non-session routes is harmless.
+  if (state.ownerToken && !headers.has("X-Session-Owner-Token")) {
+    headers.set("X-Session-Owner-Token", state.ownerToken);
   }
 
   const response = await fetch(apiUrl(path), {
@@ -247,6 +276,18 @@ async function apiFetch(path, options = {}) {
   const payload = parseJsonOrText(text);
 
   if (!response.ok) {
+    // A 401 means the access token is missing or expired. Try one silent
+    // refresh with the stored refresh token and replay the request; only if
+    // that fails do we drop the session so the UI re-gates on sign-in.
+    if (response.status === 401 && !options._retried && state.refreshToken) {
+      if (await refreshAccessToken()) {
+        return apiFetch(path, { ...options, _retried: true });
+      }
+    }
+    if (response.status === 401 && state.accessToken) {
+      clearAuthState();
+      logEvent("warn", "Access token rejected; please sign in again.");
+    }
     const message =
       payload?.error?.message || `${response.status} ${response.statusText}`;
     const error = new Error(message);
@@ -469,6 +510,168 @@ async function healthCheck({ quiet = false } = {}) {
   } finally {
     updateButtons();
   }
+}
+
+async function signIn() {
+  const email = els.authEmail.value.trim();
+  const password = els.authPassword.value;
+  if (!email || !password) {
+    els.authDetail.textContent = "이메일과 비밀번호를 모두 입력하세요.";
+    return;
+  }
+  await runBusy(async () => {
+    persistServerUrl();
+    setPill(els.authState, "Auth checking", "warn");
+    try {
+      const pair = await apiFetch("/auth/sign-in", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      state.accessToken = pair?.access_token || null;
+      state.refreshToken = pair?.refresh_token || null;
+      state.authEmail = email;
+      els.authPassword.value = "";
+      renderAuth();
+      logEvent("ok", "Signed in", { email, expires_in: pair?.expires_in });
+      await refreshReferenceFace({ quiet: true }).catch(() => null);
+    } catch (error) {
+      clearAuthState();
+      // runBusy logs the failure; re-throw so it can surface it once.
+      throw error;
+    }
+  });
+}
+
+// requestSignup starts the email registration flow: the server emails a code
+// and returns a signup_token that pairs with it. The native endpoint returns
+// that token in the body so the browser test client does not depend on cookies.
+async function requestSignup() {
+  const email = els.authEmail.value.trim();
+  const password = els.authPassword.value;
+  if (!email || !password) {
+    els.authDetail.textContent = "회원가입하려면 이메일과 비밀번호를 입력하세요.";
+    return;
+  }
+  await runBusy(async () => {
+    try {
+      const res = await apiFetch("/auth/native/sign-up", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      state.signupToken = res?.signup_token || null;
+      renderAuth();
+      els.authDetail.textContent = `${email} 로 인증 코드를 보냈습니다. 메일의 코드를 입력하고 "인증 완료"를 누르세요.`;
+      logEvent("ok", "Signup verification code sent", { email });
+    } catch (error) {
+      els.authDetail.textContent = `회원가입 실패: ${error.message}`;
+      throw error; // runBusy logs it once
+    }
+  });
+}
+
+// verifySignup confirms the emailed code, then signs in with the same
+// credentials so the tester lands in an authenticated state in one step.
+async function verifySignup() {
+  const code = els.verifyCode.value.trim();
+  if (!state.signupToken || !code) {
+    els.authDetail.textContent = "메일로 받은 인증 코드를 입력하세요.";
+    return;
+  }
+  await runBusy(async () => {
+    try {
+      await apiFetch("/auth/native/verify-email", {
+        method: "POST",
+        body: JSON.stringify({
+          signup_token: state.signupToken,
+          verification_code: code,
+        }),
+      });
+      state.signupToken = null;
+      els.verifyCode.value = "";
+      renderAuth();
+      els.authDetail.textContent = "가입 완료! 로그인합니다...";
+      logEvent("ok", "Email verified");
+    } catch (error) {
+      els.authDetail.textContent = `인증 실패: ${error.message}`;
+      throw error; // runBusy logs it once
+    }
+  });
+  if (!state.signupToken) {
+    await signIn();
+  }
+}
+
+async function signOut() {
+  // Tear down any live connection before dropping the session it belongs to,
+  // so a mid-session sign-out does not leave the peer connection running.
+  await cleanupConnection({ keepSession: false });
+  clearAuthState();
+  logEvent("ok", "Signed out");
+}
+
+function clearAuthState() {
+  state.accessToken = null;
+  state.refreshToken = null;
+  state.authEmail = null;
+  state.signupToken = null;
+  els.verifyCode.value = "";
+  renderAuth();
+}
+
+// refreshAccessToken exchanges the stored refresh token for a fresh access
+// token. It calls fetch directly (not apiFetch) so a 401 from /auth/refresh
+// cannot recurse back into refresh, and it de-duplicates concurrent callers
+// (the 2s session poll can fire several 401s at once) via a shared promise.
+async function refreshAccessToken() {
+  if (!state.refreshToken) {
+    return false;
+  }
+  if (!state.refreshPromise) {
+    state.refreshPromise = (async () => {
+      try {
+        const response = await fetch(apiUrl("/auth/refresh"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: state.refreshToken }),
+        });
+        if (!response.ok) {
+          clearAuthState();
+          return false;
+        }
+        const pair = await response.json();
+        state.accessToken = pair?.access_token || null;
+        state.refreshToken = pair?.refresh_token || state.refreshToken;
+        renderAuth();
+        logEvent("ok", "Access token refreshed");
+        return Boolean(state.accessToken);
+      } catch {
+        return false;
+      } finally {
+        state.refreshPromise = null;
+      }
+    })();
+  }
+  return state.refreshPromise;
+}
+
+// renderAuth reflects the three auth modes and shows only each mode's controls.
+// The verification code field appears solely while entering the emailed code —
+// never on the login screen or when first requesting the code.
+function renderAuth() {
+  const signedIn = Boolean(state.accessToken);
+  const verifying = Boolean(state.signupToken);
+  setPill(els.authState, signedIn ? "Auth ok" : "Auth idle", signedIn ? "ok" : "idle");
+  els.signInBtn.hidden = signedIn || verifying;
+  els.signUpBtn.hidden = signedIn || verifying;
+  els.verifyRow.hidden = !verifying;
+  els.verifyBtn.hidden = !verifying;
+  els.signOutBtn.hidden = !signedIn;
+  els.authDetail.textContent = signedIn
+    ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
+    : verifying
+      ? '메일로 받은 인증 코드를 입력하고 "인증 완료"를 누르세요.'
+      : "로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.";
+  updateButtons();
 }
 
 async function createSessionOnly() {
@@ -745,6 +948,7 @@ async function connectPeer(sessionId) {
     type: "offer",
     session_id: sessionId,
     owner_token: state.ownerToken,
+    access_token: state.accessToken,
     sdp: pc.localDescription.sdp,
   });
   state.offerSent = true;
@@ -1053,6 +1257,7 @@ function queueOrSendCandidate(candidate) {
         type: "ice_candidate",
         session_id: state.session?.session_id,
         owner_token: state.ownerToken,
+        access_token: state.accessToken,
         candidate: candidate.candidate,
         sdpMid: candidate.sdpMid,
         sdpMLineIndex: candidate.sdpMLineIndex,
@@ -1061,6 +1266,7 @@ function queueOrSendCandidate(candidate) {
         type: "ice_candidate",
         session_id: state.session?.session_id,
         owner_token: state.ownerToken,
+        access_token: state.accessToken,
         candidate: null,
       };
 
@@ -1457,10 +1663,16 @@ function updateButtons() {
   const hasConnection = Boolean(state.pc || state.ws || state.localStream);
   const wsOpen = state.ws?.readyState === WebSocket.OPEN;
   const fileProtocol = location.protocol === "file:";
+  const signedIn = Boolean(state.accessToken);
 
-  els.startBtn.disabled = state.busy || fileProtocol;
+  els.signInBtn.disabled = state.busy;
+  els.signUpBtn.disabled = state.busy;
+  els.verifyBtn.disabled = state.busy;
+  els.signOutBtn.disabled = state.busy;
+  // Session APIs are behind RequireUser, so gate them on a signed-in user.
+  els.startBtn.disabled = state.busy || fileProtocol || !signedIn;
   els.healthBtn.disabled = state.busy;
-  els.createSessionBtn.disabled = state.busy;
+  els.createSessionBtn.disabled = state.busy || !signedIn;
   els.refreshSessionsBtn.disabled = state.busy;
   els.disconnectBtn.disabled = state.busy || !hasConnection;
   els.deleteSessionBtn.disabled = state.busy || !hasSession;

@@ -91,7 +91,7 @@ func main() {
 
 	if !cfg.RequireSessionAuth {
 		logger.Warn(
-			"session ownership auth is DISABLED " +
+			"session ownership auth AND user auth are DISABLED " +
 				"(INNOLIVE_REQUIRE_SESSION_AUTH=false); " +
 				"any client can control or hijack any session — " +
 				"for local development only",
@@ -308,6 +308,18 @@ func main() {
 	)
 
 	userStatusChecker := auth.NewGormUserStatusChecker(databaseConnection.DB)
+	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
+	// escape hatch (loud warning above). Extend it to user auth as well so
+	// tokenless bench tooling (pion-load) keeps working against dev servers;
+	// production keeps the default (true) and is unaffected.
+	requireUser := auth.RequireUser(tokenService, userStatusChecker)
+	authenticateUser := func(ctx context.Context, raw string) (uuid.UUID, error) {
+		return auth.AuthenticateUser(ctx, tokenService, userStatusChecker, raw)
+	}
+	if !cfg.RequireSessionAuth {
+		requireUser = nil
+		authenticateUser = nil
+	}
 	application := server.New(
 		cfg,
 		logger,
@@ -315,10 +327,8 @@ func main() {
 		sessionManager,
 		aiPool,
 		originConfig,
-		auth.RequireUser(tokenService, userStatusChecker),
-		func(ctx context.Context, raw string) (uuid.UUID, error) {
-			return auth.AuthenticateUser(ctx, tokenService, userStatusChecker, raw)
-		},
+		requireUser,
+		authenticateUser,
 	)
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.

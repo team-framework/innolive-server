@@ -26,10 +26,20 @@ import (
 	"inno-live-server/internal/metrics"
 )
 
-const (
-	harnessWidth  = 640
-	harnessHeight = 360
+// EGRESS_WIDTH / EGRESS_HEIGHT select the synthetic frame resolution
+// (default 640x360; e.g. 1920x1080 for the FHD pass-through verification).
+var (
+	harnessWidth  = harnessDimension("EGRESS_WIDTH", 640)
+	harnessHeight = harnessDimension("EGRESS_HEIGHT", 360)
 )
+
+func harnessDimension(key string, fallback int) int {
+	parsed, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
 
 func harnessEnvInt(t *testing.T, key string, fallback int) int {
 	value := os.Getenv(key)
@@ -75,7 +85,7 @@ func harnessWireFormat() config.WireFormat {
 // harnessRawYUV builds one yuv420p frame: luma gradient plus a moving bright
 // box, neutral chroma.
 func harnessRawYUV(index int) []byte {
-	size := rawFrameSize(harnessWidth, harnessHeight)
+	size := rawFrameSize(uint16(harnessWidth), uint16(harnessHeight))
 	data := make([]byte, size)
 	for y := 0; y < harnessHeight; y++ {
 		for x := 0; x < harnessWidth; x++ {
@@ -103,7 +113,7 @@ func harnessFrameData(t *testing.T, index int, wire config.WireFormat) []byte {
 
 func newHarnessEgress(t *testing.T, output string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0)
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0, "")
 }
 
 // TestEgressHarnessStream feeds synthetic frames at real-time pace for
@@ -144,8 +154,8 @@ feed:
 				data:      harnessFrameData(t, index, harnessWireFormat()),
 				timestamp: timestamp,
 				stageAt:   time.Now(),
-				width:     harnessWidth,
-				height:    harnessHeight,
+				width:     uint16(harnessWidth),
+				height:    uint16(harnessHeight),
 			}
 			enqueuedAt := time.Now()
 			egress.Enqueue(item)
@@ -179,7 +189,7 @@ func TestEgressHarnessRestartLoop(t *testing.T) {
 		}()
 		timestamp := uint32(90000)
 		for sent := 0; sent < egressMeasureFrames+10; sent++ {
-			egress.Enqueue(frame{data: data, timestamp: timestamp, width: harnessWidth, height: harnessHeight})
+			egress.Enqueue(frame{data: data, timestamp: timestamp, width: uint16(harnessWidth), height: uint16(harnessHeight)})
 			timestamp += 3000
 			time.Sleep(5 * time.Millisecond)
 		}

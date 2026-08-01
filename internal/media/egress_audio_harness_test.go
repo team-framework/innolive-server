@@ -97,7 +97,7 @@ func TestEgressHarnessAudio(t *testing.T) {
 
 	// newHarnessEgress passes nil audio; build one with the pipe attached.
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
-		TranscoderOptions{WireFormat: harnessWireFormat()}, output, pipe, false, 0)
+		TranscoderOptions{WireFormat: harnessWireFormat()}, output, pipe, false, 0, "")
 
 	var done sync.WaitGroup
 	done.Add(1)
@@ -121,8 +121,8 @@ feed:
 				data:      harnessFrameData(t, index, harnessWireFormat()),
 				timestamp: timestamp,
 				stageAt:   time.Now(),
-				width:     harnessWidth,
-				height:    harnessHeight,
+				width:     uint16(harnessWidth),
+				height:    uint16(harnessHeight),
 			})
 			timestamp += step
 			index++

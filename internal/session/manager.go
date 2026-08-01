@@ -527,7 +527,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			egress = media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 				Gate:       m.spawnGate,
 				WireFormat: m.cfg.AIWireFormat,
-			}, youtubeIngestURL+m.cfg.YoutubeStreamKey, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset)
+			}, youtubeIngestURL+m.cfg.YoutubeStreamKey, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate)
 			go egress.Run(trackCtx)
 			m.logger.Info("YouTube RTMP egress enabled", "session_id", s.ID, "url", youtubeIngestURL+"****")
 		}

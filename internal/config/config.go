@@ -73,6 +73,7 @@ type Config struct {
 	EnableAudioEgress       bool
 	EgressLatencyLog        bool
 	EgressAudioOffset       time.Duration
+	EgressVideoBitrate      string
 	RequireSessionAuth      bool
 	LogLevel                string
 	DatabaseURL             string
@@ -114,6 +115,7 @@ func Load() (Config, error) {
 		EnableAudioEgress:       envBool("ENABLE_AUDIO_EGRESS", false),
 		EgressLatencyLog:        envBool("EGRESS_LATENCY_LOG", false),
 		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
+		EgressVideoBitrate:      strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
@@ -202,6 +204,12 @@ func (c Config) Validate() error {
 	}
 	if c.AITimeoutLatchThreshold < 0 {
 		return errors.New("AI_TIMEOUT_LATCH_THRESHOLD must not be negative")
+	}
+	if v := c.EgressVideoBitrate; v != "" {
+		digits := strings.TrimRight(v, "kKmM")
+		if n, err := strconv.Atoi(digits); err != nil || n <= 0 || len(v)-len(digits) > 1 {
+			return fmt.Errorf("EGRESS_VIDEO_BITRATE must be a positive number with an optional k/M suffix (e.g. 5000k): %q", v)
+		}
 	}
 	if c.AIPreflightTimeout <= 0 {
 		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")

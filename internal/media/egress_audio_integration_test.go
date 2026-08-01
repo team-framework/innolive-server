@@ -50,8 +50,8 @@ func feedEgress(t *testing.T, egress *RTMPEgress, seconds int, audioFeed func())
 				data:      harnessFrameData(t, index, harnessWireFormat()),
 				timestamp: timestamp,
 				stageAt:   time.Now(),
-				width:     harnessWidth,
-				height:    harnessHeight,
+				width:     uint16(harnessWidth),
+				height:    uint16(harnessHeight),
 			})
 			timestamp += uint32(videoClockRate / 30)
 			index++
@@ -105,7 +105,7 @@ func TestEgressAudioIntegrationItsOffset(t *testing.T) {
 
 	const offset = 400 * time.Millisecond
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
-		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, offset)
+		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, offset, "")
 	feedEgress(t, egress, 6, feed)
 
 	videoStart := parseStartTime(t, ffprobeField(t, out, "v", "stream=start_time"))
@@ -138,7 +138,7 @@ func TestEgressAudioIntegrationNoMicFallsBackToSilence(t *testing.T) {
 	}
 
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
-		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, 0)
+		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, 0, "")
 	feedEgress(t, egress, 5, nil)
 
 	codecs := ffprobeAll(t, out, "stream=codec_name")

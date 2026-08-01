@@ -22,8 +22,11 @@ const (
 	// the source frame rate from their RTP timestamps before the first spawn.
 	egressMeasureFrames = 30
 	egressDefaultFPS    = 30
-	egressVideoBitrate  = "2500k"
-	egressAudioBitrate  = "128k"
+	// egressVideoBitrate serves sources up to 720p; larger (FHD) sources get
+	// egressVideoBitrateFHD. EGRESS_VIDEO_BITRATE overrides both.
+	egressVideoBitrate    = "2500k"
+	egressVideoBitrateFHD = "5000k"
+	egressAudioBitrate    = "128k"
 	egressBackoffMin    = time.Second
 	egressBackoffMax    = 30 * time.Second
 	// egressStableFrames is how many frames a process must accept before a
@@ -53,25 +56,42 @@ type RTMPEgress struct {
 	// FFmpeg -itsoffset, compensating for the audio leading the video. Positive
 	// delays audio; tunable at runtime via EGRESS_AUDIO_OFFSET_MS.
 	audioOffset time.Duration
-	input       chan frame
+	// bitrateOverride, when non-empty (EGRESS_VIDEO_BITRATE), replaces the
+	// resolution-derived video bitrate.
+	bitrateOverride string
+	input           chan frame
 }
 
-func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration) *RTMPEgress {
+func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate string) *RTMPEgress {
 	if options.WireFormat == "" {
 		options.WireFormat = config.WireFormatJPEG
 	}
 	egressLogger := logger.With("ffmpeg_role", "egress")
 	return &RTMPEgress{
-		transcoder:  NewFFmpegTranscoder(path, logger, registry, options),
-		logger:      egressLogger,
-		metrics:     registry,
-		wireFormat:  options.WireFormat,
-		outputURL:   outputURL,
-		audio:       audio,
-		latency:     newLatencyTracker(egressLogger, latencyLog),
-		audioOffset: audioOffset,
-		input:       make(chan frame, egressQueueSize),
+		transcoder:      NewFFmpegTranscoder(path, logger, registry, options),
+		logger:          egressLogger,
+		metrics:         registry,
+		wireFormat:      options.WireFormat,
+		outputURL:       outputURL,
+		audio:           audio,
+		latency:         newLatencyTracker(egressLogger, latencyLog),
+		audioOffset:     audioOffset,
+		bitrateOverride: videoBitrate,
+		input:           make(chan frame, egressQueueSize),
 	}
+}
+
+// videoBitrateFor picks the x264 target for the measured source resolution:
+// up to 720p keeps the original 2500k, anything larger gets the FHD rate.
+// A non-empty EGRESS_VIDEO_BITRATE override wins regardless of resolution.
+func (e *RTMPEgress) videoBitrateFor(width, height uint16) string {
+	if e.bitrateOverride != "" {
+		return e.bitrateOverride
+	}
+	if int(width)*int(height) > 1280*720 {
+		return egressVideoBitrateFHD
+	}
+	return egressVideoBitrate
 }
 
 // Enqueue hands a processed frame to the egress without ever blocking the
@@ -106,7 +126,8 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 	width, height := startup[0].width, startup[0].height
 	fps := measureFPS(startup)
 	e.logger.Info("starting RTMP egress",
-		"url", maskStreamKey(e.outputURL), "width", width, "height", height, "fps", fps)
+		"url", maskStreamKey(e.outputURL), "width", width, "height", height, "fps", fps,
+		"video_bitrate", e.videoBitrateFor(width, height))
 
 	backoff := egressBackoffMin
 	pending := startup
@@ -275,10 +296,11 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		// the FLV stream carries plain yuv420p.
 		arguments = append(arguments, "-vf", "scale=out_range=tv")
 	}
+	videoBitrate := e.videoBitrateFor(width, height)
 	arguments = append(arguments,
 		"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
 		"-pix_fmt", "yuv420p", "-profile:v", "main",
-		"-b:v", egressVideoBitrate, "-maxrate", egressVideoBitrate, "-bufsize", egressVideoBitrate,
+		"-b:v", videoBitrate, "-maxrate", videoBitrate, "-bufsize", videoBitrate,
 		"-g", strconv.Itoa(fps*2), "-bf", "0",
 		"-r", strconv.Itoa(fps), "-fps_mode", "cfr",
 		"-c:a", "aac", "-b:a", egressAudioBitrate, "-ar", "44100", "-ac", "2",

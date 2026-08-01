@@ -50,8 +50,8 @@ func feedEgress(t *testing.T, egress *RTMPEgress, seconds int, audioFeed func())
 				data:      harnessFrameData(t, index, harnessWireFormat()),
 				timestamp: timestamp,
 				stageAt:   time.Now(),
-				width:     harnessWidth,
-				height:    harnessHeight,
+				width:     uint16(harnessWidth),
+				height:    uint16(harnessHeight),
 			})
 			timestamp += uint32(videoClockRate / 30)
 			index++

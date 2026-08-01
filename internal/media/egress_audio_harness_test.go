@@ -121,8 +121,8 @@ feed:
 				data:      harnessFrameData(t, index, harnessWireFormat()),
 				timestamp: timestamp,
 				stageAt:   time.Now(),
-				width:     harnessWidth,
-				height:    harnessHeight,
+				width:     uint16(harnessWidth),
+				height:    uint16(harnessHeight),
 			})
 			timestamp += step
 			index++

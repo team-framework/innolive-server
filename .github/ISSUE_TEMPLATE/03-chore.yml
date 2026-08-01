@@ -1,0 +1,18 @@
+name: 기타 작업 (chore)
+description: 기능 개발·버그 수정·리팩터링에 해당하지 않는 자잘한 수정 사항을 등록해요.
+title: "chore: "
+labels: ["chore"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        담당자를 꼭 지정해 주세요.
+  - type: textarea
+    id: details
+    attributes:
+      label: 추가 설명
+      description: 필요한 내용이 있으면 적어 주세요.
+      placeholder: 선택 사항이에요.
+    validations:
+      required: false

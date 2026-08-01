@@ -885,6 +885,10 @@ function buildVideoConstraints() {
   if (selectedCamera) {
     video.deviceId = { exact: selectedCamera };
   }
+  if (resolution === "fhd") {
+    video.width = { ideal: 1920 };
+    video.height = { ideal: 1080 };
+  }
   if (resolution === "hd") {
     video.width = { ideal: 1280 };
     video.height = { ideal: 720 };

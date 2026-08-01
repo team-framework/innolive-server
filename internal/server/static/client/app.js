@@ -885,10 +885,11 @@ function buildVideoConstraints() {
   if (selectedCamera) {
     video.deviceId = { exact: selectedCamera };
   }
-  if (resolution === "fhd") {
-    video.width = { ideal: 1920 };
-    video.height = { ideal: 1080 };
-  }
+  // FHD gated on AI FHD support (innolive-ai#4); re-enable with the index.html option.
+  // if (resolution === "fhd") {
+  //   video.width = { ideal: 1920 };
+  //   video.height = { ideal: 1080 };
+  // }
   if (resolution === "hd") {
     video.width = { ideal: 1280 };
     video.height = { ideal: 720 };

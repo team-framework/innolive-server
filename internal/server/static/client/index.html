@@ -14,11 +14,34 @@
           <h1>WebRTC Client</h1>
         </div>
         <div class="status-strip" aria-live="polite">
+          <div class="status-pill" data-state="idle" id="authState">Auth idle</div>
           <div class="status-pill" data-state="idle" id="healthState">HTTP idle</div>
           <div class="status-pill" data-state="idle" id="websocketState">WS idle</div>
           <div class="status-pill" data-state="idle" id="peerState">Peer idle</div>
         </div>
       </header>
+
+      <section class="toolbar" aria-label="Sign in">
+        <label class="field">
+          <span>Email</span>
+          <input id="authEmail" type="email" autocomplete="username" spellcheck="false" placeholder="you@example.com" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="authPassword" type="password" autocomplete="current-password" />
+        </label>
+        <label class="field" id="verifyRow" hidden>
+          <span>인증 코드</span>
+          <input id="verifyCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="메일로 받은 코드" />
+        </label>
+        <div class="actions" style="align-items: flex-end">
+          <button id="signInBtn" class="button button-primary" type="button">로그인</button>
+          <button id="signUpBtn" class="button" type="button">회원가입</button>
+          <button id="verifyBtn" class="button button-primary" type="button" hidden>인증 완료</button>
+          <button id="signOutBtn" class="button" type="button" hidden>로그아웃</button>
+        </div>
+        <span id="authDetail" class="field-wide">로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.</span>
+      </section>
 
       <section class="toolbar" aria-label="Connection controls">
         <label class="field field-wide">

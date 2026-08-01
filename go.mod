@@ -14,6 +14,7 @@ require (
 	github.com/pion/webrtc/v4 v4.1.2
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/crypto v0.54.0
+	golang.org/x/image v0.44.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/api v0.247.0
 	google.golang.org/grpc v1.82.0

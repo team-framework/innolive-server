@@ -14,6 +14,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// maxAIRecvMsgSize satisfies the AI contract's ≥5 MiB receive floor with
+// headroom for the worst-case processed frame.
+const maxAIRecvMsgSize = 8 << 20
+
 type Client struct {
 	address string
 	conn    *grpc.ClientConn
@@ -25,7 +29,12 @@ func New(address string, timeout time.Duration) (*Client, error) {
 	if address == "" {
 		return nil, errors.New("AI gRPC address is empty")
 	}
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// Worst-case ProcessedVideoChunk (mosaic JPEG + per-face metadata) can
+		// exceed gRPC's 4 MiB default receive cap; the AI contract mandates ≥5 MiB.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxAIRecvMsgSize)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create AI gRPC client: %w", err)
 	}
@@ -101,9 +110,10 @@ func (s *Stream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChun
 	callCtx, cancel := context.WithTimeout(s.ctx, s.timeout)
 	defer cancel()
 	request := &aiv1.VideoChunk{
-		Data:      data,
-		Timestamp: timestamp,
-		SessionId: s.sessionID,
+		Data:       data,
+		Timestamp:  timestamp,
+		SessionId:  s.sessionID,
+		OutputMode: aiv1.VideoOutputMode_VIDEO_OUTPUT_MODE_MOSAIC_JPEG,
 	}
 	if err := runWithContext(callCtx, func() error { return s.stream.Send(request) }); err != nil {
 		s.reset()

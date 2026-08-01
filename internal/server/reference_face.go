@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,9 +19,39 @@ import (
 	"inno-live-server/internal/session"
 
 	"github.com/google/uuid"
+	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 )
 
 const maxReferenceUpload = 10 << 20
+
+// maxAIFaceEdge is the AI worker's B1-640 long-edge limit. Uploads larger than
+// this are rejected by AddWhitelist, so we downscale before registering.
+const maxAIFaceEdge = 640
+
+// downscaleForAI shrinks an uploaded face image so its long edge is at most
+// maxAIFaceEdge, re-encoding as JPEG. Images already within the limit (or that
+// fail to decode here) are returned unchanged so the AI worker still applies its
+// own validation and error reporting.
+func downscaleForAI(data []byte) []byte {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || (cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge) {
+		return data
+	}
+	src, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	b := src.Bounds()
+	scale := float64(maxAIFaceEdge) / float64(max(b.Dx(), b.Dy()))
+	dst := image.NewRGBA(image.Rect(0, 0, int(float64(b.Dx())*scale), int(float64(b.Dy())*scale)))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, b, xdraw.Over, nil)
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, dst, &jpeg.Options{Quality: 90}); err != nil {
+		return data
+	}
+	return out.Bytes()
+}
 
 type referenceFace struct {
 	FaceID string `json:"face_id"`
@@ -128,7 +162,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		faceID := uuid.NewString()
-		response, err := s.ai.AddWhitelist(r.Context(), clientID, data)
+		response, err := s.ai.AddWhitelist(r.Context(), clientID, downscaleForAI(data))
 		if err != nil {
 			s.logger.Error("AI AddWhitelist failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist registration failed."})

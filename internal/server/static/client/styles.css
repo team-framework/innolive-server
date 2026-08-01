@@ -19,6 +19,12 @@
     sans-serif;
 }
 
+/* The hidden attribute must win over component display rules (.field is grid,
+   .button is inline-flex), otherwise elements toggled via el.hidden stay visible. */
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
 }

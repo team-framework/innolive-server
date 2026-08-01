@@ -103,6 +103,23 @@ func TestValidateRequiresFFmpegInAllModes(t *testing.T) {
 	}
 }
 
+func TestValidateEgressVideoBitrate(t *testing.T) {
+	for _, valid := range []string{"", "2500k", "5000K", "6M", "4500000"} {
+		cfg := validConfig()
+		cfg.EgressVideoBitrate = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with EgressVideoBitrate=%q error = %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"fast", "k", "2500kk", "-100k"} {
+		cfg := validConfig()
+		cfg.EgressVideoBitrate = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected EgressVideoBitrate=%q to be rejected", invalid)
+		}
+	}
+}
+
 func TestLoadAcceptsPythonServerDelayAlias(t *testing.T) {
 	setRequiredEnv(t)
 

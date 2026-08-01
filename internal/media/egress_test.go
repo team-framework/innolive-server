@@ -13,7 +13,31 @@ import (
 
 func newTestEgress(wire config.WireFormat, url string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0)
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0, "")
+}
+
+func TestVideoBitrateFor(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	cases := []struct {
+		width, height uint16
+		want          string
+	}{
+		{640, 360, egressVideoBitrate},
+		{1280, 720, egressVideoBitrate},
+		{1920, 1080, egressVideoBitrateFHD},
+		{1080, 1920, egressVideoBitrateFHD}, // portrait FHD
+	}
+	for _, c := range cases {
+		if got := e.videoBitrateFor(c.width, c.height); got != c.want {
+			t.Errorf("videoBitrateFor(%d, %d) = %q, want %q", c.width, c.height, got, c.want)
+		}
+	}
+
+	override := newTestEgress(config.WireFormatJPEG, "out.flv")
+	override.bitrateOverride = "3000k"
+	if got := override.videoBitrateFor(1920, 1080); got != "3000k" {
+		t.Errorf("override videoBitrateFor(1920, 1080) = %q, want %q", got, "3000k")
+	}
 }
 
 func TestMeasureFPS(t *testing.T) {

@@ -1,0 +1,18 @@
+name: 기능 개발 (feat)
+description: 새 기능 개발 작업을 등록해요.
+title: "feat: "
+labels: ["feat"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        담당자를 꼭 지정해 주세요.
+  - type: textarea
+    id: details
+    attributes:
+      label: 추가 설명
+      description: 필요한 내용이 있으면 적어 주세요.
+      placeholder: 선택 사항이에요.
+    validations:
+      required: false

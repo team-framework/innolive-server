@@ -1,0 +1,26 @@
+# GPU 프로덕션 서버용 compose. /opt/innolive/compose.prod.yaml 로 설치해 사용한다.
+# 이미지 경로·태그는 systemd 유닛이 EnvironmentFile(/etc/innolive/deploy.env,
+# /opt/innolive/deploy/current_tag)로 주입한다 — 이 파일에는 계정명·태그를 하드코딩하지 않는다.
+#
+# 주의: `docker compose config`는 env_file의 시크릿을 평문으로 병합해 출력하므로
+# 배포 스크립트·워크플로 어디에서도 실행하지 말 것(수동 디버깅 시에도 터미널에서만).
+name: innolive
+
+services:
+  server:
+    image: "${INNOLIVE_IMAGE:?set in /etc/innolive/deploy.env}:${INNOLIVE_TAG:?set in /opt/innolive/deploy/current_tag}"
+    container_name: innolive-server
+    # host 네트워크: WebRTC UDP mux(50001)·AI gRPC(127.0.0.1:5005x)·Postgres/Redis(localhost)
+    # 접근을 한 번에 해결한다. 포트 매핑은 사용하지 않는다.
+    network_mode: host
+    env_file:
+      - /etc/innolive/server.env
+      - /etc/innolive/server-secrets.env
+    volumes:
+      # 참조 얼굴 저장소(REFERENCE_STORE_PATH)
+      - /var/lib/innolive:/var/lib/innolive
+      # Apple 로그인 개인키(.p8). 컨테이너 내 경로가 server-secrets.env 의
+      # APPLE_PRIVATE_KEY_PATH 와 일치해야 하므로 호스트 경로를 그대로 마운트한다.
+      - "${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:ro"
+    # 재시작 정책은 systemd(innolive-server.service)가 관리한다.
+    restart: "no"

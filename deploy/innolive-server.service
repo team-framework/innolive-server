@@ -1,0 +1,29 @@
+# InnoLive Go 미디어 서버 systemd 유닛 (컨테이너 런타임).
+# /etc/systemd/system/innolive-server.service 로 설치한다.
+#
+# 이전(호스트 바이너리) 유닛과 달리 server.env / server-secrets.env 는 여기서 읽지 않는다 —
+# 컨테이너 환경변수는 compose의 env_file 이 주입한다. 여기서 읽는 EnvironmentFile 은
+# compose 변수 치환용(INNOLIVE_IMAGE, INNOLIVE_TAG, INNOLIVE_APPLE_KEY_PATH)뿐이다.
+#
+# AI_PREFLIGHT_REQUIRED=true(server.env) 기준으로 부팅 프리플라이트가 다시 활성화된다.
+# 재부팅 직후 AI 워커(TensorRT 로딩)보다 먼저 뜨면 프리플라이트가 실패할 수 있는데,
+# 그 경우 Restart=on-failure 가 15초 간격으로 재시도해 AI가 준비되는 즉시 정상 기동한다.
+# (구 preflight-off.env 우회는 이 유닛 도입과 함께 제거한다 — fail-closed 부팅 게이트 복원)
+
+[Unit]
+Description=InnoLive Go media server (container)
+Wants=network-online.target
+After=network-online.target docker.service innolive-ai@0.service innolive-ai@1.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/innolive/deploy.env
+EnvironmentFile=/opt/innolive/deploy/current_tag
+ExecStart=/usr/bin/docker compose -f /opt/innolive/compose.prod.yaml up --no-log-prefix
+ExecStop=/usr/bin/docker compose -f /opt/innolive/compose.prod.yaml down
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

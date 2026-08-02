@@ -41,4 +41,4 @@ Draft PR에는 리뷰 요청을 보내지 않아요. Ready for review로 전환�
 
 ## 병합
 
-`innolive-client`, `innolive-server`에서는 `main`에 직접 푸시하지 않아요. 최소 한 명의 승인과 필수 검사를 모두 통과한 뒤에만 병합해요. `innolive-ai`는 1인 개발 저장소이므로 이 승인 규칙의 대상이 아니에요.
+`innolive-client`, `innolive-server`에서는 `main`에 직접 푸시하지 않아요. 최소 한 명의 승인과 필수 검사를 모두 통과한 뒤에만 병합해요.

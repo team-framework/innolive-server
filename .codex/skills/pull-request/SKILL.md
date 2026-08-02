@@ -4,16 +4,16 @@
 
 ## 제목
 
-브랜치와 같은 형식을 사용해요.
+브랜치의 작업 유형은 콜론으로 구분하고, 나머지 슬러그와 이슈 번호는 브랜치와 같게 사용해요.
 
 ```text
-<type>/<english-slug>/#<issue-number>
+<type>: <english-slug>/#<issue-number>
 ```
 
 예시:
 
 ```text
-feat/github-release-download/#654
+fix: preflight-dim/#67
 ```
 
 ## 생성
@@ -25,7 +25,7 @@ git status --short
 git push -u origin HEAD
 gh pr create \
   --draft \
-  --title "feat/github-release-download/#654" \
+  --title "feat: github-release-download/#654" \
   --body "## 변경 내용\n- GitHub 릴리스 다운로드 기능을 추가했어요.\n\n## 확인 방법\n- 관련 테스트를 실행했어요.\n\nCloses #654"
 ```
 

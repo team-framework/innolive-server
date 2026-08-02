@@ -20,7 +20,10 @@ Requires=docker.service
 Type=simple
 EnvironmentFile=/etc/innolive/deploy.env
 EnvironmentFile=/opt/innolive/deploy/current_tag
-ExecStart=/usr/bin/docker compose -f /opt/innolive/compose.prod.yaml up --no-log-prefix
+# --exit-code-from: 컨테이너 종료 코드를 compose가 그대로 반환하게 한다.
+# 이게 없으면 서버가 비정상 종료해도 compose는 0을 반환해 Restart=on-failure가
+# 발동하지 않는다(재부팅 직후 preflight 재시도 설계가 무력화됨).
+ExecStart=/usr/bin/docker compose -f /opt/innolive/compose.prod.yaml up --no-log-prefix --exit-code-from server
 ExecStop=/usr/bin/docker compose -f /opt/innolive/compose.prod.yaml down
 Restart=on-failure
 RestartSec=15

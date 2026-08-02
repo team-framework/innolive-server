@@ -13,10 +13,11 @@ import (
 	aiv1 "inno-live-server/api/gen/aiv1"
 )
 
-// preflightDim is the side length of the tiny synthetic probe frame. Content is
-// irrelevant; only that the AI server can decode the wire format and complete a
-// real round trip.
-const preflightDim = 16
+// preflightDim is the side length of the synthetic probe frame. Content is
+// irrelevant, but the size must be one the AI server accepts: innolive-ai
+// validates incoming frames against its B1-640 pipeline and rejects tiny
+// images with DECODE_FAILED, so the probe uses 640 to match.
+const preflightDim = 640
 
 // Preflight verifies the full ProcessVideo round trip against every AI worker
 // before any user session runs. For each target it sends one synthetic frame

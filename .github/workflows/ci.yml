@@ -1,0 +1,59 @@
+# PR과 main push를 검증하는 CI. 공개 레포이므로 이 워크플로의 모든 로그는 공개된다 —
+# 실제 자격증명·서버 정보를 출력하는 스텝을 추가하지 말 것.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # CI 러너 안에서만 쓰는 더미 자격증명 — 실제 환경과 무관한 값이어야 한다.
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_only_pw
+          POSTGRES_DB: innolive_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d innolive_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ffmpeg가 없으면 media 계열 테스트가 대부분 skip되므로 설치해서 실제로 돌린다.
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          TEST_DATABASE_URL: postgres://ci_user:ci_only_pw@localhost:5432/innolive_ci?sslmode=disable
+        run: go test ./...

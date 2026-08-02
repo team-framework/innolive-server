@@ -57,3 +57,35 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://ci_user:ci_only_pw@localhost:5432/innolive_ci?sslmode=disable
         run: go test ./...
+
+  # 동시성 코드(media/session) 회귀를 잡는 race 검사. 필수 검사에는 넣지 않는 참고용 잡 —
+  # 안정성이 확인되면 required 승격을 검토한다.
+  race-test:
+    name: race-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      # TestBypassWebRTCEndToEnd는 병렬 실행에서 간헐 실패하는 알려진 flaky라 분리한다.
+      - name: Race test (excluding known flaky)
+        run: go test -race -skip 'TestBypassWebRTCEndToEnd' ./...
+
+      # flaky 테스트는 격리(-p 1) + 최대 3회 재시도로 따로 검증한다.
+      - name: Race test (flaky, isolated with retries)
+        run: |
+          for attempt in 1 2 3; do
+            if go test -race -run 'TestBypassWebRTCEndToEnd' -p 1 -count 1 ./internal/server; then
+              exit 0
+            fi
+            echo "attempt ${attempt} failed"
+          done
+          exit 1

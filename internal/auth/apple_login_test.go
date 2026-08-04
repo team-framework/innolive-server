@@ -19,11 +19,10 @@ type stubAppleExchanger struct {
 	response AppleTokenResponse
 	err      error
 	seen     string
-	clientID string
 }
 
-func (s *stubAppleExchanger) Exchange(_ context.Context, code, clientID string) (AppleTokenResponse, error) {
-	s.seen, s.clientID = code, clientID
+func (s *stubAppleExchanger) Exchange(_ context.Context, code string) (AppleTokenResponse, error) {
+	s.seen = code
 	return s.response, s.err
 }
 
@@ -32,11 +31,10 @@ type stubAppleVerifier struct {
 	err       error
 	seenID    string
 	seenNonce string
-	clientID  string
 }
 
-func (s *stubAppleVerifier) Verify(_ context.Context, idToken, nonce, clientID string) (AppleIdentity, error) {
-	s.seenID, s.seenNonce, s.clientID = idToken, nonce, clientID
+func (s *stubAppleVerifier) Verify(_ context.Context, idToken, nonce string) (AppleIdentity, error) {
+	s.seenID, s.seenNonce = idToken, nonce
 	return s.identity, s.err
 }
 
@@ -62,15 +60,15 @@ func TestAppleLoginIssuesTokensAndEncryptsProviderRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pair, err := service.Login(context.Background(), "authorization-code", "nonce-value", "Ada Lovelace", "com.framework.innolive", ClientInfo{})
+	pair, err := service.Login(context.Background(), "authorization-code", "nonce-value", "Ada Lovelace", ClientInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pair.AccessToken == "" || pair.RefreshToken == "" {
 		t.Fatalf("incomplete token pair: %+v", pair)
 	}
-	if exchanger.seen != "authorization-code" || exchanger.clientID != "com.framework.innolive" || verifier.seenID != "apple-id-token" || verifier.seenNonce != "nonce-value" || verifier.clientID != "com.framework.innolive" {
-		t.Fatalf("unexpected exchange/verifier inputs: code=%q exchange_client_id=%q id=%q nonce=%q verify_client_id=%q", exchanger.seen, exchanger.clientID, verifier.seenID, verifier.seenNonce, verifier.clientID)
+	if exchanger.seen != "authorization-code" || verifier.seenID != "apple-id-token" || verifier.seenNonce != "nonce-value" {
+		t.Fatalf("unexpected exchange/verifier inputs: code=%q id=%q nonce=%q", exchanger.seen, verifier.seenID, verifier.seenNonce)
 	}
 	if accounts.identity.DisplayName != "Ada Lovelace" || len(accounts.ciphertext) == 0 || accounts.version == nil {
 		t.Fatalf("resolver data = %+v ciphertext=%d version=%v", accounts.identity, len(accounts.ciphertext), accounts.version)
@@ -92,7 +90,7 @@ func TestAppleLoginRejectsInvalidIDTokenAndInactiveUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invalid.Login(context.Background(), "code", "", "", "com.framework.innolive", ClientInfo{}); !errors.Is(err, ErrInvalidAppleIDToken) {
+	if _, err := invalid.Login(context.Background(), "code", "", "", ClientInfo{}); !errors.Is(err, ErrInvalidAppleIDToken) {
 		t.Fatalf("invalid ID token error = %v", err)
 	}
 	inactive, err := NewAppleLoginService(
@@ -104,7 +102,7 @@ func TestAppleLoginRejectsInvalidIDTokenAndInactiveUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inactive.Login(context.Background(), "code", "", "", "com.framework.innolive", ClientInfo{}); !errors.Is(err, ErrUserInactive) {
+	if _, err := inactive.Login(context.Background(), "code", "", "", ClientInfo{}); !errors.Is(err, ErrUserInactive) {
 		t.Fatalf("inactive user error = %v", err)
 	}
 }
@@ -130,22 +128,15 @@ func TestAppleIDTokenVerifierChecksSignatureClaimsAndNonce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := client.Verify(context.Background(), raw, "expected-nonce", "com.framework.innolive")
+	identity, err := client.Verify(context.Background(), raw, "expected-nonce")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if identity.Subject != "apple-subject" || !identity.EmailVerified || identity.IsPrivateEmail {
 		t.Fatalf("identity = %+v", identity)
 	}
-	if _, err := client.Verify(context.Background(), raw, "wrong-nonce", "com.framework.innolive"); !errors.Is(err, ErrInvalidAppleIDToken) {
+	if _, err := client.Verify(context.Background(), raw, "wrong-nonce"); !errors.Is(err, ErrInvalidAppleIDToken) {
 		t.Fatalf("nonce mismatch error = %v", err)
-	}
-}
-
-func TestAppleOAuthConfigOnlyAcceptsConfiguredClientID(t *testing.T) {
-	config := AppleOAuthConfig{ClientID: "com.framework.innolive"}
-	if !config.SupportsClientID("com.framework.innolive") || config.SupportsClientID("com.framework.innolive.macos") {
-		t.Fatalf("configured client ID validation failed")
 	}
 }
 
@@ -174,7 +165,7 @@ func TestAppleClientSecretUsesES256AppleClaims(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	client := &appleOAuthClient{config: AppleOAuthConfig{TeamID: "TEAMID", ClientID: "com.framework.innolive", KeyID: "KEYID"}, privateKey: privateKey, now: func() time.Time { return now }}
-	raw, err := client.clientSecret("com.framework.innolive")
+	raw, err := client.clientSecret()
 	if err != nil {
 		t.Fatal(err)
 	}

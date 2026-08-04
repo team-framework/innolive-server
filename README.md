@@ -139,7 +139,7 @@ make proto        # protobuf 코드 생성
 | `POST` | `/auth/native/sign-up` | 네이티브 앱용. JSON 본문의 `signup_token`을 반환 |
 | `POST` | `/auth/native/verify-email` | 네이티브 앱용. JSON의 `signup_token`, `verification_code`를 검증 |
 | `POST` | `/auth/sign-in` | 이메일·비밀번호 로그인 및 토큰 발급 |
-| `POST` | `/auth/apple` | Apple authorization code를 교환·검증하고 토큰 발급. `client_id`에는 허용된 iOS/macOS Bundle ID를 전송 |
+| `POST` | `/auth/apple` | Apple authorization code를 교환·검증하고 토큰 발급. 서버의 `APPLE_CLIENT_ID` 설정을 사용 |
 
 ## 라이선스
 

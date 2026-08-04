@@ -73,11 +73,6 @@ func LoadAppleOAuthConfigFromEnv() (AppleOAuthConfig, error) {
 
 func (c AppleOAuthConfig) Enabled() bool { return c.ClientID != "" }
 
-func (c AppleOAuthConfig) SupportsClientID(clientID string) bool {
-	clientID = strings.TrimSpace(clientID)
-	return clientID != "" && clientID == c.ClientID
-}
-
 type AppleTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -85,11 +80,11 @@ type AppleTokenResponse struct {
 }
 
 type AppleAuthorizationExchanger interface {
-	Exchange(context.Context, string, string) (AppleTokenResponse, error)
+	Exchange(context.Context, string) (AppleTokenResponse, error)
 }
 
 type AppleIdentityVerifier interface {
-	Verify(context.Context, string, string, string) (AppleIdentity, error)
+	Verify(context.Context, string, string) (AppleIdentity, error)
 }
 
 type AppleTokenRevoker interface {
@@ -137,16 +132,13 @@ func NewAppleOAuthClient(config AppleOAuthConfig) (*appleOAuthClient, error) {
 	}, nil
 }
 
-func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode, clientID string) (AppleTokenResponse, error) {
-	if !c.config.SupportsClientID(clientID) {
-		return AppleTokenResponse{}, ErrInvalidAppleIDToken
-	}
-	secret, err := c.clientSecret(clientID)
+func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode string) (AppleTokenResponse, error) {
+	secret, err := c.clientSecret()
 	if err != nil {
 		return AppleTokenResponse{}, err
 	}
 	form := url.Values{
-		"client_id":     {clientID},
+		"client_id":     {c.config.ClientID},
 		"client_secret": {secret},
 		"code":          {strings.TrimSpace(authorizationCode)},
 		"grant_type":    {"authorization_code"},
@@ -176,7 +168,7 @@ func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode, clie
 }
 
 func (c *appleOAuthClient) Revoke(ctx context.Context, refreshToken string) error {
-	secret, err := c.clientSecret(c.config.ClientID)
+	secret, err := c.clientSecret()
 	if err != nil {
 		return err
 	}
@@ -203,13 +195,10 @@ func (c *appleOAuthClient) Revoke(ctx context.Context, refreshToken string) erro
 	return nil
 }
 
-func (c *appleOAuthClient) clientSecret(clientID string) (string, error) {
-	if !c.config.SupportsClientID(clientID) {
-		return "", ErrInvalidAppleIDToken
-	}
+func (c *appleOAuthClient) clientSecret() (string, error) {
 	now := c.now().UTC()
 	claims := jwt.RegisteredClaims{
-		Issuer: c.config.TeamID, Subject: clientID,
+		Issuer: c.config.TeamID, Subject: c.config.ClientID,
 		Audience: jwt.ClaimStrings{appleIssuer},
 		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(appleSecretTTL)),
 	}
@@ -234,10 +223,7 @@ type AppleIdentity struct {
 	DisplayName    string
 }
 
-func (c *appleOAuthClient) Verify(ctx context.Context, rawToken, expectedNonce, clientID string) (AppleIdentity, error) {
-	if !c.config.SupportsClientID(clientID) {
-		return AppleIdentity{}, ErrInvalidAppleIDToken
-	}
+func (c *appleOAuthClient) Verify(ctx context.Context, rawToken, expectedNonce string) (AppleIdentity, error) {
 	claims := &appleIDTokenClaims{}
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(rawToken), claims, func(token *jwt.Token) (any, error) {
 		if token.Method != jwt.SigningMethodRS256 {
@@ -245,7 +231,7 @@ func (c *appleOAuthClient) Verify(ctx context.Context, rawToken, expectedNonce, 
 		}
 		kid, _ := token.Header["kid"].(string)
 		return c.keyFor(ctx, kid)
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}), jwt.WithIssuer(appleIssuer), jwt.WithAudience(clientID), jwt.WithExpirationRequired())
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}), jwt.WithIssuer(appleIssuer), jwt.WithAudience(c.config.ClientID), jwt.WithExpirationRequired())
 	if err != nil || parsed == nil || !parsed.Valid {
 		return AppleIdentity{}, ErrInvalidAppleIDToken
 	}
@@ -486,12 +472,12 @@ func NewAppleLoginService(exchanger AppleAuthorizationExchanger, verifier AppleI
 	}
 	return &AppleLoginService{exchanger: exchanger, verifier: verifier, accounts: accounts, tokens: tokens, cipher: cipher}, nil
 }
-func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName, clientID string, client ClientInfo) (TokenPair, error) {
-	response, err := s.exchanger.Exchange(ctx, authorizationCode, clientID)
+func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
+	response, err := s.exchanger.Exchange(ctx, authorizationCode)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("exchange Apple authorization code: %w", err)
 	}
-	identity, err := s.verifier.Verify(ctx, response.IDToken, nonce, clientID)
+	identity, err := s.verifier.Verify(ctx, response.IDToken, nonce)
 	if err != nil {
 		if errors.Is(err, ErrInvalidAppleIDToken) {
 			return TokenPair{}, err

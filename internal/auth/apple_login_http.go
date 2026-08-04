@@ -25,7 +25,7 @@ func (h *tokenHTTPHandler) handleAppleLogin(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid Apple login request.")
 		return
 	}
-	pair, err := h.apple.Login(r.Context(), request.AuthorizationCode, request.Nonce, request.displayName(), requestClientInfo(r))
+	pair, err := h.apple.Login(r.Context(), request.AuthorizationCode, request.Nonce, request.displayName(), request.ClientID, requestClientInfo(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidAppleIDToken), errors.Is(err, ErrUserInactive):
@@ -41,6 +41,7 @@ func (h *tokenHTTPHandler) handleAppleLogin(w http.ResponseWriter, r *http.Reque
 
 type appleLoginRequest struct {
 	AuthorizationCode string `json:"authorization_code"`
+	ClientID          string `json:"client_id"`
 	Nonce             string `json:"nonce"`
 	GivenName         string `json:"given_name"`
 	FamilyName        string `json:"family_name"`
@@ -58,9 +59,10 @@ func decodeAppleLoginRequest(w http.ResponseWriter, r *http.Request) (appleLogin
 		return appleLoginRequest{}, errors.New("request body must contain one JSON object")
 	}
 	request.AuthorizationCode = strings.TrimSpace(request.AuthorizationCode)
+	request.ClientID = strings.TrimSpace(request.ClientID)
 	request.Nonce = strings.TrimSpace(request.Nonce)
-	if request.AuthorizationCode == "" || len(request.AuthorizationCode) > 4096 || len(request.Nonce) > 1024 {
-		return appleLoginRequest{}, errors.New("authorization_code is required")
+	if request.AuthorizationCode == "" || request.ClientID == "" || len(request.AuthorizationCode) > 4096 || len(request.ClientID) > maxAppleField || len(request.Nonce) > 1024 {
+		return appleLoginRequest{}, errors.New("authorization_code and client_id are required")
 	}
 	return request, nil
 }

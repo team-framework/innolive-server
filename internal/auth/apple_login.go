@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -72,6 +73,11 @@ func LoadAppleOAuthConfigFromEnv() (AppleOAuthConfig, error) {
 
 func (c AppleOAuthConfig) Enabled() bool { return c.ClientID != "" }
 
+func (c AppleOAuthConfig) SupportsClientID(clientID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	return clientID != "" && clientID == c.ClientID
+}
+
 type AppleTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -79,11 +85,11 @@ type AppleTokenResponse struct {
 }
 
 type AppleAuthorizationExchanger interface {
-	Exchange(context.Context, string) (AppleTokenResponse, error)
+	Exchange(context.Context, string, string) (AppleTokenResponse, error)
 }
 
 type AppleIdentityVerifier interface {
-	Verify(context.Context, string, string) (AppleIdentity, error)
+	Verify(context.Context, string, string, string) (AppleIdentity, error)
 }
 
 type AppleTokenRevoker interface {
@@ -98,7 +104,7 @@ type appleOAuthClient struct {
 	keysURL    string
 	revokeURL  string
 	keysMu     sync.Mutex
-	keys       map[string]*ecdsa.PublicKey
+	keys       map[string]*rsa.PublicKey
 	keysUntil  time.Time
 	now        func() time.Time
 }
@@ -127,17 +133,20 @@ func NewAppleOAuthClient(config AppleOAuthConfig) (*appleOAuthClient, error) {
 		config: config, privateKey: key,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		tokenURL:   appleTokenURL, keysURL: appleKeysURL, revokeURL: appleRevokeURL,
-		keys: make(map[string]*ecdsa.PublicKey), now: func() time.Time { return time.Now().UTC() },
+		keys: make(map[string]*rsa.PublicKey), now: func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
-func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode string) (AppleTokenResponse, error) {
-	secret, err := c.clientSecret()
+func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode, clientID string) (AppleTokenResponse, error) {
+	if !c.config.SupportsClientID(clientID) {
+		return AppleTokenResponse{}, ErrInvalidAppleIDToken
+	}
+	secret, err := c.clientSecret(clientID)
 	if err != nil {
 		return AppleTokenResponse{}, err
 	}
 	form := url.Values{
-		"client_id":     {c.config.ClientID},
+		"client_id":     {clientID},
 		"client_secret": {secret},
 		"code":          {strings.TrimSpace(authorizationCode)},
 		"grant_type":    {"authorization_code"},
@@ -167,7 +176,7 @@ func (c *appleOAuthClient) Exchange(ctx context.Context, authorizationCode strin
 }
 
 func (c *appleOAuthClient) Revoke(ctx context.Context, refreshToken string) error {
-	secret, err := c.clientSecret()
+	secret, err := c.clientSecret(c.config.ClientID)
 	if err != nil {
 		return err
 	}
@@ -194,10 +203,13 @@ func (c *appleOAuthClient) Revoke(ctx context.Context, refreshToken string) erro
 	return nil
 }
 
-func (c *appleOAuthClient) clientSecret() (string, error) {
+func (c *appleOAuthClient) clientSecret(clientID string) (string, error) {
+	if !c.config.SupportsClientID(clientID) {
+		return "", ErrInvalidAppleIDToken
+	}
 	now := c.now().UTC()
 	claims := jwt.RegisteredClaims{
-		Issuer: c.config.TeamID, Subject: c.config.ClientID,
+		Issuer: c.config.TeamID, Subject: clientID,
 		Audience: jwt.ClaimStrings{appleIssuer},
 		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(appleSecretTTL)),
 	}
@@ -222,15 +234,18 @@ type AppleIdentity struct {
 	DisplayName    string
 }
 
-func (c *appleOAuthClient) Verify(ctx context.Context, rawToken, expectedNonce string) (AppleIdentity, error) {
+func (c *appleOAuthClient) Verify(ctx context.Context, rawToken, expectedNonce, clientID string) (AppleIdentity, error) {
+	if !c.config.SupportsClientID(clientID) {
+		return AppleIdentity{}, ErrInvalidAppleIDToken
+	}
 	claims := &appleIDTokenClaims{}
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(rawToken), claims, func(token *jwt.Token) (any, error) {
-		if token.Method != jwt.SigningMethodES256 {
+		if token.Method != jwt.SigningMethodRS256 {
 			return nil, ErrInvalidAppleIDToken
 		}
 		kid, _ := token.Header["kid"].(string)
 		return c.keyFor(ctx, kid)
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodES256.Alg()}), jwt.WithIssuer(appleIssuer), jwt.WithAudience(c.config.ClientID), jwt.WithExpirationRequired())
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}), jwt.WithIssuer(appleIssuer), jwt.WithAudience(clientID), jwt.WithExpirationRequired())
 	if err != nil || parsed == nil || !parsed.Valid {
 		return AppleIdentity{}, ErrInvalidAppleIDToken
 	}
@@ -267,7 +282,7 @@ func appleClaimBool(value any) bool {
 	}
 }
 
-func (c *appleOAuthClient) keyFor(ctx context.Context, kid string) (*ecdsa.PublicKey, error) {
+func (c *appleOAuthClient) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	if strings.TrimSpace(kid) == "" {
 		return nil, ErrInvalidAppleIDToken
 	}
@@ -307,14 +322,14 @@ func (c *appleOAuthClient) refreshKeys(ctx context.Context) error {
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&raw); err != nil {
 		return err
 	}
-	keys := make(map[string]*ecdsa.PublicKey, len(raw.Keys))
+	keys := make(map[string]*rsa.PublicKey, len(raw.Keys))
 	for _, item := range raw.Keys {
 		if key := item.publicKey(); key != nil {
 			keys[item.KID] = key
 		}
 	}
 	if len(keys) == 0 {
-		return errors.New("Apple signing key set has no ES256 keys")
+		return errors.New("Apple signing key set has no RS256 keys")
 	}
 	c.keys, c.keysUntil = keys, c.now().Add(time.Hour)
 	return nil
@@ -324,25 +339,30 @@ type appleJWK struct {
 	KTY string `json:"kty"`
 	KID string `json:"kid"`
 	ALG string `json:"alg"`
-	CRV string `json:"crv"`
-	X   string `json:"x"`
-	Y   string `json:"y"`
+	N   string `json:"n"`
+	E   string `json:"e"`
 }
 
-func (j appleJWK) publicKey() *ecdsa.PublicKey {
-	if j.KTY != "EC" || j.ALG != "ES256" || j.CRV != "P-256" || j.KID == "" {
+func (j appleJWK) publicKey() *rsa.PublicKey {
+	if j.KTY != "RSA" || j.ALG != "RS256" || j.KID == "" {
 		return nil
 	}
-	x, xErr := base64.RawURLEncoding.DecodeString(j.X)
-	y, yErr := base64.RawURLEncoding.DecodeString(j.Y)
-	if xErr != nil || yErr != nil {
+	n, nErr := base64.RawURLEncoding.DecodeString(j.N)
+	e, eErr := base64.RawURLEncoding.DecodeString(j.E)
+	if nErr != nil || eErr != nil {
 		return nil
 	}
-	key := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-	if !key.Curve.IsOnCurve(key.X, key.Y) {
+	modulus := new(big.Int).SetBytes(n)
+	exponentValue := new(big.Int).SetBytes(e)
+	if modulus.Sign() <= 0 || exponentValue.Sign() <= 0 || !exponentValue.IsInt64() {
 		return nil
 	}
-	return key
+	exponent64 := exponentValue.Int64()
+	exponent := int(exponent64)
+	if exponent <= 0 || int64(exponent) != exponent64 {
+		return nil
+	}
+	return &rsa.PublicKey{N: modulus, E: exponent}
 }
 
 type appleLoginUser struct {
@@ -466,12 +486,12 @@ func NewAppleLoginService(exchanger AppleAuthorizationExchanger, verifier AppleI
 	}
 	return &AppleLoginService{exchanger: exchanger, verifier: verifier, accounts: accounts, tokens: tokens, cipher: cipher}, nil
 }
-func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
-	response, err := s.exchanger.Exchange(ctx, authorizationCode)
+func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName, clientID string, client ClientInfo) (TokenPair, error) {
+	response, err := s.exchanger.Exchange(ctx, authorizationCode, clientID)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("exchange Apple authorization code: %w", err)
 	}
-	identity, err := s.verifier.Verify(ctx, response.IDToken, nonce)
+	identity, err := s.verifier.Verify(ctx, response.IDToken, nonce, clientID)
 	if err != nil {
 		if errors.Is(err, ErrInvalidAppleIDToken) {
 			return TokenPair{}, err

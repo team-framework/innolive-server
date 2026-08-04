@@ -34,7 +34,7 @@ func testAppleLoginHTTPHandler(t *testing.T, verifier AppleIdentityVerifier) htt
 
 func TestAppleLoginHTTPIssuesTokenPair(t *testing.T) {
 	handler := testAppleLoginHTTPHandler(t, &stubAppleVerifier{identity: AppleIdentity{Subject: "apple-subject", Email: "person@example.com", EmailVerified: true}})
-	request := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"single-use-code","client_id":"com.framework.innolive","nonce":"nonce","given_name":"Ada","family_name":"Lovelace"}`))
+	request := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"single-use-code","nonce":"nonce","given_name":"Ada","family_name":"Lovelace"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "http://localhost:3000")
 	response := httptest.NewRecorder()
@@ -53,19 +53,13 @@ func TestAppleLoginHTTPIssuesTokenPair(t *testing.T) {
 
 func TestAppleLoginHTTPRejectsInvalidInput(t *testing.T) {
 	handler := testAppleLoginHTTPHandler(t, &stubAppleVerifier{err: ErrInvalidAppleIDToken})
-	missingClientID := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"code"}`))
-	missingClientIDResponse := httptest.NewRecorder()
-	handler.ServeHTTP(missingClientIDResponse, missingClientID)
-	if missingClientIDResponse.Code != http.StatusBadRequest {
-		t.Fatalf("missing client_id status = %d", missingClientIDResponse.Code)
-	}
-	invalid := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"code","client_id":"com.framework.innolive"}`))
+	invalid := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"code"}`))
 	invalidResponse := httptest.NewRecorder()
 	handler.ServeHTTP(invalidResponse, invalid)
 	if invalidResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid token status = %d", invalidResponse.Code)
 	}
-	bad := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"code","client_id":"com.framework.innolive","unexpected":true}`))
+	bad := httptest.NewRequest(http.MethodPost, "/auth/apple", bytes.NewBufferString(`{"authorization_code":"code","unexpected":true}`))
 	badResponse := httptest.NewRecorder()
 	handler.ServeHTTP(badResponse, bad)
 	if badResponse.Code != http.StatusBadRequest {

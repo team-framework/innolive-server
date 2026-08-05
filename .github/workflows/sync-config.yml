@@ -1,0 +1,95 @@
+# 프로덕션 시크릿 동기화 — GitHub Secrets(PROD_*)를 정본으로 서버 server-secrets.env를 렌더한다.
+# 수동 실행 전용. 본문은 SSH stdin으로만 전달되며 러너 로그에는 요약만 남는다.
+name: Sync Config
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "변경 키 이름만 보고(파일·서버 무변경)"
+        type: boolean
+        default: false
+      no_restart:
+        description: "렌더만 하고 재시작 생략(다음 재시작 때 반영)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Assemble payload
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PROD_AUTH_ACCESS_TOKEN_KEY_BASE64: ${{ secrets.PROD_AUTH_ACCESS_TOKEN_KEY_BASE64 }}
+          PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64: ${{ secrets.PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64 }}
+          PROD_SMTP_PASSWORD: ${{ secrets.PROD_SMTP_PASSWORD }}
+          PROD_REDIS_PASSWORD: ${{ secrets.PROD_REDIS_PASSWORD }}
+          PROD_TURN_USERNAME: ${{ secrets.PROD_TURN_USERNAME }}
+          PROD_TURN_CREDENTIAL: ${{ secrets.PROD_TURN_CREDENTIAL }}
+          PROD_YOUTUBE_STREAM_KEY: ${{ secrets.PROD_YOUTUBE_STREAM_KEY }}
+          PROD_APPLE_TEAM_ID: ${{ secrets.PROD_APPLE_TEAM_ID }}
+          PROD_APPLE_KEY_ID: ${{ secrets.PROD_APPLE_KEY_ID }}
+        run: |
+          fail=0
+          require() {
+            if [ -z "$2" ]; then echo "MISSING SECRET: $1"; fail=1; fi
+          }
+          require PROD_DATABASE_URL "$PROD_DATABASE_URL"
+          require PROD_AUTH_ACCESS_TOKEN_KEY_BASE64 "$PROD_AUTH_ACCESS_TOKEN_KEY_BASE64"
+          require PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64 "$PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"
+          require PROD_SMTP_PASSWORD "$PROD_SMTP_PASSWORD"
+          require PROD_TURN_USERNAME "$PROD_TURN_USERNAME"
+          require PROD_TURN_CREDENTIAL "$PROD_TURN_CREDENTIAL"
+          require PROD_APPLE_TEAM_ID "$PROD_APPLE_TEAM_ID"
+          require PROD_APPLE_KEY_ID "$PROD_APPLE_KEY_ID"
+          [ "$fail" -eq 0 ] || exit 1
+          {
+            printf 'DATABASE_URL=%s\n' "$PROD_DATABASE_URL"
+            printf 'AUTH_ACCESS_TOKEN_KEY_BASE64=%s\n' "$PROD_AUTH_ACCESS_TOKEN_KEY_BASE64"
+            printf 'AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64=%s\n' "$PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"
+            printf 'AUTH_EMAIL_SMTP_PASSWORD=%s\n' "$PROD_SMTP_PASSWORD"
+            printf 'WEBRTC_TURN_USERNAME=%s\n' "$PROD_TURN_USERNAME"
+            printf 'WEBRTC_TURN_CREDENTIAL=%s\n' "$PROD_TURN_CREDENTIAL"
+            printf 'APPLE_TEAM_ID=%s\n' "$PROD_APPLE_TEAM_ID"
+            printf 'APPLE_KEY_ID=%s\n' "$PROD_APPLE_KEY_ID"
+            printf 'YOUTUBE_STREAM_KEY=%s\n' "$PROD_YOUTUBE_STREAM_KEY"
+            printf 'AUTH_EMAIL_REDIS_PASSWORD=%s\n' "$PROD_REDIS_PASSWORD"
+          } > "$RUNNER_TEMP/secrets.env"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      # 서버의 forced command가 "sync-config [--dry-run] [--no-restart]"를 받아
+      # stdin 본문을 render-secrets.sh로 위임한다. 서버 스크립트의 stdout(요약 키워드만
+      # 출력하는 계약)이 이 스텝의 로그가 되고, exit code가 동기화 결과다.
+      - name: Sync
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          NO_RESTART: ${{ inputs.no_restart }}
+        run: |
+          flags=""
+          [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
+          [ "$NO_RESTART" = "true" ] && flags="$flags --no-restart"
+          ssh -i ~/.ssh/deploy_key \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -o StrictHostKeyChecking=yes \
+            -o LogLevel=ERROR \
+            -o ConnectTimeout=15 \
+            -p "${{ secrets.DEPLOY_SSH_PORT }}" \
+            "deploy@${{ secrets.DEPLOY_SSH_HOST }}" \
+            "sync-config$flags" < "$RUNNER_TEMP/secrets.env"

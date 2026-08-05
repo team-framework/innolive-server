@@ -29,6 +29,59 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
 - **배포 실패 원인 확인**: 러너 로그에는 의도적으로 요약만 남는다. 상세는 서버의
   `/opt/innolive/deploy/logs/`(root 600)와 `journalctl -u innolive-server`에서 본다.
 
+## 시크릿 동기화 (Sync Config)
+
+앱 시크릿의 정본은 GitHub Actions Secrets(`PROD_*`, environment `production`)다. 서버의
+`/etc/innolive/server-secrets.env`는 Sync Config 워크플로가 만들어내는 **렌더 산출물**이며
+손으로 편집하지 않는다. 긴급하게 손편집했다면 사후에 반드시 같은 값을 Secrets에 반영한다 —
+다음 동기화가 파일을 통째로 덮어쓴다.
+
+```
+Actions → Sync Config 실행(workflow_dispatch 전용)
+  → 러너가 PROD_* Secrets를 KEY=VALUE 본문으로 조립(필수 키가 비어 있으면 즉시 실패)
+  → SSH stdin → receive-deploy.sh "sync-config" → render-secrets.sh
+  → 키 화이트리스트·형식 검증(실패 시 무손상 중단) → 세션 게이트 → 원자 교체(+.bak)
+  → systemd 재시작 → /health 확인 → 헬스 실패 시 .bak 자동 복원
+```
+
+### 값 교체 절차
+
+1. GitHub → Settings → Environments → production에서 해당 `PROD_*` Secret 값을 갱신한다.
+2. Actions → **Sync Config** → Run workflow. 먼저 `dry_run`을 켜고 실행해 변경될 키
+   이름을 확인한다(값·파일·서버 무변경).
+3. 결과가 기대와 같으면 입력 없이 본 실행. 활성 방송 세션이 있으면 게이트가 대기하다
+   `SYNC DEFERRED`로 보류될 수 있다(이 경우 파일도 바뀌지 않음 — 세션 종료 후 재실행).
+4. `no_restart`를 켜면 렌더만 하고 재시작을 생략한다 — 값은 다음 재시작 때 반영된다.
+
+출력 판독: `SYNC OK (10 keys)` 성공 / `SYNC DRY-RUN changed:[…] added:[…] removed:[…]`
+변경 예고 / `SYNC DEFERRED` 방송 중 보류 / `FAILED: …` 실패(상세는 서버
+`/opt/innolive/deploy/logs/`).
+
+### Secret ↔ env 키 매핑
+
+| GitHub Secret | server-secrets.env 키 | 구분 |
+|---|---|---|
+| `PROD_DATABASE_URL` | `DATABASE_URL` | 필수 |
+| `PROD_AUTH_ACCESS_TOKEN_KEY_BASE64` | `AUTH_ACCESS_TOKEN_KEY_BASE64` | 필수 |
+| `PROD_AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64` | `AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64` | 필수 |
+| `PROD_SMTP_PASSWORD` | `AUTH_EMAIL_SMTP_PASSWORD` | 필수 |
+| `PROD_TURN_USERNAME` | `WEBRTC_TURN_USERNAME` | 필수 |
+| `PROD_TURN_CREDENTIAL` | `WEBRTC_TURN_CREDENTIAL` | 필수 |
+| `PROD_APPLE_TEAM_ID` | `APPLE_TEAM_ID` | 필수 |
+| `PROD_APPLE_KEY_ID` | `APPLE_KEY_ID` | 필수 |
+| `PROD_YOUTUBE_STREAM_KEY` | `YOUTUBE_STREAM_KEY` | 선택 — 빈 값이면 유튜브 송출 생략(기존 거동) |
+| `PROD_REDIS_PASSWORD` | `AUTH_EMAIL_REDIS_PASSWORD` | 선택 — 로컬 전용·무인증 Redis 구성이면 빈 값 |
+
+렌더 후 `server-secrets.env`에는 위 10개 키만 존재한다. 비시크릿 설정(TTL·CORS·SMTP
+호스트/포트·OAuth 클라이언트 ID 등)은 `server.env`가 정본이며 두 파일에 같은 키를 두지
+않는다.
+
+### 주의: GitHub Secrets는 다시 읽을 수 없다 (write-only)
+
+등록된 값은 워크플로 실행에서만 쓰이고 사람이 조회할 수 없다. 값의 원본 사본은 팀 내부
+금고에 보관하고, 서버에 남는 `server-secrets.env.bak-<시각>` 파일들이 직전 상태의 이력
+백업이다(렌더마다 자동 생성).
+
 ## 서버 설치 절차 (1회, 이미 적용됨 — 재구축 시 참고)
 
 전제: Docker, systemd 기반 innolive-ai@0/1, `/etc/innolive/server.env`·`server-secrets.env`.
@@ -41,8 +94,8 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
      INNOLIVE_APPLE_KEY_PATH=<server-secrets.env의 APPLE_PRIVATE_KEY_PATH와 동일 경로>
      ```
    - `/etc/innolive/dockerhub.token` (root 600): Docker Hub **Read-only** Access Token.
-2. **배포 스크립트 설치**: 이 디렉토리의 `receive-deploy.sh`/`apply-release.sh`를
-   `/opt/innolive/deploy/`에 root:root 755로 복사. `compose.prod.yaml`은
+2. **배포 스크립트 설치**: 이 디렉토리의 `receive-deploy.sh`/`apply-release.sh`/
+   `render-secrets.sh`를 `/opt/innolive/deploy/`에 root:root 755로 복사. `compose.prod.yaml`은
    `/opt/innolive/compose.prod.yaml`로, `innolive-server.service`는
    `/etc/systemd/system/innolive-server.service`로 복사 후 `systemctl daemon-reload`.
    ※ 스크립트 갱신은 항상 "레포 PR 머지 → 서버에 수동 복사" 순서로 한다(자동 동기화 금지 —
@@ -56,15 +109,17 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
    - sudoers(`/etc/sudoers.d/innolive-deploy`, 440):
      ```
      deploy ALL=(root) NOPASSWD: /opt/innolive/deploy/apply-release.sh *
+     deploy ALL=(root) NOPASSWD: /opt/innolive/deploy/render-secrets.sh *
      ```
 5. **첫 태그 파일**: `printf 'INNOLIVE_TAG=<현재 배포 커밋SHA>\n' > /opt/innolive/deploy/current_tag`
 6. 구 preflight 우회(`/etc/innolive/preflight-off.env`)는 유닛 교체와 함께 제거한다.
 
 ## GitHub 설정
 
-- Secrets (Actions): `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`(Read&Write),
+- Secrets (Actions, environment `production`): `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`(Read&Write),
   `DEPLOY_SSH_KEY`(deploy 계정 개인키), `DEPLOY_SSH_HOST`, `DEPLOY_SSH_PORT`,
   `DEPLOY_SSH_KNOWN_HOSTS`(`ssh-keyscan -p <port> <host>` 고정값).
+- 앱 시크릿(environment `production`): `PROD_*` 10종 — 목록·매핑은 위 "시크릿 동기화" 절 참조.
 - 개인 명의 자격증명은 어디에도 사용하지 않는다(팀 서비스 계정만).
 
 ## 로그 위생 (public 레포 전제)

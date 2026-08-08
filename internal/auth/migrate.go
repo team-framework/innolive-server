@@ -18,6 +18,7 @@ func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 		&OAuthAccount{},
 		&EmailAccount{},
 		&RefreshSession{},
+		&StreamingAccount{},
 	); err != nil {
 		return fmt.Errorf("auto migrate authentication schema: %w", err)
 	}

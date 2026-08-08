@@ -295,6 +295,11 @@ func main() {
 		logger.Error("create account withdrawal service failed", "error", err)
 		os.Exit(2)
 	}
+	youtubeOAuthConfig, err := auth.LoadYouTubeOAuthConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid YouTube OAuth configuration", "error", err)
+		os.Exit(2)
+	}
 	logger.Info(
 		"authentication token service ready",
 		"access_ttl", tokenConfig.AccessTTL,
@@ -305,9 +310,38 @@ func main() {
 		"google_oauth_enabled", googleOAuthConfig.Enabled(),
 		"apple_oauth_enabled", appleOAuthConfig.Enabled(),
 		"email_auth_enabled", emailAuthConfig.Enabled(),
+		"youtube_streaming_enabled", youtubeOAuthConfig.Enabled(),
 	)
 
 	userStatusChecker := auth.NewGormUserStatusChecker(databaseConnection.DB)
+	// YouTube 송출 연동. 암호화 키(cipher)는 Apple 활성 시 위에서 이미
+	// 생성됐을 수 있으므로 없을 때만 만든다 — Apple 없이 YouTube만 켠
+	// 배포에서도 refresh token 암호화가 성립해야 한다.
+	var youtubeConnect *auth.YouTubeConnectService
+	if youtubeOAuthConfig.Enabled() {
+		if providerTokenCipher == nil {
+			providerTokenCipher, err = auth.NewProviderTokenCipherFromBase64(os.Getenv("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"))
+			if err != nil {
+				logger.Error("invalid provider token encryption configuration", "error", err)
+				os.Exit(2)
+			}
+		}
+		youtubeOAuthClient, err := auth.NewYouTubeOAuthClient(youtubeOAuthConfig)
+		if err != nil {
+			logger.Error("create YouTube OAuth client failed", "error", err)
+			os.Exit(2)
+		}
+		youtubeConnect, err = auth.NewYouTubeConnectService(
+			youtubeOAuthClient,
+			auth.NewGormStreamingAccountStore(databaseConnection.DB),
+			userStatusChecker,
+			providerTokenCipher,
+		)
+		if err != nil {
+			logger.Error("create YouTube connect service failed", "error", err)
+			os.Exit(2)
+		}
+	}
 	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
 	// escape hatch (loud warning above). Extend it to user auth as well so
 	// tokenless bench tooling (pion-load) keeps working against dev servers;
@@ -373,7 +407,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithServices(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, logger, originConfig),
+		Handler:           auth.MountAuthHTTPWithServices(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, logger, originConfig, youtubeConnect),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

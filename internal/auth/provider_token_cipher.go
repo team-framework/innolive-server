@@ -23,7 +23,7 @@ type ProviderTokenCipher struct {
 func NewProviderTokenCipherFromBase64(value string) (*ProviderTokenCipher, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return nil, errors.New("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64 is required when Apple OAuth is enabled")
+		return nil, errors.New("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64 is required when Apple OAuth or a streaming integration is enabled")
 	}
 	key, err := base64.StdEncoding.DecodeString(value)
 	if err != nil {

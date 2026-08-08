@@ -101,7 +101,13 @@ type Session struct {
 	processedTrackID string
 	audioTrackID     string
 	audioPipe        *media.AudioPipe
-	processor        *media.Processor
+	// egress는 세션 수명으로 관리한다(#84). 트랙 수명(trackCtx)에 묶으면
+	// 카메라 전환(트랙 교체) 순간 egress가 함께 종료되어 RTMP 연결이 끊기고
+	// FFmpeg 재기동·백오프 동안 송출이 단절된다. egressCancel은 세션 종료와
+	// 별개로 egress만 멈추는 경로(#83의 명시적 stream/stop)를 위해 분리해 둔다.
+	egress       *media.RTMPEgress
+	egressCancel context.CancelFunc
+	processor    *media.Processor
 	ignoredTracks    int
 	offerReceivedAt  time.Time
 	answerCreatedAt  time.Time
@@ -256,6 +262,19 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	if m.cfg.EnableAudioEgress && m.cfg.YoutubeStreamKey != "" {
 		s.audioPipe = media.NewAudioPipe(m.logger.With("session_id", id), m.metrics, 2)
 		go s.audioPipe.Run(ctx)
+	}
+	// egress도 트랙 도착 전에 세션 수명으로 미리 만든다(#84). Run은 첫
+	// 프레임 수집(collectStartupFrames) 전에는 FFmpeg를 스폰하지 않으므로
+	// 트랙 없는 세션에서는 고루틴 하나가 대기할 뿐 자원을 쓰지 않는다.
+	if m.cfg.YoutubeStreamKey != "" {
+		egressCtx, egressCancel := context.WithCancel(ctx)
+		s.egress = media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", id), m.metrics, media.TranscoderOptions{
+			Gate:       m.spawnGate,
+			WireFormat: m.cfg.AIWireFormat,
+		}, youtubeIngestURL+m.cfg.YoutubeStreamKey, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate)
+		s.egressCancel = egressCancel
+		go s.egress.Run(egressCtx)
+		m.logger.Info("YouTube RTMP egress enabled", "session_id", id, "url", youtubeIngestURL+"****")
 	}
 	m.installHandlers(ctx, s)
 	m.mu.Lock()
@@ -521,16 +540,10 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		}
 		s.mu.Lock()
 		s.processor = processor
+		// 세션 수명 egress를 재사용한다(#84): 트랙이 교체되어 이 파이프라인이
+		// 새로 만들어져도 같은 egress에 Enqueue가 이어져 RTMP 연결이 유지된다.
+		egress := s.egress
 		s.mu.Unlock()
-		var egress *media.RTMPEgress
-		if m.cfg.YoutubeStreamKey != "" {
-			egress = media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
-				Gate:       m.spawnGate,
-				WireFormat: m.cfg.AIWireFormat,
-			}, youtubeIngestURL+m.cfg.YoutubeStreamKey, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate)
-			go egress.Run(trackCtx)
-			m.logger.Info("YouTube RTMP egress enabled", "session_id", s.ID, "url", youtubeIngestURL+"****")
-		}
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		go func() {
@@ -635,7 +648,29 @@ func (s *Session) Response() Response {
 	if s.processor != nil {
 		response.Media.AIFallbackActive = s.processor.FallbackActive()
 	}
+	if s.egress != nil {
+		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "")
+	}
 	return response
+}
+
+// streamStateFromEgress는 egress 상태 스냅샷을 API 응답 계약(StreamState)으로
+// 옮긴다. StopReason은 명시적 중지 개념이 생기는 #83에서 채운다.
+func streamStateFromEgress(status media.EgressStatus, publisherActive bool) StreamState {
+	state := StreamState{
+		Status:            string(status.Phase),
+		StartedAt:         status.StartedAt,
+		StoppedAt:         status.StoppedAt,
+		UpdatedAt:         status.UpdatedAt,
+		PublisherActive:   publisherActive,
+		LastError:         status.LastError,
+		ReconnectAttempts: status.ReconnectAttempts,
+	}
+	if status.TargetURL != "" {
+		target := status.TargetURL
+		state.TargetURL = &target
+	}
+	return state
 }
 
 func (s *Session) close(reason string, logger *slog.Logger) {
@@ -649,6 +684,11 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 	if s.disconnectTimer != nil {
 		s.disconnectTimer.Stop()
 		s.disconnectTimer = nil
+	}
+	// 세션 ctx 취소로도 전파되지만, egress 종료가 세션 teardown의 일부임을
+	// 명시하기 위해 전용 cancel을 직접 호출한다.
+	if s.egressCancel != nil {
+		s.egressCancel()
 	}
 	s.cancel()
 	s.mu.Unlock()

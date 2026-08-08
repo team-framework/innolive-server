@@ -2,10 +2,12 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
@@ -180,6 +182,136 @@ func TestHandleStderrLineMasksKeyInErrors(t *testing.T) {
 	}
 	if !strings.Contains(logged, "live2/****") {
 		t.Errorf("masked URL not present in logs: %s", logged)
+	}
+}
+
+func TestEgressStatusTransitions(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+
+	initial := e.Status()
+	if initial.Phase != EgressPhaseIdle {
+		t.Fatalf("initial phase = %q, want %q", initial.Phase, EgressPhaseIdle)
+	}
+	if initial.TargetURL != "rtmp://a.rtmp.youtube.com/live2/****" {
+		t.Fatalf("initial TargetURL = %q, want masked URL", initial.TargetURL)
+	}
+	if initial.StartedAt != nil || initial.StoppedAt != nil {
+		t.Fatal("initial StartedAt/StoppedAt must be nil")
+	}
+
+	e.setStreaming()
+	streaming := e.Status()
+	if streaming.Phase != EgressPhaseStreaming || streaming.StartedAt == nil {
+		t.Fatalf("after setStreaming: phase=%q started=%v", streaming.Phase, streaming.StartedAt)
+	}
+	firstStart := *streaming.StartedAt
+
+	e.noteReconnect(io.ErrUnexpectedEOF)
+	reconnecting := e.Status()
+	if reconnecting.Phase != EgressPhaseReconnecting {
+		t.Fatalf("after noteReconnect: phase = %q", reconnecting.Phase)
+	}
+	if reconnecting.ReconnectAttempts != 1 {
+		t.Fatalf("ReconnectAttempts = %d, want 1", reconnecting.ReconnectAttempts)
+	}
+	if reconnecting.LastError == nil || *reconnecting.LastError != io.ErrUnexpectedEOF.Error() {
+		t.Fatalf("LastError = %v, want %q", reconnecting.LastError, io.ErrUnexpectedEOF)
+	}
+
+	// 재연결 후 송출 재개: StartedAt은 최초 시각을 보존해야 한다.
+	e.setStreaming()
+	resumed := e.Status()
+	if resumed.StartedAt == nil || !resumed.StartedAt.Equal(firstStart) {
+		t.Fatalf("StartedAt changed across reconnect: %v -> %v", firstStart, resumed.StartedAt)
+	}
+
+	e.setStopped()
+	stopped := e.Status()
+	if stopped.Phase != EgressPhaseStopped || stopped.StoppedAt == nil {
+		t.Fatalf("after setStopped: phase=%q stopped=%v", stopped.Phase, stopped.StoppedAt)
+	}
+	firstStop := *stopped.StoppedAt
+	e.setStopped()
+	if again := e.Status(); !again.StoppedAt.Equal(firstStop) {
+		t.Fatal("StoppedAt must not change on repeated setStopped")
+	}
+}
+
+func TestCollectStartupFramesWithSeed(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	seed := frame{timestamp: 999, width: 640, height: 360}
+	go func() {
+		for i := 0; i < egressMeasureFrames-1; i++ {
+			e.input <- frame{timestamp: uint32(i), width: 640, height: 360}
+		}
+	}()
+	startup, ok := e.collectStartupFrames(t.Context(), []frame{seed})
+	if !ok {
+		t.Fatal("collectStartupFrames returned ok=false")
+	}
+	if len(startup) != egressMeasureFrames {
+		t.Fatalf("collected %d frames, want %d", len(startup), egressMeasureFrames)
+	}
+	if startup[0].timestamp != seed.timestamp {
+		t.Fatalf("startup[0].timestamp = %d, want seed %d", startup[0].timestamp, seed.timestamp)
+	}
+}
+
+func TestCollectStartupFramesCancelled(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := e.collectStartupFrames(ctx, nil); ok {
+		t.Fatal("collectStartupFrames must return ok=false on cancelled context")
+	}
+}
+
+func TestResolutionChanged(t *testing.T) {
+	tests := []struct {
+		name          string
+		item          frame
+		width, height uint16
+		want          bool
+	}{
+		{"same resolution", frame{width: 1280, height: 720}, 1280, 720, false},
+		{"width changed", frame{width: 1920, height: 720}, 1280, 720, true},
+		{"height changed", frame{width: 1280, height: 1080}, 1280, 720, true},
+		{"both changed", frame{width: 1920, height: 1080}, 1280, 720, true},
+		{"zero width skips check", frame{width: 0, height: 720}, 1280, 720, false},
+		{"zero height skips check", frame{width: 1280, height: 0}, 1280, 720, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolutionChanged(tc.item, tc.width, tc.height); got != tc.want {
+				t.Fatalf("resolutionChanged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunStopsOnCancelBeforeSpawn: 프레임이 측정 수에 못 미치면 Run은 FFmpeg를
+// 스폰하지 않고 대기하다가, 컨텍스트 취소 시 stopped 상태로 종료해야 한다.
+// 트랙이 한 번도 도착하지 않은 세션의 teardown 경로다.
+func TestRunStopsOnCancelBeforeSpawn(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	// 측정 수 미만의 프레임만 공급한다: 스폰 없이 수집 단계에 머문다.
+	for i := 0; i < 3; i++ {
+		e.Enqueue(frame{timestamp: uint32(i), width: 640, height: 360})
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after context cancellation")
+	}
+	if status := e.Status(); status.Phase != EgressPhaseStopped {
+		t.Fatalf("phase after Run = %q, want %q", status.Phase, EgressPhaseStopped)
 	}
 }
 

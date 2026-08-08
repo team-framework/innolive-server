@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -33,6 +34,33 @@ const (
 	// later failure resets the reconnect backoff to its minimum.
 	egressStableFrames = 300
 )
+
+// EgressPhase는 RTMP egress의 수명 단계다.
+type EgressPhase string
+
+const (
+	// EgressPhaseIdle: 첫 스폰 전, 프레임 수집·대기 중.
+	EgressPhaseIdle EgressPhase = "idle"
+	// EgressPhaseStreaming: FFmpeg 가동, 프레임 송출 중.
+	EgressPhaseStreaming EgressPhase = "streaming"
+	// EgressPhaseReconnecting: 송출 실패 후 백오프 대기 중.
+	EgressPhaseReconnecting EgressPhase = "reconnecting"
+	// EgressPhaseStopped: Run 종료(세션 teardown 또는 명시적 중지).
+	EgressPhaseStopped EgressPhase = "stopped"
+)
+
+// EgressStatus는 Status()가 반환하는 egress 상태 스냅샷이다. 세션 계층이
+// StreamState 응답을 합성할 때 조회하는 pull 모델의 소스이며, egress 내부
+// 고루틴이 콜백으로 세션 락을 잡는 역방향 결합을 만들지 않기 위한 구조다.
+type EgressStatus struct {
+	Phase             EgressPhase
+	TargetURL         string // 마스킹된 출력 URL
+	StartedAt         *time.Time
+	StoppedAt         *time.Time
+	UpdatedAt         time.Time
+	LastError         *string
+	ReconnectAttempts int
+}
 
 // RTMPEgress pushes processed (blurred) frames to an RTMP endpoint through a
 // dedicated FFmpeg child, following the FFmpegTranscoder process pattern.
@@ -60,6 +88,9 @@ type RTMPEgress struct {
 	// resolution-derived video bitrate.
 	bitrateOverride string
 	input           chan frame
+
+	statusMu sync.Mutex
+	status   EgressStatus
 }
 
 func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate string) *RTMPEgress {
@@ -78,6 +109,56 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		audioOffset:     audioOffset,
 		bitrateOverride: videoBitrate,
 		input:           make(chan frame, egressQueueSize),
+		status: EgressStatus{
+			Phase:     EgressPhaseIdle,
+			TargetURL: maskStreamKey(outputURL),
+			UpdatedAt: time.Now().UTC(),
+		},
+	}
+}
+
+// Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.
+func (e *RTMPEgress) Status() EgressStatus {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.status
+}
+
+// setStreaming은 스폰 성공 후 송출 단계 진입을 기록한다. StartedAt은 최초
+// 진입 시각을 보존한다(재연결·해상도 재기동으로 갱신하지 않는다).
+func (e *RTMPEgress) setStreaming() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	now := time.Now().UTC()
+	e.status.Phase = EgressPhaseStreaming
+	e.status.UpdatedAt = now
+	if e.status.StartedAt == nil {
+		e.status.StartedAt = &now
+	}
+}
+
+// noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.
+func (e *RTMPEgress) noteReconnect(cause error) {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.status.Phase = EgressPhaseReconnecting
+	e.status.UpdatedAt = time.Now().UTC()
+	e.status.ReconnectAttempts++
+	if cause != nil {
+		message := cause.Error()
+		e.status.LastError = &message
+	}
+}
+
+// setStopped는 Run 종료를 기록한다.
+func (e *RTMPEgress) setStopped() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	now := time.Now().UTC()
+	e.status.Phase = EgressPhaseStopped
+	e.status.UpdatedAt = now
+	if e.status.StoppedAt == nil {
+		e.status.StoppedAt = &now
 	}
 }
 
@@ -118,52 +199,77 @@ func (e *RTMPEgress) Enqueue(item frame) {
 // spawns the FFmpeg child, feeds it frames, and reconnects with exponential
 // backoff when the child dies or the RTMP write path fails. Frames arriving
 // while disconnected are dropped, never buffered.
+//
+// egress가 세션 수명으로 살게 되면서(#84) 트랙 교체로 프레임 해상도가
+// 바뀌어도 이 고루틴이 계속 담당한다: 바깥 루프가 해상도 한 세대를,
+// 안쪽 루프가 그 해상도에서의 스폰·재연결을 관리한다. 해상도가 바뀐
+// 프레임을 만나면 백오프 없이 바깥 루프로 나가 새 해상도로 재측정한다.
 func (e *RTMPEgress) Run(ctx context.Context) {
-	startup, ok := e.collectStartupFrames(ctx)
-	if !ok {
-		return
-	}
-	width, height := startup[0].width, startup[0].height
-	fps := measureFPS(startup)
-	e.logger.Info("starting RTMP egress",
-		"url", maskStreamKey(e.outputURL), "width", width, "height", height, "fps", fps,
-		"video_bitrate", e.videoBitrateFor(width, height))
-
+	defer e.setStopped()
 	backoff := egressBackoffMin
-	pending := startup
+	var seed []frame
 	for ctx.Err() == nil {
-		process, err := e.start(ctx, width, height, fps)
-		if err != nil {
+		startup, ok := e.collectStartupFrames(ctx, seed)
+		if !ok {
+			return
+		}
+		seed = nil
+		width, height := startup[0].width, startup[0].height
+		fps := measureFPS(startup)
+		e.logger.Info("starting RTMP egress",
+			"url", maskStreamKey(e.outputURL), "width", width, "height", height, "fps", fps,
+			"video_bitrate", e.videoBitrateFor(width, height))
+
+		pending := startup
+		for ctx.Err() == nil {
+			process, err := e.start(ctx, width, height, fps)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				e.logger.Error("start RTMP egress FFmpeg failed", "error", err)
+				e.noteReconnect(err)
+				e.waitBackoff(ctx, &backoff)
+				continue
+			}
+			e.setStreaming()
+			written, mismatch, err := e.writeFrames(ctx, process, pending, width, height)
+			pending = nil
+			process.close()
+			// Give the child EOF on pipe:3 so it exits, and free the Ogg stream so
+			// the next spawn attaches a fresh one.
+			if e.audio != nil {
+				e.audio.Detach(e.audioWriteEnd)
+			}
 			if ctx.Err() != nil {
 				return
 			}
-			e.logger.Error("start RTMP egress FFmpeg failed", "error", err)
+			if mismatch != nil {
+				// 트랙 교체로 해상도가 바뀌었다. 송출 실패가 아니므로 백오프와
+				// 재연결 집계 없이, 이 프레임을 시드로 즉시 재측정에 들어간다.
+				e.logger.Info("video resolution changed; restarting RTMP egress",
+					"old_width", width, "old_height", height,
+					"new_width", mismatch.width, "new_height", mismatch.height)
+				seed = []frame{*mismatch}
+				break
+			}
+			if written >= egressStableFrames {
+				backoff = egressBackoffMin
+			}
+			e.metrics.IncEgressReconnect()
+			e.noteReconnect(err)
+			e.logger.Warn("RTMP egress disconnected; reconnecting",
+				"error", err, "frames_written", written, "backoff", backoff)
 			e.waitBackoff(ctx, &backoff)
-			continue
 		}
-		written, err := e.writeFrames(ctx, process, pending)
-		pending = nil
-		process.close()
-		// Give the child EOF on pipe:3 so it exits, and free the Ogg stream so
-		// the next spawn attaches a fresh one.
-		if e.audio != nil {
-			e.audio.Detach(e.audioWriteEnd)
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		if written >= egressStableFrames {
-			backoff = egressBackoffMin
-		}
-		e.metrics.IncEgressReconnect()
-		e.logger.Warn("RTMP egress disconnected; reconnecting",
-			"error", err, "frames_written", written, "backoff", backoff)
-		e.waitBackoff(ctx, &backoff)
 	}
 }
 
-func (e *RTMPEgress) collectStartupFrames(ctx context.Context) ([]frame, bool) {
+// collectStartupFrames는 fps·해상도 측정에 쓸 프레임을 모은다. seed는 해상도
+// 재기동 시 이월되는 새 해상도의 첫 프레임으로, 수집 목표 수에 포함된다.
+func (e *RTMPEgress) collectStartupFrames(ctx context.Context, seed []frame) ([]frame, bool) {
 	startup := make([]frame, 0, egressMeasureFrames)
+	startup = append(startup, seed...)
 	for len(startup) < egressMeasureFrames {
 		select {
 		case <-ctx.Done():
@@ -175,35 +281,52 @@ func (e *RTMPEgress) collectStartupFrames(ctx context.Context) ([]frame, bool) {
 	return startup, true
 }
 
-func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame) (int, error) {
+// writeFrames는 프레임을 FFmpeg에 공급한다. 스폰 해상도와 다른 프레임을
+// 만나면 그 프레임을 반환하고 즉시 중단한다 — 해상도가 다른 데이터를 밀면
+// 인코더가 어차피 죽고, 죽은 뒤에는 재기동 기준 해상도를 알 수 없기 때문에
+// 죽기 전에 감지해 재측정 시드로 넘기는 것이다.
+func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame, width, height uint16) (int, *frame, error) {
 	written := 0
-	write := func(item frame) error {
+	write := func(item frame) (*frame, error) {
+		if resolutionChanged(item, width, height) {
+			return &item, nil
+		}
 		if !e.validFrame(item) {
 			e.metrics.IncEgressFrameDropped()
-			return nil
+			return nil, nil
 		}
 		if _, err := process.stdin.Write(item.data); err != nil {
-			return err
+			return nil, err
 		}
 		written++
 		e.latency.observe(item.ingestAt)
-		return nil
+		return nil, nil
 	}
 	for _, item := range pending {
-		if err := write(item); err != nil {
-			return written, err
+		if mismatch, err := write(item); mismatch != nil || err != nil {
+			return written, mismatch, err
 		}
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return written, ctx.Err()
+			return written, nil, ctx.Err()
 		case item := <-e.input:
-			if err := write(item); err != nil {
-				return written, err
+			if mismatch, err := write(item); mismatch != nil || err != nil {
+				return written, mismatch, err
 			}
 		}
 	}
+}
+
+// resolutionChanged는 프레임 해상도가 현재 스폰 해상도와 다른지 판정한다.
+// 해상도 정보가 없는 프레임(0값)은 비교에서 제외해 기존 검증(validFrame)
+// 경로에 맡긴다 — 0×0을 기준 삼아 재기동을 반복하는 것을 막는 가드다.
+func resolutionChanged(item frame, width, height uint16) bool {
+	if item.width == 0 || item.height == 0 {
+		return false
+	}
+	return item.width != width || item.height != height
 }
 
 func (e *RTMPEgress) validFrame(item frame) bool {

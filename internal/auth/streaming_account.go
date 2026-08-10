@@ -107,6 +107,9 @@ type StreamingAccountStore interface {
 	MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error
 	// Delete는 연결 행을 삭제한다. 없으면 ErrStreamingAccountNotFound.
 	Delete(ctx context.Context, id uuid.UUID) error
+	// UpdateChannel은 플랫폼 쪽 채널 표시 정보를 갱신한다(사용자가 채널명을
+	// 바꾼 경우의 신선도 유지 — 연결·방송 준비 시점에만 호출된다).
+	UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error
 }
 
 type gormStreamingAccountStore struct {
@@ -190,6 +193,26 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"channel_id":    channelID,
+			"channel_title": channelTitle,
+			"updated_at":    s.now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
 }
 
 func (s *gormStreamingAccountStore) Delete(ctx context.Context, id uuid.UUID) error {

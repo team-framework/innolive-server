@@ -267,6 +267,20 @@ func (s *memoryStreamingAccountStore) Upsert(_ context.Context, account Streamin
 	return nil
 }
 
+func (s *memoryStreamingAccountStore) UpdateChannel(_ context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			account.ChannelID = channelID
+			account.ChannelTitle = channelTitle
+			s.accounts[key] = account
+			return nil
+		}
+	}
+	return ErrStreamingAccountNotFound
+}
+
 func (s *memoryStreamingAccountStore) Delete(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -85,6 +85,10 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 	if err != nil {
 		return PreparedBroadcast{}, err
 	}
+	// 방송 준비 시점의 채널 표시 정보 갱신(#88 ④) — 조회 API가 저장값을
+	// 반환하는 대가로 여기서 신선도를 맞춘다(1 unit). 부가 기능이므로 실패해도
+	// 방송 준비는 계속한다.
+	p.refreshChannelInfo(ctx, accessToken, account)
 	broadcastID, err := p.insertBroadcast(ctx, accessToken, options)
 	if err != nil {
 		return PreparedBroadcast{}, err
@@ -193,6 +197,54 @@ func (p *YouTubeProvider) ensureReusableStream(ctx context.Context, accessToken 
 		return "", "", "", fmt.Errorf("persist reusable stream info: %w", err)
 	}
 	return response.ID, info.RtmpsIngestionAddress, info.StreamName, nil
+}
+
+// refreshChannelInfo는 channels.list(mine=true)로 현재 채널 정보를 조회해
+// 저장값과 다르면 갱신한다. 실패는 로그 대상도 아닌 무시다 — 표시 정보의
+// 신선도일 뿐 방송 준비의 성패와 무관하다.
+func (p *YouTubeProvider) refreshChannelInfo(ctx context.Context, accessToken string, account auth.StreamingAccount) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/channels?part=snippet&mine=true", nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := p.httpClient.Do(request)
+	if err != nil {
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+		return
+	}
+	var payload struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Snippet struct {
+				Title string `json:"title"`
+			} `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&payload); err != nil {
+		return
+	}
+	if len(payload.Items) == 0 || payload.Items[0].ID == "" {
+		return
+	}
+	channelID := payload.Items[0].ID
+	title := strings.TrimSpace(payload.Items[0].Snippet.Title)
+	storedTitle := ""
+	if account.ChannelTitle != nil {
+		storedTitle = *account.ChannelTitle
+	}
+	if channelID == account.ChannelID && title == storedTitle {
+		return
+	}
+	var titlePtr *string
+	if title != "" {
+		titlePtr = &title
+	}
+	_ = p.store.UpdateChannel(ctx, account.ID, channelID, titlePtr)
 }
 
 func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken string, options PrepareOptions) (string, error) {

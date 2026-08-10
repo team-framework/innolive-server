@@ -43,6 +43,19 @@ func (s *memoryStore) Upsert(_ context.Context, account auth.StreamingAccount) e
 	return nil
 }
 
+func (s *memoryStore) UpdateChannel(_ context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.ChannelID = channelID
+	account.ChannelTitle = channelTitle
+	s.accounts[id] = account
+	return nil
+}
+
 func (s *memoryStore) Delete(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -146,6 +159,9 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch {
+		case strings.HasPrefix(r.URL.Path, "/channels"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"id":"UCabc","snippet":{"title":"Team Framework Renamed"}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/liveStreams"):
 			s.streamInserts++
 			w.Header().Set("Content-Type", "application/json")
@@ -316,6 +332,27 @@ func TestPrepareMapsLivePermissionBlocked(t *testing.T) {
 	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
 	if !errors.Is(err, ErrLiveStreamingBlocked) {
 		t.Fatalf("error = %v, want ErrLiveStreamingBlocked", err)
+	}
+}
+
+// TestPrepareRefreshesChannelInfo: 방송 준비가 채널 표시 정보를 갱신해야
+// 한다(#88 ④ — 조회 API는 저장값을 반환하므로 여기서 신선도를 맞춘다).
+func TestPrepareRefreshesChannelInfo(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID) // 저장된 제목은 없음(nil), 스텁은 "Team Framework Renamed"를 반환
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	account, err := store.Get(context.Background(), userID, auth.StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ChannelTitle == nil || *account.ChannelTitle != "Team Framework Renamed" {
+		t.Fatalf("channel title = %v, want refreshed value", account.ChannelTitle)
 	}
 }
 

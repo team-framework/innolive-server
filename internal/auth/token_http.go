@@ -83,8 +83,7 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	}
 	if h.youtube != nil {
 		mux.Handle("POST /auth/youtube/connect", h.middleware(http.HandlerFunc(h.handleYouTubeConnect)))
-		// 콜백은 브라우저 리다이렉트 도착이라 GET이며, state가 사용자 바인딩이다.
-		mux.Handle("GET /auth/youtube/callback", h.middleware(http.HandlerFunc(h.handleYouTubeCallback)))
+		mux.Handle("GET /auth/youtube/config", h.middleware(http.HandlerFunc(h.handleYouTubeConfig)))
 	}
 	mux.Handle("/", next)
 	return mux

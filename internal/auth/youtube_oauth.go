@@ -18,56 +18,76 @@ import (
 )
 
 const (
-	googleOAuthAuthorizeEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
-	googleOAuthTokenEndpoint     = "https://oauth2.googleapis.com/token"
-	youtubeChannelsEndpoint      = "https://www.googleapis.com/youtube/v3/channels"
-	// youtubeStreamingScope는 Live API까지 포함하는 최소 스코프다. 이보다 좁은
-	// 라이브 전용 스코프는 존재하지 않는다(2026-08-09 조사).
-	youtubeStreamingScope = "https://www.googleapis.com/auth/youtube"
+	googleOAuthTokenEndpoint = "https://oauth2.googleapis.com/token"
+	youtubeChannelsEndpoint  = "https://www.googleapis.com/youtube/v3/channels"
+	// YouTubeStreamingScope는 Live API까지 포함하는 최소 스코프다. 이보다 좁은
+	// 라이브 전용 스코프는 존재하지 않는다(2026-08-09 조사). 클라이언트 SDK가
+	// serverAuthCode를 요청할 때 같은 값을 써야 한다.
+	YouTubeStreamingScope = "https://www.googleapis.com/auth/youtube"
 	maxYouTubeOAuthField  = 512
-	oauthStateTTL         = 10 * time.Minute
 	// accessTokenExpirySlack만큼 만료를 앞당겨 취급해, 발급 직후 만료되는
 	// 토큰으로 API를 치는 경계 상황을 피한다.
 	accessTokenExpirySlack = 60 * time.Second
 )
 
 var (
-	ErrYouTubeOAuthDenied     = errors.New("YouTube authorization was denied by the user")
-	ErrInvalidOAuthState      = errors.New("OAuth state is invalid or expired")
-	ErrYouTubeChannelMissing  = errors.New("Google account has no YouTube channel")
-	ErrYouTubeTokenExchange   = errors.New("YouTube token exchange failed")
-	ErrStreamingNotConnected  = errors.New("streaming account is not connected")
+	ErrYouTubeChannelMissing   = errors.New("Google account has no YouTube channel")
+	ErrYouTubeTokenExchange    = errors.New("YouTube token exchange failed")
+	ErrYouTubeAuthCodeRejected = errors.New("YouTube authorization code was rejected")
+	ErrStreamingNotConnected   = errors.New("streaming account is not connected")
 )
+
+// CodeSource는 인가 코드를 발급받은 클라이언트 유형이다. 교환 시 요구되는
+// redirect_uri가 유형마다 달라(2026-08-10 실측: 웹 팝업 코드는 생략 시
+// "Missing parameter: redirect_uri"로 거절, redirect_uri=postmessage 필수)
+// 클라이언트가 출처를 선언하고 서버가 매핑한다. 출처를 잘못 선언해도 교환이
+// 실패할 뿐 보안 영향은 없다(교환 자격증명은 서버의 웹 클라이언트 것 하나).
+type CodeSource string
+
+const (
+	// CodeSourceNative: GoogleSignIn SDK의 serverAuthCode. 교환 시
+	// redirect_uri 생략(문서 기준 — iOS 실물 코드로 최종 확인 예정).
+	CodeSourceNative CodeSource = "native"
+	// CodeSourceWebPopup: GIS initCodeClient(ux_mode: popup)가 발급한 코드.
+	// 교환 시 redirect_uri=postmessage 필수(실측 확정).
+	CodeSourceWebPopup CodeSource = "web_popup"
+)
+
+func (s CodeSource) Valid() bool {
+	return s == CodeSourceNative || s == CodeSourceWebPopup
+}
+
+// exchangeRedirectURI는 출처별 교환 redirect_uri 값이다. 빈 문자열은
+// 파라미터 생략을 뜻한다.
+func (s CodeSource) exchangeRedirectURI() string {
+	if s == CodeSourceWebPopup {
+		return "postmessage"
+	}
+	return ""
+}
 
 // YouTubeOAuthConfig는 송출 연동 전용 Google OAuth 클라이언트 설정이다.
 // 로그인용(GOOGLE_OAUTH_WEB_CLIENT_ID)과는 별도 GCP 프로젝트·클라이언트다.
 type YouTubeOAuthConfig struct {
 	ClientID     string
 	ClientSecret string
-	RedirectURI  string
 }
 
 func LoadYouTubeOAuthConfigFromEnv() (YouTubeOAuthConfig, error) {
 	config := YouTubeOAuthConfig{
 		ClientID:     strings.TrimSpace(os.Getenv("YOUTUBE_OAUTH_CLIENT_ID")),
 		ClientSecret: strings.TrimSpace(os.Getenv("YOUTUBE_OAUTH_CLIENT_SECRET")),
-		RedirectURI:  strings.TrimSpace(os.Getenv("YOUTUBE_OAUTH_REDIRECT_URI")),
 	}
-	values := []string{config.ClientID, config.ClientSecret, config.RedirectURI}
-	empty := 0
-	for _, value := range values {
-		if value == "" {
-			empty++
-		}
+	for _, value := range []string{config.ClientID, config.ClientSecret} {
 		if utf8.RuneCountInString(value) > maxYouTubeOAuthField {
 			return YouTubeOAuthConfig{}, errors.New("YouTube OAuth configuration value is too long")
 		}
 	}
-	if empty == len(values) {
+	if config.ClientID == "" && config.ClientSecret == "" {
 		return YouTubeOAuthConfig{}, nil
 	}
-	if empty != 0 {
-		return YouTubeOAuthConfig{}, errors.New("YOUTUBE_OAUTH_CLIENT_ID, YOUTUBE_OAUTH_CLIENT_SECRET, and YOUTUBE_OAUTH_REDIRECT_URI must be configured together")
+	if config.ClientID == "" || config.ClientSecret == "" {
+		return YouTubeOAuthConfig{}, errors.New("YOUTUBE_OAUTH_CLIENT_ID and YOUTUBE_OAUTH_CLIENT_SECRET must be configured together")
 	}
 	return config, nil
 }
@@ -94,18 +114,20 @@ type YouTubeChannel struct {
 // YouTubeAuthorizer는 Google OAuth·YouTube Data API와의 통신 계약이다.
 // 서비스 계층 테스트에서 대역으로 대체된다.
 type YouTubeAuthorizer interface {
-	AuthorizeURL(state string) string
-	Exchange(ctx context.Context, code string) (YouTubeTokenResponse, error)
+	// Exchange의 redirectURI는 코드 출처별 요구값(CodeSource.exchangeRedirectURI)
+	// 이며, 빈 문자열이면 파라미터를 생략한다.
+	Exchange(ctx context.Context, code, redirectURI string) (YouTubeTokenResponse, error)
 	RefreshAccessToken(ctx context.Context, refreshToken string) (YouTubeTokenResponse, error)
 	ChannelForToken(ctx context.Context, accessToken string) (YouTubeChannel, error)
+	// WebClientID는 웹 클라이언트(GIS)가 쓸 공개 클라이언트 식별자다.
+	WebClientID() string
 }
 
 type youtubeOAuthClient struct {
-	config       YouTubeOAuthConfig
-	httpClient   *http.Client
-	authorizeURL string
-	tokenURL     string
-	channelsURL  string
+	config      YouTubeOAuthConfig
+	httpClient  *http.Client
+	tokenURL    string
+	channelsURL string
 }
 
 func NewYouTubeOAuthClient(config YouTubeOAuthConfig) (*youtubeOAuthClient, error) {
@@ -113,42 +135,29 @@ func NewYouTubeOAuthClient(config YouTubeOAuthConfig) (*youtubeOAuthClient, erro
 		return nil, errors.New("YouTube OAuth is not configured")
 	}
 	return &youtubeOAuthClient{
-		config:       config,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		authorizeURL: googleOAuthAuthorizeEndpoint,
-		tokenURL:     googleOAuthTokenEndpoint,
-		channelsURL:  youtubeChannelsEndpoint,
+		config:      config,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		tokenURL:    googleOAuthTokenEndpoint,
+		channelsURL: youtubeChannelsEndpoint,
 	}, nil
 }
 
-// AuthorizeURL은 사용자를 보낼 Google 동의 화면 URL을 만든다.
-// access_type=offline만으로는 재승인 시 refresh_token이 응답에서 빠질 수
-// 있어 prompt=consent를 함께 강제한다(2026-08-09 실측으로 수신 확인).
-func (c *youtubeOAuthClient) AuthorizeURL(state string) string {
-	query := url.Values{
-		"client_id":     {c.config.ClientID},
-		"redirect_uri":  {c.config.RedirectURI},
-		"response_type": {"code"},
-		"scope":         {youtubeStreamingScope},
-		"access_type":   {"offline"},
-		"prompt":        {"consent"},
-		"state":         {state},
-	}
-	return c.authorizeURL + "?" + query.Encode()
-}
-
-// Exchange는 인가 코드를 토큰으로 교환한다. 코드에 '/' 등 예약 문자가
-// 들어오므로(실측) 반드시 form 인코딩을 거친다.
-func (c *youtubeOAuthClient) Exchange(ctx context.Context, code string) (YouTubeTokenResponse, error) {
+// Exchange는 클라이언트가 획득한 인가 코드를 토큰으로 교환한다. 코드에 '/'
+// 등 예약 문자가 들어오므로(실측) 반드시 form 인코딩을 거친다.
+func (c *youtubeOAuthClient) Exchange(ctx context.Context, code, redirectURI string) (YouTubeTokenResponse, error) {
 	form := url.Values{
 		"client_id":     {c.config.ClientID},
 		"client_secret": {c.config.ClientSecret},
 		"code":          {strings.TrimSpace(code)},
 		"grant_type":    {"authorization_code"},
-		"redirect_uri":  {c.config.RedirectURI},
+	}
+	if redirectURI != "" {
+		form.Set("redirect_uri", redirectURI)
 	}
 	return c.requestToken(ctx, form)
 }
+
+func (c *youtubeOAuthClient) WebClientID() string { return c.config.ClientID }
 
 // RefreshAccessToken은 refresh token으로 새 access token을 받는다. Google은
 // refresh token을 회전하지 않는 것이 기본이지만, 응답에 새 값이 오면 호출자가
@@ -176,6 +185,11 @@ func (c *youtubeOAuthClient) requestToken(ctx context.Context, form url.Values) 
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+		// 4xx는 코드 자체의 문제(만료·재사용·위조)라 클라이언트 오류로,
+		// 그 외는 Google 쪽 장애로 구분한다.
+		if response.StatusCode >= 400 && response.StatusCode < 500 {
+			return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d", ErrYouTubeAuthCodeRejected, response.StatusCode)
+		}
 		return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d", ErrYouTubeTokenExchange, response.StatusCode)
 	}
 	var result YouTubeTokenResponse
@@ -226,11 +240,11 @@ func (c *youtubeOAuthClient) ChannelForToken(ctx context.Context, accessToken st
 	return YouTubeChannel{ID: item.ID, Title: item.Snippet.Title}, nil
 }
 
-// YouTubeConnectService는 계정 연결 플로우(connect → 동의 → callback)를
-// 오케스트레이션한다.
+// YouTubeConnectService는 클라이언트(네이티브 SDK 또는 웹 GIS 팝업)가 획득한
+// 인가 코드로 계정 연결을 완결한다. 브라우저 리다이렉트가 없으므로 state가
+// 필요 없고, 사용자 바인딩은 connect 엔드포인트의 Bearer 인증이 담당한다.
 type YouTubeConnectService struct {
 	oauth  YouTubeAuthorizer
-	states *oauthStateStore
 	store  StreamingAccountStore
 	users  UserStatusChecker
 	cipher *ProviderTokenCipher
@@ -243,7 +257,6 @@ func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountSto
 	}
 	return &YouTubeConnectService{
 		oauth:  oauth,
-		states: newOAuthStateStore(oauthStateTTL),
 		store:  store,
 		users:  users,
 		cipher: cipher,
@@ -251,31 +264,14 @@ func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountSto
 	}, nil
 }
 
-// Connect는 연결 플로우를 시작한다: 사용자에 바인딩된 state를 발급하고
-// 클라이언트가 이동할 authorize URL을 돌려준다. connect 엔드포인트의 인라인
-// Bearer 인증은 사용자 상태를 확인하지 않으므로 여기서 active를 확인한다.
-func (s *YouTubeConnectService) Connect(ctx context.Context, userID uuid.UUID) (string, error) {
-	if err := s.ensureActive(ctx, userID); err != nil {
-		return "", err
-	}
-	state, err := s.states.Issue(userID)
-	if err != nil {
-		return "", err
-	}
-	return s.oauth.AuthorizeURL(state), nil
-}
-
-// CompleteCallback은 콜백의 state로 사용자를 복원하고, 코드를 토큰으로 교환한
-// 뒤 채널을 식별해 연결을 저장한다.
-func (s *YouTubeConnectService) CompleteCallback(ctx context.Context, state, code string) (YouTubeChannel, error) {
-	userID, ok := s.states.Consume(state)
-	if !ok {
-		return YouTubeChannel{}, ErrInvalidOAuthState
-	}
+// ConnectWithAuthCode는 인가 코드를 토큰으로 교환하고 채널을 식별해
+// 연결을 저장한다. connect 엔드포인트의 인라인 Bearer 인증은 사용자 상태를
+// 확인하지 않으므로 여기서 active를 확인한다.
+func (s *YouTubeConnectService) ConnectWithAuthCode(ctx context.Context, userID uuid.UUID, code string, source CodeSource) (YouTubeChannel, error) {
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return YouTubeChannel{}, err
 	}
-	token, err := s.oauth.Exchange(ctx, code)
+	token, err := s.oauth.Exchange(ctx, code, source.exchangeRedirectURI())
 	if err != nil {
 		return YouTubeChannel{}, err
 	}
@@ -305,6 +301,12 @@ func (s *YouTubeConnectService) CompleteCallback(ctx context.Context, state, cod
 		return YouTubeChannel{}, fmt.Errorf("persist streaming account: %w", err)
 	}
 	return channel, nil
+}
+
+// WebClientID는 웹(GIS) 클라이언트가 initCodeClient에 쓸 공개 클라이언트
+// 식별자다 — 비밀이 아니며 GET /auth/youtube/config 로 노출된다.
+func (s *YouTubeConnectService) WebClientID() string {
+	return s.oauth.WebClientID()
 }
 
 func (s *YouTubeConnectService) ensureActive(ctx context.Context, userID uuid.UUID) error {

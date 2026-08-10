@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -23,20 +24,34 @@ func testYouTubeHTTPHandler(t *testing.T, service *YouTubeConnectService) (*Toke
 	return tokens, handler
 }
 
+func youtubeConnectRequest(t *testing.T, accessToken, body string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/auth/youtube/connect", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	if accessToken != "" {
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	return request
+}
+
 func TestYouTubeConnectHTTPRequiresBearer(t *testing.T) {
 	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
 	_, handler := testYouTubeHTTPHandler(t, service)
 
-	request := httptest.NewRequest(http.MethodPost, "/auth/youtube/connect", nil)
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	handler.ServeHTTP(response, youtubeConnectRequest(t, "", `{"server_auth_code":"code"}`))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
-func TestYouTubeConnectHTTPReturnsAuthorizeURL(t *testing.T) {
-	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
+func TestYouTubeConnectHTTPCompletesConnection(t *testing.T) {
+	oauth := &stubYouTubeAuthorizer{
+		token:   YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt", ExpiresIn: 3599},
+		channel: YouTubeChannel{ID: "UCabc", Title: "Team Framework"},
+	}
+	store := newMemoryStreamingAccountStore()
+	service := testYouTubeConnectService(t, oauth, store, UserStatusActive)
 	tokens, handler := testYouTubeHTTPHandler(t, service)
 
 	userID := uuid.New()
@@ -45,86 +60,190 @@ func TestYouTubeConnectHTTPReturnsAuthorizeURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/auth/youtube/connect", nil)
-	request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, `{"server_auth_code":"4/0AXserver-code"}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Connected bool   `json:"connected"`
+		Provider  string `json:"provider"`
+		Channel   struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"channel"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Connected || payload.Provider != "youtube" || payload.Channel.ID != "UCabc" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); err != nil {
+		t.Fatalf("connection not persisted: %v", err)
+	}
+}
+
+func TestYouTubeConnectHTTPBadRequests(t *testing.T) {
+	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
+	tokens, handler := testYouTubeHTTPHandler(t, service)
+	pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, body := range map[string]string{
+		"empty body":    ``,
+		"missing code":  `{}`,
+		"blank code":    `{"server_auth_code":"  "}`,
+		"unknown field": `{"server_auth_code":"x","extra":true}`,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, body))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400 (body: %s)", name, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestYouTubeConnectHTTPMapsExchangeErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		stub       *stubYouTubeAuthorizer
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "rejected code",
+			stub:       &stubYouTubeAuthorizer{exchangeErr: ErrYouTubeAuthCodeRejected},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_auth_code",
+		},
+		{
+			name:       "google outage",
+			stub:       &stubYouTubeAuthorizer{exchangeErr: ErrYouTubeTokenExchange},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "youtube_token_exchange_failed",
+		},
+		{
+			name: "channel missing",
+			stub: &stubYouTubeAuthorizer{
+				token:      YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt"},
+				channelErr: ErrYouTubeChannelMissing,
+			},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "youtube_channel_missing",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := testYouTubeConnectService(t, tc.stub, newMemoryStreamingAccountStore(), UserStatusActive)
+			tokens, handler := testYouTubeHTTPHandler(t, service)
+			pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, `{"server_auth_code":"code"}`))
+			if response.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", response.Code, tc.wantStatus, response.Body.String())
+			}
+			var payload struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Code != tc.wantCode {
+				t.Fatalf("error code = %q, want %q", payload.Error.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestYouTubeConnectHTTPCodeSource: code_source가 교환 redirect_uri 매핑으로
+// 이어지고(web_popup→postmessage 실측 계약), 미지 값은 400이어야 한다.
+func TestYouTubeConnectHTTPCodeSource(t *testing.T) {
+	oauth := &stubYouTubeAuthorizer{
+		token:   YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt", ExpiresIn: 3599},
+		channel: YouTubeChannel{ID: "UCabc"},
+	}
+	service := testYouTubeConnectService(t, oauth, newMemoryStreamingAccountStore(), UserStatusActive)
+	tokens, handler := testYouTubeHTTPHandler(t, service)
+	pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, `{"server_auth_code":"c","code_source":"web_popup"}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("web_popup status = %d, body = %s", response.Code, response.Body.String())
+	}
+	oauth.mu.Lock()
+	redirect := oauth.exchangeRedirect
+	oauth.mu.Unlock()
+	if redirect != "postmessage" {
+		t.Fatalf("web_popup exchanged with redirect %q, want postmessage", redirect)
+	}
+
+	// 생략 시 native(하위호환) — redirect_uri 생략.
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, `{"server_auth_code":"c2"}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("default source status = %d, body = %s", response.Code, response.Body.String())
+	}
+	oauth.mu.Lock()
+	redirect = oauth.exchangeRedirect
+	oauth.mu.Unlock()
+	if redirect != "" {
+		t.Fatalf("native exchanged with redirect %q, want omitted", redirect)
+	}
+
+	// 미지 출처는 400.
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, youtubeConnectRequest(t, pair.AccessToken, `{"server_auth_code":"c3","code_source":"browser"}`))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown source status = %d, want 400", response.Code)
+	}
+}
+
+// TestYouTubeConfigHTTPExposesWebClientID: 웹 클라이언트가 GIS 초기화에 쓸
+// 공개 설정 — 인증 없이 접근 가능해야 한다.
+func TestYouTubeConfigHTTPExposesWebClientID(t *testing.T) {
+	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
+	_, handler := testYouTubeHTTPHandler(t, service)
+
+	request := httptest.NewRequest(http.MethodGet, "/auth/youtube/config", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	var payload struct {
-		AuthorizeURL string `json:"authorize_url"`
+		WebClientID string `json:"web_client_id"`
+		Scope       string `json:"scope"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.AuthorizeURL == "" {
-		t.Fatal("authorize_url is empty")
+	if payload.WebClientID != "stub-web-client-id" || payload.Scope != YouTubeStreamingScope {
+		t.Fatalf("payload = %+v", payload)
 	}
 }
 
-func TestYouTubeCallbackHTTPFlow(t *testing.T) {
-	oauth := &stubYouTubeAuthorizer{
-		token:   YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt", ExpiresIn: 3599},
-		channel: YouTubeChannel{ID: "UCabc", Title: "Team Framework"},
-	}
-	store := newMemoryStreamingAccountStore()
-	service := testYouTubeConnectService(t, oauth, store, UserStatusActive)
-	_, handler := testYouTubeHTTPHandler(t, service)
-
-	userID := uuid.New()
-	state, err := service.states.Issue(userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Google 콜백에는 문서에 없는 파라미터(iss — 2026-08-09 실측)가 섞여
-	// 온다. 파서는 이를 무시하고 성공해야 한다.
-	request := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback?state="+state+"&code=auth-code&iss=https://accounts.google.com&scope=x", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); err != nil {
-		t.Fatalf("connection not persisted: %v", err)
-	}
-
-	// 소비된 state 재사용은 거부돼야 한다.
-	replay := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback?state="+state+"&code=auth-code", nil)
-	replayResponse := httptest.NewRecorder()
-	handler.ServeHTTP(replayResponse, replay)
-	if replayResponse.Code != http.StatusBadRequest {
-		t.Fatalf("replay status = %d, want 400", replayResponse.Code)
-	}
-}
-
-func TestYouTubeCallbackHTTPErrors(t *testing.T) {
+// TestYouTubeCallbackRouteRemoved: serverAuthCode 전환으로 브라우저 콜백
+// 라우트는 존재하지 않아야 한다(다음 핸들러로 흘러 404).
+func TestYouTubeCallbackRouteRemoved(t *testing.T) {
 	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
 	_, handler := testYouTubeHTTPHandler(t, service)
-
-	// 사용자가 동의 화면에서 거부한 경우(error=access_denied).
-	denied := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback?error=access_denied&state=whatever", nil)
-	deniedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(deniedResponse, denied)
-	if deniedResponse.Code != http.StatusBadRequest {
-		t.Fatalf("denied status = %d, want 400", deniedResponse.Code)
-	}
-
-	// state/code 누락.
-	missing := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback", nil)
-	missingResponse := httptest.NewRecorder()
-	handler.ServeHTTP(missingResponse, missing)
-	if missingResponse.Code != http.StatusBadRequest {
-		t.Fatalf("missing params status = %d, want 400", missingResponse.Code)
-	}
-
-	// 발급된 적 없는 state.
-	unknown := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback?state=unknown&code=code", nil)
-	unknownResponse := httptest.NewRecorder()
-	handler.ServeHTTP(unknownResponse, unknown)
-	if unknownResponse.Code != http.StatusBadRequest {
-		t.Fatalf("unknown state status = %d, want 400", unknownResponse.Code)
+	request := httptest.NewRequest(http.MethodGet, "/auth/youtube/callback?state=x&code=y", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (callback route must not exist)", response.Code)
 	}
 }
 

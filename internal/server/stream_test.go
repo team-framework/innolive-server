@@ -122,6 +122,13 @@ func TestStartStreamMapsProviderErrors(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 			wantCode:   "live_streaming_blocked",
 		},
+		{
+			// 무효 refresh token은 재시도가 아니라 재연결 안내여야 한다(#88).
+			name:       "reconnect required",
+			provider:   &stubStreamingProvider{prepareErr: auth.ErrStreamingReconnectRequired},
+			wantStatus: http.StatusConflict,
+			wantCode:   "streaming_reconnect_required",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

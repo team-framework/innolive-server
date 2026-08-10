@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	googleOAuthTokenEndpoint = "https://oauth2.googleapis.com/token"
-	youtubeChannelsEndpoint  = "https://www.googleapis.com/youtube/v3/channels"
+	googleOAuthTokenEndpoint  = "https://oauth2.googleapis.com/token"
+	googleOAuthRevokeEndpoint = "https://oauth2.googleapis.com/revoke"
+	youtubeChannelsEndpoint   = "https://www.googleapis.com/youtube/v3/channels"
 	// YouTubeStreamingScope는 Live API까지 포함하는 최소 스코프다. 이보다 좁은
 	// 라이브 전용 스코프는 존재하지 않는다(2026-08-09 조사). 클라이언트 SDK가
 	// serverAuthCode를 요청할 때 같은 값을 써야 한다.
@@ -35,6 +36,10 @@ var (
 	ErrYouTubeTokenExchange    = errors.New("YouTube token exchange failed")
 	ErrYouTubeAuthCodeRejected = errors.New("YouTube authorization code was rejected")
 	ErrStreamingNotConnected   = errors.New("streaming account is not connected")
+	// ErrStreamingReconnectRequired: 저장된 refresh token이 무효화됨(사용자의
+	// 플랫폼 쪽 권한 취소 등). 재시도로 복구되지 않으며 재연결이 유일한 해법
+	// 이라 일반 실패와 구분한다.
+	ErrStreamingReconnectRequired = errors.New("streaming account requires reconnection")
 )
 
 // CodeSource는 인가 코드를 발급받은 클라이언트 유형이다. 교환 시 요구되는
@@ -127,6 +132,7 @@ type youtubeOAuthClient struct {
 	config      YouTubeOAuthConfig
 	httpClient  *http.Client
 	tokenURL    string
+	revokeURL   string
 	channelsURL string
 }
 
@@ -138,8 +144,32 @@ func NewYouTubeOAuthClient(config YouTubeOAuthConfig) (*youtubeOAuthClient, erro
 		config:      config,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		tokenURL:    googleOAuthTokenEndpoint,
+		revokeURL:   googleOAuthRevokeEndpoint,
 		channelsURL: youtubeChannelsEndpoint,
 	}, nil
+}
+
+// RevokeToken은 refresh token으로 부여된 권한 전체를 Google 쪽에서 취소한다
+// (연결 해제 시 사용자의 Google 계정에 "InnoLive 권한 부여됨"이 남지 않게).
+// 이미 무효한 토큰이면 Google이 400을 주는데, 해제 관점에선 목적이 달성된
+// 상태이므로 에러로 다루지 않는다.
+func (c *youtubeOAuthClient) RevokeToken(ctx context.Context, token string) error {
+	form := url.Values{"token": {strings.TrimSpace(token)}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.revokeURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("request Google token revocation: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusBadRequest {
+		return nil
+	}
+	return fmt.Errorf("Google token revocation returned HTTP %d", response.StatusCode)
 }
 
 // Exchange는 클라이언트가 획득한 인가 코드를 토큰으로 교환한다. 코드에 '/'
@@ -387,6 +417,13 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	}
 	response, err := p.oauth.RefreshAccessToken(ctx, refreshToken)
 	if err != nil {
+		// 토큰 엔드포인트의 4xx는 refresh token 자체가 무효라는 뜻이다(만료·
+		// 권한 취소). 재연결 필요로 표식하고 전용 에러로 구분한다 — 표식
+		// 실패는 무시한다(다음 시도에서 다시 표식된다).
+		if errors.Is(err, ErrYouTubeAuthCodeRejected) {
+			_ = p.store.MarkReconnectRequired(ctx, account.ID, p.now())
+			return "", fmt.Errorf("%w: %v", ErrStreamingReconnectRequired, err)
+		}
 		return "", err
 	}
 	// Google이 예외적으로 새 refresh token을 주면 행 락 하에 교체 저장한다.

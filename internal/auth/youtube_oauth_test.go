@@ -260,8 +260,49 @@ func (s *memoryStreamingAccountStore) Upsert(_ context.Context, account Streamin
 	} else if account.ID == uuid.Nil {
 		account.ID = uuid.New()
 	}
+	if account.ConnectedAt.IsZero() {
+		account.ConnectedAt = time.Now().UTC()
+	}
 	s.accounts[key] = account
 	return nil
+}
+
+func (s *memoryStreamingAccountStore) UpdateChannel(_ context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			account.ChannelID = channelID
+			account.ChannelTitle = channelTitle
+			s.accounts[key] = account
+			return nil
+		}
+	}
+	return ErrStreamingAccountNotFound
+}
+
+func (s *memoryStreamingAccountStore) Delete(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			delete(s.accounts, key)
+			return nil
+		}
+	}
+	return ErrStreamingAccountNotFound
+}
+
+func (s *memoryStreamingAccountStore) ListByUser(_ context.Context, userID uuid.UUID) ([]StreamingAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var accounts []StreamingAccount
+	for _, account := range s.accounts {
+		if account.UserID == userID {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *memoryStreamingAccountStore) Get(_ context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error) {
@@ -282,6 +323,19 @@ func (s *memoryStreamingAccountStore) UpdateRefreshToken(_ context.Context, id u
 			account.RefreshTokenCiphertext = ciphertext
 			account.TokenKeyVersion = version
 			account.RefreshTokenExpiresAt = expiresAt
+			s.accounts[key] = account
+			return nil
+		}
+	}
+	return ErrStreamingAccountNotFound
+}
+
+func (s *memoryStreamingAccountStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			account.ReconnectRequiredAt = &at
 			s.accounts[key] = account
 			return nil
 		}
@@ -459,6 +513,61 @@ func TestYouTubeAccessTokenProviderSerializesRefresh(t *testing.T) {
 	oauth.mu.Unlock()
 	if refreshedWith != "rt-secret" {
 		t.Fatalf("refreshed with %q, want decrypted refresh token", refreshedWith)
+	}
+}
+
+// TestYouTubeAccessTokenProviderMarksReconnectRequired: refresh token이 토큰
+// 엔드포인트에서 4xx로 거절되면(권한 취소·만료) 전용 에러로 구분되고 계정에
+// 재연결 필요 표식이 남아야 한다 — 조회 API가 API 호출 없이 판별하는 근거.
+func TestYouTubeAccessTokenProviderMarksReconnectRequired(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	ciphertext, version, err := cipher.Encrypt("rt-revoked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	if err := store.Upsert(context.Background(), StreamingAccount{
+		UserID:                 userID,
+		Provider:               StreamingProviderYouTube,
+		ChannelID:              "UCabc",
+		RefreshTokenCiphertext: ciphertext,
+		TokenKeyVersion:        version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oauth := &stubYouTubeAuthorizer{refreshErr: ErrYouTubeAuthCodeRejected}
+	provider, err := NewYouTubeAccessTokenProvider(oauth, store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.AccessToken(context.Background(), userID); !errors.Is(err, ErrStreamingReconnectRequired) {
+		t.Fatalf("error = %v, want ErrStreamingReconnectRequired", err)
+	}
+	account, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ReconnectRequiredAt == nil {
+		t.Fatal("ReconnectRequiredAt must be marked after an invalid refresh token")
+	}
+
+	// 재연결(Upsert)이 표식을 해소해야 한다.
+	if err := store.Upsert(context.Background(), StreamingAccount{
+		UserID:                 userID,
+		Provider:               StreamingProviderYouTube,
+		ChannelID:              "UCabc",
+		RefreshTokenCiphertext: ciphertext,
+		TokenKeyVersion:        version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	account, err = store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ReconnectRequiredAt != nil {
+		t.Fatalf("ReconnectRequiredAt = %v after reconnect, want nil", account.ReconnectRequiredAt)
 	}
 }
 

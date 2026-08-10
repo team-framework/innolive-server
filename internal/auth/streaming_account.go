@@ -47,6 +47,12 @@ type StreamingAccount struct {
 	// NULL이다. 이 값을 추적하지 않으면 연결이 만료 후 조용히 죽는다.
 	RefreshTokenExpiresAt *time.Time
 
+	// 토큰 갱신이 "무효 토큰"으로 거절된 시각. 사용자가 플랫폼 쪽에서 권한을
+	// 취소하는 등 재연결 없이는 복구되지 않는 상태의 표식이며, 재연결(Upsert)
+	// 시 NULL로 리셋된다. 조회 API가 "재연결 필요"를 API 호출 없이 판별하는
+	// 근거다.
+	ReconnectRequiredAt *time.Time
+
 	// 치지직처럼 ingest URL을 API로 제공하지 않는 플랫폼을 위한 수동 설정값.
 	// 연결(OAuth) 플로우는 이 컬럼을 건드리지 않는다.
 	ManualIngestURL *string `gorm:"type:text"`
@@ -89,12 +95,21 @@ type StreamingAccountStore interface {
 	// 토큰을 교체하고 기존 행(ID)을 유지한다.
 	Upsert(ctx context.Context, account StreamingAccount) error
 	Get(ctx context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error)
+	// ListByUser는 사용자의 모든 플랫폼 연결을 provider 순으로 돌려준다.
+	ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error)
 	// UpdateRefreshToken은 토큰 갱신 응답이 새 refresh token을 담아온 경우
 	// 행 락 하에 교체한다 — 한 사용자의 다중 세션이 동시에 갱신할 때 나중에
 	// 실패한 쓰기가 최신 토큰을 덮지 않도록 잠근다.
 	UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error
 	// UpdateStreamInfo는 프리로딩된 재사용 스트림 정보를 행 락 하에 저장한다.
 	UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error
+	// MarkReconnectRequired는 토큰 갱신이 무효 토큰으로 거절됐음을 기록한다.
+	MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error
+	// Delete는 연결 행을 삭제한다. 없으면 ErrStreamingAccountNotFound.
+	Delete(ctx context.Context, id uuid.UUID) error
+	// UpdateChannel은 플랫폼 쪽 채널 표시 정보를 갱신한다(사용자가 채널명을
+	// 바꾼 경우의 신선도 유지 — 연결·방송 준비 시점에만 호출된다).
+	UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error
 }
 
 type gormStreamingAccountStore struct {
@@ -123,9 +138,11 @@ func (s *gormStreamingAccountStore) Upsert(ctx context.Context, account Streamin
 		}
 		return tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "user_id"}, {Name: "provider"}},
+			// reconnect_required_at 포함: 재연결이 곧 재연결 필요 상태의 해소다.
 			DoUpdates: clause.AssignmentColumns([]string{
 				"channel_id", "channel_title",
 				"refresh_token_ciphertext", "token_key_version", "refresh_token_expires_at",
+				"reconnect_required_at",
 				"connected_at", "updated_at",
 			}),
 		}).Create(&account).Error
@@ -176,6 +193,73 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"channel_id":    channelID,
+			"channel_title": channelTitle,
+			"updated_at":    s.now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
+}
+
+func (s *gormStreamingAccountStore) Delete(ctx context.Context, id uuid.UUID) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Where("id = ?", id).Delete(&StreamingAccount{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
+}
+
+func (s *gormStreamingAccountStore) ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("streaming account database is nil")
+	}
+	var accounts []StreamingAccount
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("provider ASC").
+		Find(&accounts).Error; err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+func (s *gormStreamingAccountStore) MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"reconnect_required_at": at,
+			"updated_at":            s.now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
 }
 
 func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {

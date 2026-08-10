@@ -43,6 +43,41 @@ func (s *memoryStore) Upsert(_ context.Context, account auth.StreamingAccount) e
 	return nil
 }
 
+func (s *memoryStore) UpdateChannel(_ context.Context, id uuid.UUID, channelID string, channelTitle *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.ChannelID = channelID
+	account.ChannelTitle = channelTitle
+	s.accounts[id] = account
+	return nil
+}
+
+func (s *memoryStore) Delete(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[id]; !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	delete(s.accounts, id)
+	return nil
+}
+
+func (s *memoryStore) ListByUser(_ context.Context, userID uuid.UUID) ([]auth.StreamingAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var accounts []auth.StreamingAccount
+	for _, account := range s.accounts {
+		if account.UserID == userID {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
+}
+
 func (s *memoryStore) Get(_ context.Context, userID uuid.UUID, provider auth.StreamingProvider) (auth.StreamingAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,6 +99,18 @@ func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, cipher
 	account.RefreshTokenCiphertext = ciphertext
 	account.TokenKeyVersion = version
 	account.RefreshTokenExpiresAt = expiresAt
+	s.accounts[id] = account
+	return nil
+}
+
+func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.ReconnectRequiredAt = &at
 	s.accounts[id] = account
 	return nil
 }
@@ -112,6 +159,9 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch {
+		case strings.HasPrefix(r.URL.Path, "/channels"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"id":"UCabc","snippet":{"title":"Team Framework Renamed"}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/liveStreams"):
 			s.streamInserts++
 			w.Header().Set("Content-Type", "application/json")
@@ -161,9 +211,9 @@ func testProviderWith(t *testing.T, stub *youtubeAPIStub, store auth.StreamingAc
 func connectedAccount(t *testing.T, store *memoryStore, userID uuid.UUID) auth.StreamingAccount {
 	t.Helper()
 	account := auth.StreamingAccount{
-		ID:       uuid.New(),
-		UserID:   userID,
-		Provider: auth.StreamingProviderYouTube,
+		ID:        uuid.New(),
+		UserID:    userID,
+		Provider:  auth.StreamingProviderYouTube,
 		ChannelID: "UCabc",
 	}
 	if err := store.Upsert(context.Background(), account); err != nil {
@@ -282,6 +332,66 @@ func TestPrepareMapsLivePermissionBlocked(t *testing.T) {
 	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
 	if !errors.Is(err, ErrLiveStreamingBlocked) {
 		t.Fatalf("error = %v, want ErrLiveStreamingBlocked", err)
+	}
+}
+
+// TestPrepareRefreshesChannelInfo: 방송 준비가 채널 표시 정보를 갱신해야
+// 한다(#88 ④ — 조회 API는 저장값을 반환하므로 여기서 신선도를 맞춘다).
+func TestPrepareRefreshesChannelInfo(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID) // 저장된 제목은 없음(nil), 스텁은 "Team Framework Renamed"를 반환
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	account, err := store.Get(context.Background(), userID, auth.StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ChannelTitle == nil || *account.ChannelTitle != "Team Framework Renamed" {
+		t.Fatalf("channel title = %v, want refreshed value", account.ChannelTitle)
+	}
+}
+
+// TestCleanupStreamingResources: 저장된 재사용 스트림이 있으면 liveStreams
+// DELETE를 부르고, 없으면 API 호출 없이 무동작이어야 한다(#88).
+func TestCleanupStreamingResources(t *testing.T) {
+	var deletes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || !strings.HasPrefix(r.URL.Path, "/liveStreams") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		deletes = append(deletes, r.URL.Query().Get("id"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	store := newMemoryStore()
+	provider, err := NewYouTubeProvider(stubTokens{token: "at-value"}, store, testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+
+	streamID := "stream-id-1"
+	withStream := auth.StreamingAccount{ID: uuid.New(), UserID: uuid.New(), Provider: auth.StreamingProviderYouTube, StreamID: &streamID}
+	if err := provider.CleanupStreamingResources(context.Background(), withStream); err != nil {
+		t.Fatal(err)
+	}
+	if len(deletes) != 1 || deletes[0] != "stream-id-1" {
+		t.Fatalf("deletes = %v, want [stream-id-1]", deletes)
+	}
+
+	// 프리로딩된 스트림이 없는 계정은 무동작(추가 API 호출 없음).
+	withoutStream := auth.StreamingAccount{ID: uuid.New(), UserID: uuid.New(), Provider: auth.StreamingProviderYouTube}
+	if err := provider.CleanupStreamingResources(context.Background(), withoutStream); err != nil {
+		t.Fatal(err)
+	}
+	if len(deletes) != 1 {
+		t.Fatalf("deletes = %v, want no additional call", deletes)
 	}
 }
 

@@ -85,6 +85,10 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 	if err != nil {
 		return PreparedBroadcast{}, err
 	}
+	// 방송 준비 시점의 채널 표시 정보 갱신(#88 ④) — 조회 API가 저장값을
+	// 반환하는 대가로 여기서 신선도를 맞춘다(1 unit). 부가 기능이므로 실패해도
+	// 방송 준비는 계속한다.
+	p.refreshChannelInfo(ctx, accessToken, account)
 	broadcastID, err := p.insertBroadcast(ctx, accessToken, options)
 	if err != nil {
 		return PreparedBroadcast{}, err
@@ -105,6 +109,36 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 // transition(complete) 호출을 여기 추가한다.
 func (p *YouTubeProvider) Stop(context.Context, uuid.UUID, PreparedBroadcast) error {
 	return nil
+}
+
+// CleanupStreamingResources는 연결 해제 전에 프리로딩된 재사용 스트림을
+// 플랫폼에서 삭제한다(#88 — DB 행만 지우면 사용자 채널에 고아 리소스가
+// 남고 재연결마다 누적된다). 토큰이 이미 무효면 실패하는데, 호출자
+// (StreamingAccountService)가 로그만 남기고 해제를 계속하는 계약이다.
+func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account auth.StreamingAccount) error {
+	if account.StreamID == nil || *account.StreamID == "" {
+		return nil
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, account.UserID)
+	if err != nil {
+		return fmt.Errorf("obtain access token for stream cleanup: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		p.apiBase+"/liveStreams?id="+*account.StreamID, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := p.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("request liveStreams.delete: %w", err)
+	}
+	defer response.Body.Close()
+	// 204가 정상, 404는 이미 없는 것이라 목적 달성으로 본다.
+	if response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return decodeYouTubeAPIError(response)
 }
 
 // ensureReusableStream은 계정에 저장된 재사용 스트림을 복호화해 돌려주고,
@@ -163,6 +197,54 @@ func (p *YouTubeProvider) ensureReusableStream(ctx context.Context, accessToken 
 		return "", "", "", fmt.Errorf("persist reusable stream info: %w", err)
 	}
 	return response.ID, info.RtmpsIngestionAddress, info.StreamName, nil
+}
+
+// refreshChannelInfo는 channels.list(mine=true)로 현재 채널 정보를 조회해
+// 저장값과 다르면 갱신한다. 실패는 로그 대상도 아닌 무시다 — 표시 정보의
+// 신선도일 뿐 방송 준비의 성패와 무관하다.
+func (p *YouTubeProvider) refreshChannelInfo(ctx context.Context, accessToken string, account auth.StreamingAccount) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/channels?part=snippet&mine=true", nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := p.httpClient.Do(request)
+	if err != nil {
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+		return
+	}
+	var payload struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Snippet struct {
+				Title string `json:"title"`
+			} `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&payload); err != nil {
+		return
+	}
+	if len(payload.Items) == 0 || payload.Items[0].ID == "" {
+		return
+	}
+	channelID := payload.Items[0].ID
+	title := strings.TrimSpace(payload.Items[0].Snippet.Title)
+	storedTitle := ""
+	if account.ChannelTitle != nil {
+		storedTitle = *account.ChannelTitle
+	}
+	if channelID == account.ChannelID && title == storedTitle {
+		return
+	}
+	var titlePtr *string
+	if title != "" {
+		titlePtr = &title
+	}
+	_ = p.store.UpdateChannel(ctx, account.ID, channelID, titlePtr)
 }
 
 func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken string, options PrepareOptions) (string, error) {

@@ -212,6 +212,10 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		switch {
 		case errors.Is(err, auth.ErrStreamingNotConnected):
 			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}})
+		case errors.Is(err, auth.ErrStreamingReconnectRequired):
+			// 재시도로 복구되지 않는 상태 — "잠시 후 재시도"가 아니라
+			// "재연결"을 안내해야 하므로 일반 준비 실패(502)와 구분한다.
+			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
 		case errors.Is(err, streaming.ErrLiveStreamingBlocked):
 			writeError(w, apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}})
 		default:

@@ -51,9 +51,34 @@ type StreamingAccount struct {
 	// 연결(OAuth) 플로우는 이 컬럼을 건드리지 않는다.
 	ManualIngestURL *string `gorm:"type:text"`
 
+	// 이하 YouTube 재사용 스트림(isReusable=true) 프리로딩 정보 — 첫 방송
+	// 준비 때 1회 생성해 저장하고 이후 방송은 재사용한다(방송당 API 3→2회).
+	// 필드 구성은 liveStreams.insert 응답의 cdn.ingestionInfo 실물
+	// (2026-08-10 실측: rtmp/rtmps × 주/백업 4주소 + streamName)을 따른다.
+	StreamID                    *string `gorm:"type:varchar(255)"`
+	IngestionAddress            *string `gorm:"type:text"`
+	BackupIngestionAddress      *string `gorm:"type:text"`
+	RtmpsIngestionAddress       *string `gorm:"type:text"`
+	RtmpsBackupIngestionAddress *string `gorm:"type:text"`
+	// streamName은 RTMP URL에 붙는 스트림 키 상당의 비밀값이라 refresh token과
+	// 같은 방식(AES-GCM)으로 암호화해서만 저장한다.
+	StreamNameCiphertext []byte `gorm:"type:bytea"`
+	StreamNameKeyVersion *int16 `gorm:"type:smallint"`
+
 	ConnectedAt time.Time `gorm:"not null"`
 	CreatedAt   time.Time `gorm:"not null"`
 	UpdatedAt   time.Time `gorm:"not null"`
+}
+
+// StreamInfo는 프리로딩된 재사용 스트림 정보의 갱신 단위다.
+type StreamInfo struct {
+	StreamID                    string
+	IngestionAddress            string
+	BackupIngestionAddress      string
+	RtmpsIngestionAddress       string
+	RtmpsBackupIngestionAddress string
+	StreamNameCiphertext        []byte
+	StreamNameKeyVersion        *int16
 }
 
 func (StreamingAccount) TableName() string { return "streaming_accounts" }
@@ -68,6 +93,8 @@ type StreamingAccountStore interface {
 	// 행 락 하에 교체한다 — 한 사용자의 다중 세션이 동시에 갱신할 때 나중에
 	// 실패한 쓰기가 최신 토큰을 덮지 않도록 잠근다.
 	UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error
+	// UpdateStreamInfo는 프리로딩된 재사용 스트림 정보를 행 락 하에 저장한다.
+	UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error
 }
 
 type gormStreamingAccountStore struct {
@@ -120,6 +147,35 @@ func (s *gormStreamingAccountStore) Get(ctx context.Context, userID uuid.UUID, p
 		return StreamingAccount{}, result.Error
 	}
 	return account, nil
+}
+
+func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	now := s.now()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current StreamingAccount
+		result := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", id).
+			Take(&current)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return ErrStreamingAccountNotFound
+		}
+		if result.Error != nil {
+			return result.Error
+		}
+		return tx.Model(&StreamingAccount{}).Where("id = ?", id).Updates(map[string]any{
+			"stream_id":                      info.StreamID,
+			"ingestion_address":              info.IngestionAddress,
+			"backup_ingestion_address":       info.BackupIngestionAddress,
+			"rtmps_ingestion_address":        info.RtmpsIngestionAddress,
+			"rtmps_backup_ingestion_address": info.RtmpsBackupIngestionAddress,
+			"stream_name_ciphertext":         info.StreamNameCiphertext,
+			"stream_name_key_version":        info.StreamNameKeyVersion,
+			"updated_at":                     now,
+		}).Error
+	})
 }
 
 func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {

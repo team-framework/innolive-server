@@ -623,7 +623,7 @@ func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Ha
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, logger, registry, manager, nil, origins, requireUser, authenticateUsers...), manager
+	return New(cfg, logger, registry, manager, nil, origins, requireUser, nil, authenticateUsers...), manager
 }
 
 // createTestSession creates a session and returns its response plus the

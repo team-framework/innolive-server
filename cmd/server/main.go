@@ -23,6 +23,7 @@ import (
 	"inno-live-server/internal/origin"
 	"inno-live-server/internal/server"
 	"inno-live-server/internal/session"
+	"inno-live-server/internal/streaming"
 )
 
 func main() {
@@ -318,6 +319,7 @@ func main() {
 	// 생성됐을 수 있으므로 없을 때만 만든다 — Apple 없이 YouTube만 켠
 	// 배포에서도 refresh token 암호화가 성립해야 한다.
 	var youtubeConnect *auth.YouTubeConnectService
+	streamingProviders := map[auth.StreamingProvider]streaming.Provider{}
 	if youtubeOAuthConfig.Enabled() {
 		if providerTokenCipher == nil {
 			providerTokenCipher, err = auth.NewProviderTokenCipherFromBase64(os.Getenv("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"))
@@ -331,9 +333,10 @@ func main() {
 			logger.Error("create YouTube OAuth client failed", "error", err)
 			os.Exit(2)
 		}
+		streamingAccountStore := auth.NewGormStreamingAccountStore(databaseConnection.DB)
 		youtubeConnect, err = auth.NewYouTubeConnectService(
 			youtubeOAuthClient,
-			auth.NewGormStreamingAccountStore(databaseConnection.DB),
+			streamingAccountStore,
 			userStatusChecker,
 			providerTokenCipher,
 		)
@@ -341,6 +344,17 @@ func main() {
 			logger.Error("create YouTube connect service failed", "error", err)
 			os.Exit(2)
 		}
+		youtubeTokens, err := auth.NewYouTubeAccessTokenProvider(youtubeOAuthClient, streamingAccountStore, providerTokenCipher)
+		if err != nil {
+			logger.Error("create YouTube access token provider failed", "error", err)
+			os.Exit(2)
+		}
+		youtubeProvider, err := streaming.NewYouTubeProvider(youtubeTokens, streamingAccountStore, providerTokenCipher)
+		if err != nil {
+			logger.Error("create YouTube streaming provider failed", "error", err)
+			os.Exit(2)
+		}
+		streamingProviders[auth.StreamingProviderYouTube] = youtubeProvider
 	}
 	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
 	// escape hatch (loud warning above). Extend it to user auth as well so
@@ -362,6 +376,7 @@ func main() {
 		aiPool,
 		originConfig,
 		requireUser,
+		streamingProviders,
 		authenticateUser,
 	)
 

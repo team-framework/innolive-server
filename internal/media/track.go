@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -39,6 +40,29 @@ type frame struct {
 	ingestAt time.Time
 	width    uint16
 	height   uint16
+}
+
+// EgressSlot은 실행 중인 파이프라인에 egress를 나중에 꽂거나 뗄 수 있게 하는
+// 홀더다. 명시적 송출 시작(#83)은 트랙 도착(파이프라인 기동) 이후에 오므로,
+// 파이프라인은 egress를 직접 들지 않고 이 슬롯을 통해서만 참조한다.
+type EgressSlot struct {
+	current atomic.Pointer[RTMPEgress]
+}
+
+func NewEgressSlot() *EgressSlot { return &EgressSlot{} }
+
+// Set은 활성 egress를 교체한다.
+func (s *EgressSlot) Set(egress *RTMPEgress) { s.current.Store(egress) }
+
+// Clear는 슬롯을 비운다. 이후 파이프라인 프레임은 egress로 가지 않는다.
+func (s *EgressSlot) Clear() { s.current.Store(nil) }
+
+// Load는 현재 활성 egress를 돌려준다(슬롯이 nil이거나 비었으면 nil).
+func (s *EgressSlot) Load() *RTMPEgress {
+	if s == nil {
+		return nil
+	}
+	return s.current.Load()
 }
 
 type rtpSequenceObservation struct {
@@ -166,7 +190,7 @@ func RunTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
-	egress *RTMPEgress,
+	egress *EgressSlot,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
@@ -182,7 +206,7 @@ func runTranscodedTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
-	egress *RTMPEgress,
+	egress *EgressSlot,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
@@ -324,7 +348,7 @@ func processImages(
 	processor *Processor,
 	decoded <-chan frame,
 	processed chan<- frame,
-	egress *RTMPEgress,
+	egress *EgressSlot,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 ) {
@@ -348,8 +372,8 @@ func processImages(
 			registry.IncFrameProcessed(string(mode))
 			item.data = output
 			item.stageAt = time.Now()
-			if egress != nil {
-				egress.Enqueue(item)
+			if sink := egress.Load(); sink != nil {
+				sink.Enqueue(item)
 			}
 			select {
 			case processed <- item:

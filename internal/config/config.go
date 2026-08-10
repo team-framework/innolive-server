@@ -69,7 +69,6 @@ type Config struct {
 	UDPMuxPort              int
 	DisconnectedGracePeriod time.Duration
 	FrameQueueSize          int
-	YoutubeStreamKey        string
 	EnableAudioEgress       bool
 	EgressLatencyLog        bool
 	EgressAudioOffset       time.Duration
@@ -111,7 +110,6 @@ func Load() (Config, error) {
 		AITimeout:               envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
-		YoutubeStreamKey:        strings.TrimSpace(os.Getenv("YOUTUBE_STREAM_KEY")),
 		EnableAudioEgress:       envBool("ENABLE_AUDIO_EGRESS", false),
 		EgressLatencyLog:        envBool("EGRESS_LATENCY_LOG", false),
 		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,

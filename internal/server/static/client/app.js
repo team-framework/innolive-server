@@ -108,6 +108,8 @@ function bindElements() {
     "clearLogBtn",
     "copyJsonBtn",
     "sessionJson",
+    "connectYoutubeBtn",
+    "youtubeDetail",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -139,6 +141,7 @@ function bindEvents() {
   els.signUpBtn.addEventListener("click", () => void requestSignup());
   els.verifyBtn.addEventListener("click", () => void verifySignup());
   els.signOutBtn.addEventListener("click", () => void signOut());
+  els.connectYoutubeBtn.addEventListener("click", () => void connectYoutube());
   els.authPassword.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       void signIn();
@@ -666,12 +669,77 @@ function renderAuth() {
   els.verifyRow.hidden = !verifying;
   els.verifyBtn.hidden = !verifying;
   els.signOutBtn.hidden = !signedIn;
+  // YouTube 연결은 로그인(이메일)과 별개의 부가 기능이다 — 로그인 상태에서만 노출.
+  els.connectYoutubeBtn.hidden = !signedIn;
+  if (!signedIn) {
+    els.youtubeDetail.hidden = true;
+  }
   els.authDetail.textContent = signedIn
     ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
     : verifying
       ? '메일로 받은 인증 코드를 입력하고 "인증 완료"를 누르세요.'
       : "로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.";
   updateButtons();
+}
+
+function setYoutubeDetail(text, isError) {
+  els.youtubeDetail.hidden = false;
+  els.youtubeDetail.textContent = text;
+  els.youtubeDetail.style.color = isError ? "var(--danger, #b00020)" : "";
+}
+
+// connectYoutube는 GIS 팝업으로 인가 코드를 받아 서버에 전달해 YouTube 계정을
+// 연결한다. 로그인 자체는 이메일 그대로이고, 이 팝업은 송출 대상 연결 전용이다.
+// 코드 교환·토큰 보관은 전부 서버 몫이라 브라우저에는 인가 코드만 스친다.
+async function connectYoutube() {
+  if (!state.accessToken) {
+    setYoutubeDetail("먼저 로그인하세요.", true);
+    return;
+  }
+  if (!window.google?.accounts?.oauth2) {
+    setYoutubeDetail("Google 스크립트를 아직 불러오지 못했습니다. 잠시 후 다시 시도하세요.", true);
+    return;
+  }
+  let config;
+  try {
+    config = await apiFetch("/auth/youtube/config");
+  } catch (error) {
+    setYoutubeDetail(`서버에서 YouTube 연동 설정을 받지 못했습니다: ${error.message}`, true);
+    return;
+  }
+  setYoutubeDetail("Google 팝업에서 계정을 선택하고 동의해 주세요...");
+  const codeClient = window.google.accounts.oauth2.initCodeClient({
+    client_id: config.web_client_id,
+    scope: config.scope,
+    ux_mode: "popup",
+    callback: (response) => {
+      if (!response.code) {
+        setYoutubeDetail("Google이 인가 코드를 돌려주지 않았습니다.", true);
+        return;
+      }
+      void (async () => {
+        try {
+          const result = await apiFetch("/auth/youtube/connect", {
+            method: "POST",
+            body: JSON.stringify({
+              server_auth_code: response.code,
+              code_source: "web_popup",
+            }),
+          });
+          const title = result?.channel?.title || result?.channel?.id || "알 수 없는 채널";
+          setYoutubeDetail(`YouTube 연결됨: ${title}`);
+          logEvent("ok", "YouTube account connected", result);
+        } catch (error) {
+          setYoutubeDetail(`연결 실패: ${error.message}`, true);
+          logEvent("error", "YouTube connect failed", { message: error.message });
+        }
+      })();
+    },
+    error_callback: (error) => {
+      setYoutubeDetail(`Google 팝업 오류: ${error?.type || JSON.stringify(error)}`, true);
+    },
+  });
+  codeClient.requestCode();
 }
 
 async function createSessionOnly() {

@@ -124,7 +124,7 @@ func TestSessionAuthDisabledBypass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpServer := httptest.NewServer(New(cfg, logger, registry, manager, nil, origins, nil).Handler())
+	httpServer := httptest.NewServer(New(cfg, logger, registry, manager, nil, origins, nil, nil).Handler())
 	defer httpServer.Close()
 
 	created, _ := createTestSession(t, httpServer.URL, nil)

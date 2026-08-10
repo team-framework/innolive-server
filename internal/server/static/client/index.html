@@ -41,6 +41,10 @@
           <button id="signOutBtn" class="button" type="button" hidden>로그아웃</button>
         </div>
         <span id="authDetail" class="field-wide">로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.</span>
+        <div class="button-row">
+          <button id="connectYoutubeBtn" class="button" type="button" hidden>YouTube 계정 연결</button>
+        </div>
+        <span id="youtubeDetail" class="field-wide" hidden></span>
       </section>
 
       <section class="toolbar" aria-label="Connection controls">
@@ -255,6 +259,8 @@
       </section>
     </main>
 
+    <!-- GIS(Google Identity Services): YouTube 계정 연결 팝업 전용. 로그인과 무관하다. -->
+    <script src="https://accounts.google.com/gsi/client" async></script>
     <script src="./app.js" defer></script>
   </body>
 </html>

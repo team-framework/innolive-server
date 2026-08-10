@@ -1,0 +1,294 @@
+package streaming
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"inno-live-server/internal/auth"
+
+	"github.com/google/uuid"
+)
+
+type stubTokens struct{ token string }
+
+func (s stubTokens) AccessToken(context.Context, uuid.UUID) (string, error) {
+	return s.token, nil
+}
+
+type memoryStore struct {
+	mu       sync.Mutex
+	accounts map[uuid.UUID]auth.StreamingAccount
+}
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{accounts: make(map[uuid.UUID]auth.StreamingAccount)}
+}
+
+func (s *memoryStore) Upsert(_ context.Context, account auth.StreamingAccount) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if account.ID == uuid.Nil {
+		account.ID = uuid.New()
+	}
+	s.accounts[account.ID] = account
+	return nil
+}
+
+func (s *memoryStore) Get(_ context.Context, userID uuid.UUID, provider auth.StreamingProvider) (auth.StreamingAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, account := range s.accounts {
+		if account.UserID == userID && account.Provider == provider {
+			return account, nil
+		}
+	}
+	return auth.StreamingAccount{}, auth.ErrStreamingAccountNotFound
+}
+
+func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.RefreshTokenCiphertext = ciphertext
+	account.TokenKeyVersion = version
+	account.RefreshTokenExpiresAt = expiresAt
+	s.accounts[id] = account
+	return nil
+}
+
+func (s *memoryStore) UpdateStreamInfo(_ context.Context, id uuid.UUID, info auth.StreamInfo) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.StreamID = &info.StreamID
+	account.IngestionAddress = &info.IngestionAddress
+	account.BackupIngestionAddress = &info.BackupIngestionAddress
+	account.RtmpsIngestionAddress = &info.RtmpsIngestionAddress
+	account.RtmpsBackupIngestionAddress = &info.RtmpsBackupIngestionAddress
+	account.StreamNameCiphertext = info.StreamNameCiphertext
+	account.StreamNameKeyVersion = info.StreamNameKeyVersion
+	s.accounts[id] = account
+	return nil
+}
+
+func testCipher(t *testing.T) *auth.ProviderTokenCipher {
+	t.Helper()
+	cipher, err := auth.NewProviderTokenCipherFromBase64(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cipher
+}
+
+// youtubeAPIStub은 Live API 3종(liveStreams.insert / liveBroadcasts.insert /
+// bind)을 흉내 내며 요청을 기록한다.
+type youtubeAPIStub struct {
+	mu               sync.Mutex
+	streamInserts    int
+	broadcastInserts int
+	binds            int
+	lastBroadcast    map[string]any
+	bindQuery        string
+	blockLive        bool
+}
+
+func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/liveStreams"):
+			s.streamInserts++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"stream-id-1","cdn":{"ingestionInfo":{
+				"streamName":"secret-stream-name",
+				"ingestionAddress":"rtmp://a.rtmp.youtube.com/live2",
+				"backupIngestionAddress":"rtmp://b.rtmp.youtube.com/live2?backup=1",
+				"rtmpsIngestionAddress":"rtmps://a.rtmps.youtube.com/live2",
+				"rtmpsBackupIngestionAddress":"rtmps://b.rtmps.youtube.com/live2?backup=1"}}}`))
+		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/bind"):
+			s.binds++
+			s.bindQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
+		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
+			if s.blockLive {
+				// 라이브 미활성 채널의 실측 응답 형태(2026-08-09).
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"The user is blocked from live streaming.","errors":[{"message":"The user is blocked from live streaming.","domain":"youtube.liveBroadcast","reason":"livePermissionBlocked","extendedHelp":"https://support.google.com/youtube/answer/2853834"}]}}`))
+				return
+			}
+			s.broadcastInserts++
+			if err := json.NewDecoder(r.Body).Decode(&s.lastBroadcast); err != nil {
+				t.Errorf("decode broadcast payload: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+func testProviderWith(t *testing.T, stub *youtubeAPIStub, store auth.StreamingAccountStore) *YouTubeProvider {
+	t.Helper()
+	server := httptest.NewServer(stub.handler(t))
+	t.Cleanup(server.Close)
+	provider, err := NewYouTubeProvider(stubTokens{token: "at-value"}, store, testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+	return provider
+}
+
+func connectedAccount(t *testing.T, store *memoryStore, userID uuid.UUID) auth.StreamingAccount {
+	t.Helper()
+	account := auth.StreamingAccount{
+		ID:       uuid.New(),
+		UserID:   userID,
+		Provider: auth.StreamingProviderYouTube,
+		ChannelID: "UCabc",
+	}
+	if err := store.Upsert(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	return account
+}
+
+func TestPrepareCreatesReusableStreamOnceAndBindsBroadcast(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	first, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.IngestURL != "rtmps://a.rtmps.youtube.com/live2/secret-stream-name" {
+		t.Fatalf("IngestURL = %q", first.IngestURL)
+	}
+	if first.BroadcastID != "broadcast-id-1" || first.StreamID != "stream-id-1" {
+		t.Fatalf("prepared = %+v", first)
+	}
+
+	// 프리로딩 저장 검증: streamName은 암호문으로만 저장돼야 한다.
+	account, err := store.Get(context.Background(), userID, auth.StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamID == nil || *account.StreamID != "stream-id-1" {
+		t.Fatalf("stored stream id = %v", account.StreamID)
+	}
+	if bytes.Contains(account.StreamNameCiphertext, []byte("secret-stream-name")) {
+		t.Fatal("stream name stored in plaintext")
+	}
+	if account.RtmpsIngestionAddress == nil || *account.RtmpsIngestionAddress != "rtmps://a.rtmps.youtube.com/live2" {
+		t.Fatalf("stored rtmps address = %v", account.RtmpsIngestionAddress)
+	}
+
+	// 두 번째 방송: 저장된 스트림을 재사용해야 한다(liveStreams.insert 1회 유지).
+	second, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.IngestURL != first.IngestURL || second.StreamID != first.StreamID {
+		t.Fatalf("second prepare = %+v, want stream reuse", second)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.streamInserts != 1 {
+		t.Fatalf("liveStreams.insert calls = %d, want 1 (reusable)", stub.streamInserts)
+	}
+	if stub.broadcastInserts != 2 || stub.binds != 2 {
+		t.Fatalf("broadcast/bind calls = %d/%d, want 2/2", stub.broadcastInserts, stub.binds)
+	}
+	if !strings.Contains(stub.bindQuery, "id=broadcast-id-1") || !strings.Contains(stub.bindQuery, "streamId=stream-id-1") {
+		t.Fatalf("bind query = %q", stub.bindQuery)
+	}
+}
+
+func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	payload := stub.lastBroadcast
+	stub.mu.Unlock()
+
+	content := payload["contentDetails"].(map[string]any)
+	if content["enableAutoStart"] != true || content["enableAutoStop"] != true {
+		t.Fatalf("contentDetails = %v, want autoStart/autoStop true", content)
+	}
+	monitor := content["monitorStream"].(map[string]any)
+	if monitor["enableMonitorStream"] != false {
+		t.Fatalf("monitorStream = %v", monitor)
+	}
+	status := payload["status"].(map[string]any)
+	if status["privacyStatus"] != defaultBroadcastPrivacy {
+		t.Fatalf("privacyStatus = %v, want default %q", status["privacyStatus"], defaultBroadcastPrivacy)
+	}
+	snippet := payload["snippet"].(map[string]any)
+	if snippet["title"] != defaultBroadcastTitle {
+		t.Fatalf("title = %v, want default", snippet["title"])
+	}
+
+	// 옵션 오버라이드.
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{Title: "내 방송", Privacy: "unlisted"}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	payload = stub.lastBroadcast
+	stub.mu.Unlock()
+	if payload["snippet"].(map[string]any)["title"] != "내 방송" {
+		t.Fatalf("title override failed: %v", payload["snippet"])
+	}
+	if payload["status"].(map[string]any)["privacyStatus"] != "unlisted" {
+		t.Fatalf("privacy override failed: %v", payload["status"])
+	}
+}
+
+func TestPrepareMapsLivePermissionBlocked(t *testing.T) {
+	stub := &youtubeAPIStub{blockLive: true}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	if !errors.Is(err, ErrLiveStreamingBlocked) {
+		t.Fatalf("error = %v, want ErrLiveStreamingBlocked", err)
+	}
+}
+
+func TestPrepareRequiresConnection(t *testing.T) {
+	provider := testProviderWith(t, &youtubeAPIStub{}, newMemoryStore())
+	_, err := provider.Prepare(context.Background(), uuid.New(), PrepareOptions{})
+	if !errors.Is(err, auth.ErrStreamingNotConnected) {
+		t.Fatalf("error = %v, want ErrStreamingNotConnected", err)
+	}
+}

@@ -147,78 +147,104 @@ func TestReapsUnnegotiatedSessions(t *testing.T) {
 	t.Fatal("unnegotiated session was not reaped within the timeout window")
 }
 
-// TestCreateWithYoutubeKeyOwnsSessionScopedEgress: 전역 키가 설정되면 egress는
-// 세션 생성 시점에 세션 수명으로 만들어지고(#84 — 트랙 수명이 아니라),
-// 응답 StreamState가 egress 상태를 반영하며, 세션 삭제 시 함께 종료돼야 한다.
-func TestCreateWithYoutubeKeyOwnsSessionScopedEgress(t *testing.T) {
-	cfg := config.Config{
-		PrivacyMode:      config.PrivacyModeBypass,
-		FFmpegPath:       "ffmpeg",
-		UDPPortMin:       42000,
-		UDPPortMax:       42100,
-		FrameQueueSize:   2,
-		YoutubeStreamKey: "test-stream-key",
-	}
-	manager, err := NewManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(manager.CloseAll)
-
-	created, _, err := manager.Create(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.egress == nil {
-		t.Fatal("session with YoutubeStreamKey must own an egress at creation")
-	}
-	if created.egressCancel == nil {
-		t.Fatal("session egress must have a dedicated cancel")
-	}
-
-	stream := created.Response().Stream
-	if stream.Status != string(media.EgressPhaseIdle) {
-		t.Fatalf("initial Stream.Status = %q, want %q", stream.Status, media.EgressPhaseIdle)
-	}
-	if stream.TargetURL == nil {
-		t.Fatal("Stream.TargetURL must be populated when egress exists")
-	}
-	if strings.Contains(*stream.TargetURL, "test-stream-key") {
-		t.Fatalf("Stream.TargetURL leaks the stream key: %q", *stream.TargetURL)
-	}
-	if !strings.HasSuffix(*stream.TargetURL, "/****") {
-		t.Fatalf("Stream.TargetURL is not masked: %q", *stream.TargetURL)
-	}
-
-	if err := manager.Delete(created.ID, "test"); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if created.egress.Status().Phase == media.EgressPhaseStopped {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("egress did not stop after session delete")
-}
-
-// TestCreateWithoutYoutubeKeyKeepsIdleStream: 키가 없으면 egress를 만들지 않고
-// StreamState는 종전 기본값(idle)을 유지한다 — 기존 동작 보존 검증.
-func TestCreateWithoutYoutubeKeyKeepsIdleStream(t *testing.T) {
+// TestStartStreamRequiresVideoTrack: 트랙 먼저, 시작 나중 — 501 스텁 시절부터
+// 이어지는 409 계약이다(#83).
+func TestStartStreamRequiresVideoTrack(t *testing.T) {
 	manager := newTestManager(t, 0)
 	created, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.egress != nil || created.egressCancel != nil {
-		t.Fatal("session without YoutubeStreamKey must not own an egress")
+	if _, err := manager.StartStream(created.ID, "rtmps://ingest.example/live2/secret-key"); !errors.Is(err, ErrNoVideoTrack) {
+		t.Fatalf("StartStream error = %v, want ErrNoVideoTrack", err)
 	}
+	if _, err := manager.StartStream("missing", "rtmps://x/y"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown session error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStartStopStreamLifecycle: 명시적 start~stop 수명(#83) — 시작 시 슬롯에
+// 꽂히고, 응답 StreamState가 반영되며(키 비노출), 중지 시 StopReason이 남고,
+// 재시작이 가능해야 한다.
+func TestStartStopStreamLifecycle(t *testing.T) {
+	manager := newTestManager(t, 0)
+	created, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 트랙 도착을 모사한다(OnTrack 없이 게이트만 통과시키는 최소 설정).
+	created.mu.Lock()
+	created.rawTrackID = "video-track"
+	created.mu.Unlock()
+
 	stream := created.Response().Stream
-	if stream.Status != "idle" {
-		t.Fatalf("Stream.Status = %q, want %q", stream.Status, "idle")
+	if stream.Status != "idle" || stream.TargetURL != nil {
+		t.Fatalf("pre-start Stream = %+v, want default idle", stream)
 	}
-	if stream.TargetURL != nil {
-		t.Fatalf("Stream.TargetURL = %v, want nil", *stream.TargetURL)
+
+	if _, err := manager.StartStream(created.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
+		t.Fatal(err)
 	}
+	created.mu.RLock()
+	slotted := created.egressSlot.Load()
+	active := created.egress
+	created.mu.RUnlock()
+	if active == nil || slotted != active {
+		t.Fatal("started egress must be installed in the session slot")
+	}
+	stream = created.Response().Stream
+	if stream.TargetURL == nil {
+		t.Fatal("Stream.TargetURL must be populated after start")
+	}
+	if strings.Contains(*stream.TargetURL, "secret-key") {
+		t.Fatalf("Stream.TargetURL leaks the stream key: %q", *stream.TargetURL)
+	}
+	if !strings.HasSuffix(*stream.TargetURL, "/****") {
+		t.Fatalf("Stream.TargetURL is not masked: %q", *stream.TargetURL)
+	}
+	if stream.StopReason != nil {
+		t.Fatalf("StopReason = %v before stop", *stream.StopReason)
+	}
+
+	if _, err := manager.StartStream(created.ID, "rtmps://a.rtmps.youtube.com/live2/other"); !errors.Is(err, ErrStreamActive) {
+		t.Fatalf("double start error = %v, want ErrStreamActive", err)
+	}
+
+	if _, err := manager.StopStream(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	created.mu.RLock()
+	cleared := created.egressSlot.Load()
+	created.mu.RUnlock()
+	if cleared != nil {
+		t.Fatal("stop must clear the egress slot")
+	}
+	stream = created.Response().Stream
+	if stream.StopReason == nil || *stream.StopReason != "user_requested" {
+		t.Fatalf("StopReason = %v, want user_requested", stream.StopReason)
+	}
+	if _, err := manager.StopStream(created.ID); !errors.Is(err, ErrStreamNotActive) {
+		t.Fatalf("double stop error = %v, want ErrStreamNotActive", err)
+	}
+	// 중지된 egress는 종료 타이밍과 무관하게 재시작을 막지 않아야 한다.
+	if _, err := manager.StartStream(created.ID, "rtmps://a.rtmps.youtube.com/live2/second-key"); err != nil {
+		t.Fatalf("restart after stop failed: %v", err)
+	}
+
+	// 세션 삭제가 활성 egress를 정리해야 한다.
+	restarted := created
+	restarted.mu.RLock()
+	activeEgress := restarted.egress
+	restarted.mu.RUnlock()
+	if err := manager.Delete(created.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if activeEgress.Status().Phase == media.EgressPhaseStopped {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("egress did not stop after session delete")
 }

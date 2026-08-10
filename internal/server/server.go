@@ -21,6 +21,7 @@ import (
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
 	"inno-live-server/internal/session"
+	"inno-live-server/internal/streaming"
 )
 
 const maxJSONBody = 1 << 20
@@ -33,6 +34,7 @@ type Server struct {
 	ai               *ai.Pool
 	references       *referenceStore
 	origins          origin.Config
+	streaming        map[auth.StreamingProvider]streaming.Provider
 	authenticateUser func(context.Context, string) (uuid.UUID, error)
 	handler          http.Handler
 }
@@ -45,6 +47,7 @@ func New(
 	aiPool *ai.Pool,
 	origins origin.Config,
 	requireUser func(http.Handler) http.Handler,
+	streamingProviders map[auth.StreamingProvider]streaming.Provider,
 	userAuthenticators ...func(context.Context, string) (uuid.UUID, error),
 ) *Server {
 	if requireUser == nil {
@@ -58,6 +61,7 @@ func New(
 		ai:         aiPool,
 		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
 		origins:    origins,
+		streaming:  streamingProviders,
 	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]
@@ -176,16 +180,72 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleStartStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
-	response := liveSession.Response()
-	if response.Media.RawVideoTrack == nil {
-		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": liveSession.ID}})
+// handleStartStream은 명시적 송출 시작(#83)이다: 요청 사용자의 연결된 플랫폼
+// 계정으로 방송을 준비(Prepare)하고, 세션의 처리 출력에 egress를 붙인다.
+func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Provider string `json:"provider"`
+		Title    string `json:"title"`
+		Privacy  string `json:"privacy"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil {
+		writeError(w, badRequest("Invalid stream start request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "RTMP publishing is not supported by the media server."})
+	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
+	if providerName == "" {
+		providerName = auth.StreamingProviderYouTube
+	}
+	provider := s.streaming[providerName]
+	if provider == nil {
+		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
+		// 계약(501)을 유지한다.
+		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
+		return
+	}
+	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, streaming.PrepareOptions{
+		Title:   request.Title,
+		Privacy: request.Privacy,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrStreamingNotConnected):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}})
+		case errors.Is(err, streaming.ErrLiveStreamingBlocked):
+			writeError(w, apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}})
+		default:
+			s.logger.Error("prepare platform broadcast failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
+			writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_prepare_failed", Message: "The streaming platform could not prepare the broadcast."})
+		}
+		return
+	}
+	if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
+		switch {
+		case errors.Is(err, session.ErrNoVideoTrack):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": liveSession.ID}})
+		case errors.Is(err, session.ErrStreamActive):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": liveSession.ID}})
+		default:
+			writeSessionError(w, err, liveSession.ID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response())
 }
 
+// handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 플랫폼 쪽
+// 방송 종료는 autoStop이 담당하므로(송출 중단 약 1분 후 반영) 플랫폼 API
+// 호출이 없다.
 func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
+	if _, err := s.sessions.StopStream(liveSession.ID); err != nil {
+		if errors.Is(err, session.ErrStreamNotActive) {
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
+			return
+		}
+		writeSessionError(w, err, liveSession.ID)
+		return
+	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
 }
 

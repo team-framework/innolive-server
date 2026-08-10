@@ -95,6 +95,8 @@ type StreamingAccountStore interface {
 	// 토큰을 교체하고 기존 행(ID)을 유지한다.
 	Upsert(ctx context.Context, account StreamingAccount) error
 	Get(ctx context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error)
+	// ListByUser는 사용자의 모든 플랫폼 연결을 provider 순으로 돌려준다.
+	ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error)
 	// UpdateRefreshToken은 토큰 갱신 응답이 새 refresh token을 담아온 경우
 	// 행 락 하에 교체한다 — 한 사용자의 다중 세션이 동시에 갱신할 때 나중에
 	// 실패한 쓰기가 최신 토큰을 덮지 않도록 잠근다.
@@ -186,6 +188,20 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("streaming account database is nil")
+	}
+	var accounts []StreamingAccount
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("provider ASC").
+		Find(&accounts).Error; err != nil {
+		return nil, err
+	}
+	return accounts, nil
 }
 
 func (s *gormStreamingAccountStore) MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error {

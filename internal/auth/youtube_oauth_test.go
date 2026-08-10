@@ -260,8 +260,23 @@ func (s *memoryStreamingAccountStore) Upsert(_ context.Context, account Streamin
 	} else if account.ID == uuid.Nil {
 		account.ID = uuid.New()
 	}
+	if account.ConnectedAt.IsZero() {
+		account.ConnectedAt = time.Now().UTC()
+	}
 	s.accounts[key] = account
 	return nil
+}
+
+func (s *memoryStreamingAccountStore) ListByUser(_ context.Context, userID uuid.UUID) ([]StreamingAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var accounts []StreamingAccount
+	for _, account := range s.accounts {
+		if account.UserID == userID {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *memoryStreamingAccountStore) Get(_ context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error) {

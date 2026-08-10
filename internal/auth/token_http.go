@@ -17,14 +17,15 @@ import (
 const maxTokenRequestBody = 8 << 10
 
 type tokenHTTPHandler struct {
-	service    *TokenService
-	google     *GoogleLoginService
-	apple      *AppleLoginService
-	email      *EmailAuthService
-	withdrawal *AccountWithdrawalService
-	youtube    *YouTubeConnectService
-	logger     *slog.Logger
-	config     TokenHTTPConfig
+	service           *TokenService
+	google            *GoogleLoginService
+	apple             *AppleLoginService
+	email             *EmailAuthService
+	withdrawal        *AccountWithdrawalService
+	youtube           *YouTubeConnectService
+	streamingAccounts *StreamingAccountService
+	logger            *slog.Logger
+	config            TokenHTTPConfig
 }
 
 func MountTokenHTTP(next http.Handler, service *TokenService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
@@ -36,14 +37,14 @@ func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if len(appleServices) > 0 {
 		apple = appleServices[0]
 	}
-	return mountAuthHTTP(next, service, google, apple, nil, nil, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, nil, nil, nil, logger, config)
 }
 
 // MountAuthHTTPWithWithdrawal adds account deletion to the authentication
 // routes. It is kept separate to preserve the existing constructor used by
 // smaller deployments and focused handler tests.
 func MountAuthHTTPWithWithdrawal(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
-	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, nil, nil, logger, config)
 }
 
 // MountAuthHTTPWithServices mounts all configured authentication services.
@@ -54,14 +55,20 @@ func MountAuthHTTPWithServices(next http.Handler, service *TokenService, google 
 	if len(youtubeServices) > 0 {
 		youtube = youtubeServices[0]
 	}
-	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, logger, config)
+	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, nil, logger, config)
 }
 
-func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+// MountAuthHTTPWithStreaming은 송출 계정 조회·해제(#88)까지 포함해 전체
+// 인증 라우트를 마운트한다 — 프로덕션 조립(main)이 쓰는 완전형이다.
+func MountAuthHTTPWithStreaming(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, streamingAccounts, logger, config)
+}
+
+func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &tokenHTTPHandler{service: service, google: google, apple: apple, email: email, withdrawal: withdrawal, youtube: youtube, logger: logger, config: config}
+	h := &tokenHTTPHandler{service: service, google: google, apple: apple, email: email, withdrawal: withdrawal, youtube: youtube, streamingAccounts: streamingAccounts, logger: logger, config: config}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
 	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
@@ -84,6 +91,9 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if h.youtube != nil {
 		mux.Handle("POST /auth/youtube/connect", h.middleware(http.HandlerFunc(h.handleYouTubeConnect)))
 		mux.Handle("GET /auth/youtube/config", h.middleware(http.HandlerFunc(h.handleYouTubeConfig)))
+	}
+	if h.streamingAccounts != nil {
+		mux.Handle("GET /auth/streaming/accounts", h.middleware(http.HandlerFunc(h.handleListStreamingAccounts)))
 	}
 	mux.Handle("/", next)
 	return mux

@@ -43,6 +43,18 @@ func (s *memoryStore) Upsert(_ context.Context, account auth.StreamingAccount) e
 	return nil
 }
 
+func (s *memoryStore) ListByUser(_ context.Context, userID uuid.UUID) ([]auth.StreamingAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var accounts []auth.StreamingAccount
+	for _, account := range s.accounts {
+		if account.UserID == userID {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
+}
+
 func (s *memoryStore) Get(_ context.Context, userID uuid.UUID, provider auth.StreamingProvider) (auth.StreamingAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,9 +185,9 @@ func testProviderWith(t *testing.T, stub *youtubeAPIStub, store auth.StreamingAc
 func connectedAccount(t *testing.T, store *memoryStore, userID uuid.UUID) auth.StreamingAccount {
 	t.Helper()
 	account := auth.StreamingAccount{
-		ID:       uuid.New(),
-		UserID:   userID,
-		Provider: auth.StreamingProviderYouTube,
+		ID:        uuid.New(),
+		UserID:    userID,
+		Provider:  auth.StreamingProviderYouTube,
 		ChannelID: "UCabc",
 	}
 	if err := store.Upsert(context.Background(), account); err != nil {

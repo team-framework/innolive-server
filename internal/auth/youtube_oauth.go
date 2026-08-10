@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	googleOAuthTokenEndpoint = "https://oauth2.googleapis.com/token"
-	youtubeChannelsEndpoint  = "https://www.googleapis.com/youtube/v3/channels"
+	googleOAuthTokenEndpoint  = "https://oauth2.googleapis.com/token"
+	googleOAuthRevokeEndpoint = "https://oauth2.googleapis.com/revoke"
+	youtubeChannelsEndpoint   = "https://www.googleapis.com/youtube/v3/channels"
 	// YouTubeStreamingScope는 Live API까지 포함하는 최소 스코프다. 이보다 좁은
 	// 라이브 전용 스코프는 존재하지 않는다(2026-08-09 조사). 클라이언트 SDK가
 	// serverAuthCode를 요청할 때 같은 값을 써야 한다.
@@ -131,6 +132,7 @@ type youtubeOAuthClient struct {
 	config      YouTubeOAuthConfig
 	httpClient  *http.Client
 	tokenURL    string
+	revokeURL   string
 	channelsURL string
 }
 
@@ -142,8 +144,32 @@ func NewYouTubeOAuthClient(config YouTubeOAuthConfig) (*youtubeOAuthClient, erro
 		config:      config,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		tokenURL:    googleOAuthTokenEndpoint,
+		revokeURL:   googleOAuthRevokeEndpoint,
 		channelsURL: youtubeChannelsEndpoint,
 	}, nil
+}
+
+// RevokeToken은 refresh token으로 부여된 권한 전체를 Google 쪽에서 취소한다
+// (연결 해제 시 사용자의 Google 계정에 "InnoLive 권한 부여됨"이 남지 않게).
+// 이미 무효한 토큰이면 Google이 400을 주는데, 해제 관점에선 목적이 달성된
+// 상태이므로 에러로 다루지 않는다.
+func (c *youtubeOAuthClient) RevokeToken(ctx context.Context, token string) error {
+	form := url.Values{"token": {strings.TrimSpace(token)}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.revokeURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("request Google token revocation: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusBadRequest {
+		return nil
+	}
+	return fmt.Errorf("Google token revocation returned HTTP %d", response.StatusCode)
 }
 
 // Exchange는 클라이언트가 획득한 인가 코드를 토큰으로 교환한다. 코드에 '/'

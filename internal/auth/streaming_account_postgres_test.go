@@ -119,6 +119,27 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 		t.Fatalf("unknown id mark error = %v, want ErrStreamingAccountNotFound", err)
 	}
 
+	// 목록 조회와 삭제.
+	listed, err := store.ListByUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != updated.ID {
+		t.Fatalf("ListByUser = %d items, want the user's single connection", len(listed))
+	}
+	if err := store.Delete(ctx, updated.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, user.ID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatal("row must be gone after Delete")
+	}
+	if err := store.Delete(ctx, updated.ID); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatalf("double delete error = %v, want ErrStreamingAccountNotFound", err)
+	}
+	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderYouTube, ChannelID: "UCsecond"}); err != nil {
+		t.Fatal(err)
+	}
+
 	// 비활성 사용자의 연결은 거부돼야 한다.
 	disabled := User{ID: uuid.New(), Status: UserStatusDisabled, CreatedAt: now, UpdatedAt: now}
 	if err := db.Create(&disabled).Error; err != nil {

@@ -94,6 +94,7 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	}
 	if h.streamingAccounts != nil {
 		mux.Handle("GET /auth/streaming/accounts", h.middleware(http.HandlerFunc(h.handleListStreamingAccounts)))
+		mux.Handle("DELETE /auth/streaming/accounts/{provider}", h.middleware(http.HandlerFunc(h.handleDisconnectStreamingAccount)))
 	}
 	mux.Handle("/", next)
 	return mux

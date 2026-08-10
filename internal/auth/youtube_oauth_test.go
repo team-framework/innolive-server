@@ -267,6 +267,18 @@ func (s *memoryStreamingAccountStore) Upsert(_ context.Context, account Streamin
 	return nil
 }
 
+func (s *memoryStreamingAccountStore) Delete(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			delete(s.accounts, key)
+			return nil
+		}
+	}
+	return ErrStreamingAccountNotFound
+}
+
 func (s *memoryStreamingAccountStore) ListByUser(_ context.Context, userID uuid.UUID) ([]StreamingAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

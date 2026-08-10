@@ -43,6 +43,16 @@ func (s *memoryStore) Upsert(_ context.Context, account auth.StreamingAccount) e
 	return nil
 }
 
+func (s *memoryStore) Delete(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[id]; !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	delete(s.accounts, id)
+	return nil
+}
+
 func (s *memoryStore) ListByUser(_ context.Context, userID uuid.UUID) ([]auth.StreamingAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -306,6 +316,45 @@ func TestPrepareMapsLivePermissionBlocked(t *testing.T) {
 	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
 	if !errors.Is(err, ErrLiveStreamingBlocked) {
 		t.Fatalf("error = %v, want ErrLiveStreamingBlocked", err)
+	}
+}
+
+// TestCleanupStreamingResources: 저장된 재사용 스트림이 있으면 liveStreams
+// DELETE를 부르고, 없으면 API 호출 없이 무동작이어야 한다(#88).
+func TestCleanupStreamingResources(t *testing.T) {
+	var deletes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || !strings.HasPrefix(r.URL.Path, "/liveStreams") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		deletes = append(deletes, r.URL.Query().Get("id"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	store := newMemoryStore()
+	provider, err := NewYouTubeProvider(stubTokens{token: "at-value"}, store, testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+
+	streamID := "stream-id-1"
+	withStream := auth.StreamingAccount{ID: uuid.New(), UserID: uuid.New(), Provider: auth.StreamingProviderYouTube, StreamID: &streamID}
+	if err := provider.CleanupStreamingResources(context.Background(), withStream); err != nil {
+		t.Fatal(err)
+	}
+	if len(deletes) != 1 || deletes[0] != "stream-id-1" {
+		t.Fatalf("deletes = %v, want [stream-id-1]", deletes)
+	}
+
+	// 프리로딩된 스트림이 없는 계정은 무동작(추가 API 호출 없음).
+	withoutStream := auth.StreamingAccount{ID: uuid.New(), UserID: uuid.New(), Provider: auth.StreamingProviderYouTube}
+	if err := provider.CleanupStreamingResources(context.Background(), withoutStream); err != nil {
+		t.Fatal(err)
+	}
+	if len(deletes) != 1 {
+		t.Fatalf("deletes = %v, want no additional call", deletes)
 	}
 }
 

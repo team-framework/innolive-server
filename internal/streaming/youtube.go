@@ -107,6 +107,36 @@ func (p *YouTubeProvider) Stop(context.Context, uuid.UUID, PreparedBroadcast) er
 	return nil
 }
 
+// CleanupStreamingResources는 연결 해제 전에 프리로딩된 재사용 스트림을
+// 플랫폼에서 삭제한다(#88 — DB 행만 지우면 사용자 채널에 고아 리소스가
+// 남고 재연결마다 누적된다). 토큰이 이미 무효면 실패하는데, 호출자
+// (StreamingAccountService)가 로그만 남기고 해제를 계속하는 계약이다.
+func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account auth.StreamingAccount) error {
+	if account.StreamID == nil || *account.StreamID == "" {
+		return nil
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, account.UserID)
+	if err != nil {
+		return fmt.Errorf("obtain access token for stream cleanup: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		p.apiBase+"/liveStreams?id="+*account.StreamID, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := p.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("request liveStreams.delete: %w", err)
+	}
+	defer response.Body.Close()
+	// 204가 정상, 404는 이미 없는 것이라 목적 달성으로 본다.
+	if response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return decodeYouTubeAPIError(response)
+}
+
 // ensureReusableStream은 계정에 저장된 재사용 스트림을 복호화해 돌려주고,
 // 없으면 liveStreams.insert(isReusable=true)로 만들어 저장한다. 연결 시점이
 // 아니라 첫 Prepare에서 lazy 생성하는 이유: 연결 서비스(auth)가 Live API에

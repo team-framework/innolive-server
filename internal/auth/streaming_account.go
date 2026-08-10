@@ -105,6 +105,8 @@ type StreamingAccountStore interface {
 	UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error
 	// MarkReconnectRequired는 토큰 갱신이 무효 토큰으로 거절됐음을 기록한다.
 	MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error
+	// Delete는 연결 행을 삭제한다. 없으면 ErrStreamingAccountNotFound.
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 type gormStreamingAccountStore struct {
@@ -188,6 +190,20 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) Delete(ctx context.Context, id uuid.UUID) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Where("id = ?", id).Delete(&StreamingAccount{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
 }
 
 func (s *gormStreamingAccountStore) ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error) {

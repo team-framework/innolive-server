@@ -323,11 +323,7 @@ func main() {
 	// 송출 계정 저장소·조회 서비스는 플랫폼 중립이라 YouTube 설정 여부와
 	// 무관하게 조립한다 — 연결이 없으면 조회가 빈 배열을 돌려줄 뿐이다.
 	streamingAccountStore := auth.NewGormStreamingAccountStore(databaseConnection.DB)
-	streamingAccounts, err := auth.NewStreamingAccountService(streamingAccountStore, userStatusChecker)
-	if err != nil {
-		logger.Error("create streaming account service failed", "error", err)
-		os.Exit(2)
-	}
+	streamingDisconnectHooks := map[auth.StreamingProvider]auth.StreamingDisconnectHooks{}
 	if youtubeOAuthConfig.Enabled() {
 		if providerTokenCipher == nil {
 			providerTokenCipher, err = auth.NewProviderTokenCipherFromBase64(os.Getenv("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"))
@@ -362,6 +358,17 @@ func main() {
 			os.Exit(2)
 		}
 		streamingProviders[auth.StreamingProviderYouTube] = youtubeProvider
+		// 해제 시 정리 훅: ①재사용 스트림 삭제(Live API) ②Google 권한 취소.
+		streamingDisconnectHooks[auth.StreamingProviderYouTube] = auth.StreamingDisconnectHooks{
+			CleanupResources: youtubeProvider.CleanupStreamingResources,
+			RevokeToken:      youtubeOAuthClient.RevokeToken,
+		}
+	}
+	// 조회·해제 서비스는 플랫폼 중립이라 훅 구성 뒤 한 번만 조립한다.
+	streamingAccounts, err := auth.NewStreamingAccountService(streamingAccountStore, userStatusChecker, providerTokenCipher, streamingDisconnectHooks, logger)
+	if err != nil {
+		logger.Error("create streaming account service failed", "error", err)
+		os.Exit(2)
 	}
 	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
 	// escape hatch (loud warning above). Extend it to user auth as well so

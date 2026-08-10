@@ -52,6 +52,36 @@ func (h *tokenHTTPHandler) handleListStreamingAccounts(w http.ResponseWriter, r 
 	h.writeJSON(w, http.StatusOK, summaries)
 }
 
+// handleDisconnectStreamingAccount는 플랫폼 연결을 해제한다(#88).
+// 정리 순서(리소스 삭제→권한 취소→행 삭제)와 실패 허용은 서비스가 보장한다.
+func (h *tokenHTTPHandler) handleDisconnectStreamingAccount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	provider := StreamingProvider(r.PathValue("provider"))
+	err := h.streamingAccounts.Disconnect(r.Context(), userID, provider)
+	if err != nil {
+		switch {
+		case isUnauthorizedStreamingError(err):
+			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		case errorsIsStreamingNotFound(err):
+			// 미지 provider 문자열도 "연결 없음"으로 수렴한다 — 저장된 적이
+			// 없는 이름이므로 계약상 같은 404다.
+			h.writeError(w, r, http.StatusNotFound, "not_found", "No connected streaming account for this provider.")
+		default:
+			h.logger.Error("disconnect streaming account failed", "request_id", tokenRequestID(r), "provider", provider, "error", err)
+			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func isUnauthorizedStreamingError(err error) bool {
 	return err == ErrUserInactive
+}
+
+func errorsIsStreamingNotFound(err error) bool {
+	return err == ErrStreamingAccountNotFound
 }

@@ -21,7 +21,7 @@ func testStreamingAccountsHandler(t *testing.T, store StreamingAccountStore, sta
 		t.Fatal(err)
 	}
 	tokens := testTokenService(newMemoryRefreshStore())
-	service, err := NewStreamingAccountService(store, testUserStatusChecker{status: status})
+	service, err := NewStreamingAccountService(store, testUserStatusChecker{status: status}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,48 @@ func TestListStreamingAccountsReturnsConnections(t *testing.T) {
 	}
 	if item.ConnectedAt == "" {
 		t.Fatal("connected_at missing")
+	}
+}
+
+func TestDisconnectStreamingAccountHTTP(t *testing.T) {
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	if err := store.Upsert(context.Background(), StreamingAccount{
+		UserID:    userID,
+		Provider:  StreamingProviderYouTube,
+		ChannelID: "UCabc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tokens, handler := testStreamingAccountsHandler(t, store, UserStatusActive)
+	pair, err := tokens.IssuePair(context.Background(), userID, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteRequest := func(provider, token string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodDelete, "/auth/streaming/accounts/"+provider, nil)
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := deleteRequest("youtube", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("no bearer status = %d, want 401", response.Code)
+	}
+	if response := deleteRequest("youtube", pair.AccessToken); response.Code != http.StatusNoContent {
+		t.Fatalf("disconnect status = %d, want 204 (body %s)", response.Code, response.Body.String())
+	}
+	// 이미 해제됨 — 두 번째는 404.
+	if response := deleteRequest("youtube", pair.AccessToken); response.Code != http.StatusNotFound {
+		t.Fatalf("second disconnect status = %d, want 404", response.Code)
+	}
+	// 미지 provider 문자열도 "연결 없음"과 같은 404로 수렴한다.
+	if response := deleteRequest("soop", pair.AccessToken); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown provider status = %d, want 404", response.Code)
 	}
 }
 

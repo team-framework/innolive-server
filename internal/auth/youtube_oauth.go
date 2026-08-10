@@ -35,6 +35,10 @@ var (
 	ErrYouTubeTokenExchange    = errors.New("YouTube token exchange failed")
 	ErrYouTubeAuthCodeRejected = errors.New("YouTube authorization code was rejected")
 	ErrStreamingNotConnected   = errors.New("streaming account is not connected")
+	// ErrStreamingReconnectRequired: 저장된 refresh token이 무효화됨(사용자의
+	// 플랫폼 쪽 권한 취소 등). 재시도로 복구되지 않으며 재연결이 유일한 해법
+	// 이라 일반 실패와 구분한다.
+	ErrStreamingReconnectRequired = errors.New("streaming account requires reconnection")
 )
 
 // CodeSource는 인가 코드를 발급받은 클라이언트 유형이다. 교환 시 요구되는
@@ -387,6 +391,13 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	}
 	response, err := p.oauth.RefreshAccessToken(ctx, refreshToken)
 	if err != nil {
+		// 토큰 엔드포인트의 4xx는 refresh token 자체가 무효라는 뜻이다(만료·
+		// 권한 취소). 재연결 필요로 표식하고 전용 에러로 구분한다 — 표식
+		// 실패는 무시한다(다음 시도에서 다시 표식된다).
+		if errors.Is(err, ErrYouTubeAuthCodeRejected) {
+			_ = p.store.MarkReconnectRequired(ctx, account.ID, p.now())
+			return "", fmt.Errorf("%w: %v", ErrStreamingReconnectRequired, err)
+		}
 		return "", err
 	}
 	// Google이 예외적으로 새 refresh token을 주면 행 락 하에 교체 저장한다.

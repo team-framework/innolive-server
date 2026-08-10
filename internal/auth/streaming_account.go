@@ -47,6 +47,12 @@ type StreamingAccount struct {
 	// NULL이다. 이 값을 추적하지 않으면 연결이 만료 후 조용히 죽는다.
 	RefreshTokenExpiresAt *time.Time
 
+	// 토큰 갱신이 "무효 토큰"으로 거절된 시각. 사용자가 플랫폼 쪽에서 권한을
+	// 취소하는 등 재연결 없이는 복구되지 않는 상태의 표식이며, 재연결(Upsert)
+	// 시 NULL로 리셋된다. 조회 API가 "재연결 필요"를 API 호출 없이 판별하는
+	// 근거다.
+	ReconnectRequiredAt *time.Time
+
 	// 치지직처럼 ingest URL을 API로 제공하지 않는 플랫폼을 위한 수동 설정값.
 	// 연결(OAuth) 플로우는 이 컬럼을 건드리지 않는다.
 	ManualIngestURL *string `gorm:"type:text"`
@@ -95,6 +101,8 @@ type StreamingAccountStore interface {
 	UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error
 	// UpdateStreamInfo는 프리로딩된 재사용 스트림 정보를 행 락 하에 저장한다.
 	UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error
+	// MarkReconnectRequired는 토큰 갱신이 무효 토큰으로 거절됐음을 기록한다.
+	MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error
 }
 
 type gormStreamingAccountStore struct {
@@ -123,9 +131,11 @@ func (s *gormStreamingAccountStore) Upsert(ctx context.Context, account Streamin
 		}
 		return tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "user_id"}, {Name: "provider"}},
+			// reconnect_required_at 포함: 재연결이 곧 재연결 필요 상태의 해소다.
 			DoUpdates: clause.AssignmentColumns([]string{
 				"channel_id", "channel_title",
 				"refresh_token_ciphertext", "token_key_version", "refresh_token_expires_at",
+				"reconnect_required_at",
 				"connected_at", "updated_at",
 			}),
 		}).Create(&account).Error
@@ -176,6 +186,25 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	result := s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"reconnect_required_at": at,
+			"updated_at":            s.now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrStreamingAccountNotFound
+	}
+	return nil
 }
 
 func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {

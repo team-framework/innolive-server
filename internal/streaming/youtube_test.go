@@ -68,6 +68,18 @@ func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, cipher
 	return nil
 }
 
+func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return auth.ErrStreamingAccountNotFound
+	}
+	account.ReconnectRequiredAt = &at
+	s.accounts[id] = account
+	return nil
+}
+
 func (s *memoryStore) UpdateStreamInfo(_ context.Context, id uuid.UUID, info auth.StreamInfo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -94,6 +94,31 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 		t.Fatalf("unknown id error = %v, want ErrStreamingAccountNotFound", err)
 	}
 
+	// 재연결 필요 표식과 재연결(Upsert)에 의한 해소.
+	if err := store.MarkReconnectRequired(ctx, updated.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.ReconnectRequiredAt == nil {
+		t.Fatal("ReconnectRequiredAt not persisted")
+	}
+	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderYouTube, ChannelID: "UCsecond"}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ReconnectRequiredAt != nil {
+		t.Fatalf("ReconnectRequiredAt = %v after reconnect, want nil", cleared.ReconnectRequiredAt)
+	}
+	if err := store.MarkReconnectRequired(ctx, uuid.New(), now); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatalf("unknown id mark error = %v, want ErrStreamingAccountNotFound", err)
+	}
+
 	// 비활성 사용자의 연결은 거부돼야 한다.
 	disabled := User{ID: uuid.New(), Status: UserStatusDisabled, CreatedAt: now, UpdatedAt: now}
 	if err := db.Create(&disabled).Error; err != nil {

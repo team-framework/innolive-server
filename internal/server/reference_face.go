@@ -53,22 +53,31 @@ func downscaleForAI(data []byte) []byte {
 	return out.Bytes()
 }
 
+// referenceFace is the stored form of one registered face. It is persisted to
+// disk but never written to an API response — referenceFaceView is.
 type referenceFace struct {
 	FaceID string `json:"face_id"`
-	// EntryID is the AI worker's own server-generated identifier for this
-	// whitelist entry (returned by AddWhitelist), used to delete exactly this
-	// entry later. Internal bookkeeping only — not part of the public API.
-	EntryID      string    `json:"-"`
+	// EntryIDs maps an AI worker address to the entry id that worker minted for
+	// this face. Every worker generates its own id, so deleting the face means
+	// addressing each worker with its own id.
+	EntryIDs     map[string]string `json:"entry_ids,omitempty"`
+	RegisteredAt time.Time         `json:"registered_at"`
+}
+
+// referenceFaceView is the public shape of a registered face: the worker entry
+// ids are internal bookkeeping and stay out of the API.
+type referenceFaceView struct {
+	FaceID       string    `json:"face_id"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
 type referenceStatus struct {
-	Registered   bool            `json:"registered"`
-	Source       *string         `json:"source"`
-	RegisteredAt *time.Time      `json:"registered_at"`
-	ClientID     string          `json:"client_id"`
-	Count        int             `json:"count"`
-	Faces        []referenceFace `json:"faces"`
+	Registered   bool                `json:"registered"`
+	Source       *string             `json:"source"`
+	RegisteredAt *time.Time          `json:"registered_at"`
+	ClientID     string              `json:"client_id"`
+	Count        int                 `json:"count"`
+	Faces        []referenceFaceView `json:"faces"`
 }
 
 type referenceStore struct {
@@ -138,9 +147,13 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	replace := len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
 	if replace {
 		// Clear the client's existing worker whitelist first so stale faces stop
-		// being excluded (matches Python's replace semantics).
-		if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, ""); err != nil {
-			s.logger.Warn("clear whitelist before replace failed", "client_id", clientID, "error", err)
+		// being excluded (matches Python's replace semantics). A failure here has
+		// to abort the upload: leaving the previous faces whitelisted keeps
+		// excluding people the client just replaced.
+		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
+			s.logger.Error("clear whitelist before replace failed", "client_id", clientID, "error", err)
+			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
+			return
 		}
 	}
 	registered := make([]referenceFace, 0, len(files))
@@ -162,14 +175,14 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		faceID := uuid.NewString()
-		response, err := s.ai.AddWhitelist(r.Context(), clientID, downscaleForAI(data))
+		result, err := s.ai.AddWhitelist(r.Context(), clientID, downscaleForAI(data))
 		if err != nil {
 			s.logger.Error("AI AddWhitelist failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist registration failed."})
 			return
 		}
-		if strings.HasPrefix(response.GetStatusMessage(), "failed") {
-			msg := response.GetStatusMessage()
+		if strings.HasPrefix(result.Response.GetStatusMessage(), "failed") {
+			msg := result.Response.GetStatusMessage()
 			code := "reference_rejected"
 			switch {
 			case strings.Contains(msg, "No face"), strings.Contains(msg, "landmark"):
@@ -180,7 +193,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			writeError(w, apiError{Status: http.StatusBadRequest, Code: code, Message: "AI 서버가 기준 얼굴 등록을 거부했습니다.", Details: map[string]any{"reason": msg}})
 			return
 		}
-		registered = append(registered, referenceFace{FaceID: faceID, EntryID: response.GetEntryId(), RegisteredAt: time.Now().UTC()})
+		registered = append(registered, referenceFace{FaceID: faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
 
 	s.references.mu.Lock()
@@ -204,8 +217,8 @@ func (s *Server) handleDeleteReferenceFace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clientID := referenceClientID(r)
-	if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, ""); err != nil {
-		s.logger.Error("AI DeleteWhitelist(all) failed", "client_id", clientID, "error", err)
+	if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
+		s.logger.Error("AI ClearWhitelist failed", "client_id", clientID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}
@@ -225,11 +238,11 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	faceID := r.PathValue("face_id")
 	s.references.mu.RLock()
 	found := false
-	var entryID string
+	var entryIDs map[string]string
 	for _, f := range s.references.faces[clientID] {
 		if f.FaceID == faceID {
 			found = true
-			entryID = f.EntryID
+			entryIDs = f.EntryIDs
 			break
 		}
 	}
@@ -238,8 +251,18 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "기준 얼굴을 찾을 수 없습니다.", Details: map[string]any{"face_id": faceID}})
 		return
 	}
-	if _, err := s.ai.DeleteWhitelist(r.Context(), clientID, entryID); err != nil {
-		s.logger.Error("AI DeleteWhitelist failed", "client_id", clientID, "face_id", faceID, "error", err)
+	if len(entryIDs) == 0 {
+		// A face persisted before per-worker entry ids were recorded cannot be
+		// targeted individually. Clearing the whole session is the only way to
+		// stop excluding it, so drop the client's other faces too rather than
+		// report a registration the workers no longer hold.
+		s.logger.Warn("reference face has no worker entry ids; clearing the whole client whitelist",
+			"client_id", clientID, "face_id", faceID)
+		s.handleDeleteReferenceFace(w, r)
+		return
+	}
+	if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, entryIDs); err != nil {
+		s.logger.Error("AI DeleteWhitelistEntries failed", "client_id", clientID, "face_id", faceID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}
@@ -265,7 +288,11 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 	faces := append([]referenceFace(nil), s.faces[clientID]...)
 	envConfigured := s.envConfigured
 	s.mu.RUnlock()
-	result := referenceStatus{ClientID: clientID, Count: len(faces), Faces: faces}
+	views := make([]referenceFaceView, 0, len(faces))
+	for _, face := range faces {
+		views = append(views, referenceFaceView{FaceID: face.FaceID, RegisteredAt: face.RegisteredAt})
+	}
+	result := referenceStatus{ClientID: clientID, Count: len(faces), Faces: views}
 	if len(faces) > 0 {
 		source := "api"
 		registeredAt := faces[0].RegisteredAt

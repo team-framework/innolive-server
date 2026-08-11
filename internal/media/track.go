@@ -27,6 +27,10 @@ const (
 	rtpReorderMaxDelay       = 250 * time.Millisecond
 	rtpIngressQueueSize      = 1024
 	maxTrackedMissingPackets = 2048
+	// keyframeRequestMinInterval throttles keyframe requests: one lost gap
+	// usually spans several samples, and the publisher needs time to encode
+	// and deliver the keyframe before another request is worth sending.
+	keyframeRequestMinInterval = 500 * time.Millisecond
 )
 
 type frame struct {
@@ -115,16 +119,27 @@ type rtpFrameAssembler struct {
 	builder  *samplebuilder.SampleBuilder
 	registry *metrics.Registry
 	mode     string
+	// requestKeyframe asks the publisher for a fresh keyframe. It may be nil
+	// when no feedback channel is available.
+	requestKeyframe     func()
+	keyframeMinInterval time.Duration
+	lastKeyframeAt      time.Time
 }
 
-func newRTPFrameAssembler(registry *metrics.Registry, mode config.PrivacyMode, codec VideoCodec) (*rtpFrameAssembler, error) {
-	return newRTPFrameAssemblerWithLimits(
+func newRTPFrameAssembler(registry *metrics.Registry, mode config.PrivacyMode, codec VideoCodec, requestKeyframe func()) (*rtpFrameAssembler, error) {
+	assembler, err := newRTPFrameAssemblerWithLimits(
 		registry,
 		mode,
 		codec,
 		rtpReorderMaxLatePackets,
 		rtpReorderMaxDelay,
 	)
+	if err != nil {
+		return nil, err
+	}
+	assembler.requestKeyframe = requestKeyframe
+	assembler.keyframeMinInterval = keyframeRequestMinInterval
+	return assembler, nil
 }
 
 func newRTPFrameAssemblerWithLimits(
@@ -170,6 +185,7 @@ func (a *rtpFrameAssembler) pop() []frame {
 	for sample := a.builder.Pop(); sample != nil; sample = a.builder.Pop() {
 		if sample.PrevDroppedPackets > 0 {
 			a.registry.AddRTPPacketsDiscarded(a.mode, uint64(sample.PrevDroppedPackets))
+			a.requestKeyframeAfterLoss()
 		}
 		a.registry.IncRTPFramesAssembled(a.mode)
 		now := time.Now()
@@ -183,6 +199,23 @@ func (a *rtpFrameAssembler) pop() []frame {
 	return frames
 }
 
+// requestKeyframeAfterLoss asks the publisher for a keyframe once the sample
+// builder has given up on a gap. Dropped packets mean the decoder just lost its
+// reference, and every frame the pipeline re-encodes from that point carries
+// the damage — including its own keyframes. Without this the picture stays
+// broken until the publisher happens to send a keyframe on its own.
+func (a *rtpFrameAssembler) requestKeyframeAfterLoss() {
+	if a.requestKeyframe == nil {
+		return
+	}
+	now := time.Now()
+	if !a.lastKeyframeAt.IsZero() && now.Sub(a.lastKeyframeAt) < a.keyframeMinInterval {
+		return
+	}
+	a.lastKeyframeAt = now
+	a.requestKeyframe()
+}
+
 func RunTrack(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -194,9 +227,10 @@ func RunTrack(
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
+	requestKeyframe func(),
 ) {
 	defer processor.Close()
-	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, egress, registry, mode, queueSize)
+	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, egress, registry, mode, queueSize, requestKeyframe)
 }
 
 func runTranscodedTrack(
@@ -210,6 +244,7 @@ func runTranscodedTrack(
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
+	requestKeyframe func(),
 ) {
 	if transcoder == nil {
 		registry.IncFrameFailure(string(mode))
@@ -227,7 +262,7 @@ func runTranscodedTrack(
 	processed := make(chan frame, 1)
 	encoded := make(chan frame, compressedQueueSize)
 
-	go readFrames(pipelineContext, logger, remote, compressed, registry, mode)
+	go readFrames(pipelineContext, logger, remote, compressed, registry, mode, requestKeyframe)
 	var streamWorkers sync.WaitGroup
 	streamWorkers.Add(2)
 	go func() {
@@ -391,13 +426,14 @@ func readFrames(
 	frames chan frame,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
+	requestKeyframe func(),
 ) {
 	defer close(frames)
 	packets := make(chan *rtp.Packet, rtpIngressQueueSize)
 	go readRTPPackets(ctx, logger, remote, packets, registry, mode)
 
 	codec := VideoCodec(remote.Codec().MimeType)
-	assembler, err := newRTPFrameAssembler(registry, mode, codec)
+	assembler, err := newRTPFrameAssembler(registry, mode, codec, requestKeyframe)
 	if err != nil {
 		logger.Error("unsupported WebRTC video codec", "codec", remote.Codec().MimeType)
 		return

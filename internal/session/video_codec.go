@@ -65,6 +65,7 @@ func offeredVideoCodecs(raw string) ([]offeredVideoCodec, error) {
 		if !strings.EqualFold(mediaDescription.MediaName.Media, "video") {
 			continue
 		}
+		feedback := offeredRTCPFeedback(mediaDescription)
 		for _, format := range mediaDescription.MediaName.Formats {
 			payloadType, err := strconv.ParseUint(format, 10, 8)
 			if err != nil {
@@ -81,7 +82,7 @@ func offeredVideoCodecs(raw string) ([]offeredVideoCodec, error) {
 			result = append(result, offeredVideoCodec{
 				codec: videoCodec,
 				parameters: webrtc.RTPCodecParameters{
-					RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: string(videoCodec), ClockRate: codec.ClockRate, SDPFmtpLine: codec.Fmtp},
+					RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: string(videoCodec), ClockRate: codec.ClockRate, SDPFmtpLine: codec.Fmtp, RTCPFeedback: feedback[uint8(payloadType)]},
 					PayloadType:        webrtc.PayloadType(payloadType),
 				},
 			})
@@ -91,6 +92,30 @@ func offeredVideoCodecs(raw string) ([]offeredVideoCodec, error) {
 		return nil, fmt.Errorf("remote offer has no H.264 or VP8 video codec")
 	}
 	return result, nil
+}
+
+// offeredRTCPFeedback collects the a=rtcp-fb lines of a media section by
+// payload type. SetCodecPreferences overwrites the transceiver's codec
+// capability wholesale, so a codec rebuilt from the offer must carry the
+// feedback the client asked for or the answer advertises none at all.
+func offeredRTCPFeedback(mediaDescription *sdp.MediaDescription) map[uint8][]webrtc.RTCPFeedback {
+	feedback := make(map[uint8][]webrtc.RTCPFeedback)
+	for _, attribute := range mediaDescription.Attributes {
+		if attribute.Key != "rtcp-fb" {
+			continue
+		}
+		format, value, found := strings.Cut(attribute.Value, " ")
+		if !found {
+			continue
+		}
+		payloadType, err := strconv.ParseUint(format, 10, 8)
+		if err != nil {
+			continue
+		}
+		feedbackType, parameter, _ := strings.Cut(strings.TrimSpace(value), " ")
+		feedback[uint8(payloadType)] = append(feedback[uint8(payloadType)], webrtc.RTCPFeedback{Type: feedbackType, Parameter: parameter})
+	}
+	return feedback
 }
 
 func firstVideoTransceiver(pc *webrtc.PeerConnection) *webrtc.RTPTransceiver {

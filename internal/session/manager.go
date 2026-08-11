@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pion/logging"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -602,6 +603,16 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		s.mu.Unlock()
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
+		// The pipeline asks for a keyframe when the sample builder gives up on a
+		// gap: the decoder has lost its reference, and every frame re-encoded
+		// from that point carries the damage until the publisher sends a new one.
+		requestKeyframe := func() {
+			if err := s.PC.WriteRTCP([]rtcp.Packet{
+				&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
+			}); err != nil {
+				m.logger.Warn("keyframe request failed", "session_id", s.ID, "error", err)
+			}
+		}
 		go func() {
 			m.mu.Lock()
 			m.pipelines[s.ID] = struct{}{}
@@ -611,7 +622,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				delete(m.pipelines, s.ID)
 				m.mu.Unlock()
 			}()
-			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, egressSlot, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize)
+			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, egressSlot, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize, requestKeyframe)
 			s.mu.Lock()
 			// Only clear if we are still the active track — a replacement may have
 			// taken over while this old pipeline was draining.

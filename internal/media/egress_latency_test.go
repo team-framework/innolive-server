@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,13 +32,44 @@ func TestLatencyTrackerPercentiles(t *testing.T) {
 	if !strings.Contains(out, "frames=100") {
 		t.Fatalf("expected 100 frames, got: %s", out)
 	}
-	// p50≈50ms, p95≈95ms, min≈1ms, max≈100ms (each measured latency is at least
-	// the injected delta; the tiny wall-clock elapsed since base keeps it above).
-	for _, want := range []string{"p50_ms=5", "p95_ms=9", "min_ms=1", "max_ms=10"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in log line: %s", want, out)
+	// Each measured latency is the injected delta plus the wall clock elapsed
+	// since base, so assert a range instead of an exact value: what this test
+	// checks is percentile selection, not measurement precision. The tolerance
+	// is generous because a loaded runner adds several ms of drift over 100
+	// observe() calls.
+	const toleranceMs = 25.0
+	for _, want := range []struct {
+		key   string
+		floor float64
+	}{
+		{"p50_ms", 51},  // 51st smallest of the injected 1..100ms
+		{"p95_ms", 96},  // 96th smallest
+		{"min_ms", 1},   // smallest
+		{"max_ms", 100}, // largest
+	} {
+		got := logFloat(t, out, want.key)
+		if got < want.floor || got >= want.floor+toleranceMs {
+			t.Errorf("%s = %v, want in [%v, %v): %s", want.key, got, want.floor, want.floor+toleranceMs, out)
 		}
 	}
+}
+
+// logFloat reads one float attribute out of a slog text line.
+func logFloat(t *testing.T, line, key string) float64 {
+	t.Helper()
+	for _, field := range strings.Fields(line) {
+		name, value, ok := strings.Cut(field, "=")
+		if !ok || name != key {
+			continue
+		}
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", field, err)
+		}
+		return f
+	}
+	t.Fatalf("no %s in log line: %s", key, line)
+	return 0
 }
 
 func TestLatencyTrackerDisabledAndZero(t *testing.T) {

@@ -88,6 +88,16 @@ func (c *Client) DeleteWhitelist(ctx context.Context, sessionID, entryID string)
 	return response, nil
 }
 
+func (c *Client) GetWhitelistStatus(ctx context.Context, sessionID string) (*aiv1.GetWhitelistStatusResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
+	defer cancel()
+	response, err := c.client.GetWhitelistStatus(callCtx, &aiv1.GetWhitelistStatusRequest{SessionId: sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("call AI GetWhitelistStatus: %w", err)
+	}
+	return response, nil
+}
+
 type Stream struct {
 	ctx       context.Context
 	client    aiv1.AiProcessorClient

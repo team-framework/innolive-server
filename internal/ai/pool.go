@@ -8,6 +8,9 @@ import (
 	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Pool holds one client per AI worker target and assigns sessions to
@@ -59,37 +62,78 @@ func (p *Pool) Close() error {
 	return errors.Join(errs...)
 }
 
+// WhitelistResult is the outcome of registering one reference face across the
+// pool: a representative worker response plus every worker's own entry id.
+type WhitelistResult struct {
+	Response *aiv1.WhitelistResponse
+	// EntryIDs maps a worker address to the entry id that worker minted for the
+	// face. Each worker generates its id independently (uuid4), so the ids for
+	// one face differ per worker and deleting it later means sending every
+	// worker its own id — see DeleteWhitelistEntries.
+	EntryIDs map[string]string
+}
+
 // AddWhitelist registers a client's reference face on every AI worker (sessions
 // spread round-robin across targets, so the whitelist must exist on all of them).
-//
-// Each worker generates its own entry_id for this face (server-authoritative,
-// unlike the old client-supplied face_id), so the id in the returned response
-// is only guaranteed valid on whichever worker happened to be picked as the
-// representative response in broadcast(). DeleteWhitelist re-sends that same
-// id to every worker; a worker whose own id differs will not find a match for
-// this specific entry and silently no-ops, leaving that copy until the next
-// session-wide (empty entry_id) cleanup. Acceptable for now: it is a stale
-// in-memory entry on one worker, not a whitelist leak across sessions.
-func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*aiv1.WhitelistResponse, error) {
+func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*WhitelistResult, error) {
 	return p.broadcast("add", func(c *Client) (*aiv1.WhitelistResponse, error) {
 		return c.AddWhitelist(ctx, sessionID, data)
 	})
 }
 
-// DeleteWhitelist removes a whitelist entry from every AI worker. Empty
-// entryID removes all entries for the session (see AddWhitelist doc for the
-// per-worker entry_id caveat on non-empty entryID).
-func (p *Pool) DeleteWhitelist(ctx context.Context, sessionID, entryID string) (*aiv1.WhitelistResponse, error) {
-	return p.broadcast("delete", func(c *Client) (*aiv1.WhitelistResponse, error) {
-		return c.DeleteWhitelist(ctx, sessionID, entryID)
+// DeleteWhitelistEntries removes one registered face from every worker holding
+// it, addressing each worker with the entry id that worker itself minted
+// (entryIDs is the map from AddWhitelist). Workers absent from the map never
+// stored the face and are skipped; a worker that no longer knows the id (it
+// restarted, or the entry is already gone) counts as deleted, so a face never
+// becomes permanently undeletable.
+func (p *Pool) DeleteWhitelistEntries(ctx context.Context, sessionID string, entryIDs map[string]string) error {
+	return p.runOnWorkers("delete", func(c *Client) error {
+		entryID := entryIDs[c.Address()]
+		if entryID == "" {
+			return nil
+		}
+		_, err := c.DeleteWhitelist(ctx, sessionID, entryID)
+		return ignoreNotFound(err)
 	})
+}
+
+// ClearWhitelist removes every entry each worker currently holds for the
+// session. The entry ids come from the worker itself rather than from this
+// server's bookkeeping, so the worker whitelist ends up empty even if the two
+// have drifted apart. The workers reject an empty entry id, so there is no
+// single "delete all" call to use instead.
+func (p *Pool) ClearWhitelist(ctx context.Context, sessionID string) error {
+	return p.runOnWorkers("clear", func(c *Client) error {
+		snapshot, err := c.GetWhitelistStatus(ctx, sessionID)
+		if err != nil {
+			return ignoreNotFound(err)
+		}
+		for _, entryID := range snapshot.GetEntryIds() {
+			if _, err := c.DeleteWhitelist(ctx, sessionID, entryID); err != nil {
+				if err = ignoreNotFound(err); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// ignoreNotFound drops the error a worker returns for an entry or session it
+// does not have: the caller wanted it gone, and it is gone.
+func ignoreNotFound(err error) error {
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
 }
 
 // broadcast runs op on every worker concurrently. A partial failure is reported
 // naming the failed targets (the caller may retry — workers treat re-application
 // as idempotent), and a worker-side rejection ("failed" status) is surfaced
 // through the returned response.
-func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse, error)) (*aiv1.WhitelistResponse, error) {
+func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse, error)) (*WhitelistResult, error) {
 	type outcome struct {
 		address  string
 		response *aiv1.WhitelistResponse
@@ -103,20 +147,48 @@ func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse,
 		}(client)
 	}
 
-	var response *aiv1.WhitelistResponse
+	result := &WhitelistResult{EntryIDs: make(map[string]string, len(p.clients))}
 	var errs []error
 	for range p.clients {
-		result := <-results
-		if result.err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", result.address, result.err))
+		worker := <-results
+		if worker.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", worker.address, worker.err))
 			continue
 		}
-		if response == nil || result.response.GetStatusMessage() == "failed" {
-			response = result.response
+		if entryID := worker.response.GetEntryId(); entryID != "" {
+			result.EntryIDs[worker.address] = entryID
+		}
+		if result.Response == nil || worker.response.GetStatusMessage() == "failed" {
+			result.Response = worker.response
 		}
 	}
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
 	}
-	return response, nil
+	return result, nil
+}
+
+// runOnWorkers runs op on every worker concurrently, joining failures with the
+// target that produced them.
+func (p *Pool) runOnWorkers(kind string, op func(*Client) error) error {
+	results := make(chan error, len(p.clients))
+	for _, client := range p.clients {
+		go func(c *Client) {
+			if err := op(c); err != nil {
+				results <- fmt.Errorf("%s: %w", c.Address(), err)
+				return
+			}
+			results <- nil
+		}(client)
+	}
+	var errs []error
+	for range p.clients {
+		if err := <-results; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("whitelist %s failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
+	}
+	return nil
 }

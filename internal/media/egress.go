@@ -28,8 +28,8 @@ const (
 	egressVideoBitrate    = "2500k"
 	egressVideoBitrateFHD = "5000k"
 	egressAudioBitrate    = "128k"
-	egressBackoffMin    = time.Second
-	egressBackoffMax    = 30 * time.Second
+	egressBackoffMin      = time.Second
+	egressBackoffMax      = 30 * time.Second
 	// egressStableFrames is how many frames a process must accept before a
 	// later failure resets the reconnect backoff to its minimum.
 	egressStableFrames = 300
@@ -60,6 +60,16 @@ type EgressStatus struct {
 	UpdatedAt         time.Time
 	LastError         *string
 	ReconnectAttempts int
+	// Width, Height, FPS는 현재 측정된 egress 세대의 출력 형식이다. 일시
+	// 중단 중에도 유지하여 RTMP 연결을 재시작하지 않고 정확히 같은 형식의
+	// 슬레이트를 만들 수 있게 한다.
+	Width  uint16
+	Height uint16
+	FPS    int
+	// Paused는 Phase와 의도적으로 분리된 제어 상태다. 예를 들어 영상 소스가
+	// 일시 중단된 동안에도 egress 자체는 재연결될 수 있다.
+	Paused   bool
+	PausedAt *time.Time
 }
 
 // RTMPEgress pushes processed (blurred) frames to an RTMP endpoint through a
@@ -126,15 +136,48 @@ func (e *RTMPEgress) Status() EgressStatus {
 
 // setStreaming은 스폰 성공 후 송출 단계 진입을 기록한다. StartedAt은 최초
 // 진입 시각을 보존한다(재연결·해상도 재기동으로 갱신하지 않는다).
-func (e *RTMPEgress) setStreaming() {
+func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	now := time.Now().UTC()
 	e.status.Phase = EgressPhaseStreaming
 	e.status.UpdatedAt = now
+	e.status.Width = width
+	e.status.Height = height
+	e.status.FPS = fps
 	if e.status.StartedAt == nil {
 		e.status.StartedAt = &now
 	}
+}
+
+// Pause는 RTMP egress를 종료하지 않고 소스 일시 중단 상태를 기록한다. 다음
+// 변경에서 미디어 경로가 이 상태를 보고 실제 프레임 대신 취소 슬레이트를
+// 넣는다. 이미 일시 중단됐거나 종료됐으면 false를 반환한다.
+func (e *RTMPEgress) Pause() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status.Phase == EgressPhaseStopped || e.status.Paused {
+		return false
+	}
+	now := time.Now().UTC()
+	e.status.Paused = true
+	e.status.PausedAt = &now
+	e.status.UpdatedAt = now
+	return true
+}
+
+// Resume은 실제 영상 소스가 취소 슬레이트를 다시 대체할 수 있음을 기록한다.
+// egress가 일시 중단 상태가 아니거나 이미 종료됐으면 false를 반환한다.
+func (e *RTMPEgress) Resume() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status.Phase == EgressPhaseStopped || !e.status.Paused {
+		return false
+	}
+	e.status.Paused = false
+	e.status.PausedAt = nil
+	e.status.UpdatedAt = time.Now().UTC()
+	return true
 }
 
 // noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.
@@ -157,6 +200,8 @@ func (e *RTMPEgress) setStopped() {
 	now := time.Now().UTC()
 	e.status.Phase = EgressPhaseStopped
 	e.status.UpdatedAt = now
+	e.status.Paused = false
+	e.status.PausedAt = nil
 	if e.status.StoppedAt == nil {
 		e.status.StoppedAt = &now
 	}
@@ -232,7 +277,7 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 				e.waitBackoff(ctx, &backoff)
 				continue
 			}
-			e.setStreaming()
+			e.setStreaming(width, height, fps)
 			written, mismatch, err := e.writeFrames(ctx, process, pending, width, height)
 			pending = nil
 			process.close()

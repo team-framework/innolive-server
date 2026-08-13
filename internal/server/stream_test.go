@@ -212,3 +212,31 @@ func TestStopStreamNotActive(t *testing.T) {
 		t.Fatalf("error code = %q, want stream_not_active", streamErrorCode(payload))
 	}
 }
+
+func TestPauseAndResumeStreamNotActive(t *testing.T) {
+	server := newStreamTestApplication(t, nil)
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	for _, operation := range []string{"pause", "resume"} {
+		t.Run(operation, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodPost, server.URL+"/sessions/"+created.SessionID+"/stream/"+operation, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("X-Session-Owner-Token", ownerToken)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409", response.StatusCode)
+			}
+			payload := map[string]any{}
+			_ = json.NewDecoder(response.Body).Decode(&payload)
+			if streamErrorCode(payload) != "stream_not_active" {
+				t.Fatalf("error code = %q, want stream_not_active", streamErrorCode(payload))
+			}
+		})
+	}
+}

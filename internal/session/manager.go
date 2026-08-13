@@ -29,6 +29,8 @@ var (
 	ErrNoVideoTrack     = errors.New("no video track is available")
 	ErrStreamActive     = errors.New("stream egress is already active")
 	ErrStreamNotActive  = errors.New("stream egress is not active")
+	ErrStreamPaused     = errors.New("stream egress is already paused")
+	ErrStreamNotPaused  = errors.New("stream egress is not paused")
 )
 
 type Timing struct {
@@ -50,6 +52,11 @@ type StreamState struct {
 	LastError         *string    `json:"last_error"`
 	StopReason        *string    `json:"stop_reason"`
 	ReconnectAttempts int        `json:"reconnect_attempts"`
+	VideoWidth        uint16     `json:"video_width"`
+	VideoHeight       uint16     `json:"video_height"`
+	VideoFPS          int        `json:"video_fps"`
+	Paused            bool       `json:"paused"`
+	PausedAt          *time.Time `json:"paused_at"`
 }
 
 type TrackState struct {
@@ -427,6 +434,47 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 	return s, nil
 }
 
+// PauseStream은 RTMP 연결을 유지한 채 실행 중인 egress를 일시 중단 상태로
+// 표시한다. 미디어 계층은 기록된 출력 형식으로 취소 슬레이트를 공급하게 되며,
+// 이 제어 동작 자체는 플랫폼 방송을 종료하지 않는다.
+func (m *Manager) PauseStream(id string) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+		return nil, ErrStreamNotActive
+	}
+	if !s.egress.Pause() {
+		return nil, ErrStreamPaused
+	}
+	s.UpdatedAt = time.Now().UTC()
+	m.logger.Info("RTMP egress paused", "session_id", s.ID)
+	return s, nil
+}
+
+// ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은
+// egress를 계속 사용하므로 플랫폼 방송과 측정된 출력 형식도 유지된다.
+func (m *Manager) ResumeStream(id string) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+		return nil, ErrStreamNotActive
+	}
+	if !s.egress.Resume() {
+		return nil, ErrStreamNotPaused
+	}
+	s.UpdatedAt = time.Now().UTC()
+	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
+	return s, nil
+}
+
 func (m *Manager) Delete(id, reason string) error {
 	m.mu.Lock()
 	s := m.sessions[id]
@@ -733,6 +781,14 @@ func streamStateFromEgress(status media.EgressStatus, publisherActive bool, stop
 		LastError:         status.LastError,
 		StopReason:        stopReason,
 		ReconnectAttempts: status.ReconnectAttempts,
+		VideoWidth:        status.Width,
+		VideoHeight:       status.Height,
+		VideoFPS:          status.FPS,
+		Paused:            status.Paused,
+		PausedAt:          status.PausedAt,
+	}
+	if status.Paused {
+		state.Status = "paused"
 	}
 	if status.TargetURL != "" {
 		target := status.TargetURL

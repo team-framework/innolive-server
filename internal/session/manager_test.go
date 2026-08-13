@@ -210,6 +210,27 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatalf("double start error = %v, want ErrStreamActive", err)
 	}
 
+	if _, err := manager.PauseStream(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	stream = created.Response().Stream
+	if stream.Status != "paused" || !stream.Paused || stream.PausedAt == nil {
+		t.Fatalf("paused Stream = %+v, want paused status", stream)
+	}
+	if _, err := manager.PauseStream(created.ID); !errors.Is(err, ErrStreamPaused) {
+		t.Fatalf("double pause error = %v, want ErrStreamPaused", err)
+	}
+	if _, err := manager.ResumeStream(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	stream = created.Response().Stream
+	if stream.Status != "idle" || stream.Paused || stream.PausedAt != nil {
+		t.Fatalf("resumed Stream = %+v, want unpaused idle egress", stream)
+	}
+	if _, err := manager.ResumeStream(created.ID); !errors.Is(err, ErrStreamNotPaused) {
+		t.Fatalf("double resume error = %v, want ErrStreamNotPaused", err)
+	}
+
 	if _, err := manager.StopStream(created.ID); err != nil {
 		t.Fatal(err)
 	}

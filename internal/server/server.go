@@ -78,6 +78,8 @@ func New(
 	mux.Handle("GET /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleGetSession)))
 	mux.Handle("DELETE /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleDeleteSession)))
 	mux.Handle("POST /sessions/{session_id}/stream/start", requireUser(s.requireSessionOwner(s.handleStartStream)))
+	mux.Handle("POST /sessions/{session_id}/stream/pause", requireUser(s.requireSessionOwner(s.handlePauseStream)))
+	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
 	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
 	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
@@ -248,6 +250,39 @@ func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSe
 			return
 		}
 		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+// handlePauseStream은 RTMP·플랫폼 방송을 유지하고 소스 일시 중단을 기록한다.
+// 미디어 egress는 이 상태를 보고 취소 슬레이트로 전환하며, 최종 송출 중지와는
+// 의도적으로 다른 동작이다.
+func (s *Server) handlePauseStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
+	if _, err := s.sessions.PauseStream(liveSession.ID); err != nil {
+		switch {
+		case errors.Is(err, session.ErrStreamNotActive):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
+		case errors.Is(err, session.ErrStreamPaused):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_paused", Message: "The stream is already paused.", Details: map[string]any{"session_id": liveSession.ID}})
+		default:
+			writeSessionError(w, err, liveSession.ID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+func (s *Server) handleResumeStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
+	if _, err := s.sessions.ResumeStream(liveSession.ID); err != nil {
+		switch {
+		case errors.Is(err, session.ErrStreamNotActive):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
+		case errors.Is(err, session.ErrStreamNotPaused):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_paused", Message: "The stream is not paused.", Details: map[string]any{"session_id": liveSession.ID}})
+		default:
+			writeSessionError(w, err, liveSession.ID)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)

@@ -199,10 +199,13 @@ func TestEgressStatusTransitions(t *testing.T) {
 		t.Fatal("initial StartedAt/StoppedAt must be nil")
 	}
 
-	e.setStreaming()
+	e.setStreaming(1280, 720, 30)
 	streaming := e.Status()
 	if streaming.Phase != EgressPhaseStreaming || streaming.StartedAt == nil {
 		t.Fatalf("after setStreaming: phase=%q started=%v", streaming.Phase, streaming.StartedAt)
+	}
+	if streaming.Width != 1280 || streaming.Height != 720 || streaming.FPS != 30 {
+		t.Fatalf("after setStreaming: format=%dx%d@%d, want 1280x720@30", streaming.Width, streaming.Height, streaming.FPS)
 	}
 	firstStart := *streaming.StartedAt
 
@@ -219,16 +222,39 @@ func TestEgressStatusTransitions(t *testing.T) {
 	}
 
 	// 재연결 후 송출 재개: StartedAt은 최초 시각을 보존해야 한다.
-	e.setStreaming()
+	e.setStreaming(1920, 1080, 24)
 	resumed := e.Status()
 	if resumed.StartedAt == nil || !resumed.StartedAt.Equal(firstStart) {
 		t.Fatalf("StartedAt changed across reconnect: %v -> %v", firstStart, resumed.StartedAt)
+	}
+	if resumed.Width != 1920 || resumed.Height != 1080 || resumed.FPS != 24 {
+		t.Fatalf("reconnected format=%dx%d@%d, want 1920x1080@24", resumed.Width, resumed.Height, resumed.FPS)
+	}
+
+	if !e.Pause() {
+		t.Fatal("Pause returned false for a live egress")
+	}
+	paused := e.Status()
+	if !paused.Paused || paused.PausedAt == nil {
+		t.Fatalf("paused status = %+v, want Paused with PausedAt", paused)
+	}
+	if e.Pause() {
+		t.Fatal("second Pause returned true")
+	}
+	if !e.Resume() {
+		t.Fatal("Resume returned false for a paused egress")
+	}
+	if afterResume := e.Status(); afterResume.Paused || afterResume.PausedAt != nil {
+		t.Fatalf("resumed status = %+v, want no pause state", afterResume)
 	}
 
 	e.setStopped()
 	stopped := e.Status()
 	if stopped.Phase != EgressPhaseStopped || stopped.StoppedAt == nil {
 		t.Fatalf("after setStopped: phase=%q stopped=%v", stopped.Phase, stopped.StoppedAt)
+	}
+	if stopped.Paused || stopped.PausedAt != nil {
+		t.Fatalf("stopped status retained pause state: %+v", stopped)
 	}
 	firstStop := *stopped.StoppedAt
 	e.setStopped()

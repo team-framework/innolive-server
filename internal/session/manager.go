@@ -151,6 +151,15 @@ type Manager struct {
 	pipelines map[string]struct{}
 }
 
+// streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
+// 나타낸다. 상태 확인과 제어 호출 사이의 종료 경합을 별도 테스트할 수 있게
+// 최소 계약으로 둔다.
+type streamPauseController interface {
+	Status() media.EgressStatus
+	Pause() bool
+	Resume() bool
+}
+
 func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Registry, aiPool *ai.Pool, spawnGate *media.SpawnGate) (*Manager, error) {
 	if cfg.PrivacyMode == config.PrivacyModeReal && aiPool == nil {
 		return nil, errors.New("real privacy mode requires an AI client pool")
@@ -444,11 +453,11 @@ func (m *Manager) PauseStream(id string) (*Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+	if s.egress == nil || s.streamStopReason != nil {
 		return nil, ErrStreamNotActive
 	}
-	if !s.egress.Pause() {
-		return nil, ErrStreamPaused
+	if err := pauseEgress(s.egress); err != nil {
+		return nil, err
 	}
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress paused", "session_id", s.ID)
@@ -464,15 +473,41 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+	if s.egress == nil || s.streamStopReason != nil {
 		return nil, ErrStreamNotActive
 	}
-	if !s.egress.Resume() {
-		return nil, ErrStreamNotPaused
+	if err := resumeEgress(s.egress); err != nil {
+		return nil, err
 	}
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
 	return s, nil
+}
+
+func pauseEgress(egress streamPauseController) error {
+	if egress.Status().Phase == media.EgressPhaseStopped {
+		return ErrStreamNotActive
+	}
+	if !egress.Pause() {
+		if egress.Status().Phase == media.EgressPhaseStopped {
+			return ErrStreamNotActive
+		}
+		return ErrStreamPaused
+	}
+	return nil
+}
+
+func resumeEgress(egress streamPauseController) error {
+	if egress.Status().Phase == media.EgressPhaseStopped {
+		return ErrStreamNotActive
+	}
+	if !egress.Resume() {
+		if egress.Status().Phase == media.EgressPhaseStopped {
+			return ErrStreamNotActive
+		}
+		return ErrStreamNotPaused
+	}
+	return nil
 }
 
 func (m *Manager) Delete(id, reason string) error {

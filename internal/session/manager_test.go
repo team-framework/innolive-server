@@ -269,3 +269,56 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	}
 	t.Fatal("egress did not stop after session delete")
 }
+
+type pauseControllerStub struct {
+	statuses     []media.EgressStatus
+	statusCalls  int
+	pauseResult  bool
+	resumeResult bool
+	pauseCalls   int
+	resumeCalls  int
+}
+
+func (s *pauseControllerStub) Status() media.EgressStatus {
+	index := s.statusCalls
+	s.statusCalls++
+	if index >= len(s.statuses) {
+		return s.statuses[len(s.statuses)-1]
+	}
+	return s.statuses[index]
+}
+
+func (s *pauseControllerStub) Pause() bool {
+	s.pauseCalls++
+	return s.pauseResult
+}
+
+func (s *pauseControllerStub) Resume() bool {
+	s.resumeCalls++
+	return s.resumeResult
+}
+
+// TestPauseResumeEgressStoppedDuringControl은 첫 상태 확인 뒤 egress가
+// 종료되는 경합에서 "이미 일시 중지"나 "일시 중지 상태 아님"이 아니라
+// "활성 송출 없음"으로 분류돼야 함을 검증한다.
+func TestPauseResumeEgressStoppedDuringControl(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(streamPauseController) error
+	}{
+		{name: "pause", call: pauseEgress},
+		{name: "resume", call: resumeEgress},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			egress := &pauseControllerStub{
+				statuses: []media.EgressStatus{
+					{Phase: media.EgressPhaseStreaming},
+					{Phase: media.EgressPhaseStopped},
+				},
+			}
+			if err := tc.call(egress); !errors.Is(err, ErrStreamNotActive) {
+				t.Fatalf("error = %v, want ErrStreamNotActive", err)
+			}
+		})
+	}
+}

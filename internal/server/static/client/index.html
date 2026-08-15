@@ -92,6 +92,34 @@
         <button id="deleteSessionBtn" class="button button-danger" type="button" disabled>Delete Session</button>
       </section>
 
+      <section class="broadcast-status" aria-labelledby="broadcastStatusTitle" aria-live="polite">
+        <div class="broadcast-status-copy">
+          <p class="eyebrow">YouTube broadcasting</p>
+          <h2 id="broadcastStatusTitle">방송 상태</h2>
+          <p>
+            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 차례로 표시합니다.
+          </p>
+        </div>
+        <dl class="broadcast-status-grid">
+          <div>
+            <dt>YouTube 계정</dt>
+            <dd id="broadcastYoutubeAccount" data-state="idle">연결 전</dd>
+          </div>
+          <div>
+            <dt>영상 입력</dt>
+            <dd id="broadcastVideoInput" data-state="idle">WebRTC 시작 전</dd>
+          </div>
+          <div>
+            <dt>RTMP 송출</dt>
+            <dd id="broadcastRtmpState" data-state="idle">시작 전</dd>
+          </div>
+          <div>
+            <dt>YouTube 상태</dt>
+            <dd id="broadcastYoutubeState" data-state="idle">확인 전</dd>
+          </div>
+        </dl>
+      </section>
+
       <aside id="runtimeNotice" class="runtime-notice" hidden>
         <div>
           <strong>카메라는 file:// 페이지에서 사용할 수 없습니다.</strong>

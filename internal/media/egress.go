@@ -43,8 +43,20 @@ const (
 	EgressPhaseIdle EgressPhase = "idle"
 	// EgressPhaseStreaming: FFmpeg 가동, 프레임 송출 중.
 	EgressPhaseStreaming EgressPhase = "streaming"
+	// EgressPhasePaused: 일시 중단 요청이 수락돼 미디어 경로가 취소 슬레이트로
+	// 전환해야 하는 상태. 실제 슬레이트 프레임 전환은 다음 작업에서 연결한다.
+	EgressPhasePaused EgressPhase = "paused"
+	// EgressPhaseReconfiguring: 입력 프로필 변경을 감지해 새 해상도·FPS를
+	// 측정하고 FFmpeg를 다시 시작하는 상태.
+	EgressPhaseReconfiguring EgressPhase = "reconfiguring"
+	// EgressPhasePausedReconfiguring: 취소 슬레이트를 유지한 채 새 입력
+	// 프로필을 측정하는 상태.
+	EgressPhasePausedReconfiguring EgressPhase = "paused_reconfiguring"
 	// EgressPhaseReconnecting: 송출 실패 후 백오프 대기 중.
 	EgressPhaseReconnecting EgressPhase = "reconnecting"
+	// EgressPhasePausedReconnecting: 취소 슬레이트 상태를 보존한 채 RTMP
+	// 재연결을 시도하는 상태.
+	EgressPhasePausedReconnecting EgressPhase = "paused_reconnecting"
 	// EgressPhaseStopped: Run 종료(세션 teardown 또는 명시적 중지).
 	EgressPhaseStopped EgressPhase = "stopped"
 )
@@ -61,14 +73,13 @@ type EgressStatus struct {
 	LastError         *string
 	ReconnectAttempts int
 	// Width, Height, FPS는 현재 측정된 egress 세대의 출력 형식이다. 일시
-	// 중단 중에도 유지하여 RTMP 연결을 재시작하지 않고 정확히 같은 형식의
-	// 슬레이트를 만들 수 있게 한다.
+	// 중단 상태에서도 유지하여 RTMP 연결을 재시작하지 않고 정확히 같은
+	// 형식의 슬레이트를 만들 수 있게 한다.
 	Width  uint16
 	Height uint16
 	FPS    int
-	// Paused는 Phase와 의도적으로 분리된 제어 상태다. 예를 들어 영상 소스가
-	// 일시 중단된 동안에도 egress 자체는 재연결될 수 있다.
-	Paused   bool
+	// PausedAt은 마지막 일시 중단이 시작된 시각이다. resume과 stop 뒤에도
+	// 마지막 일시 중단 이력으로 보존한다.
 	PausedAt *time.Time
 }
 
@@ -140,7 +151,11 @@ func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	now := time.Now().UTC()
-	e.status.Phase = EgressPhaseStreaming
+	if e.status.Phase == EgressPhasePausedReconfiguring || e.status.Phase == EgressPhasePausedReconnecting {
+		e.status.Phase = EgressPhasePaused
+	} else {
+		e.status.Phase = EgressPhaseStreaming
+	}
 	e.status.UpdatedAt = now
 	e.status.Width = width
 	e.status.Height = height
@@ -150,32 +165,31 @@ func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
 	}
 }
 
-// Pause는 RTMP egress를 종료하지 않고 소스 일시 중단 상태를 기록한다. 다음
-// 변경에서 미디어 경로가 이 상태를 보고 실제 프레임 대신 취소 슬레이트를
-// 넣는다. 이미 일시 중단됐거나 종료됐으면 false를 반환한다.
+// Pause는 RTMP egress를 종료하지 않고 streaming 상태를 paused 상태로 전환한다.
+// 실제 슬레이트 프레임 전환은 이 상태를 읽는 미디어 경로가 담당한다. 출력 형식이
+// 확정된 뒤에만 전환할 수 있으므로 streaming 외의 상태에서는 false를 반환한다.
 func (e *RTMPEgress) Pause() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
-	if e.status.Phase == EgressPhaseStopped || e.status.Paused {
+	if e.status.Phase != EgressPhaseStreaming {
 		return false
 	}
 	now := time.Now().UTC()
-	e.status.Paused = true
+	e.status.Phase = EgressPhasePaused
 	e.status.PausedAt = &now
 	e.status.UpdatedAt = now
 	return true
 }
 
-// Resume은 실제 영상 소스가 취소 슬레이트를 다시 대체할 수 있음을 기록한다.
-// egress가 일시 중단 상태가 아니거나 이미 종료됐으면 false를 반환한다.
+// Resume은 paused 상태를 streaming 상태로 전환한다. PausedAt은 마지막 일시
+// 중단 이력으로 유지한다.
 func (e *RTMPEgress) Resume() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
-	if e.status.Phase == EgressPhaseStopped || !e.status.Paused {
+	if e.status.Phase != EgressPhasePaused {
 		return false
 	}
-	e.status.Paused = false
-	e.status.PausedAt = nil
+	e.status.Phase = EgressPhaseStreaming
 	e.status.UpdatedAt = time.Now().UTC()
 	return true
 }
@@ -184,13 +198,30 @@ func (e *RTMPEgress) Resume() bool {
 func (e *RTMPEgress) noteReconnect(cause error) {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
-	e.status.Phase = EgressPhaseReconnecting
+	if e.status.Phase == EgressPhasePaused || e.status.Phase == EgressPhasePausedReconfiguring || e.status.Phase == EgressPhasePausedReconnecting {
+		e.status.Phase = EgressPhasePausedReconnecting
+	} else {
+		e.status.Phase = EgressPhaseReconnecting
+	}
 	e.status.UpdatedAt = time.Now().UTC()
 	e.status.ReconnectAttempts++
 	if cause != nil {
 		message := cause.Error()
 		e.status.LastError = &message
 	}
+}
+
+// beginReconfiguring은 입력 프레임의 해상도가 바뀌어 새 출력 프로필을
+// 측정해야 함을 기록한다. 취소 상태였다면 취소 의도를 보존한다.
+func (e *RTMPEgress) beginReconfiguring() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status.Phase == EgressPhasePaused {
+		e.status.Phase = EgressPhasePausedReconfiguring
+	} else {
+		e.status.Phase = EgressPhaseReconfiguring
+	}
+	e.status.UpdatedAt = time.Now().UTC()
 }
 
 // setStopped는 Run 종료를 기록한다.
@@ -200,8 +231,6 @@ func (e *RTMPEgress) setStopped() {
 	now := time.Now().UTC()
 	e.status.Phase = EgressPhaseStopped
 	e.status.UpdatedAt = now
-	e.status.Paused = false
-	e.status.PausedAt = nil
 	if e.status.StoppedAt == nil {
 		e.status.StoppedAt = &now
 	}
@@ -292,6 +321,7 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 			if mismatch != nil {
 				// 트랙 교체로 해상도가 바뀌었다. 송출 실패가 아니므로 백오프와
 				// 재연결 집계 없이, 이 프레임을 시드로 즉시 재측정에 들어간다.
+				e.beginReconfiguring()
 				e.logger.Info("video resolution changed; restarting RTMP egress",
 					"old_width", width, "old_height", height,
 					"new_width", mismatch.width, "new_height", mismatch.height)

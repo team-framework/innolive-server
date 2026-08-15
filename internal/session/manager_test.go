@@ -210,25 +210,10 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatalf("double start error = %v, want ErrStreamActive", err)
 	}
 
-	if _, err := manager.PauseStream(created.ID); err != nil {
-		t.Fatal(err)
-	}
-	stream = created.Response().Stream
-	if stream.Status != "paused" || !stream.Paused || stream.PausedAt == nil {
-		t.Fatalf("paused Stream = %+v, want paused status", stream)
-	}
-	if _, err := manager.PauseStream(created.ID); !errors.Is(err, ErrStreamPaused) {
-		t.Fatalf("double pause error = %v, want ErrStreamPaused", err)
-	}
-	if _, err := manager.ResumeStream(created.ID); err != nil {
-		t.Fatal(err)
-	}
-	stream = created.Response().Stream
-	if stream.Status != "idle" || stream.Paused || stream.PausedAt != nil {
-		t.Fatalf("resumed Stream = %+v, want unpaused idle egress", stream)
-	}
-	if _, err := manager.ResumeStream(created.ID); !errors.Is(err, ErrStreamNotPaused) {
-		t.Fatalf("double resume error = %v, want ErrStreamNotPaused", err)
+	// 프레임을 실제로 공급하지 않는 이 단위 테스트의 egress는 idle 상태다.
+	// 취소 슬레이트의 출력 형식이 아직 확정되지 않았으므로 pause를 금지한다.
+	if _, err := manager.PauseStream(created.ID); !errors.Is(err, ErrStreamNotActive) {
+		t.Fatalf("pause before streaming error = %v, want ErrStreamNotActive", err)
 	}
 
 	if _, err := manager.StopStream(created.ID); err != nil {
@@ -303,16 +288,17 @@ func (s *pauseControllerStub) Resume() bool {
 // "활성 송출 없음"으로 분류돼야 함을 검증한다.
 func TestPauseResumeEgressStoppedDuringControl(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		call func(streamPauseController) error
+		name         string
+		initialPhase media.EgressPhase
+		call         func(streamPauseController) error
 	}{
-		{name: "pause", call: pauseEgress},
-		{name: "resume", call: resumeEgress},
+		{name: "pause", initialPhase: media.EgressPhaseStreaming, call: pauseEgress},
+		{name: "resume", initialPhase: media.EgressPhasePaused, call: resumeEgress},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			egress := &pauseControllerStub{
 				statuses: []media.EgressStatus{
-					{Phase: media.EgressPhaseStreaming},
+					{Phase: tc.initialPhase},
 					{Phase: media.EgressPhaseStopped},
 				},
 			}
@@ -320,5 +306,92 @@ func TestPauseResumeEgressStoppedDuringControl(t *testing.T) {
 				t.Fatalf("error = %v, want ErrStreamNotActive", err)
 			}
 		})
+	}
+}
+
+// TestPauseResumeEgressStateContract는 API 제어 전 상태가 허용된 Enum 전이만
+// 수행하는지 검증한다. 특히 첫 프레임 수집 중인 idle egress는 pause 대상이 아니다.
+func TestPauseResumeEgressStateContract(t *testing.T) {
+	tests := []struct {
+		name            string
+		call            func(streamPauseController) error
+		phase           media.EgressPhase
+		pauseResult     bool
+		resumeResult    bool
+		want            error
+		wantPauseCalls  int
+		wantResumeCalls int
+	}{
+		{
+			name:           "pause streaming",
+			call:           pauseEgress,
+			phase:          media.EgressPhaseStreaming,
+			pauseResult:    true,
+			wantPauseCalls: 1,
+		},
+		{
+			name:  "pause idle is not active",
+			call:  pauseEgress,
+			phase: media.EgressPhaseIdle,
+			want:  ErrStreamNotActive,
+		},
+		{
+			name:  "pause already paused",
+			call:  pauseEgress,
+			phase: media.EgressPhasePaused,
+			want:  ErrStreamPaused,
+		},
+		{
+			name:  "pause while paused reconnecting is already paused",
+			call:  pauseEgress,
+			phase: media.EgressPhasePausedReconnecting,
+			want:  ErrStreamPaused,
+		},
+		{
+			name:            "resume paused",
+			call:            resumeEgress,
+			phase:           media.EgressPhasePaused,
+			resumeResult:    true,
+			wantResumeCalls: 1,
+		},
+		{
+			name:  "resume streaming is not paused",
+			call:  resumeEgress,
+			phase: media.EgressPhaseStreaming,
+			want:  ErrStreamNotPaused,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			egress := &pauseControllerStub{
+				statuses:     []media.EgressStatus{{Phase: tc.phase}},
+				pauseResult:  tc.pauseResult,
+				resumeResult: tc.resumeResult,
+			}
+			err := tc.call(egress)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if egress.pauseCalls != tc.wantPauseCalls {
+				t.Fatalf("Pause calls = %d, want %d", egress.pauseCalls, tc.wantPauseCalls)
+			}
+			if egress.resumeCalls != tc.wantResumeCalls {
+				t.Fatalf("Resume calls = %d, want %d", egress.resumeCalls, tc.wantResumeCalls)
+			}
+		})
+	}
+}
+
+func TestStreamStateUsesEgressPhaseAsStatus(t *testing.T) {
+	pausedAt := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	state := streamStateFromEgress(media.EgressStatus{
+		Phase:    media.EgressPhasePaused,
+		PausedAt: &pausedAt,
+	}, true, nil)
+	if state.Status != string(media.EgressPhasePaused) {
+		t.Fatalf("status = %q, want %q", state.Status, media.EgressPhasePaused)
+	}
+	if state.PausedAt == nil || !state.PausedAt.Equal(pausedAt) {
+		t.Fatalf("PausedAt = %v, want %v", state.PausedAt, pausedAt)
 	}
 }

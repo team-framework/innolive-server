@@ -55,7 +55,6 @@ type StreamState struct {
 	VideoWidth        uint16     `json:"video_width"`
 	VideoHeight       uint16     `json:"video_height"`
 	VideoFPS          int        `json:"video_fps"`
-	Paused            bool       `json:"paused"`
 	PausedAt          *time.Time `json:"paused_at"`
 }
 
@@ -485,21 +484,39 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 }
 
 func pauseEgress(egress streamPauseController) error {
-	if egress.Status().Phase == media.EgressPhaseStopped {
+	switch egress.Status().Phase {
+	case media.EgressPhaseStopped:
+		return ErrStreamNotActive
+	case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
+		return ErrStreamPaused
+	case media.EgressPhaseStreaming:
+		// 아래 Pause 호출로 실제 상태 전이를 수행한다.
+	default:
+		// idle과 reconnecting은 출력 형식이 확정됐거나 RTMP가 살아 있다는
+		// 보장이 없으므로 일시 중단을 허용하지 않는다.
 		return ErrStreamNotActive
 	}
 	if !egress.Pause() {
-		if egress.Status().Phase == media.EgressPhaseStopped {
+		switch egress.Status().Phase {
+		case media.EgressPhaseStopped:
+			return ErrStreamNotActive
+		case media.EgressPhasePaused:
+			return ErrStreamPaused
+		default:
 			return ErrStreamNotActive
 		}
-		return ErrStreamPaused
 	}
 	return nil
 }
 
 func resumeEgress(egress streamPauseController) error {
-	if egress.Status().Phase == media.EgressPhaseStopped {
+	switch egress.Status().Phase {
+	case media.EgressPhaseStopped:
 		return ErrStreamNotActive
+	case media.EgressPhasePaused:
+		// 아래 Resume 호출로 실제 상태 전이를 수행한다.
+	default:
+		return ErrStreamNotPaused
 	}
 	if !egress.Resume() {
 		if egress.Status().Phase == media.EgressPhaseStopped {
@@ -819,11 +836,7 @@ func streamStateFromEgress(status media.EgressStatus, publisherActive bool, stop
 		VideoWidth:        status.Width,
 		VideoHeight:       status.Height,
 		VideoFPS:          status.FPS,
-		Paused:            status.Paused,
 		PausedAt:          status.PausedAt,
-	}
-	if status.Paused {
-		state.Status = "paused"
 	}
 	if status.TargetURL != "" {
 		target := status.TargetURL

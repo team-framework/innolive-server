@@ -12,6 +12,8 @@ import (
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
+
+	"github.com/google/uuid"
 )
 
 func newTestManager(t *testing.T, maxSessions int) *Manager {
@@ -65,6 +67,34 @@ func TestCreateUnlimitedWhenMaxSessionsZero(t *testing.T) {
 		if _, _, err := manager.Create(nil); err != nil {
 			t.Fatalf("Create() #%d error = %v", i, err)
 		}
+	}
+}
+
+func TestCloseUserSessionsForLogoutClosesOnlyLoggedOutUser(t *testing.T) {
+	manager := newTestManager(t, 0)
+	loggedOutUserID := uuid.New()
+	otherUserID := uuid.New()
+	first, _, err := manager.CreateForUser(loggedOutUserID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := manager.CreateForUser(loggedOutUserID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := manager.CreateForUser(otherUserID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.CloseUserSessionsForLogout(loggedOutUserID)
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := manager.Get(id); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("logged-out session %s still exists: %v", id, err)
+		}
+	}
+	if _, err := manager.Get(other.ID); err != nil {
+		t.Fatalf("other user's session must remain: %v", err)
 	}
 }
 
@@ -226,6 +256,9 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatal("stop must clear the egress slot")
 	}
 	stream = created.Response().Stream
+	if stream.Status != string(media.EgressPhaseStopped) {
+		t.Fatalf("Stream.Status after stop = %q, want %q", stream.Status, media.EgressPhaseStopped)
+	}
 	if stream.StopReason == nil || *stream.StopReason != "user_requested" {
 		t.Fatalf("StopReason = %v, want user_requested", stream.StopReason)
 	}
@@ -245,14 +278,9 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	if err := manager.Delete(created.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if activeEgress.Status().Phase == media.EgressPhaseStopped {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if activeEgress.Status().Phase != media.EgressPhaseStopped {
+		t.Fatalf("egress phase after session delete = %q, want %q", activeEgress.Status().Phase, media.EgressPhaseStopped)
 	}
-	t.Fatal("egress did not stop after session delete")
 }
 
 type pauseControllerStub struct {

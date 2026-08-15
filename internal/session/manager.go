@@ -362,10 +362,20 @@ func (m *Manager) List() []*Session {
 	return result
 }
 
-// CloseUserSessions tears down every live session belonging to a withdrawn
-// user. Session ownership is in-memory, so this complements the database
-// account-status check that rejects all future API requests.
+// CloseUserSessions는 탈퇴한 사용자의 모든 활성 세션을 종료한다. 세션 소유권은
+// 메모리에 있으므로, 이후 API 요청을 거부하는 DB 계정 상태 확인과 함께 쓴다.
 func (m *Manager) CloseUserSessions(userID uuid.UUID) {
+	m.closeUserSessions(userID, "user_withdrawal")
+}
+
+// CloseUserSessionsForLogout는 로그아웃한 사용자의 모든 활성 세션을 즉시
+// 종료한다. Session.close가 egress context를 취소하면 RTMPEgress.Run은 stop
+// 이벤트를 거쳐 stopped로 전이한다.
+func (m *Manager) CloseUserSessionsForLogout(userID uuid.UUID) {
+	m.closeUserSessions(userID, "user_logout")
+}
+
+func (m *Manager) closeUserSessions(userID uuid.UUID, reason string) {
 	m.mu.RLock()
 	ids := make([]string, 0)
 	for id, liveSession := range m.sessions {
@@ -375,8 +385,8 @@ func (m *Manager) CloseUserSessions(userID uuid.UUID) {
 	}
 	m.mu.RUnlock()
 	for _, id := range ids {
-		if err := m.Delete(id, "user_withdrawal"); err != nil && !errors.Is(err, ErrNotFound) {
-			m.logger.Warn("close withdrawn user session failed", "session_id", id, "user_id", userID, "error", err)
+		if err := m.Delete(id, reason); err != nil && !errors.Is(err, ErrNotFound) {
+			m.logger.Warn("close user session failed", "session_id", id, "user_id", userID, "reason", reason, "error", err)
 		}
 	}
 }
@@ -434,6 +444,7 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 		return nil, ErrStreamNotActive
 	}
 	s.egressSlot.Clear()
+	s.egress.Stop()
 	s.egressCancel()
 	reason := "user_requested"
 	s.streamStopReason = &reason
@@ -500,7 +511,7 @@ func pauseEgress(egress streamPauseController) error {
 		switch egress.Status().Phase {
 		case media.EgressPhaseStopped:
 			return ErrStreamNotActive
-		case media.EgressPhasePaused:
+		case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
 			return ErrStreamPaused
 		default:
 			return ErrStreamNotActive
@@ -858,8 +869,11 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 		s.disconnectTimer = nil
 	}
 	// 세션 ctx 취소로도 전파되지만, egress 종료가 세션 teardown의 일부임을
-	// 명시하기 위해 전용 cancel을 직접 호출한다.
+	// 명시하기 위해 상태를 먼저 stopped로 전이하고 전용 cancel을 직접 호출한다.
+	// 이 순서로 WebRTC 종료·세션 삭제·로그아웃 모두 재구성 완료를 기다리지
+	// 않고 같은 stop 전이와 RTMP 종료 경로를 사용한다.
 	if s.egressCancel != nil {
+		s.egress.Stop()
 		s.egressCancel()
 	}
 	s.cancel()

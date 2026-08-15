@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -124,6 +125,85 @@ func TestTokenHTTPRefreshRotatesRealPair(t *testing.T) {
 	}
 	if _, err := service.ValidateAccessToken(second.AccessToken); err != nil {
 		t.Fatalf("new access token invalid: %v", err)
+	}
+}
+
+func TestTokenHTTPLogoutClosesUserSessionsAfterFamilyRevocation(t *testing.T) {
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testTokenService(newMemoryRefreshStore())
+	userID := uuid.New()
+	pair, err := service.IssuePair(context.Background(), userID, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var closedUserID uuid.UUID
+	var refreshAfterCloseErr error
+	handler := mountAuthHTTP(
+		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), config,
+		func(id uuid.UUID) {
+			closedUserID = id
+			_, refreshAfterCloseErr = service.Rotate(context.Background(), pair.RefreshToken, ClientInfo{})
+		},
+	)
+	body, err := json.Marshal(map[string]string{"refresh_token": pair.RefreshToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if closedUserID != userID {
+		t.Fatalf("closed user ID = %s, want %s", closedUserID, userID)
+	}
+	if !errors.Is(refreshAfterCloseErr, ErrRefreshTokenRevoked) {
+		t.Fatalf("refresh token must be revoked before session close, got %v", refreshAfterCloseErr)
+	}
+}
+
+func TestTokenHTTPLogoutDoesNotCloseSessionsForRevokedRefreshToken(t *testing.T) {
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testTokenService(newMemoryRefreshStore())
+	pair, err := service.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Rotate(context.Background(), pair.RefreshToken, ClientInfo{}); err != nil {
+		t.Fatal(err)
+	}
+
+	closed := false
+	handler := mountAuthHTTP(
+		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), config,
+		func(uuid.UUID) { closed = true },
+	)
+	body, err := json.Marshal(map[string]string{"refresh_token": pair.RefreshToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if closed {
+		t.Fatal("revoked refresh token must not close active sessions")
 	}
 }
 

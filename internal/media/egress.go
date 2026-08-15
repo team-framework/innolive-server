@@ -83,6 +83,28 @@ type EgressStatus struct {
 	PausedAt *time.Time
 }
 
+// egressTransitionEvent는 egress 상태를 바꾸는 외부 사건이다. 상태 전이는
+// transition 한 곳에서만 허용한다. 따라서 pause/resume API, RTMP 오류,
+// 입력 프로필 변경, 세션 종료가 서로 다른 규칙으로 Phase를 덮어쓰지 않는다.
+type egressTransitionEvent uint8
+
+const (
+	egressTransitionProfileReady egressTransitionEvent = iota
+	egressTransitionPause
+	egressTransitionResume
+	egressTransitionReconnect
+	egressTransitionReconfigure
+	egressTransitionStop
+)
+
+type egressTransition struct {
+	event  egressTransitionEvent
+	width  uint16
+	height uint16
+	fps    int
+	cause  error
+}
+
 // RTMPEgress pushes processed (blurred) frames to an RTMP endpoint through a
 // dedicated FFmpeg child, following the FFmpegTranscoder process pattern.
 //
@@ -145,95 +167,138 @@ func (e *RTMPEgress) Status() EgressStatus {
 	return e.status
 }
 
-// setStreaming은 스폰 성공 후 송출 단계 진입을 기록한다. StartedAt은 최초
-// 진입 시각을 보존한다(재연결·해상도 재기동으로 갱신하지 않는다).
-func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
+// transition은 EgressStatus.Phase를 바꾸는 유일한 경로다. 생성자에서의
+// idle 초기화만 예외이며, 그 뒤에는 모든 상태 변경이 이 전이표를 거친다.
+//
+// profile_ready는 FFmpeg가 새 입력 프로필로 시작된 경우, reconnect는 RTMP 또는
+// FFmpeg 오류로 재시도를 시작하는 경우를 뜻한다. stop은 모든 생존 상태에서
+// 허용되고 멱등적으로 처리한다. 나머지 허용되지 않은 전이는 false를 반환해
+// 호출자가 현재 상태를 다시 확인하게 한다.
+func (e *RTMPEgress) transition(change egressTransition) bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
+
+	current := e.status.Phase
+	next, allowed := nextEgressPhase(current, change.event)
+	if !allowed {
+		return false
+	}
+	if current == EgressPhaseStopped && change.event == egressTransitionStop {
+		return true
+	}
+
 	now := time.Now().UTC()
-	if e.status.Phase == EgressPhasePausedReconfiguring || e.status.Phase == EgressPhasePausedReconnecting {
-		e.status.Phase = EgressPhasePaused
-	} else {
-		e.status.Phase = EgressPhaseStreaming
-	}
+	e.status.Phase = next
 	e.status.UpdatedAt = now
-	e.status.Width = width
-	e.status.Height = height
-	e.status.FPS = fps
-	if e.status.StartedAt == nil {
-		e.status.StartedAt = &now
+
+	switch change.event {
+	case egressTransitionProfileReady:
+		e.status.Width = change.width
+		e.status.Height = change.height
+		e.status.FPS = change.fps
+		if e.status.StartedAt == nil {
+			e.status.StartedAt = &now
+		}
+	case egressTransitionPause:
+		e.status.PausedAt = &now
+	case egressTransitionReconnect:
+		e.status.ReconnectAttempts++
+		if change.cause != nil {
+			message := change.cause.Error()
+			e.status.LastError = &message
+		}
+	case egressTransitionStop:
+		if e.status.StoppedAt == nil {
+			e.status.StoppedAt = &now
+		}
 	}
+	return true
+}
+
+// nextEgressPhase는 상태 전이표 자체다. 이 함수에는 상태 스냅샷 이외의
+// 부수 효과가 없으므로, 허용되지 않는 전이를 단위 테스트로 고정할 수 있다.
+func nextEgressPhase(current EgressPhase, event egressTransitionEvent) (EgressPhase, bool) {
+	switch event {
+	case egressTransitionProfileReady:
+		switch current {
+		case EgressPhaseIdle, EgressPhaseReconfiguring, EgressPhaseReconnecting:
+			return EgressPhaseStreaming, true
+		case EgressPhasePausedReconfiguring, EgressPhasePausedReconnecting:
+			return EgressPhasePaused, true
+		}
+	case egressTransitionPause:
+		if current == EgressPhaseStreaming {
+			return EgressPhasePaused, true
+		}
+	case egressTransitionResume:
+		if current == EgressPhasePaused {
+			return EgressPhaseStreaming, true
+		}
+	case egressTransitionReconnect:
+		switch current {
+		case EgressPhaseIdle, EgressPhaseStreaming, EgressPhaseReconfiguring, EgressPhaseReconnecting:
+			return EgressPhaseReconnecting, true
+		case EgressPhasePaused, EgressPhasePausedReconfiguring, EgressPhasePausedReconnecting:
+			return EgressPhasePausedReconnecting, true
+		}
+	case egressTransitionReconfigure:
+		switch current {
+		case EgressPhaseStreaming:
+			return EgressPhaseReconfiguring, true
+		case EgressPhasePaused:
+			return EgressPhasePausedReconfiguring, true
+		}
+	case egressTransitionStop:
+		return EgressPhaseStopped, true
+	}
+	return current, false
+}
+
+// setStreaming은 스폰 성공 후 profile_ready 전이를 기록한다. StartedAt은 최초
+// 진입 시각을 보존한다(재연결·해상도 재기동으로 갱신하지 않는다).
+func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
+	e.transition(egressTransition{
+		event:  egressTransitionProfileReady,
+		width:  width,
+		height: height,
+		fps:    fps,
+	})
 }
 
 // Pause는 RTMP egress를 종료하지 않고 streaming 상태를 paused 상태로 전환한다.
 // 실제 슬레이트 프레임 전환은 이 상태를 읽는 미디어 경로가 담당한다. 출력 형식이
 // 확정된 뒤에만 전환할 수 있으므로 streaming 외의 상태에서는 false를 반환한다.
 func (e *RTMPEgress) Pause() bool {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	if e.status.Phase != EgressPhaseStreaming {
-		return false
-	}
-	now := time.Now().UTC()
-	e.status.Phase = EgressPhasePaused
-	e.status.PausedAt = &now
-	e.status.UpdatedAt = now
-	return true
+	return e.transition(egressTransition{event: egressTransitionPause})
 }
 
 // Resume은 paused 상태를 streaming 상태로 전환한다. PausedAt은 마지막 일시
 // 중단 이력으로 유지한다.
 func (e *RTMPEgress) Resume() bool {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	if e.status.Phase != EgressPhasePaused {
-		return false
-	}
-	e.status.Phase = EgressPhaseStreaming
-	e.status.UpdatedAt = time.Now().UTC()
-	return true
+	return e.transition(egressTransition{event: egressTransitionResume})
+}
+
+// Stop은 egress를 즉시 stopped로 전이한다. 실제 FFmpeg 종료와 RTMP 연결
+// 해제는 호출자가 egress context를 취소해 Run 고루틴이 수행한다. 두 동작을
+// 분리하면 stop API와 세션 삭제가 재구성·재연결 완료를 기다리지 않아도 된다.
+func (e *RTMPEgress) Stop() {
+	e.transition(egressTransition{event: egressTransitionStop})
 }
 
 // noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.
 func (e *RTMPEgress) noteReconnect(cause error) {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	if e.status.Phase == EgressPhasePaused || e.status.Phase == EgressPhasePausedReconfiguring || e.status.Phase == EgressPhasePausedReconnecting {
-		e.status.Phase = EgressPhasePausedReconnecting
-	} else {
-		e.status.Phase = EgressPhaseReconnecting
-	}
-	e.status.UpdatedAt = time.Now().UTC()
-	e.status.ReconnectAttempts++
-	if cause != nil {
-		message := cause.Error()
-		e.status.LastError = &message
-	}
+	e.transition(egressTransition{event: egressTransitionReconnect, cause: cause})
 }
 
 // beginReconfiguring은 입력 프레임의 해상도가 바뀌어 새 출력 프로필을
 // 측정해야 함을 기록한다. 취소 상태였다면 취소 의도를 보존한다.
 func (e *RTMPEgress) beginReconfiguring() {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	if e.status.Phase == EgressPhasePaused {
-		e.status.Phase = EgressPhasePausedReconfiguring
-	} else {
-		e.status.Phase = EgressPhaseReconfiguring
-	}
-	e.status.UpdatedAt = time.Now().UTC()
+	e.transition(egressTransition{event: egressTransitionReconfigure})
 }
 
 // setStopped는 Run 종료를 기록한다.
 func (e *RTMPEgress) setStopped() {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	now := time.Now().UTC()
-	e.status.Phase = EgressPhaseStopped
-	e.status.UpdatedAt = now
-	if e.status.StoppedAt == nil {
-		e.status.StoppedAt = &now
-	}
+	e.Stop()
 }
 
 // videoBitrateFor picks the x264 target for the measured source resolution:

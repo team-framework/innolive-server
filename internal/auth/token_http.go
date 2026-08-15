@@ -17,15 +17,16 @@ import (
 const maxTokenRequestBody = 8 << 10
 
 type tokenHTTPHandler struct {
-	service           *TokenService
-	google            *GoogleLoginService
-	apple             *AppleLoginService
-	email             *EmailAuthService
-	withdrawal        *AccountWithdrawalService
-	youtube           *YouTubeConnectService
-	streamingAccounts *StreamingAccountService
-	logger            *slog.Logger
-	config            TokenHTTPConfig
+	service             *TokenService
+	logoutSessionCloser func(uuid.UUID)
+	google              *GoogleLoginService
+	apple               *AppleLoginService
+	email               *EmailAuthService
+	withdrawal          *AccountWithdrawalService
+	youtube             *YouTubeConnectService
+	streamingAccounts   *StreamingAccountService
+	logger              *slog.Logger
+	config              TokenHTTPConfig
 }
 
 func MountTokenHTTP(next http.Handler, service *TokenService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
@@ -37,14 +38,14 @@ func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if len(appleServices) > 0 {
 		apple = appleServices[0]
 	}
-	return mountAuthHTTP(next, service, google, apple, nil, nil, nil, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, nil, nil, nil, logger, config, nil)
 }
 
 // MountAuthHTTPWithWithdrawal adds account deletion to the authentication
 // routes. It is kept separate to preserve the existing constructor used by
 // smaller deployments and focused handler tests.
 func MountAuthHTTPWithWithdrawal(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
-	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, nil, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, nil, nil, logger, config, nil)
 }
 
 // MountAuthHTTPWithServices mounts all configured authentication services.
@@ -55,20 +56,24 @@ func MountAuthHTTPWithServices(next http.Handler, service *TokenService, google 
 	if len(youtubeServices) > 0 {
 		youtube = youtubeServices[0]
 	}
-	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, nil, logger, config)
+	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, nil, logger, config, nil)
 }
 
 // MountAuthHTTPWithStreaming은 송출 계정 조회·해제(#88)까지 포함해 전체
 // 인증 라우트를 마운트한다 — 프로덕션 조립(main)이 쓰는 완전형이다.
-func MountAuthHTTPWithStreaming(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
-	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, streamingAccounts, logger, config)
+func MountAuthHTTPWithStreaming(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig, logoutSessionClosers ...func(uuid.UUID)) http.Handler {
+	var logoutSessionCloser func(uuid.UUID)
+	if len(logoutSessionClosers) > 0 {
+		logoutSessionCloser = logoutSessionClosers[0]
+	}
+	return mountAuthHTTP(next, service, google, apple, email, withdrawal, youtube, streamingAccounts, logger, config, logoutSessionCloser)
 }
 
-func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
+func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, youtube *YouTubeConnectService, streamingAccounts *StreamingAccountService, logger *slog.Logger, config TokenHTTPConfig, logoutSessionCloser func(uuid.UUID)) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &tokenHTTPHandler{service: service, google: google, apple: apple, email: email, withdrawal: withdrawal, youtube: youtube, streamingAccounts: streamingAccounts, logger: logger, config: config}
+	h := &tokenHTTPHandler{service: service, logoutSessionCloser: logoutSessionCloser, google: google, apple: apple, email: email, withdrawal: withdrawal, youtube: youtube, streamingAccounts: streamingAccounts, logger: logger, config: config}
 	mux := http.NewServeMux()
 	mux.Handle("/auth/refresh", h.middleware(http.HandlerFunc(h.handleRefresh)))
 	mux.Handle("/auth/logout", h.middleware(http.HandlerFunc(h.handleLogout)))
@@ -152,7 +157,8 @@ func (h *tokenHTTPHandler) handleLogout(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid logout request.")
 		return
 	}
-	if err := h.service.Logout(r.Context(), raw); err != nil {
+	userID, err := h.service.LogoutUser(r.Context(), raw)
+	if err != nil {
 		if !errors.Is(err, ErrInvalidRefreshToken) &&
 			!errors.Is(err, ErrRefreshTokenExpired) &&
 			!errors.Is(err, ErrRefreshTokenRevoked) &&
@@ -162,6 +168,8 @@ func (h *tokenHTTPHandler) handleLogout(w http.ResponseWriter, r *http.Request) 
 			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
 			return
 		}
+	} else if h.logoutSessionCloser != nil {
+		h.logoutSessionCloser(userID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

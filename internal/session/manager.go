@@ -420,6 +420,9 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 		Gate:       m.spawnGate,
 		WireFormat: m.cfg.AIWireFormat,
 	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate)
+	if s.audioPipe != nil {
+		s.audioPipe.SetMuted(false)
+	}
 	s.egress = egress
 	s.egressCancel = egressCancel
 	s.streamStopReason = nil
@@ -500,7 +503,7 @@ func pauseEgress(egress streamPauseController) error {
 		return ErrStreamNotActive
 	case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
 		return ErrStreamPaused
-	case media.EgressPhaseStreaming:
+	case media.EgressPhaseStreaming, media.EgressPhaseReconfiguring:
 		// 아래 Pause 호출로 실제 상태 전이를 수행한다.
 	default:
 		// idle과 reconnecting은 출력 형식이 확정됐거나 RTMP가 살아 있다는

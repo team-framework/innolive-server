@@ -84,6 +84,7 @@
 
       <section class="actions" aria-label="Session actions">
         <button id="startBtn" class="button button-primary" type="button">Start WebRTC</button>
+        <button id="pauseBroadcastBtn" class="button" type="button" disabled>방송 일시 중지</button>
         <button id="healthBtn" class="button" type="button">Health Check</button>
         <button id="createSessionBtn" class="button" type="button">Create Session</button>
         <button id="refreshSessionsBtn" class="button" type="button">Refresh Sessions</button>
@@ -97,7 +98,7 @@
           <p class="eyebrow">YouTube broadcasting</p>
           <h2 id="broadcastStatusTitle">방송 상태</h2>
           <p>
-            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 차례로 표시합니다.
+            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 표시합니다. 송출 중에는 일시 중지로 취소 화면을 보낼 수 있습니다.
           </p>
         </div>
         <dl class="broadcast-status-grid">

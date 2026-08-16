@@ -27,12 +27,18 @@ const (
 	// the pipe writer so a slow FFmpeg never blocks RTP reception. When full the
 	// oldest packet is dropped.
 	audioIngressQueueSize = 256
+	// opusSilenceFrameDuration은 방송 일시 중지 중 기록하는 Opus 무음 프레임의
+	// 길이다. Opus clock rate에 맞춰 증가해야 FFmpeg가 단조로운 Ogg/Opus
+	// 타임라인을 계속 받을 수 있다.
+	opusSilenceFrameDuration = 20 * time.Millisecond
 )
 
-// AudioPipe carries the publisher's Opus microphone from the WebRTC ingest to
-// the RTMP egress FFmpeg as an Ogg/Opus byte stream. The RTP read loop feeds
-// packets through a non-blocking buffered channel; a single writer goroutine
-// reorders them with a samplebuilder and containerises them with an oggwriter.
+var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
+
+// AudioPipe는 송출자의 Opus 마이크 입력을 WebRTC ingest에서 RTMP egress FFmpeg로
+// Ogg/Opus 바이트 스트림으로 전달한다. RTP 읽기 루프는 패킷을 블로킹 없는 버퍼
+// 채널에 넣고, 단일 writer 고루틴이 samplebuilder로 재정렬한 뒤 oggwriter로
+// 컨테이너화한다.
 //
 // The egress FFmpeg child is (re)spawned independently, so the writer's output
 // is swapped under a mutex: it is detached (samples dropped) until the egress
@@ -47,7 +53,9 @@ type AudioPipe struct {
 	input   chan *rtp.Packet
 	builder *samplebuilder.SampleBuilder
 
-	packetSeen atomic.Bool
+	packetSeen          atomic.Bool
+	lastPacketTimestamp atomic.Uint32
+	muted               atomic.Bool
 
 	mu            sync.Mutex
 	ogg           *oggwriter.OggWriter
@@ -93,6 +101,7 @@ func (p *AudioPipe) Channels() uint16 { return uint16(p.channels.Load()) }
 // dropped first.
 func (p *AudioPipe) WritePacket(packet *rtp.Packet) {
 	p.packetSeen.Store(true)
+	p.lastPacketTimestamp.Store(packet.Timestamp)
 	select {
 	case p.input <- packet:
 		return
@@ -114,10 +123,19 @@ func (p *AudioPipe) WritePacket(packet *rtp.Packet) {
 // The egress uses this to decide between the real microphone and silence.
 func (p *AudioPipe) PacketSeen() bool { return p.packetSeen.Load() }
 
-// Run owns the single writer goroutine. It reorders packets and writes each
-// completed Opus sample to the currently attached Ogg stream, dropping samples
-// while detached. It returns when ctx is cancelled (session teardown).
+// SetMuted는 연결된 egress 오디오를 발행자 마이크와 생성한 Opus 무음 사이에서
+// 전환한다. mute 상태는 egress 수명에 속하므로 FFmpeg가 재연결되어도 유지한다.
+func (p *AudioPipe) SetMuted(muted bool) { p.muted.Store(muted) }
+
+// Muted는 실제 마이크 샘플을 현재 막고 있는지 반환한다.
+func (p *AudioPipe) Muted() bool { return p.muted.Load() }
+
+// Run은 단일 writer 고루틴을 실행한다. 패킷을 재정렬해 완성된 Opus 샘플을 현재
+// 연결된 Ogg 스트림에 기록하고, 분리된 동안에는 샘플을 버린다. ctx가 취소되면
+// (세션 종료) 반환한다.
 func (p *AudioPipe) Run(ctx context.Context) {
+	ticker := time.NewTicker(opusSilenceFrameDuration)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -127,6 +145,10 @@ func (p *AudioPipe) Run(ctx context.Context) {
 			p.builder.Push(packet)
 			for sample := p.builder.Pop(); sample != nil; sample = p.builder.Pop() {
 				p.writeSample(sample.PacketTimestamp, sample.Data)
+			}
+		case <-ticker.C:
+			if p.Muted() {
+				p.writeSilenceSample()
 			}
 		}
 	}
@@ -140,6 +162,35 @@ func (p *AudioPipe) Run(ctx context.Context) {
 func (p *AudioPipe) writeSample(timestamp uint32, payload []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.Muted() {
+		p.metrics.IncAudioSampleDropped()
+		return
+	}
+	p.writeSampleLocked(timestamp, payload)
+}
+
+// writeSilenceSample은 유효한 20ms Opus 무음 프레임 하나를 추가한다. 마이크
+// 패킷과 같은 timestamp 흐름을 사용하므로 재개 뒤 oggwriter가 과거 시점으로
+// 되돌아간 것으로 판단하지 않는다.
+func (p *AudioPipe) writeSilenceSample() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.Muted() {
+		return
+	}
+	timestamp := uint32(0)
+	if p.havePrev {
+		timestamp = p.prevTimestamp + uint32(opusClockRate*opusSilenceFrameDuration/time.Second)
+	} else if p.PacketSeen() {
+		// 아직 samplebuilder가 첫 샘플을 내보내기 전 pause된 경우에도, WebRTC
+		// RTP timestamp 근처에서 시작해 이후 실제 마이크 패킷과 큰 간격이 나지
+		// 않게 한다.
+		timestamp = p.lastPacketTimestamp.Load()
+	}
+	p.writeSampleLocked(timestamp, opusSilenceFrame)
+}
+
+func (p *AudioPipe) writeSampleLocked(timestamp uint32, payload []byte) {
 	if p.ogg == nil {
 		p.metrics.IncAudioSampleDropped()
 		return

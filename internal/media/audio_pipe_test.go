@@ -50,7 +50,7 @@ func TestAudioPipeProducesValidOgg(t *testing.T) {
 		timestamp += 960
 	}
 
-	// Drain the writer goroutine, then close the stream so the file flushes.
+	// writer 고루틴을 비운 뒤 스트림을 닫아 파일을 flush한다.
 	deadline := time.Now().Add(2 * time.Second)
 	for len(pipe.input) > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -69,6 +69,31 @@ func TestAudioPipeProducesValidOgg(t *testing.T) {
 	duration := ffprobeValue(t, path, "format=duration")
 	if seconds, _ := time.ParseDuration(duration + "s"); seconds < 1500*time.Millisecond {
 		t.Fatalf("duration = %q, want >= ~1.5s", duration)
+	}
+}
+
+func TestMutedAudioPipeProducesDecodableSilenceOgg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	path := filepath.Join(t.TempDir(), "muted.ogg")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe := NewAudioPipe(testLogger(), metrics.New(), 2)
+	if err := pipe.Attach(file); err != nil {
+		t.Fatal(err)
+	}
+	pipe.SetMuted(true)
+	for index := 0; index < 75; index++ {
+		pipe.writeSilenceSample()
+	}
+	pipe.Detach(file)
+
+	output, err := exec.Command("ffmpeg", "-v", "error", "-i", path, "-f", "null", "-").CombinedOutput()
+	if err != nil {
+		t.Fatalf("muted Ogg is not decodable: %v\n%s", err, output)
 	}
 }
 

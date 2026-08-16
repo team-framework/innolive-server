@@ -227,8 +227,11 @@ func nextEgressPhase(current EgressPhase, event egressTransitionEvent) (EgressPh
 			return EgressPhasePaused, true
 		}
 	case egressTransitionPause:
-		if current == EgressPhaseStreaming {
+		switch current {
+		case EgressPhaseStreaming:
 			return EgressPhasePaused, true
+		case EgressPhaseReconfiguring:
+			return EgressPhasePausedReconfiguring, true
 		}
 	case egressTransitionResume:
 		if current == EgressPhasePaused {
@@ -265,17 +268,29 @@ func (e *RTMPEgress) setStreaming(width, height uint16, fps int) {
 	})
 }
 
-// Pause는 RTMP egress를 종료하지 않고 streaming 상태를 paused 상태로 전환한다.
-// 실제 슬레이트 프레임 전환은 이 상태를 읽는 미디어 경로가 담당한다. 출력 형식이
-// 확정된 뒤에만 전환할 수 있으므로 streaming 외의 상태에서는 false를 반환한다.
+// Pause는 RTMP egress를 종료하지 않고 취소 슬레이트·무음 오디오 상태로
+// 전환한다. 재구성 중이면 새 출력 프로필이 확정된 직후 paused 상태가 되도록
+// paused_reconfiguring을 기록한다.
 func (e *RTMPEgress) Pause() bool {
-	return e.transition(egressTransition{event: egressTransitionPause})
+	if !e.transition(egressTransition{event: egressTransitionPause}) {
+		return false
+	}
+	if e.audio != nil {
+		e.audio.SetMuted(true)
+	}
+	return true
 }
 
 // Resume은 paused 상태를 streaming 상태로 전환한다. PausedAt은 마지막 일시
 // 중단 이력으로 유지한다.
 func (e *RTMPEgress) Resume() bool {
-	return e.transition(egressTransition{event: egressTransitionResume})
+	if !e.transition(egressTransition{event: egressTransitionResume}) {
+		return false
+	}
+	if e.audio != nil {
+		e.audio.SetMuted(false)
+	}
+	return true
 }
 
 // Stop은 egress를 즉시 stopped로 전이한다. 실제 FFmpeg 종료와 RTMP 연결
@@ -372,14 +387,14 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 				continue
 			}
 			e.setStreaming(width, height, fps)
-			written, mismatch, err := e.writeFrames(ctx, process, pending, width, height)
+			written, mismatch, err := e.writeFrames(ctx, process, pending, width, height, fps)
 			pending = nil
-			process.close()
-			// Give the child EOF on pipe:3 so it exits, and free the Ogg stream so
-			// the next spawn attaches a fresh one.
+			// 자식 프로세스가 pipe:3에서 EOF를 받아 종료하게 하고, 다음 spawn이
+			// 새 Ogg 스트림을 연결할 수 있도록 해제한다.
 			if e.audio != nil {
 				e.audio.Detach(e.audioWriteEnd)
 			}
+			process.close()
 			if ctx.Err() != nil {
 				return
 			}
@@ -425,9 +440,9 @@ func (e *RTMPEgress) collectStartupFrames(ctx context.Context, seed []frame) ([]
 // 만나면 그 프레임을 반환하고 즉시 중단한다 — 해상도가 다른 데이터를 밀면
 // 인코더가 어차피 죽고, 죽은 뒤에는 재기동 기준 해상도를 알 수 없기 때문에
 // 죽기 전에 감지해 재측정 시드로 넘기는 것이다.
-func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame, width, height uint16) (int, *frame, error) {
+func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame, width, height uint16, fps int) (int, *frame, error) {
 	written := 0
-	write := func(item frame) (*frame, error) {
+	writeCamera := func(item frame) (*frame, error) {
 		if resolutionChanged(item, width, height) {
 			return &item, nil
 		}
@@ -442,21 +457,59 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		e.latency.observe(item.ingestAt)
 		return nil, nil
 	}
+	writeSlate := func() error {
+		slate, err := cancellationSlateFrame(width, height, e.wireFormat)
+		if err != nil {
+			return err
+		}
+		if _, err := process.stdin.Write(slate.data); err != nil {
+			return err
+		}
+		written++
+		return nil
+	}
 	for _, item := range pending {
-		if mismatch, err := write(item); mismatch != nil || err != nil {
+		if e.isPaused() {
+			if resolutionChanged(item, width, height) {
+				return written, &item, nil
+			}
+			continue
+		}
+		if mismatch, err := writeCamera(item); mismatch != nil || err != nil {
 			return written, mismatch, err
 		}
 	}
+	if fps < 1 {
+		fps = egressDefaultFPS
+	}
+	slateTicker := time.NewTicker(time.Second / time.Duration(fps))
+	defer slateTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return written, nil, ctx.Err()
 		case item := <-e.input:
-			if mismatch, err := write(item); mismatch != nil || err != nil {
+			if e.isPaused() {
+				if resolutionChanged(item, width, height) {
+					return written, &item, nil
+				}
+				continue
+			}
+			if mismatch, err := writeCamera(item); mismatch != nil || err != nil {
 				return written, mismatch, err
+			}
+		case <-slateTicker.C:
+			if e.isPaused() {
+				if err := writeSlate(); err != nil {
+					return written, nil, err
+				}
 			}
 		}
 	}
+}
+
+func (e *RTMPEgress) isPaused() bool {
+	return e.Status().Phase == EgressPhasePaused
 }
 
 // resolutionChanged는 프레임 해상도가 현재 스폰 해상도와 다른지 판정한다.

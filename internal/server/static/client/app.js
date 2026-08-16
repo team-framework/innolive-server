@@ -69,6 +69,7 @@ function bindElements() {
     "sendAudio",
     "autoPoll",
     "startBtn",
+    "pauseBroadcastBtn",
     "healthBtn",
     "createSessionBtn",
     "refreshSessionsBtn",
@@ -161,6 +162,7 @@ function bindEvents() {
     void refreshSessions().catch(() => null),
   );
   els.startBtn.addEventListener("click", () => void startWebRtc());
+  els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
   els.deleteSessionBtn.addEventListener("click", () => void deleteCurrentSession());
   els.errorProbeBtn.addEventListener("click", () => sendErrorProbe());
@@ -720,6 +722,11 @@ function renderBroadcastStreamStatus(stream) {
     setBroadcastStatus(els.broadcastYoutubeState, "RTMP 송출 중 · live 확인 전", "warn");
     return;
   }
+  if (status === "reconfiguring") {
+    setBroadcastStatus(els.broadcastRtmpState, "입력 규격 변경 중", "warn");
+    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 재구성 중", "warn");
+    return;
+  }
   if (status === "idle" || status === "reconnecting") {
     setBroadcastStatus(
       els.broadcastRtmpState,
@@ -732,6 +739,16 @@ function renderBroadcastStreamStatus(stream) {
   if (status === "paused") {
     setBroadcastStatus(els.broadcastRtmpState, "일시 중지됨", "warn");
     setBroadcastStatus(els.broadcastYoutubeState, "RTMP 연결 유지 중", "warn");
+    return;
+  }
+  if (status === "paused_reconfiguring") {
+    setBroadcastStatus(els.broadcastRtmpState, "일시 중지 준비 중", "warn");
+    setBroadcastStatus(els.broadcastYoutubeState, "새 규격으로 RTMP 재구성 중", "warn");
+    return;
+  }
+  if (status === "paused_reconnecting") {
+    setBroadcastStatus(els.broadcastRtmpState, "일시 중지 화면 재연결 중", "warn");
+    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 재연결 중", "warn");
     return;
   }
   if (status === "stopped") {
@@ -1051,6 +1068,24 @@ async function startYouTubeBroadcast(session) {
       status: error?.status,
     });
   }
+}
+
+async function pauseBroadcast() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("일시 중지할 방송 세션이 없습니다.");
+  }
+  await runBusy(async () => {
+    const paused = await apiFetch(`/sessions/${sessionId}/stream/pause`, {
+      method: "POST",
+    });
+    setCurrentSession(paused);
+    renderBroadcastStreamStatus(paused.stream);
+    logEvent("ok", "YouTube broadcast pause requested", {
+      session_id: sessionId,
+      stream: paused.stream,
+    });
+  });
 }
 
 function renderBroadcastStartError(error) {
@@ -1928,13 +1963,18 @@ function updateButtons() {
   const wsOpen = state.ws?.readyState === WebSocket.OPEN;
   const fileProtocol = location.protocol === "file:";
   const signedIn = Boolean(state.accessToken);
+  const streamStatus = state.session?.stream?.status;
 
   els.signInBtn.disabled = state.busy;
   els.signUpBtn.disabled = state.busy;
   els.verifyBtn.disabled = state.busy;
   els.signOutBtn.disabled = state.busy;
-  // Session APIs are behind RequireUser, so gate them on a signed-in user.
+  // 세션 API는 RequireUser 뒤에 있으므로 로그인한 사용자에게만 열어 둔다.
   els.startBtn.disabled = state.busy || fileProtocol || !signedIn;
+  els.pauseBroadcastBtn.disabled =
+    state.busy ||
+    !state.session?.session_id ||
+    !["streaming", "reconfiguring"].includes(streamStatus);
   els.healthBtn.disabled = state.busy;
   els.createSessionBtn.disabled = state.busy || !signedIn;
   els.refreshSessionsBtn.disabled = state.busy;

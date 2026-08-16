@@ -1,5 +1,3 @@
-# PR과 main push를 검증하는 CI. 공개 레포이므로 이 워크플로의 모든 로그는 공개된다 —
-# 실제 자격증명·서버 정보를 출력하는 스텝을 추가하지 말 것.
 name: CI
 
 on:
@@ -12,16 +10,6 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/ci.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'api/**'
-      - 'cmd/**'
-      - 'internal/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/ci.yml'
-
 permissions:
   contents: read
 

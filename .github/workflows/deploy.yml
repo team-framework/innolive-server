@@ -1,11 +1,16 @@
-# main 머지 시 GPU 프로덕션 서버로 자동 배포하는 워크플로.
-# 공개 레포이므로 이 로그는 전 세계에 공개된다 — 서버 정보는 전부 Secrets로만 다루고
-# (자동 마스킹), 상세 진단은 서버 로컬 로그에만 남긴다(deploy/README.md 로그 위생 참조).
 name: Deploy
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
   workflow_dispatch:
     inputs:
       force_restart:

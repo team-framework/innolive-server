@@ -114,20 +114,26 @@ func (s *memoryRefreshStore) Rotate(_ context.Context, hash []byte, now time.Tim
 	return nextRecord, nil
 }
 
-func (s *memoryRefreshStore) RevokeFamilyByHash(_ context.Context, hash []byte, now time.Time) error {
+func (s *memoryRefreshStore) RevokeFamilyByHash(_ context.Context, hash []byte, now time.Time) (uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	key := hashKey(hash)
 	current, ok := s.records[key]
 	if !ok {
-		return ErrInvalidRefreshToken
+		return uuid.Nil, ErrInvalidRefreshToken
+	}
+	if current.RevokedAt != nil {
+		return uuid.Nil, ErrRefreshTokenRevoked
+	}
+	if !now.Before(current.ExpiresAt) {
+		return uuid.Nil, ErrRefreshTokenExpired
 	}
 	copyNow := now
 	current.LastUsedAt = &copyNow
 	s.records[key] = current
 	s.revokeFamily(current.FamilyID, now, revokeReasonLogout)
-	return nil
+	return current.UserID, nil
 }
 
 func (s *memoryRefreshStore) revokeRecord(
@@ -339,12 +345,17 @@ func TestInactiveUserCannotIssueOrRefresh(t *testing.T) {
 func TestLogoutRevokesRefreshFamily(t *testing.T) {
 	store := newMemoryRefreshStore()
 	service := testTokenService(store)
-	pair, err := service.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	userID := uuid.New()
+	pair, err := service.IssuePair(context.Background(), userID, ClientInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Logout(context.Background(), pair.RefreshToken); err != nil {
+	loggedOutUserID, err := service.LogoutUser(context.Background(), pair.RefreshToken)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if loggedOutUserID != userID {
+		t.Fatalf("logout user ID = %s, want %s", loggedOutUserID, userID)
 	}
 	if _, err := service.Rotate(context.Background(), pair.RefreshToken, ClientInfo{}); !errors.Is(err, ErrRefreshTokenRevoked) {
 		t.Fatalf("rotate error = %v, want ErrRefreshTokenRevoked", err)

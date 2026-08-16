@@ -159,8 +159,9 @@ func (s *gormRefreshStore) Rotate(
 	return nextRecord, nil
 }
 
-func (s *gormRefreshStore) RevokeFamilyByHash(ctx context.Context, tokenHash []byte, now time.Time) error {
+func (s *gormRefreshStore) RevokeFamilyByHash(ctx context.Context, tokenHash []byte, now time.Time) (uuid.UUID, error) {
 	var semanticErr error
+	var userID uuid.UUID
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current refreshSessionRow
 		result := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -173,15 +174,30 @@ func (s *gormRefreshStore) RevokeFamilyByHash(ctx context.Context, tokenHash []b
 		if result.Error != nil {
 			return result.Error
 		}
+		// 이미 회전·폐기된 옛 토큰으로는 활성 세션을 종료하면 안 된다. 이
+		// 분기는 HTTP 계층이 LogoutUser의 성공 여부로 세션 종료 콜백을
+		// 실행하므로, 유효한 현재 토큰으로만 로그아웃 효과를 전파한다.
+		if current.RevokedAt != nil {
+			semanticErr = ErrRefreshTokenRevoked
+			return nil
+		}
+		if !now.Before(current.ExpiresAt) {
+			semanticErr = ErrRefreshTokenExpired
+			return nil
+		}
+		userID = current.UserID
 		if err := touchSession(tx, current.ID, now); err != nil {
 			return err
 		}
 		return revokeFamily(tx, current.FamilyID, now, revokeReasonLogout)
 	})
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
-	return semanticErr
+	if semanticErr != nil {
+		return uuid.Nil, semanticErr
+	}
+	return userID, nil
 }
 
 func ensureActiveUser(tx *gorm.DB, userID uuid.UUID) error {

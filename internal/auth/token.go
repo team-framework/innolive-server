@@ -187,7 +187,7 @@ type refreshRotation struct {
 type refreshStore interface {
 	Create(context.Context, refreshSessionRecord) error
 	Rotate(context.Context, []byte, time.Time, refreshRotation) (refreshSessionRecord, error)
-	RevokeFamilyByHash(context.Context, []byte, time.Time) error
+	RevokeFamilyByHash(context.Context, []byte, time.Time) (uuid.UUID, error)
 }
 
 type TokenService struct {
@@ -265,9 +265,17 @@ func (s *TokenService) Rotate(ctx context.Context, rawRefresh string, client Cli
 }
 
 func (s *TokenService) Logout(ctx context.Context, rawRefresh string) error {
+	_, err := s.LogoutUser(ctx, rawRefresh)
+	return err
+}
+
+// LogoutUser는 refresh token family를 폐기하고, 폐기된 family의 사용자를
+// 반환한다. HTTP 계층은 성공한 로그아웃 뒤 이 ID로 활성 WebRTC/RTMP 세션을
+// 닫는다. 토큰이 유효하지 않으면 사용자 ID를 반환하지 않는다.
+func (s *TokenService) LogoutUser(ctx context.Context, rawRefresh string) (uuid.UUID, error) {
 	hash, err := hashRefreshToken(rawRefresh)
 	if err != nil {
-		return ErrInvalidRefreshToken
+		return uuid.Nil, ErrInvalidRefreshToken
 	}
 	return s.store.RevokeFamilyByHash(ctx, hash, s.now().UTC())
 }

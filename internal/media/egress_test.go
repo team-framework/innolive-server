@@ -198,6 +198,12 @@ func TestEgressStatusTransitions(t *testing.T) {
 	if initial.StartedAt != nil || initial.StoppedAt != nil {
 		t.Fatal("initial StartedAt/StoppedAt must be nil")
 	}
+	if initial.PausedAt != nil {
+		t.Fatal("initial PausedAt must be nil")
+	}
+	if e.Pause() {
+		t.Fatal("Pause returned true before streaming")
+	}
 
 	e.setStreaming(1280, 720, 30)
 	streaming := e.Status()
@@ -235,17 +241,18 @@ func TestEgressStatusTransitions(t *testing.T) {
 		t.Fatal("Pause returned false for a live egress")
 	}
 	paused := e.Status()
-	if !paused.Paused || paused.PausedAt == nil {
-		t.Fatalf("paused status = %+v, want Paused with PausedAt", paused)
+	if paused.Phase != EgressPhasePaused || paused.PausedAt == nil {
+		t.Fatalf("paused status = %+v, want paused phase with PausedAt", paused)
 	}
+	lastPausedAt := *paused.PausedAt
 	if e.Pause() {
 		t.Fatal("second Pause returned true")
 	}
 	if !e.Resume() {
 		t.Fatal("Resume returned false for a paused egress")
 	}
-	if afterResume := e.Status(); afterResume.Paused || afterResume.PausedAt != nil {
-		t.Fatalf("resumed status = %+v, want no pause state", afterResume)
+	if afterResume := e.Status(); afterResume.Phase != EgressPhaseStreaming || afterResume.PausedAt == nil || !afterResume.PausedAt.Equal(lastPausedAt) {
+		t.Fatalf("resumed status = %+v, want streaming phase with preserved PausedAt", afterResume)
 	}
 
 	e.setStopped()
@@ -253,13 +260,108 @@ func TestEgressStatusTransitions(t *testing.T) {
 	if stopped.Phase != EgressPhaseStopped || stopped.StoppedAt == nil {
 		t.Fatalf("after setStopped: phase=%q stopped=%v", stopped.Phase, stopped.StoppedAt)
 	}
-	if stopped.Paused || stopped.PausedAt != nil {
-		t.Fatalf("stopped status retained pause state: %+v", stopped)
+	if stopped.PausedAt == nil || !stopped.PausedAt.Equal(lastPausedAt) {
+		t.Fatalf("stopped status lost PausedAt: %+v", stopped)
 	}
 	firstStop := *stopped.StoppedAt
 	e.setStopped()
 	if again := e.Status(); !again.StoppedAt.Equal(firstStop) {
 		t.Fatal("StoppedAt must not change on repeated setStopped")
+	}
+}
+
+// TestEgressTransitionTable는 상태를 바꾸는 모든 사건이 하나의 전이표에
+// 묶여 있고, 허용하지 않은 상태 변경이 현재 상태를 통과시키지 않는지 검증한다.
+func TestEgressTransitionTable(t *testing.T) {
+	tests := []struct {
+		name    string
+		current EgressPhase
+		event   egressTransitionEvent
+		want    EgressPhase
+		allowed bool
+	}{
+		{name: "첫 프로필 확정", current: EgressPhaseIdle, event: egressTransitionProfileReady, want: EgressPhaseStreaming, allowed: true},
+		{name: "송출 중 일시 중지", current: EgressPhaseStreaming, event: egressTransitionPause, want: EgressPhasePaused, allowed: true},
+		{name: "일시 중지 중 재연결", current: EgressPhasePaused, event: egressTransitionReconnect, want: EgressPhasePausedReconnecting, allowed: true},
+		{name: "일시 중지 재연결 완료", current: EgressPhasePausedReconnecting, event: egressTransitionProfileReady, want: EgressPhasePaused, allowed: true},
+		{name: "송출 중 해상도 변경", current: EgressPhaseStreaming, event: egressTransitionReconfigure, want: EgressPhaseReconfiguring, allowed: true},
+		{name: "정지 중 일시 중지 금지", current: EgressPhaseStopped, event: egressTransitionPause, want: EgressPhaseStopped, allowed: false},
+		{name: "프로필 전 일시 중지 금지", current: EgressPhaseIdle, event: egressTransitionPause, want: EgressPhaseIdle, allowed: false},
+		{name: "재연결 중 재개 금지", current: EgressPhasePausedReconnecting, event: egressTransitionResume, want: EgressPhasePausedReconnecting, allowed: false},
+		{name: "모든 생존 상태에서 정지", current: EgressPhasePausedReconnecting, event: egressTransitionStop, want: EgressPhaseStopped, allowed: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, allowed := nextEgressPhase(tc.current, tc.event)
+			if got != tc.want || allowed != tc.allowed {
+				t.Fatalf("nextEgressPhase(%q, %d) = (%q, %t), want (%q, %t)", tc.current, tc.event, got, allowed, tc.want, tc.allowed)
+			}
+		})
+	}
+}
+
+func TestEgressTransitionRejectsIllegalStateWithoutMetadataMutation(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	before := e.Status()
+	if e.transition(egressTransition{event: egressTransitionPause}) {
+		t.Fatal("pause transition from idle must be rejected")
+	}
+	after := e.Status()
+	if after != before {
+		t.Fatalf("illegal transition mutated status: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestEgressStatusPreservesPauseAcrossReconfigureAndReconnect(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	e.setStreaming(1280, 720, 30)
+	if !e.Pause() {
+		t.Fatal("Pause returned false for a streaming egress")
+	}
+	pausedAt := *e.Status().PausedAt
+
+	e.beginReconfiguring()
+	if status := e.Status(); status.Phase != EgressPhasePausedReconfiguring {
+		t.Fatalf("phase during paused reconfigure = %q, want %q", status.Phase, EgressPhasePausedReconfiguring)
+	}
+
+	e.noteReconnect(io.ErrUnexpectedEOF)
+	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
+		t.Fatalf("phase during paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
+	}
+	e.noteReconnect(io.ErrClosedPipe)
+	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
+		t.Fatalf("phase during repeated paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
+	}
+
+	e.setStreaming(720, 1280, 60)
+	status := e.Status()
+	if status.Phase != EgressPhasePaused {
+		t.Fatalf("phase after paused reconnect = %q, want %q", status.Phase, EgressPhasePaused)
+	}
+	if status.Width != 720 || status.Height != 1280 || status.FPS != 60 {
+		t.Fatalf("profile after paused reconnect = %dx%d@%d, want 720x1280@60", status.Width, status.Height, status.FPS)
+	}
+	if status.PausedAt == nil || !status.PausedAt.Equal(pausedAt) {
+		t.Fatalf("PausedAt after paused reconnect = %v, want %v", status.PausedAt, pausedAt)
+	}
+}
+
+func TestEgressStatusReconfiguringReturnsToStreaming(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	e.setStreaming(1280, 720, 30)
+	e.beginReconfiguring()
+	if status := e.Status(); status.Phase != EgressPhaseReconfiguring {
+		t.Fatalf("phase during reconfigure = %q, want %q", status.Phase, EgressPhaseReconfiguring)
+	}
+	e.setStreaming(720, 1280, 60)
+	status := e.Status()
+	if status.Phase != EgressPhaseStreaming {
+		t.Fatalf("phase after reconfigure = %q, want %q", status.Phase, EgressPhaseStreaming)
+	}
+	if status.Width != 720 || status.Height != 1280 || status.FPS != 60 {
+		t.Fatalf("profile after reconfigure = %dx%d@%d, want 720x1280@60", status.Width, status.Height, status.FPS)
 	}
 }
 

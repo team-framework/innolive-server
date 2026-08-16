@@ -436,7 +436,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithStreaming(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, streamingAccounts, logger, originConfig),
+		Handler:           auth.MountAuthHTTPWithStreaming(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

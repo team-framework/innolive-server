@@ -14,10 +14,9 @@ import (
 	"github.com/pion/rtp"
 )
 
-// TestAudioPipeProducesValidOgg feeds synthetic Opus RTP packets through the
-// pipe into a file and asserts ffprobe reads back a well-formed Ogg/Opus stream
-// at 48 kHz with a plausible duration. This is the Phase 2 verification: the
-// container and granule timeline are correct even before real egress.
+// TestAudioPipeProducesValidOgg는 합성 Opus RTP 패킷을 pipe로 파일에 기록하고,
+// ffprobe가 그 결과를 타당한 길이의 48kHz Ogg/Opus 스트림으로 읽는지 확인한다.
+// 실제 egress 전에도 컨테이너와 granule 타임라인이 올바른지 검증한다.
 func TestAudioPipeProducesValidOgg(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe not installed")
@@ -39,7 +38,7 @@ func TestAudioPipeProducesValidOgg(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 
-	// 100 Opus packets, 20 ms apart (960 samples @ 48 kHz) ≈ 2 s of audio.
+	// 20ms 간격의 Opus 패킷 100개(48kHz에서 960 samples)는 약 2초 오디오다.
 	const packets = 100
 	var timestamp uint32 = 160000
 	for seq := 0; seq < packets; seq++ {

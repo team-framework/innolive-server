@@ -16,22 +16,22 @@ import (
 )
 
 const (
-	// egressQueueSize bounds the blur → egress channel. When full the oldest
-	// frame is dropped so the blur stage never blocks on a slow RTMP peer.
+	// egressQueueSize는 blur → egress 채널 크기를 제한한다. 가득 차면 가장 오래된
+	// 프레임을 버려 blur 단계가 느린 RTMP 피어 때문에 막히지 않게 한다.
 	egressQueueSize = 5
-	// egressMeasureFrames is how many leading frames are buffered to derive
-	// the source frame rate from their RTP timestamps before the first spawn.
+	// egressMeasureFrames는 첫 spawn 전에 RTP timestamp로 소스 프레임률을
+	// 계산하기 위해 버퍼링할 선행 프레임 수다.
 	egressMeasureFrames = 30
 	egressDefaultFPS    = 30
-	// egressVideoBitrate serves sources up to 720p; larger (FHD) sources get
-	// egressVideoBitrateFHD. EGRESS_VIDEO_BITRATE overrides both.
+	// egressVideoBitrate는 720p 이하 소스에 사용하며, 그보다 큰 FHD 소스에는
+	// egressVideoBitrateFHD를 사용한다. EGRESS_VIDEO_BITRATE가 둘 다 덮어쓴다.
 	egressVideoBitrate    = "2500k"
 	egressVideoBitrateFHD = "5000k"
 	egressAudioBitrate    = "128k"
 	egressBackoffMin      = time.Second
 	egressBackoffMax      = 30 * time.Second
-	// egressStableFrames is how many frames a process must accept before a
-	// later failure resets the reconnect backoff to its minimum.
+	// egressStableFrames는 이후 실패 시 재연결 backoff를 최솟값으로 되돌리려면
+	// 프로세스가 받아야 하는 프레임 수다.
 	egressStableFrames = 300
 )
 
@@ -43,8 +43,8 @@ const (
 	EgressPhaseIdle EgressPhase = "idle"
 	// EgressPhaseStreaming: FFmpeg 가동, 프레임 송출 중.
 	EgressPhaseStreaming EgressPhase = "streaming"
-	// EgressPhasePaused: 일시 중단 요청이 수락돼 미디어 경로가 취소 슬레이트로
-	// 전환해야 하는 상태. 실제 슬레이트 프레임 전환은 다음 작업에서 연결한다.
+	// EgressPhasePaused: 일시 중단 요청이 수락돼 미디어 경로가 취소 슬레이트와
+	// 무음 오디오를 송출하는 상태.
 	EgressPhasePaused EgressPhase = "paused"
 	// EgressPhaseReconfiguring: 입력 프로필 변경을 감지해 새 해상도·FPS를
 	// 측정하고 FFmpeg를 다시 시작하는 상태.
@@ -66,7 +66,7 @@ const (
 // 고루틴이 콜백으로 세션 락을 잡는 역방향 결합을 만들지 않기 위한 구조다.
 type EgressStatus struct {
 	Phase             EgressPhase
-	TargetURL         string // 마스킹된 출력 URL
+	TargetURL         string // 마스킹한 출력 URL
 	StartedAt         *time.Time
 	StoppedAt         *time.Time
 	UpdatedAt         time.Time
@@ -105,13 +105,12 @@ type egressTransition struct {
 	cause  error
 }
 
-// RTMPEgress pushes processed (blurred) frames to an RTMP endpoint through a
-// dedicated FFmpeg child, following the FFmpegTranscoder process pattern.
+// RTMPEgress는 FFmpegTranscoder 프로세스 패턴을 따라 전용 FFmpeg 자식 프로세스를
+// 통해 처리된(blurred) 프레임을 RTMP endpoint로 보낸다.
 //
-// When audio is nil, or no microphone audio has been received, the audio track
-// is generated silence (YouTube rejects streams without an audio track). When
-// the publisher's Opus microphone is flowing, audio carries it through an
-// Ogg/Opus pipe on fd 3 (pipe:3) instead.
+// 오디오가 nil이거나 마이크 오디오를 아직 받지 못했으면 무음 오디오 트랙을
+// 생성한다(YouTube는 오디오 트랙 없는 스트림을 거부한다). 송출자의 Opus 마이크가
+// 흐르면 대신 fd 3(pipe:3)의 Ogg/Opus pipe를 통해 오디오를 전달한다.
 type RTMPEgress struct {
 	transcoder *FFmpegTranscoder
 	logger     *slog.Logger
@@ -119,16 +118,16 @@ type RTMPEgress struct {
 	wireFormat config.WireFormat
 	outputURL  string
 	audio      *AudioPipe
-	// audioWriteEnd is the pipe write end attached to the current FFmpeg child,
-	// so teardown detaches exactly this stream and not a successor's.
+	// audioWriteEnd는 현재 FFmpeg 자식 프로세스에 연결된 pipe write end다.
+	// 종료 시 후속 프로세스가 아니라 정확히 이 스트림만 분리한다.
 	audioWriteEnd *os.File
 	latency       *latencyTracker
-	// audioOffset delays the microphone relative to the (blur-delayed) video via
-	// FFmpeg -itsoffset, compensating for the audio leading the video. Positive
-	// delays audio; tunable at runtime via EGRESS_AUDIO_OFFSET_MS.
+	// audioOffset은 FFmpeg -itsoffset으로 마이크를 blur 지연된 영상에 맞춰
+	// 지연시킨다. 양수 값은 오디오를 늦추며 EGRESS_AUDIO_OFFSET_MS로 런타임에
+	// 조정할 수 있다.
 	audioOffset time.Duration
-	// bitrateOverride, when non-empty (EGRESS_VIDEO_BITRATE), replaces the
-	// resolution-derived video bitrate.
+	// bitrateOverride가 비어 있지 않으면(EGRESS_VIDEO_BITRATE) 해상도 기반
+	// 영상 bitrate를 대체한다.
 	bitrateOverride string
 	input           chan frame
 
@@ -316,9 +315,9 @@ func (e *RTMPEgress) setStopped() {
 	e.Stop()
 }
 
-// videoBitrateFor picks the x264 target for the measured source resolution:
-// up to 720p keeps the original 2500k, anything larger gets the FHD rate.
-// A non-empty EGRESS_VIDEO_BITRATE override wins regardless of resolution.
+// videoBitrateFor는 측정한 소스 해상도에 맞는 x264 목표 bitrate를 고른다.
+// 720p 이하는 기존 2500k를 유지하고, 그보다 크면 FHD bitrate를 사용한다.
+// 비어 있지 않은 EGRESS_VIDEO_BITRATE는 해상도와 무관하게 우선한다.
 func (e *RTMPEgress) videoBitrateFor(width, height uint16) string {
 	if e.bitrateOverride != "" {
 		return e.bitrateOverride
@@ -329,8 +328,8 @@ func (e *RTMPEgress) videoBitrateFor(width, height uint16) string {
 	return egressVideoBitrate
 }
 
-// Enqueue hands a processed frame to the egress without ever blocking the
-// caller: when the queue is full the oldest frame is discarded first.
+// Enqueue는 호출자를 막지 않고 처리된 프레임을 egress에 전달한다. 큐가 가득 차면
+// 가장 오래된 프레임을 먼저 버린다.
 func (e *RTMPEgress) Enqueue(item frame) {
 	select {
 	case e.input <- item:
@@ -349,10 +348,10 @@ func (e *RTMPEgress) Enqueue(item frame) {
 	}
 }
 
-// Run owns the single writer goroutine: it measures the source frame rate,
-// spawns the FFmpeg child, feeds it frames, and reconnects with exponential
-// backoff when the child dies or the RTMP write path fails. Frames arriving
-// while disconnected are dropped, never buffered.
+// Run은 단일 writer 고루틴을 실행한다. 소스 프레임률을 측정하고 FFmpeg 자식
+// 프로세스를 생성해 프레임을 공급하며, 자식 프로세스 종료나 RTMP 쓰기 경로 실패
+// 시 지수 backoff로 재연결한다. 연결이 끊긴 동안 들어오는 프레임은 버리고
+// 버퍼링하지 않는다.
 //
 // egress가 세션 수명으로 살게 되면서(#84) 트랙 교체로 프레임 해상도가
 // 바뀌어도 이 고루틴이 계속 담당한다: 바깥 루프가 해상도 한 세대를,
@@ -529,9 +528,8 @@ func (e *RTMPEgress) validFrame(item frame) bool {
 	return isJPEG(item.data)
 }
 
-// waitBackoff sleeps for the current backoff while draining (dropping) frames
-// so the queue holds fresh frames when the process comes back, then doubles
-// the backoff up to its cap.
+// waitBackoff는 현재 backoff 동안 프레임을 비우며(버리며) 대기한다. 프로세스가
+// 돌아왔을 때 큐에 최신 프레임이 남게 하며, 이후 backoff를 상한까지 두 배로 늘린다.
 func (e *RTMPEgress) waitBackoff(ctx context.Context, backoff *time.Duration) {
 	timer := time.NewTimer(*backoff)
 	defer timer.Stop()
@@ -558,12 +556,11 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		"-thread_queue_size", "512", "-use_wallclock_as_timestamps", "1",
 	}
 	if useAudio {
-		// FFmpeg opens inputs sequentially and, at the default probesize (5 MB),
-		// reads several seconds of video before it even opens pipe:3. During that
-		// window the microphone would be muxed late (or the child killed before
-		// pipe:3 opens at all). The codec and frame rate are already forced, so
-		// bounding the video probe lets pipe:3 open promptly. This is scoped to
-		// the audio path to leave the silence path's timing untouched.
+		// FFmpeg는 입력을 순차적으로 열며, 기본 probesize(5MB)에서는 pipe:3을
+		// 열기 전 영상 수 초를 읽는다. 그 사이 마이크 mux가 늦어지거나 pipe:3을
+		// 열기도 전에 자식 프로세스가 종료될 수 있다. codec과 프레임률은 이미
+		// 강제하므로 영상 probe를 제한해 pipe:3을 신속히 열게 한다. 무음 경로의
+		// 타이밍은 건드리지 않도록 오디오 경로에만 적용한다.
 		arguments = append(arguments, "-analyzeduration", "0", "-probesize", "1000000")
 	}
 	if e.wireFormat == config.WireFormatRaw {
@@ -578,10 +575,10 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 			"-framerate", strconv.Itoa(fps), "-i", "pipe:0",
 		)
 	}
-	// Second input: the publisher's Opus microphone on pipe:3 when it is
-	// flowing, otherwise generated silence. The audio input deliberately omits
-	// -use_wallclock_as_timestamps so it keeps its own Opus timeline (the video
-	// input above consumed that flag); A/V sync is deferred to Phase 4.
+	// 두 번째 입력은 송출자의 Opus 마이크가 흐를 때 pipe:3을 사용하고, 그렇지
+	// 않으면 생성한 무음을 사용한다. 오디오 입력은 자체 Opus 타임라인을 유지하도록
+	// -use_wallclock_as_timestamps를 의도적으로 쓰지 않는다(위 영상 입력에서
+	// 해당 플래그를 사용했다). A/V 동기화는 4단계에서 처리한다.
 	var extraFiles []*os.File
 	var audioWriteEnd *os.File
 	if useAudio {
@@ -593,8 +590,8 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		audioWriteEnd = writeEnd
 		arguments = append(arguments, "-thread_queue_size", "512")
 		if e.audioOffset != 0 {
-			// -itsoffset shifts the audio input's timestamps to line it up with
-			// the blur-delayed video. It must precede the audio -i.
+			// -itsoffset은 오디오 입력 timestamp를 blur 지연 영상에 맞춘다.
+			// 오디오 -i보다 앞에 와야 한다.
 			arguments = append(arguments, "-itsoffset", fmt.Sprintf("%.3f", e.audioOffset.Seconds()))
 		}
 		arguments = append(arguments,
@@ -608,8 +605,8 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		)
 	}
 	if e.wireFormat != config.WireFormatRaw {
-		// MJPEG decodes to full-range yuvj420p; compress to limited range so
-		// the FLV stream carries plain yuv420p.
+		// MJPEG는 full-range yuvj420p로 디코딩된다. FLV 스트림이 일반 yuv420p를
+		// 담도록 limited range로 압축한다.
 		arguments = append(arguments, "-vf", "scale=out_range=tv")
 	}
 	videoBitrate := e.videoBitrateFor(width, height)
@@ -622,11 +619,11 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		"-c:a", "aac", "-b:a", egressAudioBitrate, "-ar", "44100", "-ac", "2",
 	)
 	if useAudio {
-		// Let FFmpeg absorb Opus clock drift and DTX gaps against the video
-		// clock instead of tearing the stream down.
+		// 스트림을 종료하지 않고 FFmpeg가 영상 clock을 기준으로 Opus clock drift와
+		// DTX 공백을 흡수하게 한다.
 		arguments = append(arguments, "-af", "aresample=async=1")
 	} else {
-		// Silence tracks the video length; end the stream when video ends.
+		// 무음은 영상 길이를 따르며, 영상이 끝나면 스트림을 종료한다.
 		arguments = append(arguments, "-shortest")
 	}
 	arguments = append(arguments, "-f", "flv", e.outputURL)
@@ -650,8 +647,8 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 	return process, nil
 }
 
-// handleStderrLine splits FFmpeg's -progress key=value stream (carrying the
-// dup/drop frame counters produced by -fps_mode cfr) from genuine errors.
+// handleStderrLine은 FFmpeg의 -progress key=value 스트림(-fps_mode cfr가 만든
+// dup/drop 프레임 카운터 포함)과 실제 오류를 구분한다.
 func (e *RTMPEgress) handleStderrLine(line string) {
 	key, value, found := strings.Cut(line, "=")
 	if found && isProgressKey(key) {
@@ -667,8 +664,8 @@ func (e *RTMPEgress) handleStderrLine(line string) {
 		}
 		return
 	}
-	// FFmpeg echoes the output URL (which carries the stream key) into its
-	// own error messages; mask it before it reaches the logs.
+	// FFmpeg는 스트림 키가 포함된 출력 URL을 자체 오류 메시지에 그대로 넣으므로,
+	// 로그에 도달하기 전에 마스킹한다.
 	e.logger.Warn("FFmpeg reported an error", "message", strings.ReplaceAll(line, e.outputURL, maskStreamKey(e.outputURL)))
 }
 
@@ -681,9 +678,8 @@ func isProgressKey(key string) bool {
 	return strings.HasPrefix(key, "stream_")
 }
 
-// measureFPS derives the source frame rate from the RTP timestamp span
-// (90 kHz clock) of the buffered startup frames. uint32 subtraction handles
-// timestamp wrap-around.
+// measureFPS는 버퍼링한 시작 프레임의 RTP timestamp 범위(90kHz clock)로 소스
+// 프레임률을 계산한다. uint32 뺄셈으로 timestamp wrap-around를 처리한다.
 func measureFPS(frames []frame) int {
 	if len(frames) < 2 {
 		return egressDefaultFPS
@@ -699,8 +695,8 @@ func measureFPS(frames []frame) int {
 	return fps
 }
 
-// maskStreamKey hides the final path segment (the stream key) of an RTMP URL
-// so it never reaches the logs.
+// maskStreamKey는 RTMP URL의 마지막 경로 조각(스트림 키)을 숨겨 로그에 남지
+// 않게 한다.
 func maskStreamKey(url string) string {
 	index := strings.LastIndex(url, "/")
 	if index < 0 || index == len(url)-1 {

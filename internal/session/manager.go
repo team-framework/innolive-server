@@ -143,10 +143,10 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	pending  int
-	// pipelines tracks sessions whose media pipeline (FFmpeg pair) is still
-	// alive, including sessions already removed from the map but not yet
-	// torn down — those keep counting toward MaxSessions so reconnect churn
-	// cannot double-book processes during the teardown grace window.
+	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
+	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
+	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
+	// MaxSessions 사용량에 계속 포함한다.
 	pipelines map[string]struct{}
 }
 
@@ -165,12 +165,11 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 	}
 	var settingEngine webrtc.SettingEngine
 	if cfg.UDPMuxPort > 0 {
-		// Multiplex all ICE UDP traffic onto a single port. Spreading media
-		// across the ephemeral range (the default) opens one NAT binding per
-		// flow, which overwhelms home-router NAT tables under multi-session
-		// load — observed as heavy RTP packet loss once the client runs on a
-		// separate machine. A single muxed port collapses that to one binding
-		// (and means only one UDP port needs opening on a firewall).
+		// 모든 ICE UDP 트래픽을 단일 포트에 multiplex한다. 기본값처럼 미디어를
+		// ephemeral 포트 범위에 분산하면 흐름마다 NAT binding이 하나씩 생겨,
+		// 다중 세션에서 가정용 공유기 NAT 테이블을 소진한다. 클라이언트가 다른
+		// 장비에서 실행될 때 심한 RTP 패킷 손실로 관찰됐다. 단일 mux 포트는 이를
+		// binding 하나로 줄이고 방화벽에서도 UDP 포트 하나만 열면 된다.
 		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: cfg.UDPMuxPort})
 		if err != nil {
 			return nil, fmt.Errorf("open WebRTC UDP mux port %d: %w", cfg.UDPMuxPort, err)
@@ -202,8 +201,8 @@ func (m *Manager) ICEServers() []webrtc.ICEServer {
 	return result
 }
 
-// Capacity reports the number of capacity-consuming sessions (live +
-// reserved) and the configured limit (0 means unlimited).
+// Capacity는 용량을 사용하는 세션 수(실행 중 + 예약)와 설정한 제한을 반환한다.
+// 제한값 0은 무제한을 뜻한다.
 func (m *Manager) Capacity() (active, limit int) {
 	m.mu.RLock()
 	active = len(m.sessions) + m.pending
@@ -211,9 +210,8 @@ func (m *Manager) Capacity() (active, limit int) {
 	return active, m.cfg.MaxSessions
 }
 
-// capacityInUseLocked counts live sessions, in-flight reservations, and
-// orphaned pipelines (deleted sessions whose FFmpeg pair is still tearing
-// down). Callers must hold m.mu.
+// capacityInUseLocked는 실행 중인 세션, 진행 중인 예약, 종료 중인 FFmpeg 쌍이
+// 남은 삭제 세션의 orphaned pipeline을 센다. 호출자는 m.mu를 잡고 있어야 한다.
 func (m *Manager) capacityInUseLocked() int {
 	inUse := len(m.sessions) + m.pending
 	for id := range m.pipelines {
@@ -224,16 +222,16 @@ func (m *Manager) capacityInUseLocked() int {
 	return inUse
 }
 
-// Create provisions a new session and returns it together with the plaintext
-// owner token. The token is returned exactly once here; the server must relay
-// it to the creator in the creation response and never expose it again.
+// Create는 새 세션을 만들고 평문 owner token과 함께 반환한다. token은 여기서
+// 정확히 한 번만 반환하며, 서버는 생성 응답으로 생성자에게 전달한 뒤 다시
+// 노출해서는 안 된다.
 func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 	return m.CreateForUser(uuid.Nil, metadata)
 }
 
-// CreateForUser provisions a session owned by userID. The AI client ID is
-// deliberately derived here rather than accepted as request metadata so the
-// face whitelist and the media stream always use the same authenticated scope.
+// CreateForUser는 userID가 소유하는 세션을 만든다. AI client ID는 요청 metadata로
+// 받지 않고 여기서 계산해, 얼굴 whitelist와 미디어 스트림이 항상 같은 인증 범위를
+// 사용하게 한다.
 func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*Session, string, error) {
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
@@ -277,11 +275,11 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	}
 	s.baseCtx = ctx
 	s.egressSlot = media.NewEgressSlot()
-	// The audio pipe is created up front (decoupled from track arrival order)
-	// so the egress can attach it regardless of whether the video or the audio
-	// track's OnTrack fires first. It idles, dropping samples, until a mic track
-	// feeds it and the egress attaches a pipe. 사용자별 송출(#83)에서는 세션
-	// 생성 시점에 송출 여부를 알 수 없으므로 오디오 egress 설정만 보고 만든다.
+	// audio pipe는 트랙 도착 순서와 무관하게 미리 만든다. 영상 또는 오디오 트랙의
+	// OnTrack 중 무엇이 먼저 실행돼도 egress가 연결할 수 있다. 마이크 트랙이
+	// 입력을 공급하고 egress가 pipe를 연결할 때까지는 샘플을 버리며 유휴 상태다.
+	// 사용자별 송출(#83)에서는 세션 생성 시점에 송출 여부를 알 수 없으므로 오디오
+	// egress 설정만 보고 만든다.
 	if m.cfg.EnableAudioEgress {
 		s.audioPipe = media.NewAudioPipe(m.logger.With("session_id", id), m.metrics, 2)
 		go s.audioPipe.Run(ctx)
@@ -300,16 +298,16 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	return s, ownerToken, nil
 }
 
-// AIClientIDForUser is the only whitelist bucket identifier used for an
-// authenticated user. The prefix keeps it distinct from the legacy global
-// bucket (an empty client ID) without exposing a caller-controlled selector.
+// AIClientIDForUser는 인증된 사용자가 사용하는 유일한 whitelist bucket 식별자다.
+// 접두사는 호출자가 제어하는 선택자를 노출하지 않으면서 legacy global bucket
+// (빈 client ID)과 구분한다.
 func AIClientIDForUser(userID uuid.UUID) string {
 	return "user:" + userID.String()
 }
 
-// reapUnnegotiated frees a session that never started negotiation within
-// SESSION_NEGOTIATION_TIMEOUT, so bare POST /sessions calls cannot pin
-// MAX_SESSIONS slots indefinitely.
+// reapUnnegotiated는 SESSION_NEGOTIATION_TIMEOUT 안에 협상을 시작하지 않은
+// 세션을 해제한다. POST /sessions만 호출해 MAX_SESSIONS 슬롯을 무기한 점유하지
+// 못하게 한다.
 func (m *Manager) reapUnnegotiated(id string) {
 	s, err := m.Get(id)
 	if err != nil {
@@ -335,11 +333,10 @@ func (m *Manager) Get(id string) (*Session, error) {
 	return s, nil
 }
 
-// VerifyOwner resolves a session and confirms the caller owns it. It returns
-// ErrNotFound when no such session exists and ErrUnauthorized when the token
-// does not match. When session auth is disabled (local dev only) the token is
-// not checked, but the session must still exist. This is the single gate used
-// by both the HTTP middleware and the WebRTC signaling path.
+// VerifyOwner는 세션을 찾고 호출자가 소유자인지 확인한다. 세션이 없으면
+// ErrNotFound를, token이 일치하지 않으면 ErrUnauthorized를 반환한다. 세션 인증을
+// 끈 경우(로컬 개발 전용)에는 token을 검사하지 않지만 세션은 존재해야 한다.
+// HTTP middleware와 WebRTC signaling 경로가 함께 사용하는 단일 관문이다.
 func (m *Manager) VerifyOwner(id, token string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
@@ -568,8 +565,9 @@ func (m *Manager) CloseAll() {
 	for _, s := range sessions {
 		s.close("application_shutdown", m.logger)
 	}
-	// Wait for the FFmpeg pairs' graceful teardown so process exit does not
-	// orphan children mid-shutdown (bounded slightly above the grace period).
+	// 종료 중인 FFmpeg 쌍이 정상적으로 끝날 때까지 기다려, shutdown 중 프로세스가
+	// 자식 프로세스를 고아로 남기지 않게 한다. 대기 시간은 grace period보다 조금
+	// 길게 제한한다.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.RLock()
@@ -588,18 +586,18 @@ func (m *Manager) CloseAll() {
 	}
 }
 
-// handleAudioTrack captures the publisher's Opus microphone and feeds it to the
-// session's audio pipe for RTMP egress. Only the first Opus track is used;
-// non-Opus or additional audio tracks are ignored (and counted). The read loop
-// exits on EOF (track/PeerConnection closed) or session teardown, following the
-// video path's ReadRTP semantics. No PLI/keyframe RTCP is sent for audio.
+// handleAudioTrack은 송출자의 Opus 마이크를 받아 RTMP egress용 세션 audio pipe에
+// 공급한다. 첫 번째 Opus 트랙만 사용하며, Opus가 아니거나 추가된 오디오 트랙은
+// 무시하고 집계한다. 읽기 루프는 영상 경로의 ReadRTP 의미와 같이 EOF(트랙 또는
+// PeerConnection 종료)나 세션 종료 시 끝난다. 오디오에는 PLI/keyframe RTCP를
+// 보내지 않는다.
 func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrtc.TrackRemote) {
 	codec := track.Codec()
 	s.mu.Lock()
 	pipe := s.audioPipe
 	switch {
 	case pipe == nil:
-		// Audio egress disabled: preserve the prior ignore-and-count behaviour.
+		// Audio egress를 끈 경우 기존의 무시·집계 동작을 유지한다.
 		s.ignoredTracks++
 		s.UpdatedAt = time.Now().UTC()
 		s.mu.Unlock()
@@ -644,10 +642,10 @@ func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrt
 
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 	s.PC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		// RTPReceiver.ReadRTCP runs Pion's receiver-report interceptors. Those
-		// interceptors consume inbound Sender Reports and return Receiver Reports
-		// with a LastSenderReport value, which lets the Pion load client calculate
-		// RTCP RTT. The media loop reads RTP separately, so drain RTCP concurrently.
+		// RTPReceiver.ReadRTCP는 Pion의 receiver-report interceptor를 실행한다.
+		// interceptor는 들어온 Sender Report를 소비하고 LastSenderReport 값이 든
+		// Receiver Report를 반환해 Pion load client가 RTCP RTT를 계산하게 한다.
+		// 미디어 루프는 RTP를 따로 읽으므로 RTCP는 동시에 비운다.
 		go drainReceiverRTCP(receiver)
 		if track.Kind() == webrtc.RTPCodecTypeAudio {
 			m.handleAudioTrack(ctx, s, track)
@@ -673,9 +671,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		}
 		s.mu.Lock()
 		if s.rawTrackID != "" && s.trackCancel != nil {
-			// Replacement track (e.g. camera switch): stop the old pipeline and
-			// re-wrap the new track into the same output track — matches Python's
-			// live video-track replacement instead of ignoring it.
+			// 교체 트랙(예: 카메라 전환)이면 기존 파이프라인을 중지하고 새 트랙을
+			// 같은 출력 트랙으로 다시 감싼다. 무시하지 않고 Python의 실시간 영상
+			// 트랙 교체 동작과 맞춘다.
 			m.logger.Info("replacing video track", "session_id", s.ID, "previous_track_id", s.rawTrackID, "new_track_id", track.ID())
 			s.trackCancel()
 		}
@@ -692,9 +690,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		if m.cfg.PrivacyMode == config.PrivacyModeReal {
 			client := m.ai.Next()
 			m.metrics.IncAITargetSession(client.Address())
-			// The AI server requires a non-empty session scope. Use the
-			// server-derived AI client ID so its per-user reference-face bucket
-			// and stream identity cannot be selected through request metadata.
+			// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
+			// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
+			// 스트림 식별자를 선택할 수 없게 한다.
 			aiStream = client.NewStream(trackCtx, s.AIClientID)
 		}
 		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
@@ -717,9 +715,9 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		s.mu.Unlock()
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
-		// The pipeline asks for a keyframe when the sample builder gives up on a
-		// gap: the decoder has lost its reference, and every frame re-encoded
-		// from that point carries the damage until the publisher sends a new one.
+		// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
+		// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
+		// 이후 재인코딩 프레임마다 손상이 이어지기 때문이다.
 		requestKeyframe := func() {
 			if err := s.PC.WriteRTCP([]rtcp.Packet{
 				&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
@@ -738,8 +736,8 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			}()
 			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, egressSlot, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize, requestKeyframe)
 			s.mu.Lock()
-			// Only clear if we are still the active track — a replacement may have
-			// taken over while this old pipeline was draining.
+			// 아직 활성 트랙일 때만 비운다. 이전 파이프라인을 비우는 사이 새
+			// 교체 트랙이 활성화됐을 수 있다.
 			if s.rawTrackID == trackID {
 				s.rawTrackID = ""
 				s.processedTrackID = ""

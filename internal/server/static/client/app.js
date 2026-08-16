@@ -44,7 +44,7 @@ document.addEventListener("DOMContentLoaded", () => {
   void loadCameras();
   void healthCheck({ quiet: true }).catch(() => null);
   void refreshSessions({ quiet: true }).catch(() => null);
-  // Reference-face status is behind RequireUser; fetch it only once signed in.
+  // Reference-face 상태는 RequireUser 뒤에 있으므로 로그인한 뒤에만 조회한다.
 });
 
 function bindElements() {
@@ -268,13 +268,13 @@ async function apiFetch(path, options = {}) {
   ) {
     headers.set("Content-Type", "application/json");
   }
-  // User identity: the JWT access token proves an active InnoLive user and is
-  // required by RequireUser on every session and reference-face route.
+  // 사용자 식별: JWT access token은 활성 InnoLive 사용자를 증명하며 모든 세션과
+  // reference-face 경로의 RequireUser에 필요하다.
   if (state.accessToken && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${state.accessToken}`);
   }
-  // Session ownership: the owner token minted once at session creation goes in
-  // its own header. Attaching it to non-session routes is harmless.
+  // 세션 소유권: 세션 생성 때 한 번 발급한 owner token은 전용 header에 넣는다.
+  // 세션 외 경로에 붙어도 문제는 없다.
   if (state.ownerToken && !headers.has("X-Session-Owner-Token")) {
     headers.set("X-Session-Owner-Token", state.ownerToken);
   }
@@ -287,9 +287,9 @@ async function apiFetch(path, options = {}) {
   const payload = parseJsonOrText(text);
 
   if (!response.ok) {
-    // A 401 means the access token is missing or expired. Try one silent
-    // refresh with the stored refresh token and replay the request; only if
-    // that fails do we drop the session so the UI re-gates on sign-in.
+    // 401은 access token이 없거나 만료됐다는 뜻이다. 저장한 refresh token으로
+    // 한 번 조용히 갱신한 뒤 요청을 재시도하고, 그것도 실패할 때만 세션을
+    // 제거해 UI가 다시 로그인을 요구하게 한다.
     if (response.status === 401 && !options._retried && state.refreshToken) {
       if (await refreshAccessToken()) {
         return apiFetch(path, { ...options, _retried: true });
@@ -547,15 +547,15 @@ async function signIn() {
       await refreshReferenceFace({ quiet: true }).catch(() => null);
     } catch (error) {
       clearAuthState();
-      // runBusy logs the failure; re-throw so it can surface it once.
+      // runBusy가 실패를 기록하므로, 한 번만 표시되게 다시 던진다.
       throw error;
     }
   });
 }
 
-// requestSignup starts the email registration flow: the server emails a code
-// and returns a signup_token that pairs with it. The native endpoint returns
-// that token in the body so the browser test client does not depend on cookies.
+// requestSignup은 이메일 가입 절차를 시작한다. 서버는 인증 코드를 이메일로 보내고
+// 짝이 되는 signup_token을 반환한다. native endpoint는 browser 테스트 클라이언트가
+// cookie에 의존하지 않도록 token을 body에 넣어 반환한다.
 async function requestSignup() {
   const email = els.authEmail.value.trim();
   const password = els.authPassword.value;
@@ -575,13 +575,13 @@ async function requestSignup() {
       logEvent("ok", "Signup verification code sent", { email });
     } catch (error) {
       els.authDetail.textContent = `회원가입 실패: ${error.message}`;
-      throw error; // runBusy logs it once
+      throw error; // runBusy가 한 번 기록한다.
     }
   });
 }
 
-// verifySignup confirms the emailed code, then signs in with the same
-// credentials so the tester lands in an authenticated state in one step.
+// verifySignup은 이메일 인증 코드를 확인한 뒤 같은 credentials로 로그인해,
+// 테스트 사용자가 한 단계로 인증된 상태에 도달하게 한다.
 async function verifySignup() {
   const code = els.verifyCode.value.trim();
   if (!state.signupToken || !code) {
@@ -604,7 +604,7 @@ async function verifySignup() {
       logEvent("ok", "Email verified");
     } catch (error) {
       els.authDetail.textContent = `인증 실패: ${error.message}`;
-      throw error; // runBusy logs it once
+      throw error; // runBusy가 한 번 기록한다.
     }
   });
   if (!state.signupToken) {
@@ -613,8 +613,8 @@ async function verifySignup() {
 }
 
 async function signOut() {
-  // Tear down any live connection before dropping the session it belongs to,
-  // so a mid-session sign-out does not leave the peer connection running.
+  // 연결이 속한 세션을 제거하기 전에 실행 중인 연결을 종료해, 세션 중간 로그아웃이
+  // peer connection을 남기지 않게 한다.
   await cleanupConnection({ keepSession: false });
   clearAuthState();
   logEvent("ok", "Signed out");
@@ -629,10 +629,10 @@ function clearAuthState() {
   renderAuth();
 }
 
-// refreshAccessToken exchanges the stored refresh token for a fresh access
-// token. It calls fetch directly (not apiFetch) so a 401 from /auth/refresh
-// cannot recurse back into refresh, and it de-duplicates concurrent callers
-// (the 2s session poll can fire several 401s at once) via a shared promise.
+// refreshAccessToken은 저장한 refresh token을 새 access token으로 교환한다.
+// /auth/refresh의 401이 refresh를 재귀 호출하지 않도록 apiFetch가 아닌 fetch를
+// 직접 호출하며, 공유 promise로 동시 호출을 합친다(2초 세션 poll이 동시에 여러
+// 401을 만들 수 있다).
 async function refreshAccessToken() {
   if (!state.refreshToken) {
     return false;
@@ -665,9 +665,9 @@ async function refreshAccessToken() {
   return state.refreshPromise;
 }
 
-// renderAuth reflects the three auth modes and shows only each mode's controls.
-// The verification code field appears solely while entering the emailed code —
-// never on the login screen or when first requesting the code.
+// renderAuth는 세 가지 인증 모드를 반영해 각 모드의 control만 표시한다. 인증 코드
+// 필드는 이메일 코드를 입력할 때만 보이며 로그인 화면이나 코드 첫 요청 때는 보이지
+// 않는다.
 function renderAuth() {
   const signedIn = Boolean(state.accessToken);
   const verifying = Boolean(state.signupToken);
@@ -837,9 +837,8 @@ async function createSession() {
     method: "POST",
     body: JSON.stringify({ metadata }),
   });
-  // owner_token is returned exactly once, here. Keep it in memory so later
-  // session-scoped requests (and signaling) can prove ownership; a session
-  // refresh response will not carry it again.
+  // owner_token은 여기서 정확히 한 번만 반환된다. 이후 세션 범위 요청과 signaling이
+  // 소유권을 증명하도록 메모리에 보관하며, 세션 새로고침 응답에는 다시 오지 않는다.
   state.ownerToken = session.owner_token || null;
   logEvent("ok", "Session created", {
     session_id: session.session_id,
@@ -862,9 +861,9 @@ function buildSessionMetadata() {
 }
 
 async function refreshSessions({ quiet = false } = {}) {
-  // The GET /sessions listing endpoint was removed server-side (it leaked every
-  // active session_id). This viewer only owns the session it created, so the
-  // panel now reflects just the current session.
+  // GET /sessions 목록 endpoint는 모든 활성 session_id를 노출해 서버에서
+  // 제거했다. 이 viewer는 자신이 만든 세션만 소유하므로 panel에는 현재 세션만
+  // 반영한다.
   const sessions = state.session ? [state.session] : [];
   renderSessions(sessions);
   if (!quiet) {
@@ -1177,7 +1176,8 @@ function buildVideoConstraints() {
   if (selectedCamera) {
     video.deviceId = { exact: selectedCamera };
   }
-  // FHD gated on AI FHD support (innolive-ai#4); re-enable with the index.html option.
+  // FHD는 AI FHD 지원(innolive-ai#4) 전까지 비활성화한다. index.html option과
+  // 함께 지원 배포 뒤 다시 활성화한다.
   // if (resolution === "fhd") {
   //   video.width = { ideal: 1920 };
   //   video.height = { ideal: 1080 };

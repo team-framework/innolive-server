@@ -3,6 +3,8 @@ const SERVER_STORAGE_KEY = "inno-live-client.server-url";
 const CLIENT_ID_STORAGE_KEY = "inno-live-client.client-id";
 const MAX_LOG_ITEMS = 120;
 const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const VIDEO_TRACK_WAIT_ATTEMPTS = 15;
+const VIDEO_TRACK_WAIT_INTERVAL_MS = 1000;
 
 const els = {};
 const state = {
@@ -110,6 +112,10 @@ function bindElements() {
     "sessionJson",
     "connectYoutubeBtn",
     "youtubeDetail",
+    "broadcastYoutubeAccount",
+    "broadcastVideoInput",
+    "broadcastRtmpState",
+    "broadcastYoutubeState",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -673,6 +679,7 @@ function renderAuth() {
   els.connectYoutubeBtn.hidden = !signedIn;
   if (!signedIn) {
     els.youtubeDetail.hidden = true;
+    resetBroadcastStatus();
   }
   els.authDetail.textContent = signedIn
     ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
@@ -688,15 +695,65 @@ function setYoutubeDetail(text, isError) {
   els.youtubeDetail.style.color = isError ? "var(--danger, #b00020)" : "";
 }
 
+function setBroadcastStatus(element, text, visualState = "idle") {
+  element.textContent = text;
+  element.dataset.state = visualState;
+}
+
+function resetBroadcastStatus() {
+  setBroadcastStatus(els.broadcastYoutubeAccount, "연결 전");
+  setBroadcastStatus(els.broadcastVideoInput, "WebRTC 시작 전");
+  setBroadcastStatus(els.broadcastRtmpState, "시작 전");
+  setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
+}
+
+function renderBroadcastStreamStatus(stream) {
+  const status = stream?.status || "";
+  if (!status) {
+    setBroadcastStatus(els.broadcastRtmpState, "시작 전");
+    setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
+    return;
+  }
+
+  if (status === "streaming") {
+    setBroadcastStatus(els.broadcastRtmpState, "송출 중", "ok");
+    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 송출 중 · live 확인 전", "warn");
+    return;
+  }
+  if (status === "idle" || status === "reconnecting") {
+    setBroadcastStatus(
+      els.broadcastRtmpState,
+      status === "reconnecting" ? "재연결 중" : "연결 준비 중",
+      "warn",
+    );
+    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 연결 대기", "warn");
+    return;
+  }
+  if (status === "paused") {
+    setBroadcastStatus(els.broadcastRtmpState, "일시 중지됨", "warn");
+    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 연결 유지 중", "warn");
+    return;
+  }
+  if (status === "stopped") {
+    setBroadcastStatus(els.broadcastRtmpState, "중지됨");
+    setBroadcastStatus(els.broadcastYoutubeState, "종료 반영 대기");
+    return;
+  }
+  setBroadcastStatus(els.broadcastRtmpState, status, "warn");
+  setBroadcastStatus(els.broadcastYoutubeState, "상태 확인 중", "warn");
+}
+
 // connectYoutube는 GIS 팝업으로 인가 코드를 받아 서버에 전달해 YouTube 계정을
 // 연결한다. 로그인 자체는 이메일 그대로이고, 이 팝업은 송출 대상 연결 전용이다.
 // 코드 교환·토큰 보관은 전부 서버 몫이라 브라우저에는 인가 코드만 스친다.
 async function connectYoutube() {
   if (!state.accessToken) {
+    setBroadcastStatus(els.broadcastYoutubeAccount, "로그인 필요", "error");
     setYoutubeDetail("먼저 로그인하세요.", true);
     return;
   }
   if (!window.google?.accounts?.oauth2) {
+    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
     setYoutubeDetail("Google 스크립트를 아직 불러오지 못했습니다. 잠시 후 다시 시도하세요.", true);
     return;
   }
@@ -704,9 +761,11 @@ async function connectYoutube() {
   try {
     config = await apiFetch("/auth/youtube/config");
   } catch (error) {
+    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 설정 실패", "error");
     setYoutubeDetail(`서버에서 YouTube 연동 설정을 받지 못했습니다: ${error.message}`, true);
     return;
   }
+  setBroadcastStatus(els.broadcastYoutubeAccount, "연결 중", "warn");
   setYoutubeDetail("Google 팝업에서 계정을 선택하고 동의해 주세요...");
   const codeClient = window.google.accounts.oauth2.initCodeClient({
     client_id: config.web_client_id,
@@ -714,6 +773,7 @@ async function connectYoutube() {
     ux_mode: "popup",
     callback: (response) => {
       if (!response.code) {
+        setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
         setYoutubeDetail("Google이 인가 코드를 돌려주지 않았습니다.", true);
         return;
       }
@@ -728,14 +788,17 @@ async function connectYoutube() {
           });
           const title = result?.channel?.title || result?.channel?.id || "알 수 없는 채널";
           setYoutubeDetail(`YouTube 연결됨: ${title}`);
+          setBroadcastStatus(els.broadcastYoutubeAccount, title, "ok");
           logEvent("ok", "YouTube account connected", result);
         } catch (error) {
+          setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
           setYoutubeDetail(`연결 실패: ${error.message}`, true);
           logEvent("error", "YouTube connect failed", { message: error.message });
         }
       })();
     },
     error_callback: (error) => {
+      setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
       setYoutubeDetail(`Google 팝업 오류: ${error?.type || JSON.stringify(error)}`, true);
     },
   });
@@ -876,6 +939,15 @@ async function startWebRtc() {
       persistServerUrl();
       await healthCheck({ quiet: true });
 
+      if (canStartYouTubeBroadcastFromCurrentConnection()) {
+        logEvent("ok", "Reusing active WebRTC connection for YouTube broadcast", {
+          session_id: state.session.session_id,
+        });
+        const readySession = await waitForVideoTrack();
+        await startYouTubeBroadcast(readySession);
+        return;
+      }
+
       const reusableSession = canUseCurrentSessionForOffer();
       if (!reusableSession) {
         await cleanupConnection({ keepSession: false });
@@ -885,15 +957,132 @@ async function startWebRtc() {
       if (!reusableSession) {
         setCurrentSession(await createSession());
       }
+      setBroadcastStatus(els.broadcastVideoInput, "WebRTC 연결 중", "warn");
+      setBroadcastStatus(els.broadcastRtmpState, "영상 입력 대기", "warn");
+      setBroadcastStatus(els.broadcastYoutubeState, "방송 준비 대기", "warn");
       await connectPeer(state.session.session_id);
       startPolling();
       await refreshCurrentSession({ quiet: true });
       await refreshSessions({ quiet: true });
+
+      const readySession = await waitForVideoTrack();
+      await startYouTubeBroadcast(readySession);
     } catch (error) {
       await cleanupConnection({ keepSession: Boolean(state.session) });
       throw error;
     }
   });
+}
+
+function canStartYouTubeBroadcastFromCurrentConnection() {
+  return Boolean(
+    state.session?.session_id &&
+      state.localStream &&
+      state.pc?.connectionState === "connected",
+  );
+}
+
+// 서버가 실제로 수신한 raw video track을 확인한 뒤에만 방송 시작을 요청한다.
+// 시간만 기다리면 느린 카메라·네트워크에서 Prepare만 성공하고 송출 시작이
+// 실패할 수 있으므로 iOS와 동일하게 세션 응답을 기준으로 판단한다.
+async function waitForVideoTrack() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("방송을 시작할 세션이 없습니다.");
+  }
+
+  logEvent("ok", "Waiting for server video track", { session_id: sessionId });
+  for (let attempt = 1; attempt <= VIDEO_TRACK_WAIT_ATTEMPTS; attempt += 1) {
+    const connectionState = state.pc?.connectionState;
+    if (["failed", "closed", "disconnected"].includes(connectionState)) {
+      throw new Error("영상 트랙을 기다리는 중 WebRTC 연결이 끊겼습니다.");
+    }
+
+    const snapshot = await refreshCurrentSession({ quiet: true });
+    if (!snapshot || snapshot.session_id !== sessionId) {
+      throw new Error("영상 트랙을 기다리는 중 세션을 찾을 수 없습니다.");
+    }
+    if (snapshot.media?.raw_video_track?.ready_state === "live") {
+      setBroadcastStatus(els.broadcastVideoInput, "서버 수신 확인됨", "ok");
+      logEvent("ok", "Server video track detected", {
+        session_id: sessionId,
+        track: snapshot.media.raw_video_track,
+      });
+      return snapshot;
+    }
+
+    setBroadcastStatus(
+      els.broadcastVideoInput,
+      `서버 수신 대기 (${attempt}/${VIDEO_TRACK_WAIT_ATTEMPTS})`,
+      "warn",
+    );
+    await delay(VIDEO_TRACK_WAIT_INTERVAL_MS);
+  }
+
+  throw new Error("서버가 영상 트랙을 받지 못했습니다. 카메라 연결을 다시 시도하세요.");
+}
+
+async function startYouTubeBroadcast(session) {
+  const sessionId = session?.session_id;
+  if (!sessionId) {
+    throw new Error("YouTube 방송을 시작할 세션이 없습니다.");
+  }
+
+  setBroadcastStatus(els.broadcastRtmpState, "방송 준비 중", "warn");
+  setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 중", "warn");
+  logEvent("ok", "YouTube broadcast start requested", { session_id: sessionId });
+  try {
+    const started = await apiFetch(`/sessions/${sessionId}/stream/start`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "youtube", privacy: "private" }),
+    });
+    setCurrentSession(started);
+    renderBroadcastStreamStatus(started.stream);
+    logEvent("ok", "YouTube RTMP egress started", {
+      session_id: sessionId,
+      stream: started.stream,
+    });
+  } catch (error) {
+    renderBroadcastStartError(error);
+    logEvent("error", "YouTube broadcast start failed", {
+      session_id: sessionId,
+      code: error?.payload?.error?.code,
+      message: error?.message,
+      status: error?.status,
+    });
+  }
+}
+
+function renderBroadcastStartError(error) {
+  const code = error?.payload?.error?.code;
+  if (code === "streaming_not_connected") {
+    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 필요", "warn");
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastYoutubeState, "YouTube 계정 연결 필요", "warn");
+    return;
+  }
+  if (code === "streaming_reconnect_required") {
+    setBroadcastStatus(els.broadcastYoutubeAccount, "재연결 필요", "warn");
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastYoutubeState, "YouTube 재연결 필요", "warn");
+    return;
+  }
+  if (code === "live_streaming_blocked") {
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastYoutubeState, "채널 라이브 권한 없음", "error");
+    return;
+  }
+  if (code === "stream_already_active") {
+    setBroadcastStatus(els.broadcastRtmpState, "이미 송출 중", "warn");
+    setBroadcastStatus(els.broadcastYoutubeState, "기존 방송 사용 중 · live 확인 전", "warn");
+    return;
+  }
+  setBroadcastStatus(els.broadcastRtmpState, "시작 실패", "error");
+  setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 실패", "error");
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function canUseCurrentSessionForOffer() {
@@ -1520,6 +1709,7 @@ function renderSessionDetails(session) {
     els.videoSenderActive.textContent = "false";
     els.ignoredTracks.textContent = "0";
     setTiming({});
+    renderBroadcastStreamStatus(null);
     return;
   }
 
@@ -1541,6 +1731,7 @@ function renderSessionDetails(session) {
     session.media?.ignored_track_count || 0,
   );
   setTiming(session.timing || {});
+  renderBroadcastStreamStatus(session.stream);
 }
 
 function setTiming(timing) {

@@ -5,8 +5,22 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/ci.yml'
 
 permissions:
   contents: read

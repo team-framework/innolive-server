@@ -6,6 +6,14 @@ name: Deploy
 on:
   push:
     branches: [main]
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
   workflow_dispatch:
     inputs:
       force_restart:

@@ -37,6 +37,7 @@ type Registry struct {
 	mu                  sync.RWMutex
 	aiFallbackLatched   map[string]uint64
 	aiFallbackFrames    map[string]uint64
+	aiInputPausedFrames map[string]uint64
 	aiTargetSessions    map[string]uint64
 	framesReceived      map[string]uint64
 	framesProcessed     map[string]uint64
@@ -58,6 +59,7 @@ func New() *Registry {
 	return &Registry{
 		aiFallbackLatched:   make(map[string]uint64),
 		aiFallbackFrames:    make(map[string]uint64),
+		aiInputPausedFrames: make(map[string]uint64),
 		aiTargetSessions:    make(map[string]uint64),
 		framesReceived:      make(map[string]uint64),
 		framesProcessed:     make(map[string]uint64),
@@ -98,6 +100,12 @@ func (r *Registry) IncAIFallbackLatched(mode string) {
 
 func (r *Registry) IncAIFallbackFrame(mode string) {
 	r.increment(r.aiFallbackFrames, mode)
+}
+
+// IncAIInputPausedFrame은 방송 일시 중지 중 AI worker로 보내지 않고 버린
+// 카메라 프레임 수를 기록한다.
+func (r *Registry) IncAIInputPausedFrame(mode string) {
+	r.increment(r.aiInputPausedFrames, mode)
 }
 
 func (r *Registry) IncAITargetSession(target string) {
@@ -213,6 +221,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	defer r.mu.RUnlock()
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_latched_total", "Number of sessions that latched the fail-closed blackout after an AI failure.", "mode", r.aiFallbackLatched)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)
+	writeLabeledCountersWithKey(w, "innolive_ai_input_paused_frames_total", "Number of camera frames discarded before AI processing while a broadcast is paused.", "mode", r.aiInputPausedFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
 	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of processed video frames returned to WebRTC.", r.framesProcessed)

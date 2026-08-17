@@ -399,7 +399,11 @@ func processImages(
 			}
 			registry.AddQueue(-1)
 			registry.IncFrameReceived(string(mode))
-			output, err := processor.Process(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
+			output, processedByAI, err := processor.ProcessIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
+			if !processedByAI {
+				registry.IncAIInputPausedFrame(string(mode))
+				continue
+			}
 			if err != nil {
 				recordFrameFailure(ctx, logger, registry, mode, &failureLog, err)
 				continue

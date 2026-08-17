@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	aiv1 "inno-live-server/api/gen/aiv1"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 
@@ -26,6 +27,49 @@ func TestRTPSequenceTrackerRecordsGapRecoveryAndOutOfOrder(t *testing.T) {
 	}
 	if observation := tracker.observe(101); !observation.outOfOrder {
 		t.Fatalf("duplicate packet observation = %+v, want out-of-order", observation)
+	}
+}
+
+// TestProcessImagesSkipsPausedAIInput은 실제 트랙 처리 루프가 pause 중에는
+// Processor.Process를 호출하지 않고, 프레임을 AI 입력 차단 metric으로만
+// 기록하는지 검증한다.
+func TestProcessImagesSkipsPausedAIInput(t *testing.T) {
+	registry := metrics.New()
+	var calls int
+	processor, err := NewProcessor(
+		config.PrivacyModeReal,
+		0,
+		&fakeAIStream{process: func(_ []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+			calls++
+			return &aiv1.ProcessedVideoChunk{Data: []byte("output"), Timestamp: timestamp, StatusMessage: "success"}, nil
+		}},
+		registry,
+		nil,
+		config.WireFormatJPEG,
+		config.FailurePolicyFreeze,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor.SuspendAIInput()
+
+	decoded := make(chan frame, 1)
+	decoded <- frame{data: []byte("camera-frame"), width: 640, height: 480}
+	close(decoded)
+	processed := make(chan frame, 1)
+	processImages(context.Background(), nil, processor, decoded, processed, NewEgressSlot(), registry, config.PrivacyModeReal)
+
+	if calls != 0 {
+		t.Fatalf("AI Process calls = %d, want 0 while paused", calls)
+	}
+	if _, ok := <-processed; ok {
+		t.Fatal("paused frame must not reach the processed output")
+	}
+	var metricsOutput bytes.Buffer
+	registry.WritePrometheus(&metricsOutput)
+	if !bytes.Contains(metricsOutput.Bytes(), []byte(`innolive_ai_input_paused_frames_total{mode="real"} 1`)) {
+		t.Fatalf("paused AI input metric missing\n%s", metricsOutput.String())
 	}
 }
 

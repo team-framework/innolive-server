@@ -42,6 +42,48 @@ func TestVideoBitrateFor(t *testing.T) {
 	}
 }
 
+func TestCancellationSlateCacheKeepsOnlyCurrentEgressProfile(t *testing.T) {
+	e := newTestEgress(config.WireFormatRaw, "out.flv")
+
+	first, err := e.cancellationSlate(1280, 720)
+	if err != nil {
+		t.Fatalf("create first cancellation slate: %v", err)
+	}
+	firstCached := e.slate
+	if firstCached == nil {
+		t.Fatal("first cancellation slate was not retained")
+	}
+	if len(first.data) != rawFrameSize(1280, 720) {
+		t.Fatalf("first raw slate size = %d, want %d", len(first.data), rawFrameSize(1280, 720))
+	}
+
+	if _, err := e.cancellationSlate(1280, 720); err != nil {
+		t.Fatalf("reuse cancellation slate: %v", err)
+	}
+	if e.slate != firstCached {
+		t.Fatal("same output profile should reuse the egress slate")
+	}
+
+	second, err := e.cancellationSlate(720, 1280)
+	if err != nil {
+		t.Fatalf("replace cancellation slate: %v", err)
+	}
+	if e.slate == firstCached {
+		t.Fatal("changed output profile should replace the prior egress slate")
+	}
+	if e.slate.width != 720 || e.slate.height != 1280 {
+		t.Fatalf("cached profile = %dx%d, want 720x1280", e.slate.width, e.slate.height)
+	}
+	if len(second.data) != rawFrameSize(720, 1280) {
+		t.Fatalf("second raw slate size = %d, want %d", len(second.data), rawFrameSize(720, 1280))
+	}
+
+	e.Stop()
+	if e.slate != nil {
+		t.Fatal("stopped egress must release its cancellation slate")
+	}
+}
+
 func TestMeasureFPS(t *testing.T) {
 	// framesAt builds n frames whose RTP timestamps advance by step (90kHz clock).
 	framesAt := func(n int, start uint32, step uint32) []frame {

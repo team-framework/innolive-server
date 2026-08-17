@@ -105,6 +105,16 @@ type egressTransition struct {
 	cause  error
 }
 
+// cachedCancellationSlate는 한 egress가 현재 출력 규격에서 재사용하는 취소
+// 슬레이트다. 해상도 또는 wire format이 바뀌면 새 값으로 교체하며, 전역 map을
+// 사용하지 않아 입력 규격 수에 비례해 메모리가 누적되지 않는다.
+type cachedCancellationSlate struct {
+	width  uint16
+	height uint16
+	format config.WireFormat
+	frame  frame
+}
+
 // RTMPEgress는 FFmpegTranscoder 프로세스 패턴을 따라 전용 FFmpeg 자식 프로세스를
 // 통해 처리된(blurred) 프레임을 RTMP endpoint로 보낸다.
 //
@@ -133,6 +143,8 @@ type RTMPEgress struct {
 
 	statusMu sync.Mutex
 	status   EgressStatus
+	slateMu  sync.Mutex
+	slate    *cachedCancellationSlate
 }
 
 func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate string) *RTMPEgress {
@@ -297,6 +309,7 @@ func (e *RTMPEgress) Resume() bool {
 // 분리하면 stop API와 세션 삭제가 재구성·재연결 완료를 기다리지 않아도 된다.
 func (e *RTMPEgress) Stop() {
 	e.transition(egressTransition{event: egressTransitionStop})
+	e.clearCancellationSlate()
 }
 
 // noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.
@@ -308,6 +321,7 @@ func (e *RTMPEgress) noteReconnect(cause error) {
 // 측정해야 함을 기록한다. 취소 상태였다면 취소 의도를 보존한다.
 func (e *RTMPEgress) beginReconfiguring() {
 	e.transition(egressTransition{event: egressTransitionReconfigure})
+	e.clearCancellationSlate()
 }
 
 // setStopped는 Run 종료를 기록한다.
@@ -457,7 +471,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		return nil, nil
 	}
 	writeSlate := func() error {
-		slate, err := cancellationSlateFrame(width, height, e.wireFormat)
+		slate, err := e.cancellationSlate(width, height)
 		if err != nil {
 			return err
 		}
@@ -505,6 +519,38 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			}
 		}
 	}
+}
+
+// cancellationSlate는 이 egress의 현재 출력 규격에 맞는 슬레이트 한 장만
+// 보관한다. pause 중 매 프레임마다 PNG를 다시 변환하지 않으면서도, 다른 세션이
+// 사용한 임의의 해상도가 이 egress 또는 전역 메모리에 남지 않게 한다.
+func (e *RTMPEgress) cancellationSlate(width, height uint16) (frame, error) {
+	e.slateMu.Lock()
+	defer e.slateMu.Unlock()
+
+	if e.slate != nil && e.slate.width == width && e.slate.height == height && e.slate.format == e.wireFormat {
+		return e.slate.frame, nil
+	}
+
+	generated, err := cancellationSlateFrame(width, height, e.wireFormat)
+	if err != nil {
+		return frame{}, err
+	}
+	e.slate = &cachedCancellationSlate{
+		width:  width,
+		height: height,
+		format: e.wireFormat,
+		frame:  generated,
+	}
+	return generated, nil
+}
+
+// clearCancellationSlate는 출력 규격이 바뀌거나 egress가 종료될 때 이전
+// 슬레이트의 참조를 끊는다. 큰 raw YUV 프레임도 이후 GC 대상이 된다.
+func (e *RTMPEgress) clearCancellationSlate() {
+	e.slateMu.Lock()
+	e.slate = nil
+	e.slateMu.Unlock()
 }
 
 func (e *RTMPEgress) isPaused() bool {

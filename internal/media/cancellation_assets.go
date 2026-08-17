@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
-	"sync"
 
 	"inno-live-server/internal/config"
 
@@ -20,21 +19,11 @@ var cancelLandscapePNG []byte
 //go:embed assets/cancel-portrait.png
 var cancelPortraitPNG []byte
 
-type cancellationSlateKey struct {
-	width  uint16
-	height uint16
-	format config.WireFormat
-}
-
-var cancellationSlateCache = struct {
-	sync.Mutex
-	frames map[cancellationSlateKey]frame
-}{frames: make(map[cancellationSlateKey]frame)}
-
 // cancellationSlateFrame은 현재 출력 크기에 맞는 취소 슬레이트를 만든다.
 // 입력 비율을 별도로 분류하지 않고, 가로·세로 방향만으로 에셋을 고른 뒤
-// 정확한 출력 해상도까지 리사이즈한다. 따라서 FFmpeg와 RTMP를 pause 때문에
-// 다시 시작하지 않아도 된다.
+// 정확한 출력 해상도까지 리사이즈한다. 생성한 프레임의 보관 수명은
+// RTMPEgress가 관리하므로, 서로 다른 입력 규격이 들어와도 전역 캐시가 누적되지
+// 않는다.
 func cancellationSlateFrame(width, height uint16, format config.WireFormat) (frame, error) {
 	if width == 0 || height == 0 {
 		return frame{}, fmt.Errorf("invalid cancellation slate size %dx%d", width, height)
@@ -42,13 +31,6 @@ func cancellationSlateFrame(width, height uint16, format config.WireFormat) (fra
 	if format == "" {
 		format = config.WireFormatJPEG
 	}
-	key := cancellationSlateKey{width: width, height: height, format: format}
-	cancellationSlateCache.Lock()
-	if cached, ok := cancellationSlateCache.frames[key]; ok {
-		cancellationSlateCache.Unlock()
-		return cached, nil
-	}
-	cancellationSlateCache.Unlock()
 
 	asset := cancellationSlateAsset(width, height)
 	source, err := png.Decode(bytes.NewReader(asset))
@@ -72,14 +54,6 @@ func cancellationSlateFrame(width, height uint16, format config.WireFormat) (fra
 	default:
 		return frame{}, fmt.Errorf("unsupported cancellation slate wire format %q", format)
 	}
-
-	cancellationSlateCache.Lock()
-	if cached, ok := cancellationSlateCache.frames[key]; ok {
-		cancellationSlateCache.Unlock()
-		return cached, nil
-	}
-	cancellationSlateCache.frames[key] = result
-	cancellationSlateCache.Unlock()
 	return result, nil
 }
 

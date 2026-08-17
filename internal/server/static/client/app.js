@@ -70,6 +70,7 @@ function bindElements() {
     "autoPoll",
     "startBtn",
     "pauseBroadcastBtn",
+    "resumeBroadcastBtn",
     "healthBtn",
     "createSessionBtn",
     "refreshSessionsBtn",
@@ -163,6 +164,7 @@ function bindEvents() {
   );
   els.startBtn.addEventListener("click", () => void startWebRtc());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
+  els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
   els.deleteSessionBtn.addEventListener("click", () => void deleteCurrentSession());
   els.errorProbeBtn.addEventListener("click", () => sendErrorProbe());
@@ -1078,11 +1080,27 @@ async function pauseBroadcast() {
     const paused = await apiFetch(`/sessions/${sessionId}/stream/pause`, {
       method: "POST",
     });
-    setCurrentSession(paused);
-    renderBroadcastStreamStatus(paused.stream);
+    updateCurrentSessionStream(paused);
     logEvent("ok", "YouTube broadcast pause requested", {
       session_id: sessionId,
-      stream: paused.stream,
+      stream: paused,
+    });
+  });
+}
+
+async function resumeBroadcast() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("재개할 방송 세션이 없습니다.");
+  }
+  await runBusy(async () => {
+    const resumed = await apiFetch(`/sessions/${sessionId}/stream/resume`, {
+      method: "POST",
+    });
+    updateCurrentSessionStream(resumed);
+    logEvent("ok", "YouTube broadcast resume requested", {
+      session_id: sessionId,
+      stream: resumed,
     });
   });
 }
@@ -1722,6 +1740,16 @@ function setCurrentSession(session) {
   updateButtons();
 }
 
+// updateCurrentSessionStream은 pause·resume API가 반환한 stream 상태만 현재
+// 세션에 반영한다. 이 API들은 전체 SessionResponse가 아니라 StreamState를
+// 반환하므로 setCurrentSession에 직접 넘기면 session_id가 사라진다.
+function updateCurrentSessionStream(stream) {
+  if (!state.session?.session_id) {
+    throw new Error("현재 세션 없이 방송 상태를 갱신할 수 없습니다.");
+  }
+  setCurrentSession({ ...state.session, stream });
+}
+
 function clearCurrentSession() {
   state.session = null;
   state.ownerToken = null;
@@ -1975,6 +2003,10 @@ function updateButtons() {
     state.busy ||
     !state.session?.session_id ||
     !["streaming", "reconfiguring"].includes(streamStatus);
+  els.resumeBroadcastBtn.disabled =
+    state.busy ||
+    !state.session?.session_id ||
+    streamStatus !== "paused";
   els.healthBtn.disabled = state.busy;
   els.createSessionBtn.disabled = state.busy || !signedIn;
   els.refreshSessionsBtn.disabled = state.busy;

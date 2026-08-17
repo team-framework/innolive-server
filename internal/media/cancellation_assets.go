@@ -38,8 +38,7 @@ func cancellationSlateFrame(width, height uint16, format config.WireFormat) (fra
 		return frame{}, fmt.Errorf("decode cancellation slate: %w", err)
 	}
 
-	resized := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
-	draw.CatmullRom.Scale(resized, resized.Bounds(), source, cancellationSlateCropRect(source.Bounds(), width, height), draw.Src, nil)
+	resized := renderCancellationSlate(source, width, height)
 
 	result := frame{width: width, height: height}
 	switch format {
@@ -79,6 +78,15 @@ func cancellationSlateCropRect(source image.Rectangle, targetWidth, targetHeight
 		return image.Rect(cropX, source.Min.Y, cropX+cropWidth, source.Max.Y)
 	}
 	return source
+}
+
+// renderCancellationSlate는 중앙 crop과 리사이즈를 하나의 경로로 수행한다. 이
+// helper를 분리해 테스트가 실제 렌더링 과정에서 crop 영역이 사용되는지 검증할 수
+// 있게 한다.
+func renderCancellationSlate(source image.Image, width, height uint16) *image.RGBA {
+	resized := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+	draw.CatmullRom.Scale(resized, resized.Bounds(), source, cancellationSlateCropRect(source.Bounds(), width, height), draw.Src, nil)
+	return resized
 }
 
 // rgbaToYUV420P는 raw egress 테스트 경로까지 지원하기 위한 변환이다. 실제

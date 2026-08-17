@@ -20,10 +20,10 @@ var cancelLandscapePNG []byte
 var cancelPortraitPNG []byte
 
 // cancellationSlateFrame은 현재 출력 크기에 맞는 취소 슬레이트를 만든다.
-// 입력 비율을 별도로 분류하지 않고, 가로·세로 방향만으로 에셋을 고른 뒤
-// 정확한 출력 해상도까지 리사이즈한다. 생성한 프레임의 보관 수명은
-// RTMPEgress가 관리하므로, 서로 다른 입력 규격이 들어와도 전역 캐시가 누적되지
-// 않는다.
+// 입력 비율을 별도로 분류하지 않고, 가로·세로 방향만으로 에셋을 고른다. 에셋의
+// 중앙을 출력 비율에 맞게 잘라 리사이즈하므로 로고·문구의 비율을 유지하면서도
+// RTMP 출력 프레임 전체를 채운다. 생성한 프레임의 보관 수명은 RTMPEgress가
+// 관리하므로, 서로 다른 입력 규격이 들어와도 전역 캐시가 누적되지 않는다.
 func cancellationSlateFrame(width, height uint16, format config.WireFormat) (frame, error) {
 	if width == 0 || height == 0 {
 		return frame{}, fmt.Errorf("invalid cancellation slate size %dx%d", width, height)
@@ -39,7 +39,7 @@ func cancellationSlateFrame(width, height uint16, format config.WireFormat) (fra
 	}
 
 	resized := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
-	draw.CatmullRom.Scale(resized, resized.Bounds(), source, source.Bounds(), draw.Src, nil)
+	draw.CatmullRom.Scale(resized, resized.Bounds(), source, cancellationSlateCropRect(source.Bounds(), width, height), draw.Src, nil)
 
 	result := frame{width: width, height: height}
 	switch format {
@@ -62,6 +62,23 @@ func cancellationSlateAsset(width, height uint16) []byte {
 		return cancelLandscapePNG
 	}
 	return cancelPortraitPNG
+}
+
+// cancellationSlateCropRect는 에셋의 중앙에서 목표 비율만큼을 선택한다. crop 뒤
+// 리사이즈하면 가로·세로 배율이 같아져 stretch 왜곡 없이 출력 프레임을 채운다.
+func cancellationSlateCropRect(source image.Rectangle, targetWidth, targetHeight uint16) image.Rectangle {
+	sourceWidth, sourceHeight := source.Dx(), source.Dy()
+	if int(targetWidth)*sourceHeight > int(targetHeight)*sourceWidth {
+		cropHeight := sourceWidth * int(targetHeight) / int(targetWidth)
+		cropY := source.Min.Y + (sourceHeight-cropHeight)/2
+		return image.Rect(source.Min.X, cropY, source.Max.X, cropY+cropHeight)
+	}
+	if int(targetWidth)*sourceHeight < int(targetHeight)*sourceWidth {
+		cropWidth := sourceHeight * int(targetWidth) / int(targetHeight)
+		cropX := source.Min.X + (sourceWidth-cropWidth)/2
+		return image.Rect(cropX, source.Min.Y, cropX+cropWidth, source.Max.Y)
+	}
+	return source
 }
 
 // rgbaToYUV420P는 raw egress 테스트 경로까지 지원하기 위한 변환이다. 실제

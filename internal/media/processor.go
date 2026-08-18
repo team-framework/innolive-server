@@ -26,10 +26,14 @@ type AIStream interface {
 	Close()
 }
 
+var errAIInputPaused = errors.New("AI input is paused")
+
 type Processor struct {
 	mode          config.PrivacyMode
 	fixedDelay    time.Duration
+	aiMu          sync.RWMutex
 	ai            AIStream
+	aiInputPaused bool
 	metrics       *metrics.Registry
 	logger        *slog.Logger
 	wireFormat    config.WireFormat
@@ -90,15 +94,77 @@ func NewProcessor(
 }
 
 func (p *Processor) Close() {
+	p.aiMu.Lock()
+	defer p.aiMu.Unlock()
 	if p.ai != nil {
 		p.ai.Close()
 	}
+}
+
+// SuspendAIInput은 실제 AI 모드에서 새 카메라 프레임의 AI 전송을 중단하고
+// 열려 있던 bidi stream을 닫는다. 이미 진행 중인 Process 호출이 끝날 때까지
+// 기다리므로, 이 메서드가 반환된 뒤에는 새 프레임이 AI worker에 도달하지 않는다.
+func (p *Processor) SuspendAIInput() {
+	if p.mode != config.PrivacyModeReal {
+		return
+	}
+	p.aiMu.Lock()
+	defer p.aiMu.Unlock()
+	p.aiInputPaused = true
+	if p.ai != nil {
+		p.ai.Close()
+	}
+}
+
+// ResumeAIInput은 AI 입력 차단을 해제한다. AI Stream은 다음 Process 호출에서
+// 필요한 경우 bidi stream을 다시 열므로, WebRTC·FFmpeg 파이프라인을 새로
+// 만들지 않아도 된다.
+func (p *Processor) ResumeAIInput() {
+	if p.mode != config.PrivacyModeReal {
+		return
+	}
+	p.aiMu.Lock()
+	p.aiInputPaused = false
+	p.aiMu.Unlock()
+}
+
+// AIInputPaused는 실제 AI worker에 카메라 프레임을 보내지 않는 상태인지
+// 반환한다. bypass·fixed-delay 모드는 AI 입력이 없으므로 항상 false다.
+func (p *Processor) AIInputPaused() bool {
+	if p.mode != config.PrivacyModeReal {
+		return false
+	}
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	return p.aiInputPaused
 }
 
 // FallbackActive reports whether the fail-closed blackout latch has fired.
 func (p *Processor) FallbackActive() bool { return p.fallback.Load() }
 
 func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
+		return nil, errAIInputPaused
+	}
+	return p.process(ctx, frame, timestamp, width, height)
+}
+
+// ProcessIfAIInputEnabled는 AI 입력이 중단된 pause 구간에는 processed=false를
+// 반환한다. 읽기 잠금을 Process 전체에 유지해 SuspendAIInput 반환 뒤에도
+// 직전에 통과한 프레임이 AI worker로 전송되는 경합을 막는다.
+func (p *Processor) ProcessIfAIInputEnabled(ctx context.Context, frame []byte, timestamp int64, width, height uint16) ([]byte, bool, error) {
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
+		return nil, false, nil
+	}
+	output, err := p.process(ctx, frame, timestamp, width, height)
+	return output, true, err
+}
+
+func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
 	startedAt := time.Now()
 
 	switch p.mode {
@@ -119,7 +185,7 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 		if p.fallback.Load() {
 			return p.serveBlackout(frame, width, height, nil)
 		}
-		output, err := p.ProcessImage(frame, timestamp)
+		output, err := p.processImage(frame, timestamp)
 		if err == nil {
 			p.consecutiveTimeouts.Store(0)
 			return output, nil
@@ -152,6 +218,15 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 }
 
 func (p *Processor) ProcessImage(frame []byte, timestamp int64) ([]byte, error) {
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	if p.aiInputPaused {
+		return nil, errAIInputPaused
+	}
+	return p.processImage(frame, timestamp)
+}
+
+func (p *Processor) processImage(frame []byte, timestamp int64) ([]byte, error) {
 	startedAt := time.Now()
 	defer func() { p.metrics.ObserveProcessing(string(p.mode), time.Since(startedAt)) }()
 	if p.mode != config.PrivacyModeReal {

@@ -2,6 +2,8 @@ package media
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,12 +14,17 @@ import (
 
 type fakeAIStream struct {
 	process func([]byte, int64) (*aiv1.ProcessedVideoChunk, error)
+	close   func()
 }
 
 func (f *fakeAIStream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
 	return f.process(data, timestamp)
 }
-func (f *fakeAIStream) Close() {}
+func (f *fakeAIStream) Close() {
+	if f.close != nil {
+		f.close()
+	}
+}
 
 func TestRealProcessorCallsAIWithImage(t *testing.T) {
 	input := []byte("jpeg-input")
@@ -37,6 +44,98 @@ func TestRealProcessorCallsAIWithImage(t *testing.T) {
 	}
 	if string(output) != "jpeg-output" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+// TestProcessorPauseStopsAIInputUntilResume은 pause 응답이 반환된 뒤에는
+// 카메라 프레임이 AI worker에 도달하지 않고, resume 뒤 다음 프레임에서 다시
+// 처리되는 계약을 검증한다.
+func TestProcessorPauseStopsAIInputUntilResume(t *testing.T) {
+	var calls atomic.Int64
+	var closes atomic.Int64
+	ai := &fakeAIStream{
+		process: func(_ []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+			calls.Add(1)
+			return &aiv1.ProcessedVideoChunk{Data: []byte("jpeg-output"), Timestamp: timestamp, StatusMessage: "success"}, nil
+		},
+		close: func() { closes.Add(1) },
+	}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyFreeze, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, processed, err := processor.ProcessIfAIInputEnabled(context.Background(), []byte("before-pause"), 1, 0, 0); err != nil || !processed {
+		t.Fatalf("before pause = (processed=%v, err=%v), want (true, nil)", processed, err)
+	}
+	processor.SuspendAIInput()
+	if !processor.AIInputPaused() {
+		t.Fatal("AI input must be paused")
+	}
+	if _, processed, err := processor.ProcessIfAIInputEnabled(context.Background(), []byte("while-paused"), 2, 0, 0); err != nil || processed {
+		t.Fatalf("while paused = (processed=%v, err=%v), want (false, nil)", processed, err)
+	}
+	if _, err := processor.Process(context.Background(), []byte("direct-while-paused"), 3, 0, 0); !errors.Is(err, errAIInputPaused) {
+		t.Fatalf("direct Process while paused error = %v, want errAIInputPaused", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("AI Process calls while paused = %d, want 1 total", got)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("AI stream Close calls after pause = %d, want 1", got)
+	}
+
+	processor.ResumeAIInput()
+	if processor.AIInputPaused() {
+		t.Fatal("AI input must be resumed")
+	}
+	if _, processed, err := processor.ProcessIfAIInputEnabled(context.Background(), []byte("after-resume"), 3, 0, 0); err != nil || !processed {
+		t.Fatalf("after resume = (processed=%v, err=%v), want (true, nil)", processed, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("AI Process calls after resume = %d, want 2", got)
+	}
+}
+
+// TestProcessorSuspendWaitsForInFlightAIFrame은 pause 성공 응답 뒤에 이미
+// 통과한 프레임까지 AI worker로 전송되는 경합이 없도록, 진행 중인 호출이
+// 끝날 때까지 SuspendAIInput이 기다리는지 검증한다.
+func TestProcessorSuspendWaitsForInFlightAIFrame(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ai := &fakeAIStream{process: func(_ []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+		close(started)
+		<-release
+		return &aiv1.ProcessedVideoChunk{Data: []byte("jpeg-output"), Timestamp: timestamp, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyFreeze, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	processed := make(chan struct{})
+	go func() {
+		defer close(processed)
+		_, _, _ = processor.ProcessIfAIInputEnabled(context.Background(), []byte("in-flight"), 1, 0, 0)
+	}()
+	<-started
+
+	suspended := make(chan struct{})
+	go func() {
+		processor.SuspendAIInput()
+		close(suspended)
+	}()
+	select {
+	case <-suspended:
+		t.Fatal("SuspendAIInput returned before the in-flight AI frame completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	<-processed
+	<-suspended
+	if _, accepted, err := processor.ProcessIfAIInputEnabled(context.Background(), []byte("after-pause"), 2, 0, 0); err != nil || accepted {
+		t.Fatalf("after pause = (accepted=%v, err=%v), want (false, nil)", accepted, err)
 	}
 }
 

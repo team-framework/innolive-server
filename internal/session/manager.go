@@ -119,16 +119,20 @@ type Session struct {
 	egressCancel     context.CancelFunc
 	streamStopReason *string
 	processor        *media.Processor
-	ignoredTracks    int
-	offerReceivedAt  time.Time
-	answerCreatedAt  time.Time
-	pendingICE       []webrtc.ICECandidateInit
-	negotiationMu    sync.Mutex
-	cancel           context.CancelFunc
-	trackCancel      context.CancelFunc
-	disconnectTimer  *time.Timer
-	wasConnected     bool
-	closed           bool
+	// aiInputPaused는 방송 pause 의도를 보존한다. egress가 재구성·재연결 중인
+	// 경우와 카메라 트랙이 교체되는 경우에도 새 카메라 프레임을 AI worker로
+	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
+	aiInputPaused   bool
+	ignoredTracks   int
+	offerReceivedAt time.Time
+	answerCreatedAt time.Time
+	pendingICE      []webrtc.ICECandidateInit
+	negotiationMu   sync.Mutex
+	cancel          context.CancelFunc
+	trackCancel     context.CancelFunc
+	disconnectTimer *time.Timer
+	wasConnected    bool
+	closed          bool
 }
 
 type Manager struct {
@@ -420,6 +424,7 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 	if s.audioPipe != nil {
 		s.audioPipe.SetMuted(false)
 	}
+	s.setAIInputPaused(false)
 	s.egress = egress
 	s.egressCancel = egressCancel
 	s.streamStopReason = nil
@@ -446,6 +451,10 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 	s.egressSlot.Clear()
 	s.egress.Stop()
 	s.egressCancel()
+	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
+	// 보존한다. pause 상태에서 stop한 경우에도 이후 처리 프레임은 다시 AI로
+	// 보낼 수 있게 차단을 해제한다.
+	s.setAIInputPaused(false)
 	reason := "user_requested"
 	s.streamStopReason = &reason
 	s.UpdatedAt = time.Now().UTC()
@@ -469,6 +478,7 @@ func (m *Manager) PauseStream(id string) (*Session, error) {
 	if err := pauseEgress(s.egress); err != nil {
 		return nil, err
 	}
+	s.setAIInputPaused(true)
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress paused", "session_id", s.ID)
 	return s, nil
@@ -489,6 +499,7 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 	if err := resumeEgress(s.egress); err != nil {
 		return nil, err
 	}
+	s.setAIInputPaused(false)
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
 	return s, nil
@@ -536,6 +547,21 @@ func resumeEgress(egress streamPauseController) error {
 		return ErrStreamNotPaused
 	}
 	return nil
+}
+
+// setAIInputPaused는 Session.mu를 가진 호출자만 사용한다. Processor는 내부
+// 잠금으로 진행 중인 AI 호출을 기다린 뒤 stream을 닫으므로, pause API가
+// 성공으로 반환된 뒤에는 새 카메라 프레임이 AI worker에 전달되지 않는다.
+func (s *Session) setAIInputPaused(paused bool) {
+	s.aiInputPaused = paused
+	if s.processor == nil {
+		return
+	}
+	if paused {
+		s.processor.SuspendAIInput()
+		return
+	}
+	s.processor.ResumeAIInput()
 }
 
 func (m *Manager) Delete(id, reason string) error {
@@ -708,11 +734,17 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		}
 		s.mu.Lock()
 		s.processor = processor
+		aiInputPaused := s.aiInputPaused
 		// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 		// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
 		// Enqueue 경로가 끊기지 않는다.
 		egressSlot := s.egressSlot
 		s.mu.Unlock()
+		if aiInputPaused {
+			// pause 중 카메라 트랙이 교체돼도 새 Processor가 첫 프레임을 AI로
+			// 보내기 전에 같은 입력 차단 상태를 이어받아야 한다.
+			processor.SuspendAIInput()
+		}
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.

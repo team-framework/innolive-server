@@ -139,7 +139,11 @@ type RTMPEgress struct {
 	// bitrateOverride가 비어 있지 않으면(EGRESS_VIDEO_BITRATE) 해상도 기반
 	// 영상 bitrate를 대체한다.
 	bitrateOverride string
-	input           chan frame
+	// videoSize가 비어 있지 않으면(EGRESS_VIDEO_SIZE) 입력 프레임 해상도와
+	// 무관하게 출력 해상도를 이 값으로 고정한다. WebRTC 퍼블리셔가 대역폭에
+	// 따라 해상도를 바꿔도 RTMP 출력 프로필이 흔들리지 않게 한다.
+	videoSize string
+	input     chan frame
 
 	statusMu sync.Mutex
 	status   EgressStatus
@@ -147,7 +151,7 @@ type RTMPEgress struct {
 	slate    *cachedCancellationSlate
 }
 
-func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate string) *RTMPEgress {
+func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate, videoSize string) *RTMPEgress {
 	if options.WireFormat == "" {
 		options.WireFormat = config.WireFormatJPEG
 	}
@@ -162,6 +166,7 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		latency:         newLatencyTracker(egressLogger, latencyLog),
 		audioOffset:     audioOffset,
 		bitrateOverride: videoBitrate,
+		videoSize:       videoSize,
 		input:           make(chan frame, egressQueueSize),
 		status: EgressStatus{
 			Phase:     EgressPhaseIdle,
@@ -335,6 +340,10 @@ func (e *RTMPEgress) setStopped() {
 func (e *RTMPEgress) videoBitrateFor(width, height uint16) string {
 	if e.bitrateOverride != "" {
 		return e.bitrateOverride
+	}
+	// 출력 해상도를 고정했다면 측정된 입력이 아니라 그 해상도를 기준으로 고른다.
+	if pinnedWidth, pinnedHeight, ok := parseVideoSize(e.videoSize); ok {
+		width, height = pinnedWidth, pinnedHeight
 	}
 	if int(width)*int(height) > 1280*720 {
 		return egressVideoBitrateFHD
@@ -595,6 +604,49 @@ func (e *RTMPEgress) waitBackoff(ctx context.Context, backoff *time.Duration) {
 	}
 }
 
+// videoFilter는 FFmpeg -vf 체인을 만든다.
+//
+// EGRESS_VIDEO_SIZE가 설정돼 있으면 입력 해상도와 무관하게 그 크기로 맞춘다
+// (종횡비 유지 후 레터박스). WebRTC 퍼블리셔는 대역폭 추정에 따라 스트림
+// 도중 해상도를 바꾸는데, H.264 경로에서는 그 변화가 frame 메타데이터에
+// 반영되지 않아(#122) resolutionChanged가 감지하지 못한다. 그 결과 FFmpeg가
+// 첫 프레임 해상도로 libx264를 초기화한 뒤 이후 프레임을 조용히 다운스케일해
+// 송출 화질이 시작 시점 해상도에 묶였다(#121). 출력 해상도를 고정하면 입력
+// 변동을 필터가 흡수하므로 RTMP 재연결 없이 화질이 유지된다.
+//
+// MJPEG 입력은 full-range yuvj420p로 디코딩되므로 FLV 스트림이 일반
+// yuv420p를 담도록 limited range로 압축한다.
+func (e *RTMPEgress) videoFilter() string {
+	var stages []string
+	if width, height, ok := parseVideoSize(e.videoSize); ok {
+		stages = append(stages,
+			fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", width, height),
+			fmt.Sprintf("pad=%d:%d:-1:-1", width, height))
+	}
+	if e.wireFormat != config.WireFormatRaw {
+		stages = append(stages, "scale=out_range=tv")
+	}
+	return strings.Join(stages, ",")
+}
+
+// parseVideoSize는 "1280x720" 형식을 파싱한다. 형식에 맞지 않으면 ok가 false다
+// (설정 검증은 config.Validate가 담당하므로 여기서는 조용히 무시한다).
+func parseVideoSize(value string) (uint16, uint16, bool) {
+	rawWidth, rawHeight, found := strings.Cut(strings.TrimSpace(value), "x")
+	if !found {
+		return 0, 0, false
+	}
+	width, err := strconv.Atoi(rawWidth)
+	if err != nil || width <= 0 || width > math.MaxUint16 {
+		return 0, 0, false
+	}
+	height, err := strconv.Atoi(rawHeight)
+	if err != nil || height <= 0 || height > math.MaxUint16 {
+		return 0, 0, false
+	}
+	return uint16(width), uint16(height), true
+}
+
 func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (*ffmpegProcess, error) {
 	useAudio := e.audio != nil && e.audio.PacketSeen()
 	arguments := []string{
@@ -650,10 +702,8 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 			"-map", "0:v", "-map", "1:a",
 		)
 	}
-	if e.wireFormat != config.WireFormatRaw {
-		// MJPEG는 full-range yuvj420p로 디코딩된다. FLV 스트림이 일반 yuv420p를
-		// 담도록 limited range로 압축한다.
-		arguments = append(arguments, "-vf", "scale=out_range=tv")
+	if filter := e.videoFilter(); filter != "" {
+		arguments = append(arguments, "-vf", filter)
 	}
 	videoBitrate := e.videoBitrateFor(width, height)
 	arguments = append(arguments,

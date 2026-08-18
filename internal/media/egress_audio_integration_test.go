@@ -3,11 +3,13 @@
 // Integration tests for the audio egress path with real ffmpeg/ffprobe. Unlike
 // the harness (which measures), these assert output and fail on regressions.
 // They cover behaviour not exercised by egress_audio_harness_test.go:
+//
 //   - -itsoffset (EGRESS_AUDIO_OFFSET_MS) actually delays the audio stream
+//
 //   - an attached-but-silent AudioPipe (no mic packets) falls back to the
 //     generated-silence path instead of stalling on an empty Ogg input
 //
-//	go test -tags egress_harness -run TestEgressAudioIntegration ./internal/media -v -timeout 5m
+//     go test -tags egress_harness -run TestEgressAudioIntegration ./internal/media -v -timeout 5m
 package media
 
 import (
@@ -105,7 +107,7 @@ func TestEgressAudioIntegrationItsOffset(t *testing.T) {
 
 	const offset = 400 * time.Millisecond
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
-		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, offset, "")
+		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, offset, "", "")
 	feedEgress(t, egress, 6, feed)
 
 	videoStart := parseStartTime(t, ffprobeField(t, out, "v", "stream=start_time"))
@@ -138,7 +140,7 @@ func TestEgressAudioIntegrationNoMicFallsBackToSilence(t *testing.T) {
 	}
 
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
-		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, 0, "")
+		TranscoderOptions{WireFormat: harnessWireFormat()}, out, pipe, false, 0, "", "")
 	feedEgress(t, egress, 5, nil)
 
 	codecs := ffprobeAll(t, out, "stream=codec_name")

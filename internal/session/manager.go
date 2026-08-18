@@ -420,7 +420,7 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 		Gate:       m.spawnGate,
 		WireFormat: m.cfg.AIWireFormat,
-	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate)
+	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate, m.cfg.EgressVideoSize)
 	if s.audioPipe != nil {
 		s.audioPipe.SetMuted(false)
 	}

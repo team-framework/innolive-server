@@ -134,7 +134,7 @@ func TestEgressIntegrationResolutionChange(t *testing.T) {
 	logs := &syncLogBuffer{}
 	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logs), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	out := t.TempDir() + "/egress-resolution.flv"
-	egress := NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: config.WireFormatJPEG}, out, nil, false, 0, "")
+	egress := NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: config.WireFormatJPEG}, out, nil, false, 0, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	var done sync.WaitGroup
 	done.Add(1)

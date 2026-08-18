@@ -240,3 +240,61 @@ func TestPauseAndResumeStreamNotActive(t *testing.T) {
 		})
 	}
 }
+
+func TestPatchAnonymizationIsIndependentFromBroadcastState(t *testing.T) {
+	server := newStreamTestApplication(t, nil)
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	for _, enabled := range []bool{true, false} {
+		body, err := json.Marshal(map[string]bool{"enabled": enabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequest(http.MethodPatch, server.URL+"/sessions/"+created.SessionID+"/anonymization", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Session-Owner-Token", ownerToken)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := map[string]any{}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			response.Body.Close()
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (payload %v)", response.StatusCode, payload)
+		}
+		media, _ := payload["media"].(map[string]any)
+		if got, ok := media["anonymization_enabled"].(bool); !ok || got != enabled {
+			t.Fatalf("anonymization_enabled = %v, want %v", media["anonymization_enabled"], enabled)
+		}
+		stream, _ := payload["stream"].(map[string]any)
+		if stream["status"] != "idle" {
+			t.Fatalf("stream status = %v, want unchanged idle", stream["status"])
+		}
+	}
+}
+
+func TestPatchAnonymizationRequiresEnabled(t *testing.T) {
+	server := newStreamTestApplication(t, nil)
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	request, err := http.NewRequest(http.MethodPatch, server.URL+"/sessions/"+created.SessionID+"/anonymization", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Session-Owner-Token", ownerToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+}

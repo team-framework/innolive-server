@@ -83,6 +83,7 @@ type Response struct {
 		IgnoredTrackCount      int         `json:"ignored_track_count"`
 		UnsupportedTrackPolicy string      `json:"unsupported_track_policy"`
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
+		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
 	} `json:"media"`
 	Stream StreamState `json:"stream"`
 }
@@ -122,17 +123,18 @@ type Session struct {
 	// aiInputPaused는 방송 pause 의도를 보존한다. egress가 재구성·재연결 중인
 	// 경우와 카메라 트랙이 교체되는 경우에도 새 카메라 프레임을 AI worker로
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
-	aiInputPaused   bool
-	ignoredTracks   int
-	offerReceivedAt time.Time
-	answerCreatedAt time.Time
-	pendingICE      []webrtc.ICECandidateInit
-	negotiationMu   sync.Mutex
-	cancel          context.CancelFunc
-	trackCancel     context.CancelFunc
-	disconnectTimer *time.Timer
-	wasConnected    bool
-	closed          bool
+	aiInputPaused        bool
+	anonymizationEnabled bool
+	ignoredTracks        int
+	offerReceivedAt      time.Time
+	answerCreatedAt      time.Time
+	pendingICE           []webrtc.ICECandidateInit
+	negotiationMu        sync.Mutex
+	cancel               context.CancelFunc
+	trackCancel          context.CancelFunc
+	disconnectTimer      *time.Timer
+	wasConnected         bool
+	closed               bool
 }
 
 type Manager struct {
@@ -265,17 +267,18 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
 	s := &Session{
-		ID:         id,
-		UserID:     userID,
-		AIClientID: AIClientIDForUser(userID),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Metadata:   copyMetadata(metadata),
-		Status:     "active",
-		PC:         pc,
-		Stream:     StreamState{Status: "idle", UpdatedAt: now},
-		ownerHash:  ownerHash,
-		cancel:     cancel,
+		ID:                   id,
+		UserID:               userID,
+		AIClientID:           AIClientIDForUser(userID),
+		CreatedAt:            now,
+		UpdatedAt:            now,
+		Metadata:             copyMetadata(metadata),
+		Status:               "active",
+		PC:                   pc,
+		Stream:               StreamState{Status: "idle", UpdatedAt: now},
+		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
+		ownerHash:            ownerHash,
+		cancel:               cancel,
 	}
 	s.baseCtx = ctx
 	s.egressSlot = media.NewEgressSlot()
@@ -502,6 +505,28 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 	s.setAIInputPaused(false)
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
+	return s, nil
+}
+
+// SetAnonymizationEnabled changes AI processing independently from WebRTC and
+// RTMP egress. When disabled, raw frames continue through both outputs while
+// the existing gRPC bidi stream remains open for a fast re-enable.
+func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrNotFound
+	}
+	s.anonymizationEnabled = enabled
+	if s.processor != nil {
+		s.processor.SetAnonymizationEnabled(enabled)
+	}
+	s.UpdatedAt = time.Now().UTC()
+	m.logger.Info("anonymization changed", "session_id", s.ID, "enabled", enabled)
 	return s, nil
 }
 
@@ -733,18 +758,19 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			return
 		}
 		s.mu.Lock()
+		// 새 Processor를 세션에 공개하기 전에 현재 제어 상태를 먼저 적용한다.
+		// 그렇지 않으면 토글 요청이 이 새 Processor를 갱신한 직후, 여기서 읽은
+		// 오래된 상태가 다시 덮어쓰는 경합이 생길 수 있다.
+		if s.aiInputPaused {
+			processor.SuspendAIInput()
+		}
+		processor.SetAnonymizationEnabled(s.anonymizationEnabled)
 		s.processor = processor
-		aiInputPaused := s.aiInputPaused
 		// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 		// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
 		// Enqueue 경로가 끊기지 않는다.
 		egressSlot := s.egressSlot
 		s.mu.Unlock()
-		if aiInputPaused {
-			// pause 중 카메라 트랙이 교체돼도 새 Processor가 첫 프레임을 AI로
-			// 보내기 전에 같은 입력 차단 상태를 이어받아야 한다.
-			processor.SuspendAIInput()
-		}
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
 		// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
@@ -859,6 +885,7 @@ func (s *Session) Response() Response {
 	if s.processor != nil {
 		response.Media.AIFallbackActive = s.processor.FallbackActive()
 	}
+	response.Media.AnonymizationEnabled = s.anonymizationEnabled
 	if s.egress != nil {
 		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)
 	}

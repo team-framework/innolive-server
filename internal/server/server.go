@@ -81,6 +81,7 @@ func New(
 	mux.Handle("POST /sessions/{session_id}/stream/pause", requireUser(s.requireSessionOwner(s.handlePauseStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
+	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
 	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
 	mux.Handle("DELETE /reference-face", requireUser(http.HandlerFunc(s.handleDeleteReferenceFace)))
@@ -286,6 +287,27 @@ func (s *Server) handleResumeStream(w http.ResponseWriter, _ *http.Request, live
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+// handlePatchAnonymization controls AI privacy processing without changing the
+// WebRTC session or an active RTMP/YouTube broadcast.
+func (s *Server) handlePatchAnonymization(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Enabled *bool `json:"enabled"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil || request.Enabled == nil {
+		if err == nil {
+			err = errors.New("enabled is required")
+		}
+		writeError(w, badRequest("Invalid anonymization request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	if _, err := s.sessions.SetAnonymizationEnabled(liveSession.ID, *request.Enabled); err != nil {
+		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response())
 }
 
 func decodeOptionalJSON(body io.Reader, target any) error {

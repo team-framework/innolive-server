@@ -15,7 +15,7 @@ import (
 
 func newTestEgress(wire config.WireFormat, url string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0, "")
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0, "", "")
 }
 
 func TestVideoBitrateFor(t *testing.T) {
@@ -39,6 +39,89 @@ func TestVideoBitrateFor(t *testing.T) {
 	override.bitrateOverride = "3000k"
 	if got := override.videoBitrateFor(1920, 1080); got != "3000k" {
 		t.Errorf("override videoBitrateFor(1920, 1080) = %q, want %q", got, "3000k")
+	}
+}
+
+func TestParseVideoSize(t *testing.T) {
+	cases := []struct {
+		value         string
+		width, height uint16
+		ok            bool
+	}{
+		{"1280x720", 1280, 720, true},
+		{" 1920x1080 ", 1920, 1080, true},
+		{"", 0, 0, false},
+		{"1280", 0, 0, false},
+		{"1280x", 0, 0, false},
+		{"x720", 0, 0, false},
+		{"0x720", 0, 0, false},
+		{"-1280x720", 0, 0, false},
+		{"hdx720", 0, 0, false},
+		{"99999x720", 0, 0, false}, // uint16 범위 밖
+	}
+	for _, c := range cases {
+		width, height, ok := parseVideoSize(c.value)
+		if ok != c.ok || width != c.width || height != c.height {
+			t.Errorf("parseVideoSize(%q) = (%d, %d, %t), want (%d, %d, %t)",
+				c.value, width, height, ok, c.width, c.height, c.ok)
+		}
+	}
+}
+
+// TestVideoFilter는 EGRESS_VIDEO_SIZE 설정 여부에 따른 -vf 체인을 고정한다.
+// 고정하지 않았을 때의 체인이 바뀌면 기존 송출 동작이 달라지므로 함께 잠근다.
+func TestVideoFilter(t *testing.T) {
+	cases := []struct {
+		name      string
+		wire      config.WireFormat
+		videoSize string
+		want      string
+	}{
+		{"jpeg/미고정", config.WireFormatJPEG, "", "scale=out_range=tv"},
+		{"raw/미고정", config.WireFormatRaw, "", ""},
+		{
+			"jpeg/고정", config.WireFormatJPEG, "1280x720",
+			"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1,scale=out_range=tv",
+		},
+		{
+			"raw/고정", config.WireFormatRaw, "1280x720",
+			"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1",
+		},
+		{"jpeg/형식 오류는 무시", config.WireFormatJPEG, "hd", "scale=out_range=tv"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newTestEgress(c.wire, "out.flv")
+			e.videoSize = c.videoSize
+			if got := e.videoFilter(); got != c.want {
+				t.Errorf("videoFilter() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestVideoBitrateForPinnedSize는 출력 해상도를 고정했을 때 bitrate가 측정된
+// 입력이 아니라 고정 해상도를 기준으로 선택되는지 확인한다. 램프업 저해상도가
+// 기준이 되면 FHD로 고정해도 720p용 bitrate가 나간다.
+func TestVideoBitrateForPinnedSize(t *testing.T) {
+	pinnedFHD := newTestEgress(config.WireFormatJPEG, "out.flv")
+	pinnedFHD.videoSize = "1920x1080"
+	if got := pinnedFHD.videoBitrateFor(320, 180); got != egressVideoBitrateFHD {
+		t.Errorf("videoBitrateFor(320, 180) with 1920x1080 pinned = %q, want %q", got, egressVideoBitrateFHD)
+	}
+
+	pinnedHD := newTestEgress(config.WireFormatJPEG, "out.flv")
+	pinnedHD.videoSize = "1280x720"
+	if got := pinnedHD.videoBitrateFor(1920, 1080); got != egressVideoBitrate {
+		t.Errorf("videoBitrateFor(1920, 1080) with 1280x720 pinned = %q, want %q", got, egressVideoBitrate)
+	}
+
+	// EGRESS_VIDEO_BITRATE는 해상도 고정보다 우선한다.
+	override := newTestEgress(config.WireFormatJPEG, "out.flv")
+	override.videoSize = "1920x1080"
+	override.bitrateOverride = "3000k"
+	if got := override.videoBitrateFor(320, 180); got != "3000k" {
+		t.Errorf("videoBitrateFor with override = %q, want %q", got, "3000k")
 	}
 }
 

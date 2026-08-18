@@ -131,7 +131,8 @@ make proto        # protobuf 코드 생성
 | `GET` | `/webrtc/config` | 클라이언트용 ICE 서버 설정 |
 | `POST` | `/sessions` | 세션 생성 (소유권 토큰 발급) |
 | `GET`/`DELETE` | `/sessions/{id}` | 세션 조회/삭제 |
-| `POST` | `/sessions/{id}/stream/start`\|`/stop` | RTMP 송출 시작/중지 |
+| `POST` | `/sessions/{id}/stream/start`\|`/pause`\|`/resume`\|`/stop` | RTMP 송출 시작/일시 중지/재개/중지 |
+| `PATCH` | `/sessions/{id}/anonymization` | `{ "enabled": true\|false }`로 비식별화 AI 처리만 켜거나 끔 (WebRTC·RTMP 송출 유지) |
 | `GET`/`POST`/`DELETE` | `/reference-face` | 참조(본인) 얼굴 등록/조회/삭제 |
 | `GET` | `/signaling` | WebRTC 시그널링(WebSocket) |
 | `POST` | `/auth/sign-up` | 이메일·비밀번호로 인증 코드를 발송하고 `signup_token` HttpOnly 쿠키 설정 |

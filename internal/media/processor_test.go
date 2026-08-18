@@ -97,6 +97,42 @@ func TestProcessorPauseStopsAIInputUntilResume(t *testing.T) {
 	}
 }
 
+func TestProcessorDisablingAnonymizationPassesFramesWithoutClosingAIStream(t *testing.T) {
+	var calls atomic.Int64
+	var closes atomic.Int64
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, &fakeAIStream{
+		process: func(_ []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+			calls.Add(1)
+			return &aiv1.ProcessedVideoChunk{Data: []byte("anonymized"), Timestamp: timestamp, StatusMessage: "success"}, nil
+		},
+		close: func() { closes.Add(1) },
+	}, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyFreeze, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	processor.SetAnonymizationEnabled(false)
+	if processor.AnonymizationEnabled() {
+		t.Fatal("anonymization must be disabled")
+	}
+	output, processed, err := processor.ProcessIfAIInputEnabled(context.Background(), []byte("raw-frame"), 1, 0, 0)
+	if err != nil || !processed || string(output) != "raw-frame" {
+		t.Fatalf("disabled output = (%q, processed=%v, err=%v), want raw frame", output, processed, err)
+	}
+	if calls.Load() != 0 || closes.Load() != 0 {
+		t.Fatalf("disabled anonymization calls=%d closes=%d, want both 0", calls.Load(), closes.Load())
+	}
+
+	processor.SetAnonymizationEnabled(true)
+	output, processed, err = processor.ProcessIfAIInputEnabled(context.Background(), []byte("next-frame"), 2, 0, 0)
+	if err != nil || !processed || string(output) != "anonymized" {
+		t.Fatalf("enabled output = (%q, processed=%v, err=%v), want anonymized frame", output, processed, err)
+	}
+	if calls.Load() != 1 || closes.Load() != 0 {
+		t.Fatalf("enabled anonymization calls=%d closes=%d, want 1 and 0", calls.Load(), closes.Load())
+	}
+}
+
 // TestProcessorSuspendWaitsForInFlightAIFrame은 pause 성공 응답 뒤에 이미
 // 통과한 프레임까지 AI worker로 전송되는 경합이 없도록, 진행 중인 호출이
 // 끝날 때까지 SuspendAIInput이 기다리는지 검증한다.

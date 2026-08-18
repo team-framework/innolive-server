@@ -29,15 +29,16 @@ type AIStream interface {
 var errAIInputPaused = errors.New("AI input is paused")
 
 type Processor struct {
-	mode          config.PrivacyMode
-	fixedDelay    time.Duration
-	aiMu          sync.RWMutex
-	ai            AIStream
-	aiInputPaused bool
-	metrics       *metrics.Registry
-	logger        *slog.Logger
-	wireFormat    config.WireFormat
-	failurePolicy config.AIFailurePolicy
+	mode                 config.PrivacyMode
+	fixedDelay           time.Duration
+	aiMu                 sync.RWMutex
+	ai                   AIStream
+	aiInputPaused        bool
+	anonymizationEnabled bool
+	metrics              *metrics.Registry
+	logger               *slog.Logger
+	wireFormat           config.WireFormat
+	failurePolicy        config.AIFailurePolicy
 
 	// timeoutLatchThreshold bounds how many CONSECUTIVE timeout failures are
 	// tolerated (serving a per-frame blackout, retrying the AI next frame)
@@ -90,6 +91,7 @@ func NewProcessor(
 		wireFormat:            wireFormat,
 		failurePolicy:         failurePolicy,
 		timeoutLatchThreshold: timeoutLatchThreshold,
+		anonymizationEnabled:  mode == config.PrivacyModeReal,
 	}, nil
 }
 
@@ -128,6 +130,29 @@ func (p *Processor) ResumeAIInput() {
 	p.aiMu.Unlock()
 }
 
+// SetAnonymizationEnabled changes whether frames are sent to the AI worker.
+// Unlike SuspendAIInput (used by broadcast pause), disabling anonymization
+// preserves the open bidi stream and passes the raw frame to the outputs.
+func (p *Processor) SetAnonymizationEnabled(enabled bool) {
+	if p.mode != config.PrivacyModeReal {
+		return
+	}
+	p.aiMu.Lock()
+	p.anonymizationEnabled = enabled
+	p.aiMu.Unlock()
+}
+
+// AnonymizationEnabled reports whether real-mode frames are currently sent to
+// the AI worker. Non-real privacy modes have no AI processing to toggle.
+func (p *Processor) AnonymizationEnabled() bool {
+	if p.mode != config.PrivacyModeReal {
+		return false
+	}
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	return p.anonymizationEnabled
+}
+
 // AIInputPaused는 실제 AI worker에 카메라 프레임을 보내지 않는 상태인지
 // 반환한다. bypass·fixed-delay 모드는 AI 입력이 없으므로 항상 false다.
 func (p *Processor) AIInputPaused() bool {
@@ -148,6 +173,9 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
 		return nil, errAIInputPaused
 	}
+	if p.mode == config.PrivacyModeReal && !p.anonymizationEnabled {
+		return frame, nil
+	}
 	return p.process(ctx, frame, timestamp, width, height)
 }
 
@@ -159,6 +187,9 @@ func (p *Processor) ProcessIfAIInputEnabled(ctx context.Context, frame []byte, t
 	defer p.aiMu.RUnlock()
 	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
 		return nil, false, nil
+	}
+	if p.mode == config.PrivacyModeReal && !p.anonymizationEnabled {
+		return frame, true, nil
 	}
 	output, err := p.process(ctx, frame, timestamp, width, height)
 	return output, true, err

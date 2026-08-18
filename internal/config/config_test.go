@@ -120,6 +120,24 @@ func TestValidateEgressVideoBitrate(t *testing.T) {
 	}
 }
 
+func TestValidateEgressVideoSize(t *testing.T) {
+	for _, valid := range []string{"", "1280x720", "1920x1080", "640x360"} {
+		cfg := validConfig()
+		cfg.EgressVideoSize = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with EgressVideoSize=%q error = %v", valid, err)
+		}
+	}
+	// 홀수 해상도는 libx264의 yuv420p가 받지 못하므로 기동 시점에 거른다.
+	for _, invalid := range []string{"1280", "1280x", "x720", "0x720", "-1280x720", "1281x721", "hdx720", "99999x720"} {
+		cfg := validConfig()
+		cfg.EgressVideoSize = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected EgressVideoSize=%q to be rejected", invalid)
+		}
+	}
+}
+
 func TestLoadAcceptsPythonServerDelayAlias(t *testing.T) {
 	setRequiredEnv(t)
 

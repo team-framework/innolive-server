@@ -73,6 +73,12 @@ func harnessJPEG(t *testing.T, index int) []byte {
 	return encoded.Bytes()
 }
 
+// harnessVideoSize는 EGRESS_VIDEO_SIZE를 그대로 전달해, 출력 해상도 고정을
+// 켠 상태와 끈 상태를 같은 하네스로 비교할 수 있게 한다.
+func harnessVideoSize() string {
+	return os.Getenv("EGRESS_VIDEO_SIZE")
+}
+
 // harnessWireFormat selects the frame format via EGRESS_WIRE (jpeg|raw),
 // mirroring the server's AI_FRAME_WIRE_FORMAT.
 func harnessWireFormat() config.WireFormat {
@@ -113,7 +119,7 @@ func harnessFrameData(t *testing.T, index int, wire config.WireFormat) []byte {
 
 func newHarnessEgress(t *testing.T, output string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0, "")
+	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0, "", harnessVideoSize())
 }
 
 // TestEgressHarnessStream feeds synthetic frames at real-time pace for

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -73,6 +74,7 @@ type Config struct {
 	EgressLatencyLog        bool
 	EgressAudioOffset       time.Duration
 	EgressVideoBitrate      string
+	EgressVideoSize         string
 	RequireSessionAuth      bool
 	LogLevel                string
 	DatabaseURL             string
@@ -114,6 +116,7 @@ func Load() (Config, error) {
 		EgressLatencyLog:        envBool("EGRESS_LATENCY_LOG", false),
 		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
 		EgressVideoBitrate:      strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
+		EgressVideoSize:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
@@ -207,6 +210,17 @@ func (c Config) Validate() error {
 		digits := strings.TrimRight(v, "kKmM")
 		if n, err := strconv.Atoi(digits); err != nil || n <= 0 || len(v)-len(digits) > 1 {
 			return fmt.Errorf("EGRESS_VIDEO_BITRATE must be a positive number with an optional k/M suffix (e.g. 5000k): %q", v)
+		}
+	}
+	if v := c.EgressVideoSize; v != "" {
+		rawWidth, rawHeight, found := strings.Cut(v, "x")
+		width, widthErr := strconv.Atoi(rawWidth)
+		height, heightErr := strconv.Atoi(rawHeight)
+		// libx264의 yuv420p는 짝수 해상도만 받는다.
+		if !found || widthErr != nil || heightErr != nil ||
+			width <= 0 || height <= 0 || width > math.MaxUint16 || height > math.MaxUint16 ||
+			width%2 != 0 || height%2 != 0 {
+			return fmt.Errorf("EGRESS_VIDEO_SIZE must be an even WIDTHxHEIGHT (e.g. 1280x720): %q", v)
 		}
 	}
 	if c.AIPreflightTimeout <= 0 {

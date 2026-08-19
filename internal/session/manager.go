@@ -751,6 +751,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			EncoderThreads: m.cfg.FFmpegEncoderThreads,
 			WireFormat:     m.cfg.AIWireFormat,
 			VideoCodec:     codec,
+			PinLongEdge:    uint16(m.cfg.DecoderPinLongEdge),
 		})
 		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {

@@ -58,6 +58,23 @@ type TranscoderOptions struct {
 	// VideoCodec is the negotiated WebRTC codec. VP8 remains the zero-value
 	// default for callers that do not participate in SDP codec selection.
 	VideoCodec VideoCodec
+	// PinLongEdge fixes the decoder's output long edge. 0 (default) keeps the
+	// legacy behaviour of following the first frame.
+	PinLongEdge uint16
+}
+
+// decoderOutput은 디코더가 내보낼 치수와 그것을 강제하는 -vf 체인을 정한다.
+// 핀이 꺼져 있으면(기본) 소스 치수를 그대로 쓰고 필터도 붙지 않으므로 종전과
+// 인자가 바이트 동일하다.
+func (t *FFmpegTranscoder) decoderOutput(sourceWidth, sourceHeight uint16) (uint16, uint16, string, error) {
+	if t.options.PinLongEdge == 0 {
+		return sourceWidth, sourceHeight, "", nil
+	}
+	width, height, err := pinDimensions(sourceWidth, sourceHeight, t.options.PinLongEdge)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	return width, height, pinFilter(width, height), nil
 }
 
 type FFmpegTranscoder struct {
@@ -120,14 +137,21 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 	if err != nil {
 		return err
 	}
-	process, err := t.startDecoder(ctx, width, height)
+	outputWidth, outputHeight, filter, err := t.decoderOutput(width, height)
+	if err != nil {
+		return err
+	}
+	process, err := t.startDecoder(ctx, width, height, filter)
 	if err != nil {
 		return err
 	}
 	defer process.close()
-	// H.264 경로와 같은 이유로 여기서 세션 화질의 상한이 정해진다(#122).
+	// 디코더 ffmpeg는 출력 규격을 첫 프레임에 고정한다. 핀이 꺼져 있으면 이
+	// 한 줄이 세션 화질의 상한을 기록하고, 켜져 있으면 입력과 무관하게
+	// 유지되는 규격을 기록한다(#122).
 	t.logger.Info("VP8 decoder output locked",
-		"width", width, "height", height, "wire_format", t.options.WireFormat)
+		"width", outputWidth, "height", outputHeight,
+		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
@@ -145,10 +169,10 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 				t.logger.Info("VP8 input resolution changed",
 					"from_width", observedWidth, "from_height", observedHeight,
 					"to_width", inputWidth, "to_height", inputHeight,
-					"decoder_locked_width", width, "decoder_locked_height", height)
+					"decoder_locked_width", outputWidth, "decoder_locked_height", outputHeight)
 				observedWidth, observedHeight = inputWidth, inputHeight
 			}
-			item.width, item.height = width, height
+			item.width, item.height = outputWidth, outputHeight
 			if err := writeIVFFrame(process.stdin, item.data, index); err != nil {
 				return err
 			}
@@ -182,7 +206,7 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		}
 	}()
 
-	rawSize := rawFrameSize(width, height)
+	rawSize := rawFrameSize(outputWidth, outputHeight)
 	for item := range metadata {
 		var decoded []byte
 		if t.options.WireFormat == config.WireFormatRaw {
@@ -317,11 +341,16 @@ func (t *FFmpegTranscoder) validateEncoderInput(data []byte, expectedRawSize int
 	return nil
 }
 
-func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint16) (*ffmpegProcess, error) {
+// startDecoder의 width/height는 IVF 헤더에 쓰는 입력 기술자이므로 항상 소스
+// 치수여야 한다. 출력 규격은 filter가 정한다(빈 문자열이면 입력을 따른다).
+func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint16, filter string) (*ffmpegProcess, error) {
 	arguments := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0", "-threads", "1",
 		"-f", "ivf", "-blocksize", "1024", "-i", "pipe:0",
+	}
+	if filter != "" {
+		arguments = append(arguments, "-vf", filter)
 	}
 	if t.options.WireFormat == config.WireFormatRaw {
 		arguments = append(arguments, "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-flush_packets", "1", "-blocksize", "1024")

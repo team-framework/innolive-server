@@ -125,6 +125,9 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		return err
 	}
 	defer process.close()
+	// H.264 경로와 같은 이유로 여기서 세션 화질의 상한이 정해진다(#122).
+	t.logger.Info("VP8 decoder output locked",
+		"width", width, "height", height, "wire_format", t.options.WireFormat)
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
@@ -132,7 +135,19 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		defer close(metadata)
 		defer process.stdin.Close()
 		index := uint64(0)
+		// observed*는 관측 전용이며 이 고루틴 안에서만 쓴다(레이스 없음).
+		observedWidth, observedHeight := width, height
 		write := func(item frame) error {
+			// 키프레임에서만 치수를 읽을 수 있다. 인터프레임은 ErrKeyframeRequired로
+			// 걸러진다. 메타데이터는 바꾸지 않고 관측만 남긴다(#122).
+			if inputWidth, inputHeight, err := vp8KeyframeDimensions(item.data); err == nil &&
+				(inputWidth != observedWidth || inputHeight != observedHeight) {
+				t.logger.Info("VP8 input resolution changed",
+					"from_width", observedWidth, "from_height", observedHeight,
+					"to_width", inputWidth, "to_height", inputHeight,
+					"decoder_locked_width", width, "decoder_locked_height", height)
+				observedWidth, observedHeight = inputWidth, inputHeight
+			}
 			item.width, item.height = width, height
 			if err := writeIVFFrame(process.stdin, item.data, index); err != nil {
 				return err

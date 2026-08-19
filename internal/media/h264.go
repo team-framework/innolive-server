@@ -38,12 +38,20 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 		return err
 	}
 	defer process.close()
+	// 디코더 ffmpeg는 출력 스트림 규격을 첫 프레임에 고정하고, 이후 입력
+	// 해상도가 올라가도 그 값으로 되돌린다. 즉 이 한 줄이 세션 화질의
+	// 상한을 기록한다(#122).
+	t.logger.Info("H.264 decoder output locked",
+		"width", width, "height", height, "wire_format", t.options.WireFormat)
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
+		// observed*는 퍼블리셔가 보내오는 입력 해상도를 관측만 하기 위한 것으로,
+		// 이 고루틴 안에서만 읽고 쓴다(공유 상태가 아니라 레이스가 없다).
+		observedWidth, observedHeight := width, height
 		write := func(item frame) error {
 			item.width, item.height = width, height
 			if _, err := process.stdin.Write(item.data); err != nil {
@@ -70,9 +78,21 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 					writeError <- nil
 					return
 				}
-				data, _, _, _ := bootstrap.prepare(item.data)
+				data, _, inputWidth, inputHeight := bootstrap.prepare(item.data)
 				if len(data) == 0 {
 					continue
+				}
+				// 새 SPS 치수를 frame 메타데이터에 반영하지는 않는다 — 디코더가
+				// 출력을 위에서 고정한 규격으로 되돌리므로 실제 페이로드 크기는
+				// 그대로이고, 메타데이터만 바꾸면 하위 단계와 어긋난다(#122).
+				// 퍼블리셔가 어디까지 올라오는지 관측만 남긴다.
+				if inputWidth != 0 && inputHeight != 0 &&
+					(inputWidth != observedWidth || inputHeight != observedHeight) {
+					t.logger.Info("H.264 input resolution changed",
+						"from_width", observedWidth, "from_height", observedHeight,
+						"to_width", inputWidth, "to_height", inputHeight,
+						"decoder_locked_width", width, "decoder_locked_height", height)
+					observedWidth, observedHeight = inputWidth, inputHeight
 				}
 				item.data = data
 				if err := write(item); err != nil {

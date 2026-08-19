@@ -385,10 +385,10 @@ func main() {
 		logger.Error("create streaming account service failed", "error", err)
 		os.Exit(2)
 	}
-	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
-	// escape hatch (loud warning above). Extend it to user auth as well so
-	// tokenless bench tooling (pion-load) keeps working against dev servers;
-	// production keeps the default (true) and is unaffected.
+	// INNOLIVE_REQUIRE_SESSION_AUTH=false는 로컬 개발용으로 명시된 탈출구다
+	// (위에서 크게 경고한다). 토큰 없는 벤치 도구(pion-load)가 개발 서버를
+	// 상대로 계속 동작하도록 사용자 인증까지 함께 끈다. 프로덕션은 기본값
+	// (true)을 유지하므로 영향이 없다.
 	requireUser := auth.RequireUser(tokenService, userStatusChecker)
 	authenticateUser := func(ctx context.Context, raw string) (uuid.UUID, error) {
 		return auth.AuthenticateUser(ctx, tokenService, userStatusChecker, raw)

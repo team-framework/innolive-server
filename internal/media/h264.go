@@ -13,9 +13,9 @@ import (
 
 const h264AnnexBStartCode = "\x00\x00\x00\x01"
 
-// decodeH264Stream consumes complete Annex-B H.264 access units assembled
-// from RTP. Parameter-only access units are retained until an IDR frame so
-// FFmpeg always starts with SPS/PPS followed by a decodable picture.
+// decodeH264Stream은 RTP에서 조립된 완전한 Annex-B H.264 액세스 유닛을 소비한다.
+// 파라미터만 들어 있는 액세스 유닛은 IDR 프레임이 올 때까지 들고 있어서,
+// FFmpeg가 항상 SPS/PPS 다음에 디코드 가능한 픽처로 시작하게 한다.
 func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
 	bootstrap := h264Bootstrap{}
 	var first frame
@@ -389,9 +389,9 @@ func h264AUDStarts(data []byte) []int {
 	}
 }
 
-// h264SPSDimensions reads coded display dimensions from an SPS NAL unit. It
-// only needs the sequence-parameter fields up to frame cropping; slice data is
-// never parsed here.
+// h264SPSDimensions는 SPS NAL 유닛에서 코딩된 표시 치수를 읽는다. frame
+// cropping까지의 시퀀스 파라미터 필드만 있으면 되고, slice 데이터는 여기서
+// 파싱하지 않는다.
 func h264SPSDimensions(nalu []byte) (uint16, uint16, error) {
 	if len(nalu) < 4 || nalu[0]&0x1f != 7 {
 		return 0, 0, errors.New("invalid H.264 SPS")

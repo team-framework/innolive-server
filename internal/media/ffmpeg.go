@@ -22,16 +22,16 @@ import (
 
 const (
 	maxEncodedFrameSize = 20 << 20
-	// ffmpegShutdownGrace bounds how long teardown waits for FFmpeg to exit
-	// on its own (stdin EOF or SIGINT) before falling back to SIGKILL.
+	// ffmpegShutdownGrace는 teardown이 FFmpeg의 자체 종료(stdin EOF 또는
+	// SIGINT)를 얼마나 기다린 뒤 SIGKILL로 넘어갈지를 정한다.
 	ffmpegShutdownGrace = 2 * time.Second
 )
 
 var ErrKeyframeRequired = errors.New("a video keyframe is required to initialize the decoder")
 
-// VideoCodec is the compressed WebRTC video codec used for one session. The
-// codec is selected from the offer before the answer is created, then remains
-// fixed for the lifetime of that negotiated media section.
+// VideoCodec은 한 세션에서 쓰는 압축 WebRTC 비디오 코덱이다. offer에서 골라
+// answer를 만들기 전에 정해지고, 그 뒤로는 협상된 media section의 수명 동안
+// 고정된다.
 type VideoCodec string
 
 const (
@@ -45,21 +45,21 @@ func (c VideoCodec) Valid() bool {
 
 type commandFactory func(ctx context.Context, name string, arguments ...string) *exec.Cmd
 
-// TranscoderOptions carries the per-process resource policy shared by every
-// session's FFmpeg pair.
+// TranscoderOptions는 모든 세션의 FFmpeg 쌍이 공유하는 프로세스별 자원
+// 정책을 담는다.
 type TranscoderOptions struct {
-	// Gate bounds concurrent FFmpeg process starts. nil means unlimited.
+	// Gate는 동시에 시작하는 FFmpeg 프로세스 수를 제한한다. nil이면 무제한이다.
 	Gate *SpawnGate
-	// EncoderThreads caps libvpx encoder threads; 0 lets FFmpeg auto-detect.
+	// EncoderThreads는 libvpx 인코더 스레드를 제한한다. 0이면 FFmpeg가 자동으로 정한다.
 	EncoderThreads int
-	// WireFormat selects the decoded-frame format exchanged with the AI
-	// boundary: JPEG (default) or raw yuv420p.
+	// WireFormat은 AI 경계에서 주고받는 디코드 프레임 형식을 고른다.
+	// JPEG(기본) 또는 raw yuv420p다.
 	WireFormat config.WireFormat
-	// VideoCodec is the negotiated WebRTC codec. VP8 remains the zero-value
-	// default for callers that do not participate in SDP codec selection.
+	// VideoCodec은 협상된 WebRTC 코덱이다. SDP 코덱 선택에 참여하지 않는
+	// 호출자를 위해 VP8이 zero-value 기본값으로 남아 있다.
 	VideoCodec VideoCodec
-	// PinLongEdge fixes the decoder's output long edge. 0 (default) keeps the
-	// legacy behaviour of following the first frame.
+	// PinLongEdge는 디코더 출력의 장변을 고정한다. 0(기본)이면 첫 프레임을
+	// 따르는 종전 동작을 유지한다.
 	PinLongEdge uint16
 }
 
@@ -238,9 +238,9 @@ func (t *FFmpegTranscoder) EncodeStream(ctx context.Context, input <-chan frame,
 }
 
 func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
-	// The encoder process is spawned only once the first processed frame
-	// exists, mirroring the decoder's keyframe wait. This keeps a cold spike
-	// of N sessions from forking N encoders before any media flows.
+	// 인코더 프로세스는 처리된 첫 프레임이 생긴 뒤에야 스폰한다. 디코더가
+	// 키프레임을 기다리는 것과 같은 방식이다. 이렇게 해야 세션 N개가 한꺼번에
+	// 뜨는 콜드 스파이크에서 미디어가 흐르기도 전에 인코더 N개를 fork하지 않는다.
 	var first frame
 	select {
 	case <-ctx.Done():
@@ -398,21 +398,20 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 	return process, nil
 }
 
-// startFFmpeg spawns one FFmpeg child. stderrLine, when non-nil, receives each
-// stderr line instead of the default warning log (used by the RTMP egress to
-// separate -progress output from real errors). extraFiles are passed to the
-// child as fds starting at 3 (extraFiles[0] == fd 3) and are closed in the
-// parent once the child has been started; callers that keep the write end of
-// such a pipe hold their own copy separately.
+// startFFmpeg는 FFmpeg 자식 하나를 스폰한다. stderrLine이 nil이 아니면 기본
+// 경고 로그 대신 stderr의 각 줄을 그쪽으로 넘긴다(RTMP egress가 -progress
+// 출력을 실제 에러와 분리하는 데 쓴다). extraFiles는 자식에게 fd 3번부터
+// 전달되고(extraFiles[0] == fd 3), 자식이 시작된 뒤 부모 쪽 사본은 닫힌다.
+// 그런 파이프의 쓰기 끝을 계속 들고 있어야 하는 호출자는 자기 사본을 따로 보관한다.
 func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrLine func(string), extraFiles []*os.File, arguments ...string) (*ffmpegProcess, error) {
 	logger := t.logger.With("ffmpeg_role", role)
 	cmd := t.newCommand(ctx, t.path, arguments...)
 	cmd.ExtraFiles = extraFiles
-	// os.Pipe() returns non-blocking, runtime-poller-managed descriptors. FFmpeg
-	// reads its pipe:N inputs with plain blocking syscalls and treats an EAGAIN
-	// as end-of-file, so a child that reads fd 3 before data is buffered would
-	// abort with "Error opening input: End of file". Detach each extra file from
-	// the poller and restore blocking mode before the child inherits it.
+	// os.Pipe()는 논블로킹이면서 런타임 poller가 관리하는 디스크립터를 돌려준다.
+	// FFmpeg는 pipe:N 입력을 평범한 블로킹 syscall로 읽고 EAGAIN을 파일 끝으로
+	// 취급하므로, 데이터가 버퍼에 차기 전에 fd 3을 읽은 자식은 "Error opening
+	// input: End of file"로 중단된다. 자식이 상속하기 전에 각 extra file을
+	// poller에서 떼어내고 블로킹 모드로 되돌린다.
 	for _, file := range extraFiles {
 		_ = syscall.SetNonblock(int(file.Fd()), false)
 	}
@@ -423,9 +422,9 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 		return cmd.Process.Signal(os.Interrupt)
 	}
 	cmd.WaitDelay = ffmpegShutdownGrace
-	// Acquire the gate before creating any pipes: a start that is cancelled
-	// while queued must not have allocated file descriptors (exec only
-	// closes them via Start's own cleanup, which never runs on this path).
+	// 파이프를 만들기 전에 gate를 먼저 얻는다. 큐에서 대기하다 취소된 시작이
+	// 파일 디스크립터를 이미 할당해 두면 안 되기 때문이다(exec은 Start 자체의
+	// 정리 경로로만 닫는데, 이 경로에서는 그게 실행되지 않는다).
 	if err := t.options.Gate.Acquire(ctx); err != nil {
 		return nil, err
 	}
@@ -446,8 +445,8 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 	}
 	err = cmd.Start()
 	t.options.Gate.Release()
-	// The child has inherited (dup'd) any extra fds; close the parent's copies
-	// so the read end of an audio pipe reaches EOF once the writer closes it.
+	// 자식이 extra fd를 상속(dup)했으므로 부모 쪽 사본을 닫는다. 그래야 쓰는
+	// 쪽이 닫힐 때 오디오 파이프의 읽기 끝이 EOF에 도달한다.
 	for _, file := range extraFiles {
 		_ = file.Close()
 	}
@@ -555,8 +554,8 @@ func readIVFFrame(reader io.Reader) ([]byte, uint64, error) {
 	return frame, binary.LittleEndian.Uint64(header[4:12]), nil
 }
 
-// rawFrameSize returns the byte size of one yuv420p frame, with chroma
-// planes rounded up for odd dimensions the way FFmpeg emits them.
+// rawFrameSize는 yuv420p 프레임 한 장의 바이트 크기를 돌려준다. 홀수 치수는
+// FFmpeg가 내보내는 방식 그대로 크로마 평면을 올림 처리한다.
 func rawFrameSize(width, height uint16) int {
 	w, h := int(width), int(height)
 	return w*h + 2*((w+1)/2)*((h+1)/2)
@@ -573,10 +572,10 @@ func readRawFrame(reader *bufio.Reader, size int) ([]byte, error) {
 	return buffer, nil
 }
 
-// readJPEG extracts one JPEG image from a byte stream by scanning buffered
-// windows for the EOI marker. The 0xFFD9 sequence cannot occur inside
-// entropy-coded data (byte stuffing escapes 0xFF as 0xFF00), so the first
-// occurrence terminates the image.
+// readJPEG는 버퍼링한 구간에서 EOI 마커를 훑어 바이트 스트림에서 JPEG 이미지
+// 하나를 꺼낸다. 0xFFD9 시퀀스는 엔트로피 코딩 데이터 안에 나타날 수 없으므로
+// (바이트 스터핑이 0xFF를 0xFF00으로 이스케이프한다) 처음 나온 것이 이미지의
+// 끝이다.
 func readJPEG(reader *bufio.Reader) ([]byte, error) {
 	start, err := reader.Peek(2)
 	if err != nil {

@@ -56,7 +56,7 @@ func TestLoadAudioEgressDefaultsOff(t *testing.T) {
 	}
 }
 
-// The offset is signed so tuning can shift audio either way.
+// offset은 부호 있는 값이라 튜닝으로 오디오를 어느 쪽으로든 밀 수 있다.
 func TestLoadAudioOffsetAcceptsNegative(t *testing.T) {
 	setRequiredEnv(t)
 

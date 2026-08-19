@@ -279,7 +279,7 @@ func (c Config) Validate() error {
 	case DatabaseMigrationModeAuto,
 		DatabaseMigrationModeVersioned,
 		DatabaseMigrationModeOff:
-		// valid
+		// 유효한 값
 	default:
 		return fmt.Errorf(
 			"DATABASE_MIGRATION_MODE must be one of auto, versioned, off: %q",

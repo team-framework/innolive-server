@@ -508,9 +508,9 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 	return s, nil
 }
 
-// SetAnonymizationEnabled changes AI processing independently from WebRTC and
-// RTMP egress. When disabled, raw frames continue through both outputs while
-// the existing gRPC bidi stream remains open for a fast re-enable.
+// SetAnonymizationEnabled는 WebRTC·RTMP 송출과 독립적으로 AI 처리만 켜고 끈다.
+// 꺼져 있는 동안에는 원본 프레임이 두 출력으로 그대로 나가고, 빠른 재활성화를
+// 위해 기존 gRPC bidi stream은 열어 둔다.
 func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {

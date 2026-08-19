@@ -17,8 +17,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-// badStatusServer echoes frames back but reports a non-success status, standing
-// in for an AI server that cannot process the sent wire format.
+// badStatusServer는 프레임을 되돌려주되 성공이 아닌 status를 보고한다. 보낸
+// 와이어 포맷을 처리하지 못하는 AI 서버를 대신한다.
 type badStatusServer struct {
 	aiv1.UnimplementedAiProcessorServer
 }
@@ -69,10 +69,9 @@ func TestPreflightPassesAgainstSuccessServer(t *testing.T) {
 	}
 }
 
-// TestPreflightRejectsRawWireFormat: this AI server's proto has no
-// width/height/pix_fmt fields, so raw yuv420p cannot be conveyed at all —
-// Preflight must reject it loudly rather than silently sending jpeg data
-// under a raw label.
+// TestPreflightRejectsRawWireFormat: 이 AI 서버의 proto에는 width/height/pix_fmt
+// 필드가 없어서 raw yuv420p는 전달 자체가 불가능하다 — Preflight는 raw 라벨을
+// 달고 jpeg 데이터를 조용히 보내는 대신 시끄럽게 거부해야 한다.
 func TestPreflightRejectsRawWireFormat(t *testing.T) {
 	client := preflightClient(t, echoAIServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

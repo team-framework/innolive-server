@@ -16,13 +16,16 @@ runs:
         else
           echo "already-present=false" >> "${GITHUB_OUTPUT}"
         fi
+        CACHE_KEY="ffmpeg-debs-${RUNNER_OS}-${ImageOS:-unknown}-${ImageVersion:-unknown}-v1"
+        echo "cache-key=${CACHE_KEY}" >> "${GITHUB_OUTPUT}"
+        echo "캐시 키: ${CACHE_KEY}"
 
     - id: cache
       if: steps.probe.outputs.already-present != 'true'
       uses: actions/cache@v4
       with:
         path: /tmp/ffmpeg-debs
-        key: ffmpeg-debs-${{ runner.os }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-v1
+        key: ${{ steps.probe.outputs.cache-key }}
 
     - if: steps.probe.outputs.already-present != 'true'
       shell: bash

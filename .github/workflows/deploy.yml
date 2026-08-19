@@ -21,7 +21,6 @@ on:
 permissions:
   contents: read
 
-# 배포는 직렬화한다 — 진행 중인 배포·롤백 위로 새 배포가 끼어들지 않게 한다.
 concurrency:
   group: deploy-production
   cancel-in-progress: false
@@ -62,8 +61,6 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      # 서버의 forced command가 "deploy <sha> [--force]"만 받는다. 서버 스크립트의
-      # stdout(단계 키워드만 출력하는 계약)이 이 스텝의 로그가 되고, exit code가 배포 결과다.
       - name: Deploy to production
         run: |
           FORCE=""

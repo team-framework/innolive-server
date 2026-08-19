@@ -201,6 +201,59 @@ func TestMeasureFPS(t *testing.T) {
 	}
 }
 
+// TestMeasureFPSSurvivesRampUpGaps는 세션 초반의 프레임 드롭이 프레임률 측정을
+// 무너뜨리지 않는지 확인한다. 측정 구간인 시작 프레임 몇 장은 WebRTC 대역폭
+// 추정이 가장 낮아 인코더가 프레임을 떨구는 때이고, 측정값은 -r/-fps_mode cfr로
+// 세션 내내 고정되므로 낮게 잡히면 이후 정상 프레임을 계속 버린다(#127).
+func TestMeasureFPSSurvivesRampUpGaps(t *testing.T) {
+	// framesWithGaps는 step 간격으로 프레임을 만들되, gaps에 지정된 위치 앞에는
+	// step의 배수만큼 공백을 둔다(인코더가 그만큼 프레임을 떨군 상황).
+	framesWithGaps := func(n int, step uint32, gaps map[int]uint32) []frame {
+		out := make([]frame, 0, n)
+		ts := uint32(90000)
+		for i := 0; i < n; i++ {
+			if extra, ok := gaps[i]; ok {
+				ts += step * extra
+			}
+			out = append(out, frame{timestamp: ts})
+			ts += step
+		}
+		return out
+	}
+	const step30 = uint32(videoClockRate / 30)
+	const step15 = uint32(videoClockRate / 15)
+
+	tests := []struct {
+		name  string
+		input []frame
+		want  int
+	}{
+		{"공백 없음", framesWithGaps(30, step30, nil), 30},
+		{"1초 공백 1회", framesWithGaps(30, step30, map[int]uint32{2: 30}), 30},
+		{"0.5초 공백 2회", framesWithGaps(30, step30, map[int]uint32{2: 15, 5: 15}), 30},
+		{"초기 프레임드롭 3회", framesWithGaps(30, step30, map[int]uint32{1: 45, 3: 30, 6: 20}), 30},
+		{"심한 램프업 4회", framesWithGaps(30, step30, map[int]uint32{1: 90, 2: 60, 4: 45, 8: 30}), 30},
+		// 간격이 고르게 넓은 저프레임 소스는 그대로 잡아야 한다 — 공백과 혼동하면 안 된다.
+		{"진짜 15fps 소스", framesWithGaps(30, step15, nil), 15},
+		{"진짜 15fps 소스에 공백 1회", framesWithGaps(30, step15, map[int]uint32{4: 10}), 15},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := measureFPS(tc.input); got != tc.want {
+				t.Fatalf("measureFPS = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("순서가 뒤바뀐 프레임이 섞여도 흔들리지 않는다", func(t *testing.T) {
+		input := framesWithGaps(30, step30, nil)
+		input[10].timestamp, input[11].timestamp = input[11].timestamp, input[10].timestamp
+		if got := measureFPS(input); got != 30 {
+			t.Fatalf("measureFPS = %d, want 30", got)
+		}
+	})
+}
+
 func TestMaskStreamKey(t *testing.T) {
 	tests := map[string]string{
 		"rtmp://a.rtmp.youtube.com/live2/ss0y-abcd-1234": "rtmp://a.rtmp.youtube.com/live2/****",

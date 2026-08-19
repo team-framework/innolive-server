@@ -10,6 +10,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/ci.yml'
+      - '.github/actions/**'
 
 permissions:
   contents: read

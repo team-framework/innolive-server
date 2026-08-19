@@ -31,13 +31,16 @@ runs:
           echo "::group::ffmpeg 설치 시도 ${attempt}/${ATTEMPTS} (상한 ${ATTEMPT_TIMEOUT}초)"
           started=${SECONDS}
 
-          # update와 install을 한 덩어리로 묶어 시간을 끊는다. 관측된 실패 양상이
-          # "둘 중 어디선가 멈춤"이라 개별로 나눌 실익이 없다.
-          # `|| status=$?`가 없으면 -e가 여기서 스크립트를 죽여 재시도가 일어나지
-          # 않는다(#132). timeout은 시간 초과 시 124를 돌려준다.
+          # timeout이 apt-get의 '직접' 부모여야 한다. 사이에 sudo나 bash -c를
+          # 끼우면 timeout은 그 껍데기만 죽이고 손자인 apt-get이 살아남아
+          # /var/lib/apt/lists/lock을 쥔 채로 남는다 — 그러면 다음 시도가
+          # "Could not get lock"으로 즉시 실패해 재시도가 무의미해진다(#132).
+          # `|| status=$?`가 없으면 -e가 여기서 스크립트를 죽인다.
           status=0
-          timeout "${ATTEMPT_TIMEOUT}" sudo bash -c \
-            'apt-get update -qq && apt-get install -y -qq ffmpeg' || status=$?
+          sudo timeout "${ATTEMPT_TIMEOUT}" apt-get update -qq || status=$?
+          if [ "${status}" -eq 0 ]; then
+            sudo timeout "${ATTEMPT_TIMEOUT}" apt-get install -y -qq ffmpeg || status=$?
+          fi
 
           elapsed=$((SECONDS - started))
           echo "::endgroup::"
@@ -54,8 +57,12 @@ runs:
             echo "::warning::ffmpeg 설치가 ${attempt}회차에서 실패했습니다(exit ${status}, ${elapsed}초)."
           fi
 
-          # 시간 초과로 apt를 끊으면 dpkg가 중간 상태로 남을 수 있다. 정리하지
-          # 않으면 다음 시도가 "dpkg was interrupted"로 바로 실패한다.
+          # 그래도 남은 apt 프로세스가 있으면 락이 풀리지 않는다. 러너는 일회용이라
+          # 남은 것을 정리해도 잃을 게 없다. 이어서 dpkg 중간 상태도 복구한다 —
+          # 정리하지 않으면 다음 시도가 "dpkg was interrupted"로 바로 실패한다.
+          sudo pkill -TERM -x apt-get >/dev/null 2>&1 || true
+          sleep 2
+          sudo pkill -KILL -x apt-get >/dev/null 2>&1 || true
           sudo dpkg --configure -a >/dev/null 2>&1 || true
           sleep $((attempt * 5))
         done

@@ -10,6 +10,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/ci.yml'
+      - '.github/actions/**'
 permissions:
   contents: read
 
@@ -46,8 +47,10 @@ jobs:
           cache: true
 
       # ffmpeg가 없으면 media 계열 테스트가 대부분 skip되므로 설치해서 실제로 돌린다.
+      # 설치 자체는 러너 apt 미러 상태에 좌우되므로 재시도·시간 제한을 액션에 넣었다(#126).
       - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        uses: ./.github/actions/install-ffmpeg
+        timeout-minutes: 10
 
       - name: Build
         run: go build ./...
@@ -75,7 +78,8 @@ jobs:
           cache: true
 
       - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        uses: ./.github/actions/install-ffmpeg
+        timeout-minutes: 10
 
       # TestBypassWebRTCEndToEnd는 병렬 실행에서 간헐 실패하는 알려진 flaky라 분리한다.
       - name: Race test (excluding known flaky)

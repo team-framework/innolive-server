@@ -138,6 +138,7 @@ func main() {
 			context.Background(),
 			string(cfg.AIWireFormat),
 			cfg.AIPreflightTimeout,
+			cfg.DecoderPinLongEdge,
 		)
 		if err != nil {
 			if cfg.AIPreflightRequired {

@@ -1,7 +1,9 @@
 package ai
 
 import (
+	"bytes"
 	"context"
+	"image/jpeg"
 	"io"
 	"net"
 	"strings"
@@ -62,7 +64,7 @@ func TestPreflightPassesAgainstSuccessServer(t *testing.T) {
 	client := preflightClient(t, echoAIServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.Preflight(ctx, "jpeg"); err != nil {
+	if err := client.Preflight(ctx, "jpeg", 0); err != nil {
 		t.Fatalf("Preflight(jpeg) error = %v, want nil", err)
 	}
 }
@@ -75,7 +77,7 @@ func TestPreflightRejectsRawWireFormat(t *testing.T) {
 	client := preflightClient(t, echoAIServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := client.Preflight(ctx, "raw")
+	err := client.Preflight(ctx, "raw", 0)
 	if err == nil {
 		t.Fatal("Preflight(raw) error = nil, want a not-supported error")
 	}
@@ -88,7 +90,7 @@ func TestPreflightFailsOnNonSuccessStatus(t *testing.T) {
 	client := preflightClient(t, badStatusServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := client.Preflight(ctx, "jpeg")
+	err := client.Preflight(ctx, "jpeg", 0)
 	if err == nil {
 		t.Fatal("Preflight() error = nil, want a non-success status failure")
 	}
@@ -99,11 +101,52 @@ func TestPreflightFailsOnNonSuccessStatus(t *testing.T) {
 
 func TestPoolPreflightAggregatesTargets(t *testing.T) {
 	pool := &Pool{clients: []*Client{preflightClient(t, echoAIServer{}), preflightClient(t, badStatusServer{})}}
-	err := pool.Preflight(context.Background(), "jpeg", time.Second)
+	err := pool.Preflight(context.Background(), "jpeg", time.Second, 0)
 	if err == nil {
 		t.Fatal("Pool.Preflight() error = nil, want the bad target reported")
 	}
 	if !strings.Contains(err.Error(), "1/2") {
 		t.Fatalf("Pool.Preflight() error = %v, want it to report 1/2 targets failed", err)
+	}
+}
+
+// TestProbeDimension은 프리플라이트 프로브 크기가 디코더 핀을 따라가는지
+// 본다. 핀이 꺼져 있으면 종전 640을 그대로 써야 한다 — 그렇지 않으면
+// 머지만으로 부팅 동작이 바뀐다.
+func TestProbeDimension(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pinLongEdge int
+		want        int
+	}{
+		{"핀 꺼짐", 0, preflightDim},
+		{"핀 640", 640, 640},
+		{"핀 1280", 1280, 1280},
+		{"핀 1920", 1920, 1920},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := probeDimension(tc.pinLongEdge); got != tc.want {
+				t.Fatalf("probeDimension(%d) = %d, want %d", tc.pinLongEdge, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSyntheticFrameMatchesProbeDimension은 프로브가 실제로 그 크기로
+// 만들어지는지 확인한다. 핀보다 작은 프로브를 보내면 AI가 상한을 낮게 잡고
+// 있어도 부팅이 조용히 통과해, 실방송 첫 프레임부터 전량 거부된다(#122).
+func TestSyntheticFrameMatchesProbeDimension(t *testing.T) {
+	for _, dim := range []int{preflightDim, 1280, 1920} {
+		data, err := syntheticFrame(dim)
+		if err != nil {
+			t.Fatalf("syntheticFrame(%d): %v", dim, err)
+		}
+		config, err := jpeg.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("프로브 디코드 실패: %v", err)
+		}
+		if config.Width != dim || config.Height != dim {
+			t.Fatalf("프로브 = %dx%d, want %dx%d", config.Width, config.Height, dim, dim)
+		}
 	}
 }

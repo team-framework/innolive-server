@@ -778,14 +778,23 @@ func isProgressKey(key string) bool {
 // measureFPS는 버퍼링한 시작 프레임의 RTP timestamp(90kHz clock)로 소스
 // 프레임률을 계산한다. uint32 뺄셈으로 timestamp wrap-around를 처리한다.
 //
-// 전체 구간을 프레임 수로 나누지 않고 인접 프레임 간격의 중앙값을 쓴다.
-// 측정 구간인 시작 프레임 몇 장은 하필 WebRTC 대역폭 추정이 가장 낮아
-// 인코더가 프레임을 떨구는 때다. 구간 전체를 한 표본으로 삼으면 그 공백
-// 몇 개가 분모를 부풀려 프레임률이 실제보다 낮게 나온다. 이 값은
-// -r/-fps_mode cfr로 세션 내내 고정되므로, 한 번 낮게 잡히면 이후 정상
-// 속도로 들어오는 프레임을 계속 버리게 된다(#127에서 프로덕션 실측).
-// 중앙값은 소수의 공백에 흔들리지 않으면서, 간격이 고르게 넓은 진짜
-// 저프레임 소스는 그대로 잡는다.
+// 이 값은 -r/-fps_mode cfr로 세션 내내 고정되므로 한 번 낮게 잡히면 이후
+// 정상 속도로 들어오는 프레임을 계속 버린다. 그런데 측정 구간인 시작
+// 프레임 몇 장은 하필 WebRTC 대역폭 추정이 가장 낮은 때라 낮게 잡히기
+// 쉽다. 그래서 추정 방식을 두 번 좁혔다.
+//
+// 먼저 전체 구간을 프레임 수로 나누는 방식은 공백 몇 개가 분모를 부풀려
+// 무너지므로 인접 간격의 통계로 바꿨다(#127에서 프로덕션 실측). 다음으로
+// 중앙값도 초반 구간 전체가 균일하게 느리면 통째로 포획된다는 것이
+// 드러났다(#134). 측정 창이 egressMeasureFrames장이라 간격은 그보다 하나
+// 적고, 중앙값은 그 절반 지점을 고른다 — 느린 구간이 간격의 절반만
+// 만들면 넘어간다. 느린 구간은 시간당 프레임을 적게 만들므로, 아주
+// 느릴 때보다 어중간하게 느릴 때(10~20fps) 오히려 쉽게 넘어간다.
+//
+// 그래서 하위 백분위를 쓴다. 드롭은 간격을 늘리기만 하고 줄이지 않으므로
+// 가장 짧은 축이 소스의 실제 능력을 가장 정직하게 반영한다. 간격이 고르게
+// 넓은 진짜 저프레임 소스는 종전과 같이 그대로 잡는다 — 그 경우 짧은
+// 축도 함께 넓기 때문이다.
 func measureFPS(frames []frame) int {
 	if len(frames) < 2 {
 		return egressDefaultFPS
@@ -802,8 +811,11 @@ func measureFPS(frames []frame) int {
 		return egressDefaultFPS
 	}
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i] < intervals[j] })
-	median := intervals[len(intervals)/2]
-	fps := int(math.Round(videoClockRate / float64(median)))
+	// 하위 10% 지점. 최솟값을 그대로 쓰지 않는 것은 timestamp 지터나 재정렬로
+	// 한두 칸이 비정상적으로 짧게 찍히는 경우를 견디기 위해서다. 표본이 적으면
+	// 자연히 최솟값으로 수렴한다.
+	shortest := intervals[len(intervals)/10]
+	fps := int(math.Round(videoClockRate / float64(shortest)))
 	if fps < 1 || fps > 120 {
 		return egressDefaultFPS
 	}

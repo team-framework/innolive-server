@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -774,17 +775,35 @@ func isProgressKey(key string) bool {
 	return strings.HasPrefix(key, "stream_")
 }
 
-// measureFPS는 버퍼링한 시작 프레임의 RTP timestamp 범위(90kHz clock)로 소스
+// measureFPS는 버퍼링한 시작 프레임의 RTP timestamp(90kHz clock)로 소스
 // 프레임률을 계산한다. uint32 뺄셈으로 timestamp wrap-around를 처리한다.
+//
+// 전체 구간을 프레임 수로 나누지 않고 인접 프레임 간격의 중앙값을 쓴다.
+// 측정 구간인 시작 프레임 몇 장은 하필 WebRTC 대역폭 추정이 가장 낮아
+// 인코더가 프레임을 떨구는 때다. 구간 전체를 한 표본으로 삼으면 그 공백
+// 몇 개가 분모를 부풀려 프레임률이 실제보다 낮게 나온다. 이 값은
+// -r/-fps_mode cfr로 세션 내내 고정되므로, 한 번 낮게 잡히면 이후 정상
+// 속도로 들어오는 프레임을 계속 버리게 된다(#127에서 프로덕션 실측).
+// 중앙값은 소수의 공백에 흔들리지 않으면서, 간격이 고르게 넓은 진짜
+// 저프레임 소스는 그대로 잡는다.
 func measureFPS(frames []frame) int {
 	if len(frames) < 2 {
 		return egressDefaultFPS
 	}
-	delta := frames[len(frames)-1].timestamp - frames[0].timestamp
-	if delta == 0 {
+	intervals := make([]uint32, 0, len(frames)-1)
+	for i := 1; i < len(frames); i++ {
+		// uint32 뺄셈이 wrap-around를 흡수한다. 같은 timestamp를 가진
+		// 프레임은 간격 표본이 아니므로 제외한다.
+		if delta := frames[i].timestamp - frames[i-1].timestamp; delta > 0 {
+			intervals = append(intervals, delta)
+		}
+	}
+	if len(intervals) == 0 {
 		return egressDefaultFPS
 	}
-	fps := int(math.Round(float64(len(frames)-1) * videoClockRate / float64(delta)))
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i] < intervals[j] })
+	median := intervals[len(intervals)/2]
+	fps := int(math.Round(videoClockRate / float64(median)))
 	if fps < 1 || fps > 120 {
 		return egressDefaultFPS
 	}

@@ -33,6 +33,14 @@ const (
 	WireFormatRaw  WireFormat = "raw"
 )
 
+const (
+	// decoderPinMinLongEdge / decoderPinMaxLongEdge는 DECODER_PIN_LONG_EDGE의
+	// 허용 범위다. 상한은 AI 서버의 MAX_LONG_EDGE(1920)와 같게 두어, 프레임이
+	// 도착하자마자 리사이즈 없이 거부되는 조합을 부팅에서 막는다.
+	decoderPinMinLongEdge = 32
+	decoderPinMaxLongEdge = 1920
+)
+
 type AIFailurePolicy string
 
 const (
@@ -75,6 +83,7 @@ type Config struct {
 	EgressAudioOffset       time.Duration
 	EgressVideoBitrate      string
 	EgressVideoSize         string
+	DecoderPinLongEdge      int
 	RequireSessionAuth      bool
 	LogLevel                string
 	DatabaseURL             string
@@ -117,6 +126,7 @@ func Load() (Config, error) {
 		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
 		EgressVideoBitrate:      strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
 		EgressVideoSize:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
+		DecoderPinLongEdge:      envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
@@ -223,6 +233,17 @@ func (c Config) Validate() error {
 			return fmt.Errorf("EGRESS_VIDEO_SIZE must be an even WIDTHxHEIGHT (e.g. 1280x720): %q", v)
 		}
 	}
+	if v := c.DecoderPinLongEdge; v != 0 {
+		// 상한 1920은 AI 서버의 MAX_LONG_EDGE와 같다. 그보다 큰 프레임은 AI가
+		// 리사이즈 없이 거부하므로 세션이 통째로 블랙아웃된다. 짝수 제한은
+		// yuv420p 때문이고, 하한은 AI의 MIN_FRAME_DIMENSION이다.
+		if v < decoderPinMinLongEdge || v > decoderPinMaxLongEdge || v%2 != 0 {
+			return fmt.Errorf(
+				"DECODER_PIN_LONG_EDGE must be an even value between %d and %d (e.g. 1280): %d",
+				decoderPinMinLongEdge, decoderPinMaxLongEdge, v,
+			)
+		}
+	}
 	if c.AIPreflightTimeout <= 0 {
 		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")
 	}
@@ -258,7 +279,7 @@ func (c Config) Validate() error {
 	case DatabaseMigrationModeAuto,
 		DatabaseMigrationModeVersioned,
 		DatabaseMigrationModeOff:
-		// valid
+		// 유효한 값
 	default:
 		return fmt.Errorf(
 			"DATABASE_MIGRATION_MODE must be one of auto, versioned, off: %q",

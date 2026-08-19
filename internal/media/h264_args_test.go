@@ -49,7 +49,7 @@ func TestH264DecoderUsesLowLatencyArgs(t *testing.T) {
 			arguments := captureFFmpegArgs(t,
 				TranscoderOptions{VideoCodec: VideoCodecH264, WireFormat: wire},
 				func(transcoder *FFmpegTranscoder) error {
-					process, err := transcoder.startH264Decoder(context.Background())
+					process, err := transcoder.startH264Decoder(context.Background(), "")
 					if err == nil {
 						process.close()
 					}

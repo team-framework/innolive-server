@@ -99,6 +99,20 @@ func main() {
 		)
 	}
 
+	// 디코더 핀은 소스 방향을 따라가는데 EGRESS_VIDEO_SIZE는 고정 캔버스라,
+	// 세로 세션이 가로 캔버스에 재수납되면서 다운스케일과 필러박스가 생긴다.
+	// 가로 고정 인입이 필요한 운영도 있으므로 거부하지 않고 경고만 남긴다.
+	if cfg.DecoderPinLongEdge > 0 && cfg.EgressVideoSize != "" {
+		logger.Warn(
+			"DECODER_PIN_LONG_EDGE and EGRESS_VIDEO_SIZE are both set; "+
+				"a portrait session pinned by the decoder will be re-boxed into "+
+				"the fixed egress canvas, losing resolution to letterboxing — "+
+				"unset EGRESS_VIDEO_SIZE unless a fixed ingest canvas is required",
+			"decoder_pin_long_edge", cfg.DecoderPinLongEdge,
+			"egress_video_size", cfg.EgressVideoSize,
+		)
+	}
+
 	resolvedFFmpeg, lookupErr := exec.LookPath(cfg.FFmpegPath)
 	if lookupErr != nil {
 		logger.Error(
@@ -138,6 +152,7 @@ func main() {
 			context.Background(),
 			string(cfg.AIWireFormat),
 			cfg.AIPreflightTimeout,
+			cfg.DecoderPinLongEdge,
 		)
 		if err != nil {
 			if cfg.AIPreflightRequired {
@@ -370,10 +385,10 @@ func main() {
 		logger.Error("create streaming account service failed", "error", err)
 		os.Exit(2)
 	}
-	// INNOLIVE_REQUIRE_SESSION_AUTH=false is the explicit local-development
-	// escape hatch (loud warning above). Extend it to user auth as well so
-	// tokenless bench tooling (pion-load) keeps working against dev servers;
-	// production keeps the default (true) and is unaffected.
+	// INNOLIVE_REQUIRE_SESSION_AUTH=false는 로컬 개발용으로 명시된 탈출구다
+	// (위에서 크게 경고한다). 토큰 없는 벤치 도구(pion-load)가 개발 서버를
+	// 상대로 계속 동작하도록 사용자 인증까지 함께 끈다. 프로덕션은 기본값
+	// (true)을 유지하므로 영향이 없다.
 	requireUser := auth.RequireUser(tokenService, userStatusChecker)
 	authenticateUser := func(ctx context.Context, raw string) (uuid.UUID, error) {
 		return auth.AuthenticateUser(ctx, tokenService, userStatusChecker, raw)

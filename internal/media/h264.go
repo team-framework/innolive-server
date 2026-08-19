@@ -13,9 +13,9 @@ import (
 
 const h264AnnexBStartCode = "\x00\x00\x00\x01"
 
-// decodeH264Stream consumes complete Annex-B H.264 access units assembled
-// from RTP. Parameter-only access units are retained until an IDR frame so
-// FFmpeg always starts with SPS/PPS followed by a decodable picture.
+// decodeH264Stream은 RTP에서 조립된 완전한 Annex-B H.264 액세스 유닛을 소비한다.
+// 파라미터만 들어 있는 액세스 유닛은 IDR 프레임이 올 때까지 들고 있어서,
+// FFmpeg가 항상 SPS/PPS 다음에 디코드 가능한 픽처로 시작하게 한다.
 func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
 	bootstrap := h264Bootstrap{}
 	var first frame
@@ -33,16 +33,22 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 		break
 	}
 
-	process, err := t.startH264Decoder(ctx)
+	outputWidth, outputHeight, filter, err := t.decoderOutput(width, height)
+	if err != nil {
+		return err
+	}
+	process, err := t.startH264Decoder(ctx, filter)
 	if err != nil {
 		return err
 	}
 	defer process.close()
 	// 디코더 ffmpeg는 출력 스트림 규격을 첫 프레임에 고정하고, 이후 입력
-	// 해상도가 올라가도 그 값으로 되돌린다. 즉 이 한 줄이 세션 화질의
-	// 상한을 기록한다(#122).
+	// 해상도가 올라가도 그 값으로 되돌린다. 핀이 꺼져 있으면 이 한 줄이
+	// 세션 화질의 상한을 기록하고, 켜져 있으면 입력과 무관하게 유지되는
+	// 규격을 기록한다(#122).
 	t.logger.Info("H.264 decoder output locked",
-		"width", width, "height", height, "wire_format", t.options.WireFormat)
+		"width", outputWidth, "height", outputHeight,
+		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
@@ -53,7 +59,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 		// 이 고루틴 안에서만 읽고 쓴다(공유 상태가 아니라 레이스가 없다).
 		observedWidth, observedHeight := width, height
 		write := func(item frame) error {
-			item.width, item.height = width, height
+			item.width, item.height = outputWidth, outputHeight
 			if _, err := process.stdin.Write(item.data); err != nil {
 				return err
 			}
@@ -91,7 +97,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 					t.logger.Info("H.264 input resolution changed",
 						"from_width", observedWidth, "from_height", observedHeight,
 						"to_width", inputWidth, "to_height", inputHeight,
-						"decoder_locked_width", width, "decoder_locked_height", height)
+						"decoder_locked_width", outputWidth, "decoder_locked_height", outputHeight)
 					observedWidth, observedHeight = inputWidth, inputHeight
 				}
 				item.data = data
@@ -103,7 +109,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 		}
 	}()
 
-	rawSize := rawFrameSize(width, height)
+	rawSize := rawFrameSize(outputWidth, outputHeight)
 	for item := range metadata {
 		if t.options.WireFormat == config.WireFormatRaw {
 			item.data, err = readRawFrame(process.stdout, rawSize)
@@ -205,11 +211,15 @@ func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan fr
 // 이 인자들이 없으면 ffmpeg가 기본 probe 예산(5MB / 5초)을 채울 때까지
 // 출력을 시작하지 않아 스폰부터 첫 프레임까지 1.7초가 걸린다(#130 실측).
 // codec과 컨테이너를 이미 강제하므로 probe 자체가 필요 없다.
-func (t *FFmpegTranscoder) startH264Decoder(ctx context.Context) (*ffmpegProcess, error) {
+// filter가 비어 있지 않으면 출력 규격을 그 체인이 정한다(#122의 디코더 핀).
+func (t *FFmpegTranscoder) startH264Decoder(ctx context.Context, filter string) (*ffmpegProcess, error) {
 	arguments := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0", "-threads", "1",
 		"-f", "h264", "-blocksize", "1024", "-i", "pipe:0",
+	}
+	if filter != "" {
+		arguments = append(arguments, "-vf", filter)
 	}
 	if t.options.WireFormat == config.WireFormatRaw {
 		arguments = append(arguments, "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-blocksize", "1024")
@@ -379,9 +389,9 @@ func h264AUDStarts(data []byte) []int {
 	}
 }
 
-// h264SPSDimensions reads coded display dimensions from an SPS NAL unit. It
-// only needs the sequence-parameter fields up to frame cropping; slice data is
-// never parsed here.
+// h264SPSDimensions는 SPS NAL 유닛에서 코딩된 표시 치수를 읽는다. frame
+// cropping까지의 시퀀스 파라미터 필드만 있으면 되고, slice 데이터는 여기서
+// 파싱하지 않는다.
 func h264SPSDimensions(nalu []byte) (uint16, uint16, error) {
 	if len(nalu) < 4 || nalu[0]&0x1f != 7 {
 		return 0, 0, errors.New("invalid H.264 SPS")

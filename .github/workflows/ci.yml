@@ -27,7 +27,6 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          # CI 러너 안에서만 쓰는 더미 자격증명 — 실제 환경과 무관한 값이어야 한다.
           POSTGRES_USER: ci_user
           POSTGRES_PASSWORD: ci_only_pw
           POSTGRES_DB: innolive_ci
@@ -46,8 +45,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # ffmpeg가 없으면 media 계열 테스트가 대부분 skip되므로 설치해서 실제로 돌린다.
-      # 설치 자체는 러너 apt 미러 상태에 좌우되므로 재시도·시간 제한을 액션에 넣었다(#126).
       - name: Install ffmpeg
         uses: ./.github/actions/install-ffmpeg
         timeout-minutes: 10
@@ -63,8 +60,6 @@ jobs:
           TEST_DATABASE_URL: postgres://ci_user:ci_only_pw@localhost:5432/innolive_ci?sslmode=disable
         run: go test ./...
 
-  # 동시성 코드(media/session) 회귀를 잡는 race 검사. 필수 검사에는 넣지 않는 참고용 잡 —
-  # 안정성이 확인되면 required 승격을 검토한다.
   race-test:
     name: race-test
     runs-on: ubuntu-latest
@@ -81,11 +76,9 @@ jobs:
         uses: ./.github/actions/install-ffmpeg
         timeout-minutes: 10
 
-      # TestBypassWebRTCEndToEnd는 병렬 실행에서 간헐 실패하는 알려진 flaky라 분리한다.
       - name: Race test (excluding known flaky)
         run: go test -race -skip 'TestBypassWebRTCEndToEnd' ./...
 
-      # flaky 테스트는 격리(-p 1) + 최대 3회 재시도로 따로 검증한다.
       - name: Race test (flaky, isolated with retries)
         run: |
           for attempt in 1 2 3; do

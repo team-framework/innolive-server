@@ -1,57 +1,97 @@
 name: Install ffmpeg
 description: >-
-  media 계열 테스트가 실제로 돌도록 ffmpeg를 설치한다. 러너의 apt 미러가
-  느려지면 설치가 멈춘 것처럼 길어져 테스트에 쓸 시간 예산을 잠식하므로,
-  시도마다 시간을 끊고 재시도한다.
+  media 계열 테스트가 실제로 돌도록 ffmpeg를 설치한다.
+  받아둔 .deb을 캐시해 재실행에서는 네트워크를 타지 않고,
+  캐시가 없을 때만 apt로 내려받되 시도마다 시간을 끊고 재시도한다.
 
 runs:
   using: composite
   steps:
-    - name: Install ffmpeg (bounded retry)
+    - id: probe
       shell: bash
       run: |
-        # -e는 쓰지 않는다. 실패한 시도에서 스크립트가 멈추면 재시도가 무의미하다.
+        if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+          echo "already-present=true" >> "${GITHUB_OUTPUT}"
+          echo "ffmpeg가 이미 있어 설치를 건너뜁니다 — $(ffmpeg -version | head -1)"
+        else
+          echo "already-present=false" >> "${GITHUB_OUTPUT}"
+        fi
+        CACHE_KEY="ffmpeg-debs-${RUNNER_OS}-${ImageOS:-unknown}-${ImageVersion:-unknown}-v1"
+        echo "cache-key=${CACHE_KEY}" >> "${GITHUB_OUTPUT}"
+        echo "캐시 키: ${CACHE_KEY}"
+
+    - id: cache
+      if: steps.probe.outputs.already-present != 'true'
+      uses: actions/cache@v4
+      with:
+        path: /tmp/ffmpeg-debs
+        key: ${{ steps.probe.outputs.cache-key }}
+
+    - if: steps.probe.outputs.already-present != 'true'
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
         set -uo pipefail
 
-        # 시도 1회 상한. 정상 설치는 1~2분대라 3분이면 넉넉하고, 미러가 멈춘
-        # 경우는 여기서 끊어 다음 시도로 넘긴다(다른 미러가 잡힐 수 있다).
+        DEB_DIR=/tmp/ffmpeg-debs
         ATTEMPT_TIMEOUT=180
         ATTEMPTS=3
 
-        # 러너 이미지에 이미 있으면 받지 않는다. 현재 ubuntu-latest에는 없지만
-        # 나중에 포함되면 이 스텝이 그대로 몇 초로 줄어든다.
-        if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
-          echo "ffmpeg가 이미 있어 설치를 건너뜁니다 — $(ffmpeg -version | head -1)"
-          exit 0
+        install_from_cache() {
+          ls "${DEB_DIR}"/*.deb >/dev/null 2>&1 || return 1
+          sudo dpkg --install --skip-same-version "${DEB_DIR}"/*.deb >/dev/null 2>&1 || return 1
+          command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1
+        }
+
+        if [ "${CACHE_HIT:-}" = "true" ]; then
+          echo "::group::캐시된 .deb으로 설치"
+          started=${SECONDS}
+          if install_from_cache; then
+            echo "::endgroup::"
+            echo "ffmpeg 설치 완료 — 캐시, $((SECONDS - started))초, 네트워크 미사용"
+            ffmpeg -version | head -1
+            exit 0
+          fi
+          echo "::endgroup::"
+          echo "::warning::캐시된 .deb으로 설치하지 못했습니다. apt로 진행합니다."
+          sudo apt-get --fix-broken install -y -qq >/dev/null 2>&1 || true
         fi
+
+        sudo rm -rf "${DEB_DIR}"
+        sudo mkdir -p "${DEB_DIR}/partial"
 
         for attempt in $(seq 1 "${ATTEMPTS}"); do
           echo "::group::ffmpeg 설치 시도 ${attempt}/${ATTEMPTS} (상한 ${ATTEMPT_TIMEOUT}초)"
           started=${SECONDS}
 
-          # update와 install을 한 덩어리로 묶어 시간을 끊는다. 관측된 실패 양상이
-          # "둘 중 어디선가 멈춤"이라 개별로 나눌 실익이 없다.
-          timeout "${ATTEMPT_TIMEOUT}" sudo bash -c \
-            'apt-get update -qq && apt-get install -y -qq ffmpeg'
-          status=$?
+          status=0
+          sudo timeout "${ATTEMPT_TIMEOUT}" apt-get update -qq || status=$?
+          if [ "${status}" -eq 0 ]; then
+            sudo timeout "${ATTEMPT_TIMEOUT}" apt-get install -y -qq \
+              -o Dir::Cache::archives="${DEB_DIR}" ffmpeg || status=$?
+          fi
 
           elapsed=$((SECONDS - started))
           echo "::endgroup::"
 
           if [ "${status}" -eq 0 ]; then
-            echo "ffmpeg 설치 완료 — ${attempt}회차, ${elapsed}초"
+            sudo rm -rf "${DEB_DIR}/partial"
+            sudo chown -R "$(id -u):$(id -g)" "${DEB_DIR}"
+            echo "ffmpeg 설치 완료 — ${attempt}회차, ${elapsed}초, .deb $(ls "${DEB_DIR}"/*.deb 2>/dev/null | wc -l | tr -d ' ')개 캐시 예정"
             ffmpeg -version | head -1
             exit 0
           fi
 
           if [ "${status}" -eq 124 ]; then
-            echo "::warning::ffmpeg 설치가 ${attempt}회차에서 ${ATTEMPT_TIMEOUT}초를 넘겨 중단됐습니다(러너 apt 미러 지연으로 추정)."
+            echo "::warning::ffmpeg 설치가 ${attempt}회차에서 ${ATTEMPT_TIMEOUT}초를 넘겨 중단됐습니다."
           else
             echo "::warning::ffmpeg 설치가 ${attempt}회차에서 실패했습니다(exit ${status}, ${elapsed}초)."
           fi
 
-          # 시간 초과로 apt를 끊으면 dpkg가 중간 상태로 남을 수 있다. 정리하지
-          # 않으면 다음 시도가 "dpkg was interrupted"로 바로 실패한다.
+          sudo pkill -TERM -x apt-get >/dev/null 2>&1 || true
+          sleep 2
+          sudo pkill -KILL -x apt-get >/dev/null 2>&1 || true
           sudo dpkg --configure -a >/dev/null 2>&1 || true
           sleep $((attempt * 5))
         done

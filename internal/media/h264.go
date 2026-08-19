@@ -201,12 +201,20 @@ func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan fr
 	return nil
 }
 
+// startH264Decoder는 VP8 경로의 startDecoder와 동일한 저지연 인자를 쓴다.
+// 이 인자들이 없으면 ffmpeg가 기본 probe 예산(5MB / 5초)을 채울 때까지
+// 출력을 시작하지 않아 스폰부터 첫 프레임까지 1.7초가 걸린다(#130 실측).
+// codec과 컨테이너를 이미 강제하므로 probe 자체가 필요 없다.
 func (t *FFmpegTranscoder) startH264Decoder(ctx context.Context) (*ffmpegProcess, error) {
-	arguments := []string{"-hide_banner", "-loglevel", "error", "-f", "h264", "-i", "pipe:0"}
+	arguments := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0", "-threads", "1",
+		"-f", "h264", "-blocksize", "1024", "-i", "pipe:0",
+	}
 	if t.options.WireFormat == config.WireFormatRaw {
-		arguments = append(arguments, "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p")
+		arguments = append(arguments, "-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-blocksize", "1024")
 	} else {
-		arguments = append(arguments, "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p")
+		arguments = append(arguments, "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p", "-blocksize", "1024")
 	}
 	arguments = append(arguments, "-flush_packets", "1", "pipe:1")
 	process, err := t.startFFmpeg(ctx, "decoder", nil, nil, arguments...)
@@ -216,12 +224,17 @@ func (t *FFmpegTranscoder) startH264Decoder(ctx context.Context) (*ffmpegProcess
 	return process, nil
 }
 
+// startH264Encoder도 VP8 경로의 startEncoder와 인자를 맞춘다(#130).
+// 스레드는 VP8과 마찬가지로 자원 거버너(EncoderThreads)를 따른다.
 func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height uint16) (*ffmpegProcess, error) {
-	arguments := []string{"-hide_banner", "-loglevel", "error"}
+	arguments := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0",
+	}
 	if t.options.WireFormat == config.WireFormatRaw {
-		arguments = append(arguments, "-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", fmt.Sprintf("%dx%d", width, height), "-framerate", "30", "-i", "pipe:0")
+		arguments = append(arguments, "-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", fmt.Sprintf("%dx%d", width, height), "-framerate", "30", "-blocksize", "1024", "-i", "pipe:0")
 	} else {
-		arguments = append(arguments, "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", "30", "-i", "pipe:0")
+		arguments = append(arguments, "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", "30", "-blocksize", "1024", "-i", "pipe:0")
 	}
 	if t.options.EncoderThreads > 0 {
 		arguments = append(arguments, "-threads", strconv.Itoa(t.options.EncoderThreads))

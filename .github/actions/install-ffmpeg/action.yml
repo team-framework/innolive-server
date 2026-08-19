@@ -10,7 +10,9 @@ runs:
     - name: Install ffmpeg (bounded retry)
       shell: bash
       run: |
-        # -e는 쓰지 않는다. 실패한 시도에서 스크립트가 멈추면 재시도가 무의미하다.
+        # composite action의 `shell: bash`는 `--noprofile --norc -e -o pipefail`로
+        # 실행된다. 여기서 -e를 전역으로 끄면 스크립트의 다른 실패가 조용히
+        # 지나가므로, 실패를 허용해야 하는 호출만 아래에서 `|| status=$?`로 받는다.
         set -uo pipefail
 
         # 시도 1회 상한. 정상 설치는 1~2분대라 3분이면 넉넉하고, 미러가 멈춘
@@ -31,9 +33,11 @@ runs:
 
           # update와 install을 한 덩어리로 묶어 시간을 끊는다. 관측된 실패 양상이
           # "둘 중 어디선가 멈춤"이라 개별로 나눌 실익이 없다.
+          # `|| status=$?`가 없으면 -e가 여기서 스크립트를 죽여 재시도가 일어나지
+          # 않는다(#132). timeout은 시간 초과 시 124를 돌려준다.
+          status=0
           timeout "${ATTEMPT_TIMEOUT}" sudo bash -c \
-            'apt-get update -qq && apt-get install -y -qq ffmpeg'
-          status=$?
+            'apt-get update -qq && apt-get install -y -qq ffmpeg' || status=$?
 
           elapsed=$((SECONDS - started))
           echo "::endgroup::"

@@ -99,6 +99,20 @@ func main() {
 		)
 	}
 
+	// 디코더 핀은 소스 방향을 따라가는데 EGRESS_VIDEO_SIZE는 고정 캔버스라,
+	// 세로 세션이 가로 캔버스에 재수납되면서 다운스케일과 필러박스가 생긴다.
+	// 가로 고정 인입이 필요한 운영도 있으므로 거부하지 않고 경고만 남긴다.
+	if cfg.DecoderPinLongEdge > 0 && cfg.EgressVideoSize != "" {
+		logger.Warn(
+			"DECODER_PIN_LONG_EDGE and EGRESS_VIDEO_SIZE are both set; "+
+				"a portrait session pinned by the decoder will be re-boxed into "+
+				"the fixed egress canvas, losing resolution to letterboxing — "+
+				"unset EGRESS_VIDEO_SIZE unless a fixed ingest canvas is required",
+			"decoder_pin_long_edge", cfg.DecoderPinLongEdge,
+			"egress_video_size", cfg.EgressVideoSize,
+		)
+	}
+
 	resolvedFFmpeg, lookupErr := exec.LookPath(cfg.FFmpegPath)
 	if lookupErr != nil {
 		logger.Error(

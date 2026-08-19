@@ -138,6 +138,28 @@ func TestValidateEgressVideoSize(t *testing.T) {
 	}
 }
 
+// TestValidateDecoderPinLongEdge는 디코더 핀의 허용 범위를 고정한다. 상한
+// 1920은 AI 서버의 MAX_LONG_EDGE와 같아서, 넘기면 프레임이 도착하자마자
+// 리사이즈 없이 거부돼 세션이 통째로 블랙아웃된다(#122).
+func TestValidateDecoderPinLongEdge(t *testing.T) {
+	// 0은 미설정 = 기존 동작 유지다.
+	for _, valid := range []int{0, 32, 640, 1280, 1920} {
+		cfg := validConfig()
+		cfg.DecoderPinLongEdge = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with DecoderPinLongEdge=%d error = %v", valid, err)
+		}
+	}
+	// 홀수(yuv420p), 하한 미만(AI가 거부), 상한 초과(AI가 거부), 음수.
+	for _, invalid := range []int{1, 30, 31, 1281, 1922, 3840, -1280} {
+		cfg := validConfig()
+		cfg.DecoderPinLongEdge = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected DecoderPinLongEdge=%d to be rejected", invalid)
+		}
+	}
+}
+
 func TestLoadAcceptsPythonServerDelayAlias(t *testing.T) {
 	setRequiredEnv(t)
 

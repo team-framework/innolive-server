@@ -120,9 +120,9 @@ func TestPutBroadcastRejectsInvalidSettings(t *testing.T) {
 	}
 }
 
-// TestStartStreamUsesStoredBroadcastSettings: 저장된 설정이 준비 옵션으로
-// 넘어가고, 요청 바디에 실린 값만 이번 방송에 한해 덮어써야 한다.
-func TestStartStreamUsesStoredBroadcastSettings(t *testing.T) {
+// TestPrepareStreamUsesStoredBroadcastSettingsOnly: 저장된 설정이 준비 옵션의
+// 단일 출처다 — 요청 바디에 실린 방송 속성은 무시돼야 한다(#142).
+func TestPrepareStreamUsesStoredBroadcastSettingsOnly(t *testing.T) {
 	provider := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{
 		Provider:  auth.StreamingProviderYouTube,
 		IngestURL: "rtmps://a.rtmps.youtube.com/live2/secret",
@@ -138,46 +138,66 @@ func TestStartStreamUsesStoredBroadcastSettings(t *testing.T) {
 		t.Fatalf("put broadcast status = %d (payload %v)", response.StatusCode, payload)
 	}
 
-	// 바디를 비운 start: 저장값이 그대로 쓰여야 한다(트랙이 없어 409로 끝나지만
-	// Prepare는 이미 호출된 뒤다).
-	startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	// 준비 요청 바디에는 방송 속성이 없다 — 옛 오버라이드 필드를 보내면
+	// 조용히 무시하지 않고 400으로 거절한다.
+	if response, _ := prepareStream(t, server.URL, created.SessionID, ownerToken,
+		`{"title":"이번만","privacy":"public","made_for_kids":false}`); response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for removed override fields", response.StatusCode)
+	}
+	if provider.prepareCalls != 0 {
+		t.Fatalf("prepare calls = %d, want no platform call", provider.prepareCalls)
+	}
+
+	// 저장값이 그대로 준비 옵션이 된다(트랙이 없어 409로 끝나지만 Prepare는
+	// 이미 호출된 뒤다).
+	prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	options := provider.lastOptions
 	if options.Title != "저장 제목" || options.Description != "저장 설명" || options.Privacy != "private" ||
 		options.CategoryID != "22" || options.MadeForKids == nil || !*options.MadeForKids {
-		t.Fatalf("options = %+v, want stored settings", options)
+		t.Fatalf("options = %+v, want stored settings only", options)
 	}
 	if options.Thumbnail == nil || string(options.Thumbnail.Data) != "png-bytes" || options.Thumbnail.MIME != "image/png" {
 		t.Fatalf("thumbnail option = %+v", options.Thumbnail)
 	}
-
-	// 바디 오버라이드.
-	startStream(t, server.URL, created.SessionID, ownerToken, `{"title":"이번만","privacy":"public","made_for_kids":false}`)
-	options = provider.lastOptions
-	if options.Title != "이번만" || options.Privacy != "public" || *options.MadeForKids {
-		t.Fatalf("options = %+v, want body override", options)
-	}
-	if options.Description != "저장 설명" || options.CategoryID != "22" {
-		t.Fatalf("options = %+v, want stored values kept for unset fields", options)
-	}
 }
 
-// TestStartStreamRequiresMadeForKidsWithoutStoredSettings: 저장값에도 바디에도
-// 아동용 여부가 없으면 플랫폼 호출 전에 400이어야 한다.
-func TestStartStreamMadeForKidsCanComeFromStoredSettings(t *testing.T) {
+// TestPrepareStreamMadeForKidsComesFromStoredSettings: 저장값에 아동용 여부가
+// 없으면 플랫폼 호출 전에 400이고, 저장하면 통과해야 한다.
+func TestPrepareStreamMadeForKidsComesFromStoredSettings(t *testing.T) {
 	provider := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
 	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: provider,
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 
-	response, _ := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	response, _ := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if response.StatusCode != http.StatusBadRequest || provider.prepareCalls != 0 {
 		t.Fatalf("status = %d, prepare calls = %d, want 400 without platform call", response.StatusCode, provider.prepareCalls)
 	}
 
 	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":true}`)
-	response, _ = startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	response, _ = prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if response.StatusCode != http.StatusConflict || provider.prepareCalls != 1 {
 		t.Fatalf("status = %d, prepare calls = %d, want the stored value to satisfy the requirement", response.StatusCode, provider.prepareCalls)
+	}
+}
+
+// TestGoLiveWithoutPrepare: 준비되지 않은 세션의 라이브 전환은 409다.
+func TestGoLiveWithoutPrepare(t *testing.T) {
+	provider := &stubStreamingProvider{}
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	response, payload := goLive(t, server.URL, created.SessionID, ownerToken)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (payload %v)", response.StatusCode, payload)
+	}
+	if streamErrorCode(payload) != "broadcast_not_prepared" {
+		t.Fatalf("error code = %q, want broadcast_not_prepared", streamErrorCode(payload))
+	}
+	if provider.goLiveCalls != 0 {
+		t.Fatalf("go live calls = %d, want no platform call", provider.goLiveCalls)
 	}
 }

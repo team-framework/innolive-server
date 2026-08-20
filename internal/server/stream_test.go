@@ -26,6 +26,11 @@ type stubStreamingProvider struct {
 	prepareErr   error
 	prepareCalls int
 	lastOptions  streaming.PrepareOptions
+	goLiveErr    error
+	goLiveCalls  int
+	lastGoLive   streaming.PreparedBroadcast
+	stopCalls    int
+	lastStopped  streaming.PreparedBroadcast
 }
 
 func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
@@ -34,7 +39,15 @@ func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options 
 	return s.prepared, s.prepareErr
 }
 
-func (s *stubStreamingProvider) Stop(context.Context, uuid.UUID, streaming.PreparedBroadcast) error {
+func (s *stubStreamingProvider) GoLive(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	s.goLiveCalls++
+	s.lastGoLive = prepared
+	return s.goLiveErr
+}
+
+func (s *stubStreamingProvider) Stop(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	s.stopCalls++
+	s.lastStopped = prepared
 	return nil
 }
 
@@ -68,9 +81,19 @@ func newStreamTestApplication(t *testing.T, providers map[auth.StreamingProvider
 	return server
 }
 
-func startStream(t *testing.T, baseURL, sessionID, ownerToken, body string) (*http.Response, map[string]any) {
+func prepareStream(t *testing.T, baseURL, sessionID, ownerToken, body string) (*http.Response, map[string]any) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, baseURL+"/sessions/"+sessionID+"/stream/start", bytes.NewBufferString(body))
+	return postStream(t, baseURL, sessionID, ownerToken, "prepare", body)
+}
+
+func goLive(t *testing.T, baseURL, sessionID, ownerToken string) (*http.Response, map[string]any) {
+	t.Helper()
+	return postStream(t, baseURL, sessionID, ownerToken, "golive", "")
+}
+
+func postStream(t *testing.T, baseURL, sessionID, ownerToken, action, body string) (*http.Response, map[string]any) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/sessions/"+sessionID+"/stream/"+action, bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,13 +115,14 @@ func streamErrorCode(payload map[string]any) string {
 	return code
 }
 
-// TestStartStreamNotConfigured: 플랫폼 송출이 조립되지 않은 배포(자격증명
+// TestPrepareStreamNotConfigured: 플랫폼 송출이 조립되지 않은 배포(자격증명
 // 미설정·벤치)에서는 종전 계약(501)이 유지돼야 한다.
-func TestStartStreamNotConfigured(t *testing.T) {
+func TestPrepareStreamNotConfigured(t *testing.T) {
 	server := newStreamTestApplication(t, nil)
 	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if response.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", response.StatusCode)
 	}
@@ -107,7 +131,7 @@ func TestStartStreamNotConfigured(t *testing.T) {
 	}
 }
 
-func TestStartStreamMapsProviderErrors(t *testing.T) {
+func TestPrepareStreamMapsProviderErrors(t *testing.T) {
 	cases := []struct {
 		name       string
 		provider   *stubStreamingProvider
@@ -140,7 +164,8 @@ func TestStartStreamMapsProviderErrors(t *testing.T) {
 				auth.StreamingProviderYouTube: tc.provider,
 			})
 			created, ownerToken := createTestSession(t, server.URL, nil)
-			response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+			putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+			response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 			if response.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (payload %v)", response.StatusCode, tc.wantStatus, payload)
 			}
@@ -157,34 +182,46 @@ func TestStartStreamMapsProviderErrors(t *testing.T) {
 	}
 }
 
-// TestStartStreamRequiresTrackAfterPrepare: Prepare가 성공해도 비디오 트랙이
-// 없으면 종전 409 계약을 유지해야 한다.
-func TestStartStreamRequiresTrackAfterPrepare(t *testing.T) {
+// TestPrepareStreamRequiresTrackAfterPrepare: Prepare가 성공해도 비디오 트랙이
+// 없으면 종전 409 계약을 유지해야 한다. 이때 만들어진 방송은 아무도 쓸 수
+// 없으므로 플랫폼에서 지워야 한다(autoStart를 껐으므로 자동 정리가 없다).
+func TestPrepareStreamRequiresTrackAfterPrepare(t *testing.T) {
 	provider := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{
-		Provider:  auth.StreamingProviderYouTube,
-		IngestURL: "rtmps://a.rtmps.youtube.com/live2/secret",
+		Provider:    auth.StreamingProviderYouTube,
+		IngestURL:   "rtmps://a.rtmps.youtube.com/live2/secret",
+		BroadcastID: "bid-1",
 	}}
 	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: provider,
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (payload %v)", response.StatusCode, payload)
 	}
 	if streamErrorCode(payload) != "conflict" {
 		t.Fatalf("error code = %q, want conflict", streamErrorCode(payload))
 	}
+	if provider.stopCalls != 1 || provider.lastStopped.BroadcastID != "bid-1" {
+		t.Fatalf("stop calls = %d, stopped = %+v, want the unusable broadcast discarded", provider.stopCalls, provider.lastStopped)
+	}
+	// 준비가 되돌아갔으므로 세션은 여전히 idle이어야 한다.
+	stream, _ := getSessionPayload(t, server.URL, created.SessionID, ownerToken)["stream"].(map[string]any)
+	if stream["broadcast_phase"] != string(session.BroadcastPhaseIdle) {
+		t.Fatalf("broadcast_phase = %v, want idle", stream["broadcast_phase"])
+	}
 }
 
-func TestStartStreamRejectsUnknownProvider(t *testing.T) {
+func TestPrepareStreamRejectsUnknownProvider(t *testing.T) {
 	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: &stubStreamingProvider{},
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"provider":"soop","made_for_kids":false}`)
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{"provider":"soop"}`)
 	if response.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501 for unregistered provider", response.StatusCode)
 	}
@@ -193,16 +230,16 @@ func TestStartStreamRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
-// TestStartStreamRequiresMadeForKids: 시청자층 신고는 사용자가 직접 골라야
-// 하므로, 미선택 요청은 프로바이더 호출 전에 400으로 거절해야 한다.
-func TestStartStreamRequiresMadeForKids(t *testing.T) {
+// TestPrepareStreamRequiresMadeForKids: 시청자층 신고는 사용자가 직접 골라야
+// 하므로, 미선택 상태의 준비 요청은 프로바이더 호출 전에 400으로 거절해야 한다.
+func TestPrepareStreamRequiresMadeForKids(t *testing.T) {
 	provider := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
 	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: provider,
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (payload %v)", response.StatusCode, payload)
 	}

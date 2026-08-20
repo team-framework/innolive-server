@@ -22,11 +22,13 @@ import (
 )
 
 type stubStreamingProvider struct {
-	prepared   streaming.PreparedBroadcast
-	prepareErr error
+	prepared     streaming.PreparedBroadcast
+	prepareErr   error
+	prepareCalls int
 }
 
 func (s *stubStreamingProvider) Prepare(context.Context, uuid.UUID, streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
+	s.prepareCalls++
 	return s.prepared, s.prepareErr
 }
 
@@ -94,7 +96,7 @@ func TestStartStreamNotConfigured(t *testing.T) {
 	server := newStreamTestApplication(t, nil)
 	created, ownerToken := createTestSession(t, server.URL, nil)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 	if response.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501", response.StatusCode)
 	}
@@ -136,7 +138,7 @@ func TestStartStreamMapsProviderErrors(t *testing.T) {
 				auth.StreamingProviderYouTube: tc.provider,
 			})
 			created, ownerToken := createTestSession(t, server.URL, nil)
-			response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+			response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 			if response.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (payload %v)", response.StatusCode, tc.wantStatus, payload)
 			}
@@ -165,7 +167,7 @@ func TestStartStreamRequiresTrackAfterPrepare(t *testing.T) {
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (payload %v)", response.StatusCode, payload)
 	}
@@ -180,12 +182,30 @@ func TestStartStreamRejectsUnknownProvider(t *testing.T) {
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 
-	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"provider":"soop"}`)
+	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{"provider":"soop","made_for_kids":false}`)
 	if response.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501 for unregistered provider", response.StatusCode)
 	}
 	if streamErrorCode(payload) != "not_supported" {
 		t.Fatalf("error code = %q", streamErrorCode(payload))
+	}
+}
+
+// TestStartStreamRequiresMadeForKids: 시청자층 신고는 사용자가 직접 골라야
+// 하므로, 미선택 요청은 프로바이더 호출 전에 400으로 거절해야 한다.
+func TestStartStreamRequiresMadeForKids(t *testing.T) {
+	provider := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	response, payload := startStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (payload %v)", response.StatusCode, payload)
+	}
+	if provider.prepareCalls != 0 {
+		t.Fatalf("prepare calls = %d, want 0", provider.prepareCalls)
 	}
 }
 

@@ -18,10 +18,10 @@ import (
 
 const (
 	youtubeAPIBase = "https://www.googleapis.com/youtube/v3"
-	// 기본 방송 속성. Privacy 기본값 public은 "방송 시작을 명시적으로 요청한
-	// 사용자의 기대치"를 따른 것으로, start 요청 옵션으로 바꿀 수 있다.
+	// 기본 방송 속성. Privacy 기본값은 실수로 시작된 방송이 곧바로 전체공개로
+	// 나가지 않도록 unlisted다. 전체공개는 start 요청에서 명시해야 한다.
 	defaultBroadcastTitle   = "InnoLive 방송"
-	defaultBroadcastPrivacy = "public"
+	defaultBroadcastPrivacy = "unlisted"
 )
 
 var (
@@ -29,6 +29,9 @@ var (
 	// 이거나 차단된 상태. 실측(2026-08-09 403 → 활성화 후 08-10 200)으로
 	// reason=="livePermissionBlocked"가 이 상태의 시그니처임을 확인했다.
 	ErrLiveStreamingBlocked = errors.New("the YouTube channel is not enabled for live streaming")
+	// ErrMadeForKidsRequired: 시청자층(아동용 여부)은 YouTube가 요구하는
+	// 법적 신고 항목이라 서버가 대신 추정하지 않는다 — 미선택이면 거절한다.
+	ErrMadeForKidsRequired = errors.New("made_for_kids must be specified by the user")
 	// LiveStreamingHelpURL은 위 에러 응답의 extendedHelp 실물값 — 사용자
 	// 안내에 그대로 쓴다.
 	LiveStreamingHelpURL = "https://support.google.com/youtube/answer/2853834"
@@ -70,6 +73,9 @@ func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountS
 // autoStart/autoStop broadcast를 만들어 스트림에 바인딩한 뒤 ingest URL을
 // 돌려준다.
 func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options PrepareOptions) (PreparedBroadcast, error) {
+	if options.MadeForKids == nil {
+		return PreparedBroadcast{}, ErrMadeForKidsRequired
+	}
 	accessToken, err := p.tokens.AccessToken(ctx, userID)
 	if err != nil {
 		return PreparedBroadcast{}, err
@@ -265,7 +271,7 @@ func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken strin
 		},
 		"status": map[string]any{
 			"privacyStatus":           privacy,
-			"selfDeclaredMadeForKids": false,
+			"selfDeclaredMadeForKids": *options.MadeForKids,
 		},
 		"contentDetails": map[string]any{
 			"enableAutoStart": true,

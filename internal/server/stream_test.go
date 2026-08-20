@@ -25,10 +25,12 @@ type stubStreamingProvider struct {
 	prepared     streaming.PreparedBroadcast
 	prepareErr   error
 	prepareCalls int
+	lastOptions  streaming.PrepareOptions
 }
 
-func (s *stubStreamingProvider) Prepare(context.Context, uuid.UUID, streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
+func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
 	s.prepareCalls++
+	s.lastOptions = options
 	return s.prepared, s.prepareErr
 }
 

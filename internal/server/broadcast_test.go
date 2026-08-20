@@ -85,7 +85,7 @@ func TestPutBroadcastStoresAndReturnsSettings(t *testing.T) {
 // TestPutBroadcastRejectsInvalidSettings: 검증 실패는 400이고 어떤 필드인지
 // 알려줘야 한다. 이 경로에는 플랫폼 호출이 없다.
 func TestPutBroadcastRejectsInvalidSettings(t *testing.T) {
-	oversizedThumbnail := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, session.MaxThumbnailBytes+1))
+	oversizedThumbnail := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, session.MaxYouTubeThumbnailBytes+1))
 	cases := []struct {
 		name      string
 		body      string

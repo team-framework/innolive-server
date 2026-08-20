@@ -85,8 +85,8 @@ type Response struct {
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
 		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
 	} `json:"media"`
-	Stream    StreamState        `json:"stream"`
-	Broadcast *BroadcastResponse `json:"broadcast"`
+	Stream    StreamState               `json:"stream"`
+	Broadcast *YouTubeBroadcastResponse `json:"broadcast"`
 }
 
 type Session struct {
@@ -126,7 +126,7 @@ type Session struct {
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
 	aiInputPaused        bool
 	anonymizationEnabled bool
-	broadcast            *BroadcastSettings
+	broadcast            *YouTubeBroadcastSettings
 	ignoredTracks        int
 	offerReceivedAt      time.Time
 	answerCreatedAt      time.Time

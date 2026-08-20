@@ -10,9 +10,9 @@ import (
 // 방송 설정 한계값. 제목·설명은 YouTube liveBroadcasts.insert의 문자 수 제한,
 // 썸네일 크기는 thumbnails.set의 업로드 제한이다.
 const (
-	MaxBroadcastTitleLength       = 100
-	MaxBroadcastDescriptionLength = 5000
-	MaxThumbnailBytes             = 2 << 20
+	MaxYouTubeTitleLength       = 100
+	MaxYouTubeDescriptionLength = 5000
+	MaxYouTubeThumbnailBytes    = 2 << 20
 )
 
 // broadcastPrivacyValues는 status.privacyStatus 열거값이다.
@@ -21,16 +21,16 @@ var broadcastPrivacyValues = map[string]bool{"public": true, "unlisted": true, "
 // thumbnailMIMETypes는 thumbnails.set이 받는 이미지 형식이다.
 var thumbnailMIMETypes = map[string]bool{"image/jpeg": true, "image/png": true}
 
-// Thumbnail은 업로드된 썸네일 원본이다. thumbnails.set이 URL 참조를 지원하지
+// YouTubeThumbnail은 업로드된 썸네일 원본이다. thumbnails.set이 URL 참조를 지원하지
 // 않아 바이트를 그대로 들고 있다가 방송 준비 때 멀티파트로 올린다.
-type Thumbnail struct {
+type YouTubeThumbnail struct {
 	MIME string
 	Data []byte
 }
 
-// BroadcastSettings는 세션 1회 방송의 사용자 입력 설정이다. 저장 시점에는
-// 플랫폼을 호출하지 않고, 방송 준비(Prepare)에서 사용된다.
-type BroadcastSettings struct {
+// YouTubeBroadcastSettings는 세션 1회 방송의 사용자 입력 설정이다. 저장
+// 시점에는 플랫폼을 호출하지 않고, 방송 준비(Prepare)에서 사용된다.
+type YouTubeBroadcastSettings struct {
 	Title       string
 	Description string
 	Privacy     string
@@ -38,7 +38,7 @@ type BroadcastSettings struct {
 	// 구분한다. streaming.PrepareOptions와 같은 이유의 포인터다.
 	MadeForKids *bool
 	CategoryID  string
-	Thumbnail   *Thumbnail
+	Thumbnail   *YouTubeThumbnail
 	UpdatedAt   time.Time
 }
 
@@ -55,12 +55,12 @@ func (e InvalidBroadcastSettingsError) Error() string {
 
 // Validate는 저장 전 검증이다. 빈 값은 "설정하지 않음"으로 허용하고,
 // 값이 있을 때만 형식을 확인한다 — 필수 여부는 송출 시작 시점의 계약이다.
-func (b BroadcastSettings) Validate() error {
-	if utf8.RuneCountInString(b.Title) > MaxBroadcastTitleLength {
-		return InvalidBroadcastSettingsError{Field: "title", Reason: fmt.Sprintf("must be at most %d characters", MaxBroadcastTitleLength)}
+func (b YouTubeBroadcastSettings) Validate() error {
+	if utf8.RuneCountInString(b.Title) > MaxYouTubeTitleLength {
+		return InvalidBroadcastSettingsError{Field: "title", Reason: fmt.Sprintf("must be at most %d characters", MaxYouTubeTitleLength)}
 	}
-	if utf8.RuneCountInString(b.Description) > MaxBroadcastDescriptionLength {
-		return InvalidBroadcastSettingsError{Field: "description", Reason: fmt.Sprintf("must be at most %d characters", MaxBroadcastDescriptionLength)}
+	if utf8.RuneCountInString(b.Description) > MaxYouTubeDescriptionLength {
+		return InvalidBroadcastSettingsError{Field: "description", Reason: fmt.Sprintf("must be at most %d characters", MaxYouTubeDescriptionLength)}
 	}
 	if b.Privacy != "" && !broadcastPrivacyValues[b.Privacy] {
 		return InvalidBroadcastSettingsError{Field: "privacy", Reason: "must be one of public, unlisted, private"}
@@ -77,8 +77,8 @@ func (b BroadcastSettings) Validate() error {
 		if len(b.Thumbnail.Data) == 0 {
 			return InvalidBroadcastSettingsError{Field: "thumbnail.data", Reason: "must not be empty"}
 		}
-		if len(b.Thumbnail.Data) > MaxThumbnailBytes {
-			return InvalidBroadcastSettingsError{Field: "thumbnail.data", Reason: fmt.Sprintf("must be at most %d bytes", MaxThumbnailBytes)}
+		if len(b.Thumbnail.Data) > MaxYouTubeThumbnailBytes {
+			return InvalidBroadcastSettingsError{Field: "thumbnail.data", Reason: fmt.Sprintf("must be at most %d bytes", MaxYouTubeThumbnailBytes)}
 		}
 	}
 	return nil
@@ -88,25 +88,25 @@ func isDigits(value string) bool {
 	return value != "" && strings.IndexFunc(value, func(r rune) bool { return r < '0' || r > '9' }) < 0
 }
 
-// BroadcastResponse는 조회 응답의 방송 설정 표현이다. 썸네일 원본은 수 MB라
+// YouTubeBroadcastResponse는 조회 응답의 방송 설정 표현이다. 썸네일 원본은 수 MB라
 // 되돌려주지 않고 메타데이터만 노출한다.
-type BroadcastResponse struct {
-	Title       string             `json:"title"`
-	Description string             `json:"description"`
-	Privacy     string             `json:"privacy"`
-	MadeForKids *bool              `json:"made_for_kids"`
-	CategoryID  string             `json:"category_id"`
-	Thumbnail   *ThumbnailResponse `json:"thumbnail"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+type YouTubeBroadcastResponse struct {
+	Title       string                    `json:"title"`
+	Description string                    `json:"description"`
+	Privacy     string                    `json:"privacy"`
+	MadeForKids *bool                     `json:"made_for_kids"`
+	CategoryID  string                    `json:"category_id"`
+	Thumbnail   *YouTubeThumbnailResponse `json:"thumbnail"`
+	UpdatedAt   time.Time                 `json:"updated_at"`
 }
 
-type ThumbnailResponse struct {
+type YouTubeThumbnailResponse struct {
 	MIME  string `json:"mime"`
 	Bytes int    `json:"bytes"`
 }
 
-func (b BroadcastSettings) response() BroadcastResponse {
-	response := BroadcastResponse{
+func (b YouTubeBroadcastSettings) response() YouTubeBroadcastResponse {
+	response := YouTubeBroadcastResponse{
 		Title:       b.Title,
 		Description: b.Description,
 		Privacy:     b.Privacy,
@@ -115,14 +115,14 @@ func (b BroadcastSettings) response() BroadcastResponse {
 		UpdatedAt:   b.UpdatedAt,
 	}
 	if b.Thumbnail != nil {
-		response.Thumbnail = &ThumbnailResponse{MIME: b.Thumbnail.MIME, Bytes: len(b.Thumbnail.Data)}
+		response.Thumbnail = &YouTubeThumbnailResponse{MIME: b.Thumbnail.MIME, Bytes: len(b.Thumbnail.Data)}
 	}
 	return response
 }
 
 // SetBroadcastSettings는 검증된 방송 설정을 세션에 저장한다. 플랫폼 호출은
 // 하지 않는다.
-func (m *Manager) SetBroadcastSettings(id string, settings BroadcastSettings) (*Session, error) {
+func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSettings) (*Session, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -144,11 +144,11 @@ func (m *Manager) SetBroadcastSettings(id string, settings BroadcastSettings) (*
 }
 
 // BroadcastSettings는 저장된 설정의 스냅샷이다. 저장된 값이 없으면 zero value.
-func (s *Session) BroadcastSettings() BroadcastSettings {
+func (s *Session) BroadcastSettings() YouTubeBroadcastSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.broadcast == nil {
-		return BroadcastSettings{}
+		return YouTubeBroadcastSettings{}
 	}
 	return *s.broadcast
 }

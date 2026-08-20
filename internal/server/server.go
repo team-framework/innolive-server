@@ -273,7 +273,7 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 }
 
 // prepareOptionsFrom은 저장된 방송 설정을 플랫폼 준비 옵션으로 옮긴다.
-func prepareOptionsFrom(settings session.BroadcastSettings) streaming.PrepareOptions {
+func prepareOptionsFrom(settings session.YouTubeBroadcastSettings) streaming.PrepareOptions {
 	options := streaming.PrepareOptions{
 		Title:       settings.Title,
 		Description: settings.Description,
@@ -307,7 +307,7 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 		writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	settings := session.BroadcastSettings{
+	settings := session.YouTubeBroadcastSettings{
 		Title:       strings.TrimSpace(request.Title),
 		Description: request.Description,
 		Privacy:     strings.TrimSpace(request.Privacy),
@@ -320,7 +320,7 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 			writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"field": "thumbnail.data_base64", "error": err.Error()}))
 			return
 		}
-		settings.Thumbnail = &session.Thumbnail{MIME: strings.TrimSpace(request.Thumbnail.MIME), Data: data}
+		settings.Thumbnail = &session.YouTubeThumbnail{MIME: strings.TrimSpace(request.Thumbnail.MIME), Data: data}
 	}
 	if _, err := s.sessions.SetBroadcastSettings(liveSession.ID, settings); err != nil {
 		var invalid session.InvalidBroadcastSettingsError

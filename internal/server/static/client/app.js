@@ -67,6 +67,7 @@ function bindElements() {
     "cameraSelect",
     "resolutionSelect",
     "sendAudio",
+    "madeForKids",
     "autoPoll",
     "startBtn",
     "pauseBroadcastBtn",
@@ -1052,7 +1053,12 @@ async function startYouTubeBroadcast(session) {
   try {
     const started = await apiFetch(`/sessions/${sessionId}/stream/start`, {
       method: "POST",
-      body: JSON.stringify({ provider: "youtube", privacy: "private" }),
+      // made_for_kids는 서버가 대신 신고하지 않는 사용자 선택값이다(#140).
+      body: JSON.stringify({
+        provider: "youtube",
+        privacy: "private",
+        made_for_kids: els.madeForKids.checked,
+      }),
     });
     setCurrentSession(started);
     renderBroadcastStreamStatus(started.stream);

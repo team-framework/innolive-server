@@ -88,7 +88,12 @@ func New(
 	mux.Handle("DELETE /reference-face/{face_id}", requireUser(http.HandlerFunc(s.handleDeleteReferenceFaceByID)))
 	mux.HandleFunc("GET /signaling", s.handleSignaling)
 	mux.Handle("/client/", s.clientHandler())
-	mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	// pprof는 힙·고루틴 덤프와 프로세스 argv를 그대로 노출하므로 기본값은 꺼짐이다.
+	// 인증 래퍼를 씌우지 않고 등록 자체를 막는다 — 라우트가 없으면 404로 떨어진다.
+	// 프로파일링이 필요할 때만 PPROF_ENABLED=true로 켠다.
+	if cfg.PprofEnabled {
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
 	s.handler = recoverMiddleware(logger, corsMiddleware(origins, requestIDMiddleware(mux)))
 	return s
 }

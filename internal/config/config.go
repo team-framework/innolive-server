@@ -85,6 +85,7 @@ type Config struct {
 	EgressVideoSize         string
 	DecoderPinLongEdge      int
 	RequireSessionAuth      bool
+	PprofEnabled            bool
 	LogLevel                string
 	DatabaseURL             string
 	DatabaseMaxOpenConns    int
@@ -128,6 +129,7 @@ func Load() (Config, error) {
 		EgressVideoSize:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
 		DecoderPinLongEdge:      envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
+		PprofEnabled:            envBool("PPROF_ENABLED", false),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
 		DatabaseURL:             strings.TrimSpace(os.Getenv("DATABASE_URL")),

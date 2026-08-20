@@ -229,7 +229,7 @@ func TestPrepareCreatesReusableStreamOnceAndBindsBroadcast(t *testing.T) {
 	connectedAccount(t, store, userID)
 	provider := testProviderWith(t, stub, store)
 
-	first, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	first, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestPrepareCreatesReusableStreamOnceAndBindsBroadcast(t *testing.T) {
 	}
 
 	// 두 번째 방송: 저장된 스트림을 재사용해야 한다(liveStreams.insert 1회 유지).
-	second, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	second, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
 	connectedAccount(t, store, userID)
 	provider := testProviderWith(t, stub, store)
 
-	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{}); err != nil {
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)}); err != nil {
 		t.Fatal(err)
 	}
 	stub.mu.Lock()
@@ -299,8 +299,12 @@ func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
 		t.Fatalf("monitorStream = %v", monitor)
 	}
 	status := payload["status"].(map[string]any)
-	if status["privacyStatus"] != defaultBroadcastPrivacy {
-		t.Fatalf("privacyStatus = %v, want default %q", status["privacyStatus"], defaultBroadcastPrivacy)
+	// 기본값은 전체공개가 아니어야 한다(#140).
+	if status["privacyStatus"] != "unlisted" {
+		t.Fatalf("privacyStatus = %v, want default unlisted", status["privacyStatus"])
+	}
+	if status["selfDeclaredMadeForKids"] != false {
+		t.Fatalf("selfDeclaredMadeForKids = %v, want the requested false", status["selfDeclaredMadeForKids"])
 	}
 	snippet := payload["snippet"].(map[string]any)
 	if snippet["title"] != defaultBroadcastTitle {
@@ -308,7 +312,7 @@ func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
 	}
 
 	// 옵션 오버라이드.
-	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{Title: "내 방송", Privacy: "unlisted"}); err != nil {
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{Title: "내 방송", Privacy: "public", MadeForKids: boolPtr(true)}); err != nil {
 		t.Fatal(err)
 	}
 	stub.mu.Lock()
@@ -317,8 +321,33 @@ func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
 	if payload["snippet"].(map[string]any)["title"] != "내 방송" {
 		t.Fatalf("title override failed: %v", payload["snippet"])
 	}
-	if payload["status"].(map[string]any)["privacyStatus"] != "unlisted" {
+	if payload["status"].(map[string]any)["privacyStatus"] != "public" {
 		t.Fatalf("privacy override failed: %v", payload["status"])
+	}
+	if payload["status"].(map[string]any)["selfDeclaredMadeForKids"] != true {
+		t.Fatalf("made for kids override failed: %v", payload["status"])
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+// TestPrepareRejectsMissingMadeForKids: 아동용 여부는 사용자 신고값이라
+// 미선택이면 플랫폼 호출 없이 거절해야 한다.
+func TestPrepareRejectsMissingMadeForKids(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	if !errors.Is(err, ErrMadeForKidsRequired) {
+		t.Fatalf("error = %v, want ErrMadeForKidsRequired", err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.broadcastInserts != 0 || stub.streamInserts != 0 {
+		t.Fatalf("YouTube calls = %d/%d, want none", stub.streamInserts, stub.broadcastInserts)
 	}
 }
 
@@ -329,7 +358,7 @@ func TestPrepareMapsLivePermissionBlocked(t *testing.T) {
 	connectedAccount(t, store, userID)
 	provider := testProviderWith(t, stub, store)
 
-	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{})
+	_, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)})
 	if !errors.Is(err, ErrLiveStreamingBlocked) {
 		t.Fatalf("error = %v, want ErrLiveStreamingBlocked", err)
 	}
@@ -344,7 +373,7 @@ func TestPrepareRefreshesChannelInfo(t *testing.T) {
 	connectedAccount(t, store, userID) // 저장된 제목은 없음(nil), 스텁은 "Team Framework Renamed"를 반환
 	provider := testProviderWith(t, stub, store)
 
-	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{}); err != nil {
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)}); err != nil {
 		t.Fatal(err)
 	}
 	account, err := store.Get(context.Background(), userID, auth.StreamingProviderYouTube)
@@ -397,7 +426,7 @@ func TestCleanupStreamingResources(t *testing.T) {
 
 func TestPrepareRequiresConnection(t *testing.T) {
 	provider := testProviderWith(t, &youtubeAPIStub{}, newMemoryStore())
-	_, err := provider.Prepare(context.Background(), uuid.New(), PrepareOptions{})
+	_, err := provider.Prepare(context.Background(), uuid.New(), PrepareOptions{MadeForKids: boolPtr(false)})
 	if !errors.Is(err, auth.ErrStreamingNotConnected) {
 		t.Fatalf("error = %v, want ErrStreamingNotConnected", err)
 	}

@@ -192,13 +192,20 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 // 계정으로 방송을 준비(Prepare)하고, 세션의 처리 출력에 egress를 붙인다.
 func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
-		Provider string `json:"provider"`
-		Title    string `json:"title"`
-		Privacy  string `json:"privacy"`
+		Provider    string `json:"provider"`
+		Title       string `json:"title"`
+		Privacy     string `json:"privacy"`
+		MadeForKids *bool  `json:"made_for_kids"`
 	}{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
 		writeError(w, badRequest("Invalid stream start request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	if request.MadeForKids == nil {
+		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
+		// 서버가 기본값으로 대신 신고하지 않는다.
+		writeError(w, badRequest("made_for_kids must be specified.", map[string]any{"field": "made_for_kids"}))
 		return
 	}
 	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
@@ -213,8 +220,9 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		return
 	}
 	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, streaming.PrepareOptions{
-		Title:   request.Title,
-		Privacy: request.Privacy,
+		Title:       request.Title,
+		Privacy:     request.Privacy,
+		MadeForKids: request.MadeForKids,
 	})
 	if err != nil {
 		switch {

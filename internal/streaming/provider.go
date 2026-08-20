@@ -18,6 +18,10 @@ type PrepareOptions struct {
 	Title string
 	// Privacy는 공개 범위(public/unlisted/private). 비면 프로바이더 기본값.
 	Privacy string
+	// MadeForKids는 아동용 콘텐츠 여부 신고값이다. 사용자가 직접 고른 값만
+	// 플랫폼에 전달해야 하므로, "미선택"(nil)과 "아동용 아님"(false)을
+	// 구분하려고 포인터를 쓴다. nil이면 프로바이더가 준비를 거절한다.
+	MadeForKids *bool
 }
 
 // PreparedBroadcast는 송출 시작에 필요한 준비 결과다.

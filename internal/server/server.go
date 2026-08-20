@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,10 @@ import (
 )
 
 const maxJSONBody = 1 << 20
+
+// 방송 설정은 2MB 썸네일을 base64로 싣는다(약 1.34배 팽창) — 그 경로만
+// 본문 한계를 따로 둔다.
+const maxBroadcastBody = 4 << 20
 
 type Server struct {
 	cfg              config.Config
@@ -81,6 +86,7 @@ func New(
 	mux.Handle("POST /sessions/{session_id}/stream/pause", requireUser(s.requireSessionOwner(s.handlePauseStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
+	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
 	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
@@ -202,7 +208,19 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		writeError(w, badRequest("Invalid stream start request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	if request.MadeForKids == nil {
+	// 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 기본이고, 요청 바디에
+	// 실린 값이 이번 방송에 한해 덮어쓴다.
+	options := prepareOptionsFrom(liveSession.BroadcastSettings())
+	if strings.TrimSpace(request.Title) != "" {
+		options.Title = request.Title
+	}
+	if strings.TrimSpace(request.Privacy) != "" {
+		options.Privacy = request.Privacy
+	}
+	if request.MadeForKids != nil {
+		options.MadeForKids = request.MadeForKids
+	}
+	if options.MadeForKids == nil {
 		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
 		// 서버가 기본값으로 대신 신고하지 않는다.
 		writeError(w, badRequest("made_for_kids must be specified.", map[string]any{"field": "made_for_kids"}))
@@ -219,11 +237,7 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
 		return
 	}
-	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, streaming.PrepareOptions{
-		Title:       request.Title,
-		Privacy:     request.Privacy,
-		MadeForKids: request.MadeForKids,
-	})
+	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrStreamingNotConnected):
@@ -249,6 +263,72 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		default:
 			writeSessionError(w, err, liveSession.ID)
 		}
+		return
+	}
+	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
+	writeJSON(w, http.StatusOK, struct {
+		session.Response
+		Warnings []streaming.Warning `json:"warnings,omitempty"`
+	}{Response: liveSession.Response(), Warnings: prepared.Warnings})
+}
+
+// prepareOptionsFrom은 저장된 방송 설정을 플랫폼 준비 옵션으로 옮긴다.
+func prepareOptionsFrom(settings session.BroadcastSettings) streaming.PrepareOptions {
+	options := streaming.PrepareOptions{
+		Title:       settings.Title,
+		Description: settings.Description,
+		Privacy:     settings.Privacy,
+		MadeForKids: settings.MadeForKids,
+		CategoryID:  settings.CategoryID,
+	}
+	if settings.Thumbnail != nil {
+		options.Thumbnail = &streaming.Thumbnail{MIME: settings.Thumbnail.MIME, Data: settings.Thumbnail.Data}
+	}
+	return options
+}
+
+// handlePutBroadcast는 방송 설정을 저장·검증만 한다. 플랫폼 호출은 송출
+// 시작(prepare) 시점으로 미룬다 — 설정 도중 방송이 만들어지지 않게 하려는 것.
+// PUT이므로 생략한 필드는 비워지는 전체 교체다.
+func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Privacy     string `json:"privacy"`
+		MadeForKids *bool  `json:"made_for_kids"`
+		CategoryID  string `json:"category_id"`
+		Thumbnail   *struct {
+			MIME       string `json:"mime"`
+			DataBase64 string `json:"data_base64"`
+		} `json:"thumbnail"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBroadcastBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil {
+		writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	settings := session.BroadcastSettings{
+		Title:       strings.TrimSpace(request.Title),
+		Description: request.Description,
+		Privacy:     strings.TrimSpace(request.Privacy),
+		MadeForKids: request.MadeForKids,
+		CategoryID:  strings.TrimSpace(request.CategoryID),
+	}
+	if request.Thumbnail != nil {
+		data, err := base64.StdEncoding.DecodeString(request.Thumbnail.DataBase64)
+		if err != nil {
+			writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"field": "thumbnail.data_base64", "error": err.Error()}))
+			return
+		}
+		settings.Thumbnail = &session.Thumbnail{MIME: strings.TrimSpace(request.Thumbnail.MIME), Data: data}
+	}
+	if _, err := s.sessions.SetBroadcastSettings(liveSession.ID, settings); err != nil {
+		var invalid session.InvalidBroadcastSettingsError
+		if errors.As(err, &invalid) {
+			writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"field": invalid.Field, "reason": invalid.Reason}))
+			return
+		}
+		writeSessionError(w, err, liveSession.ID)
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response())

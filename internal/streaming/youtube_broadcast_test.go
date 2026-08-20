@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -104,5 +105,106 @@ func TestPrepareReturnsWarningsOnOptionalFailure(t *testing.T) {
 	}
 	if !strings.Contains(prepared.Warnings[1].Message, ThumbnailHelpURL) {
 		t.Fatalf("thumbnail warning = %q, want channel verification guidance", prepared.Warnings[1].Message)
+	}
+}
+
+// TestPrepareDoesNotAutoStart: 준비만으로 방송이 시청자에게 나가면 안 되므로
+// enableAutoStart는 꺼져 있어야 한다(#142). 종료는 계속 autoStop이 맡는다.
+func TestPrepareDoesNotAutoStart(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{MadeForKids: boolPtr(false)}); err != nil {
+		t.Fatal(err)
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	contentDetails := stub.lastBroadcast["contentDetails"].(map[string]any)
+	if contentDetails["enableAutoStart"] != false {
+		t.Fatalf("enableAutoStart = %v, want false", contentDetails["enableAutoStart"])
+	}
+	if contentDetails["enableAutoStop"] != true {
+		t.Fatalf("enableAutoStop = %v, want true", contentDetails["enableAutoStop"])
+	}
+}
+
+// TestGoLiveTransitionsBroadcast: GoLive는 준비된 방송 id로 transition(live)을
+// 호출해야 한다.
+func TestGoLiveTransitionsBroadcast(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if err := provider.GoLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.transitions != 1 {
+		t.Fatalf("transition calls = %d, want 1", stub.transitions)
+	}
+	if !strings.Contains(stub.transitionQuery, "broadcastStatus=live") || !strings.Contains(stub.transitionQuery, "id=broadcast-id-1") {
+		t.Fatalf("transition query = %q", stub.transitionQuery)
+	}
+}
+
+// TestGoLiveReportsNotReady: 송출 프레임이 아직 플랫폼에 도착하지 않은 상태는
+// 재시도로 풀리므로 일반 실패와 구분돼야 한다.
+func TestGoLiveReportsNotReady(t *testing.T) {
+	stub := &youtubeAPIStub{
+		transitionStatus: 403,
+		transitionBody:   `{"error":{"code":403,"message":"The broadcast is not ready.","errors":[{"reason":"errorStreamInactive"}]}}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	err := provider.GoLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"})
+	if !errors.Is(err, ErrBroadcastNotReady) {
+		t.Fatalf("GoLive() error = %v, want ErrBroadcastNotReady", err)
+	}
+}
+
+// TestStopDeletesBroadcast: autoStart를 끈 뒤로 라이브가 되지 못한 방송은
+// 아무도 정리해주지 않으므로 Stop이 지운다.
+func TestStopDeletesBroadcast(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if err := provider.Stop(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.deletes != 1 || !strings.Contains(stub.deleteQuery, "id=broadcast-id-1") {
+		t.Fatalf("deletes = %d, query = %q, want the broadcast removed", stub.deletes, stub.deleteQuery)
+	}
+}
+
+// TestStopWithoutBroadcastIsNoOp: 준비된 방송이 없으면 플랫폼을 부르지 않는다.
+func TestStopWithoutBroadcastIsNoOp(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if err := provider.Stop(context.Background(), userID, PreparedBroadcast{}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.deletes != 0 {
+		t.Fatalf("deletes = %d, want 0", stub.deletes)
 	}
 }

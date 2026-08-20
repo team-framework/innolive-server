@@ -161,6 +161,13 @@ type youtubeAPIStub struct {
 	lastThumbnailBody  []byte
 	lastThumbnailType  string
 	thumbnailSetStatus int
+	// 라이브 전환·삭제 기록.
+	transitions      int
+	transitionQuery  string
+	transitionStatus int
+	transitionBody   string
+	deletes          int
+	deleteQuery      string
 }
 
 func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
@@ -204,6 +211,20 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"items":[]}`))
+		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/transition"):
+			s.transitions++
+			s.transitionQuery = r.URL.RawQuery
+			if s.transitionStatus != 0 {
+				w.WriteHeader(s.transitionStatus)
+				_, _ = w.Write([]byte(s.transitionBody))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"broadcast-id-1","status":{"lifeCycleStatus":"live"}}`))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
+			s.deletes++
+			s.deleteQuery = r.URL.RawQuery
+			w.WriteHeader(http.StatusNoContent)
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/bind"):
 			s.binds++
 			s.bindQuery = r.URL.RawQuery
@@ -310,7 +331,7 @@ func TestPrepareCreatesReusableStreamOnceAndBindsBroadcast(t *testing.T) {
 	}
 }
 
-func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
+func TestPrepareBroadcastPayloadDefaults(t *testing.T) {
 	stub := &youtubeAPIStub{}
 	store := newMemoryStore()
 	userID := uuid.New()
@@ -325,9 +346,6 @@ func TestPrepareBroadcastPayloadUsesAutoStartAndDefaults(t *testing.T) {
 	stub.mu.Unlock()
 
 	content := payload["contentDetails"].(map[string]any)
-	if content["enableAutoStart"] != true || content["enableAutoStop"] != true {
-		t.Fatalf("contentDetails = %v, want autoStart/autoStop true", content)
-	}
 	monitor := content["monitorStream"].(map[string]any)
 	if monitor["enableMonitorStream"] != false {
 		t.Fatalf("monitorStream = %v", monitor)

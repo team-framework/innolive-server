@@ -31,6 +31,10 @@ var (
 	ErrStreamNotActive  = errors.New("stream egress is not active")
 	ErrStreamPaused     = errors.New("stream egress is already paused")
 	ErrStreamNotPaused  = errors.New("stream egress is not paused")
+	// 플랫폼 방송 라이프사이클(준비 → 라이브) 위반.
+	ErrBroadcastPrepared    = errors.New("the platform broadcast is already prepared")
+	ErrBroadcastNotPrepared = errors.New("the platform broadcast is not prepared")
+	ErrBroadcastLive        = errors.New("the platform broadcast is already live")
 )
 
 type Timing struct {
@@ -56,6 +60,9 @@ type StreamState struct {
 	VideoHeight       uint16     `json:"video_height"`
 	VideoFPS          int        `json:"video_fps"`
 	PausedAt          *time.Time `json:"paused_at"`
+	// BroadcastPhase는 플랫폼 방송의 위치(idle/prepared/live)다. egress는
+	// "준비만 된 방송"을 알 수 없어 egress phase에서 파생할 수 없다.
+	BroadcastPhase BroadcastPhase `json:"broadcast_phase"`
 }
 
 type TrackState struct {
@@ -127,6 +134,8 @@ type Session struct {
 	aiInputPaused        bool
 	anonymizationEnabled bool
 	broadcast            *YouTubeBroadcastSettings
+	platformBroadcast    *PlatformBroadcast
+	broadcastPhase       BroadcastPhase
 	ignoredTracks        int
 	offerReceivedAt      time.Time
 	answerCreatedAt      time.Time
@@ -277,7 +286,8 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		Metadata:             copyMetadata(metadata),
 		Status:               "active",
 		PC:                   pc,
-		Stream:               StreamState{Status: "idle", UpdatedAt: now},
+		Stream:               StreamState{Status: "idle", UpdatedAt: now, BroadcastPhase: BroadcastPhaseIdle},
+		broadcastPhase:       BroadcastPhaseIdle,
 		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
 		ownerHash:            ownerHash,
 		cancel:               cancel,
@@ -462,6 +472,8 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 	s.setAIInputPaused(false)
 	reason := "user_requested"
 	s.streamStopReason = &reason
+	s.platformBroadcast = nil
+	s.broadcastPhase = BroadcastPhaseIdle
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
 	return s, nil
@@ -896,6 +908,7 @@ func (s *Session) Response() Response {
 	if s.egress != nil {
 		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)
 	}
+	response.Stream.BroadcastPhase = s.broadcastPhase
 	return response
 }
 

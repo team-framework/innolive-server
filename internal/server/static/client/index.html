@@ -126,6 +126,52 @@
         </dl>
       </section>
 
+      <section class="broadcast-settings" aria-labelledby="broadcastSettingsTitle">
+        <div class="broadcast-settings-copy">
+          <p class="eyebrow">Broadcast details</p>
+          <h2 id="broadcastSettingsTitle">방송 설정</h2>
+          <p>
+            제목·설명·카테고리·썸네일은 저장만 하고, 실제 YouTube 반영은 송출 시작 시점에 이뤄집니다.
+            Start WebRTC를 누르면 이 값이 자동으로 저장된 뒤 방송이 준비됩니다.
+          </p>
+          <div class="broadcast-settings-status" aria-live="polite">
+            <span class="status-pill" data-state="idle" id="broadcastSettingsState">저장 전</span>
+            <span id="broadcastSettingsDetail">세션을 만든 뒤 저장할 수 있습니다.</span>
+          </div>
+        </div>
+        <div class="broadcast-settings-form">
+          <label class="field">
+            <span>제목 (100자)</span>
+            <input id="broadcastTitle" maxlength="100" autocomplete="off" placeholder="InnoLive 방송" />
+          </label>
+          <label class="field">
+            <span>공개 범위</span>
+            <select id="broadcastPrivacy">
+              <option value="private" selected>비공개 (private)</option>
+              <option value="unlisted">일부 공개 (unlisted)</option>
+              <option value="public">공개 (public)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>카테고리 ID</span>
+            <input id="broadcastCategoryId" inputmode="numeric" autocomplete="off" placeholder="예: 20 (Gaming)" />
+          </label>
+          <label class="field">
+            <span>썸네일 (JPEG·PNG, 최대 2MB)</span>
+            <input id="broadcastThumbnail" type="file" accept="image/jpeg,image/png" />
+          </label>
+          <label class="field field-wide">
+            <span>설명 (5000자)</span>
+            <textarea id="broadcastDescription" maxlength="5000" rows="4" placeholder="방송 설명 · 해시태그 포함"></textarea>
+          </label>
+          <div class="broadcast-settings-actions">
+            <button id="saveBroadcastBtn" class="button button-primary" type="button" disabled>
+              방송 설정 저장
+            </button>
+          </div>
+        </div>
+      </section>
+
       <aside id="runtimeNotice" class="runtime-notice" hidden>
         <div>
           <strong>카메라는 file:// 페이지에서 사용할 수 없습니다.</strong>

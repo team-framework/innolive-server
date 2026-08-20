@@ -121,6 +121,7 @@ h2 {
 
 .toolbar,
 .actions,
+.broadcast-settings,
 .reference-face-panel,
 .video-panel,
 .panel {
@@ -272,6 +273,63 @@ h2 {
 
 .broadcast-status-grid dd[data-state="error"] {
   color: var(--danger);
+}
+
+.broadcast-settings {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.2fr);
+  gap: 20px;
+  margin-top: 16px;
+  padding: 18px;
+}
+
+.broadcast-settings-copy > p:not(.eyebrow) {
+  max-width: 720px;
+  margin: 10px 0 16px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.broadcast-settings-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.broadcast-settings-status > span:last-child {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.broadcast-settings-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.broadcast-settings-form .field-wide,
+.broadcast-settings-actions {
+  grid-column: 1 / -1;
+}
+
+.broadcast-settings-form textarea {
+  width: 100%;
+  min-height: 92px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 11px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+  resize: vertical;
+}
+
+.broadcast-settings-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(8, 127, 127, 0.16);
 }
 
 .reference-face-panel {
@@ -691,6 +749,7 @@ dd {
 
   .topbar,
   .broadcast-status,
+  .broadcast-settings,
   .reference-face-panel,
   .video-grid,
   .dashboard,

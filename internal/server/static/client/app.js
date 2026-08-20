@@ -78,6 +78,14 @@ function bindElements() {
     "errorProbeBtn",
     "disconnectBtn",
     "deleteSessionBtn",
+    "broadcastSettingsState",
+    "broadcastSettingsDetail",
+    "broadcastTitle",
+    "broadcastPrivacy",
+    "broadcastCategoryId",
+    "broadcastThumbnail",
+    "broadcastDescription",
+    "saveBroadcastBtn",
     "runtimeNotice",
     "servedClientLink",
     "referenceFaceState",
@@ -178,6 +186,9 @@ function bindEvents() {
   );
   els.deleteReferenceFaceBtn.addEventListener("click", () =>
     void deleteReferenceFace(),
+  );
+  els.saveBroadcastBtn.addEventListener("click", () =>
+    void saveBroadcastSettings().catch(() => null),
   );
   els.clearLogBtn.addEventListener("click", () => {
     els.eventLog.replaceChildren();
@@ -710,6 +721,8 @@ function resetBroadcastStatus() {
   setBroadcastStatus(els.broadcastVideoInput, "WebRTC 시작 전");
   setBroadcastStatus(els.broadcastRtmpState, "시작 전");
   setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
+  setBroadcastStatus(els.broadcastSettingsState, "저장 전");
+  els.broadcastSettingsDetail.textContent = "세션을 만든 뒤 저장할 수 있습니다.";
 }
 
 function renderBroadcastStreamStatus(stream) {
@@ -1041,6 +1054,79 @@ async function waitForVideoTrack() {
   throw new Error("서버가 영상 트랙을 받지 못했습니다. 카메라 연결을 다시 시도하세요.");
 }
 
+// readBroadcastThumbnail은 선택한 이미지를 base64로 바꾼다. PUT /broadcast가
+// JSON 계약이라 바이너리를 그대로 실을 수 없다.
+async function readBroadcastThumbnail() {
+  const [file] = els.broadcastThumbnail.files;
+  if (!file) {
+    return null;
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  // btoa는 문자열만 받고 apply는 인자 수 제한이 있어 청크로 나눠 붙인다.
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return { mime: file.type, data_base64: btoa(binary) };
+}
+
+// saveBroadcastSettings는 폼 값을 PUT /sessions/{id}/broadcast로 저장한다.
+// PUT은 전체 교체라 비운 필드는 서버에서도 비워진다.
+async function saveBroadcastSettings() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("방송 설정을 저장할 세션이 없습니다.");
+  }
+  const payload = {
+    title: els.broadcastTitle.value.trim(),
+    description: els.broadcastDescription.value,
+    privacy: els.broadcastPrivacy.value,
+    made_for_kids: els.madeForKids.checked,
+    category_id: els.broadcastCategoryId.value.trim(),
+    thumbnail: await readBroadcastThumbnail(),
+  };
+  try {
+    const updated = await apiFetch(`/sessions/${sessionId}/broadcast`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    setCurrentSession(updated);
+    setBroadcastStatus(els.broadcastSettingsState, "저장됨", "ok");
+    els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated.broadcast);
+    logEvent("ok", "Broadcast settings saved", {
+      session_id: sessionId,
+      broadcast: updated.broadcast,
+    });
+    return updated;
+  } catch (error) {
+    const details = error?.payload?.error?.details;
+    setBroadcastStatus(els.broadcastSettingsState, "저장 실패", "error");
+    els.broadcastSettingsDetail.textContent = details?.field
+      ? `${details.field}: ${details.reason || error.message}`
+      : error.message;
+    logEvent("error", "Broadcast settings save failed", {
+      session_id: sessionId,
+      field: details?.field,
+      message: error?.message,
+      status: error?.status,
+    });
+    throw error;
+  }
+}
+
+function describeBroadcastSettings(broadcast) {
+  if (!broadcast) {
+    return "저장된 설정이 없습니다.";
+  }
+  const parts = [
+    broadcast.title || "제목 없음",
+    broadcast.privacy || "privacy 미설정",
+    broadcast.category_id ? `카테고리 ${broadcast.category_id}` : "카테고리 없음",
+    broadcast.thumbnail ? `썸네일 ${formatBytes(broadcast.thumbnail.bytes)}` : "썸네일 없음",
+  ];
+  return parts.join(" · ");
+}
+
 async function startYouTubeBroadcast(session) {
   const sessionId = session?.session_id;
   if (!sessionId) {
@@ -1051,17 +1137,20 @@ async function startYouTubeBroadcast(session) {
   setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 중", "warn");
   logEvent("ok", "YouTube broadcast start requested", { session_id: sessionId });
   try {
+    // 방송 설정은 저장된 값이 준비 옵션으로 쓰이므로 송출 직전에 폼을 반영한다.
+    await saveBroadcastSettings();
     const started = await apiFetch(`/sessions/${sessionId}/stream/start`, {
       method: "POST",
       // made_for_kids는 서버가 대신 신고하지 않는 사용자 선택값이다(#140).
       body: JSON.stringify({
         provider: "youtube",
-        privacy: "private",
+        privacy: els.broadcastPrivacy.value,
         made_for_kids: els.madeForKids.checked,
       }),
     });
     setCurrentSession(started);
     renderBroadcastStreamStatus(started.stream);
+    renderBroadcastWarnings(started.warnings);
     logEvent("ok", "YouTube RTMP egress started", {
       session_id: sessionId,
       stream: started.stream,
@@ -1109,6 +1198,19 @@ async function resumeBroadcast() {
       stream: resumed,
     });
   });
+}
+
+// renderBroadcastWarnings는 카테고리·썸네일처럼 실패해도 방송이 진행되는
+// 선택 항목의 경고를 보여준다(#141).
+function renderBroadcastWarnings(warnings) {
+  if (!warnings?.length) {
+    return;
+  }
+  setBroadcastStatus(els.broadcastSettingsState, "일부 미반영", "warn");
+  els.broadcastSettingsDetail.textContent = warnings
+    .map((warning) => warning.message)
+    .join(" / ");
+  logEvent("warn", "Broadcast settings partially applied", { warnings });
 }
 
 function renderBroadcastStartError(error) {
@@ -2018,6 +2120,8 @@ function updateButtons() {
   els.refreshSessionsBtn.disabled = state.busy;
   els.disconnectBtn.disabled = state.busy || !hasConnection;
   els.deleteSessionBtn.disabled = state.busy || !hasSession;
+  // 방송 설정은 세션 범위 API라 세션이 있어야 저장할 수 있다.
+  els.saveBroadcastBtn.disabled = state.busy || !hasSession;
   els.errorProbeBtn.disabled = state.busy || !wsOpen;
   els.copyJsonBtn.disabled = !state.lastSessionJson;
   els.referenceFaceInput.disabled =

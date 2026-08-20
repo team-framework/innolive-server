@@ -18,6 +18,8 @@ import (
 
 const (
 	youtubeAPIBase = "https://www.googleapis.com/youtube/v3"
+	// 미디어 업로드는 별도 호스트다(thumbnails.set).
+	youtubeUploadBase = "https://www.googleapis.com/upload/youtube/v3"
 	// 기본 방송 속성. Privacy 기본값은 실수로 시작된 방송이 곧바로 전체공개로
 	// 나가지 않도록 unlisted다. 전체공개는 start 요청에서 명시해야 한다.
 	defaultBroadcastTitle   = "InnoLive 방송"
@@ -29,9 +31,14 @@ var (
 	// 이거나 차단된 상태. 실측(2026-08-09 403 → 활성화 후 08-10 200)으로
 	// reason=="livePermissionBlocked"가 이 상태의 시그니처임을 확인했다.
 	ErrLiveStreamingBlocked = errors.New("the YouTube channel is not enabled for live streaming")
+	// ErrThumbnailForbidden: 썸네일 업로드가 거부된 상태(채널 전화번호 인증
+	// 미완료가 대표 원인). 선택 항목이므로 방송은 진행하고 경고로 알린다.
+	ErrThumbnailForbidden = errors.New("the YouTube channel is not allowed to upload custom thumbnails")
 	// ErrMadeForKidsRequired: 시청자층(아동용 여부)은 YouTube가 요구하는
 	// 법적 신고 항목이라 서버가 대신 추정하지 않는다 — 미선택이면 거절한다.
 	ErrMadeForKidsRequired = errors.New("made_for_kids must be specified by the user")
+	// ThumbnailHelpURL은 썸네일 업로드 권한(채널 인증) 안내 문서다.
+	ThumbnailHelpURL = "https://support.google.com/youtube/answer/72431"
 	// LiveStreamingHelpURL은 위 에러 응답의 extendedHelp 실물값 — 사용자
 	// 안내에 그대로 쓴다.
 	LiveStreamingHelpURL = "https://support.google.com/youtube/answer/2853834"
@@ -52,6 +59,7 @@ type YouTubeProvider struct {
 	cipher     *auth.ProviderTokenCipher
 	httpClient *http.Client
 	apiBase    string
+	uploadBase string
 	now        func() time.Time
 }
 
@@ -65,6 +73,7 @@ func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountS
 		cipher:     cipher,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		apiBase:    youtubeAPIBase,
+		uploadBase: youtubeUploadBase,
 		now:        func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -102,11 +111,14 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 	if err := p.bind(ctx, accessToken, broadcastID, streamID); err != nil {
 		return PreparedBroadcast{}, err
 	}
+	// 여기까지가 필수 경로다. 카테고리·썸네일은 선택 항목이라 실패해도
+	// 방송을 되돌리지 않고 경고로만 알린다.
 	return PreparedBroadcast{
 		Provider:    auth.StreamingProviderYouTube,
 		IngestURL:   ingestAddress + "/" + streamName,
 		BroadcastID: broadcastID,
 		StreamID:    streamID,
+		Warnings:    p.applyOptionalSettings(ctx, accessToken, broadcastID, options),
 	}, nil
 }
 
@@ -253,18 +265,27 @@ func (p *YouTubeProvider) refreshChannelInfo(ctx context.Context, accessToken st
 	_ = p.store.UpdateChannel(ctx, account.ID, channelID, titlePtr)
 }
 
-func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken string, options PrepareOptions) (string, error) {
-	title := strings.TrimSpace(options.Title)
+// resolveSnippet은 insert와 videos.update가 같은 제목·설명을 싣도록 한 곳에서
+// 기본값을 채운다 — videos.update의 snippet은 통째 교체라 값이 어긋나면
+// 방송 정보가 지워진다.
+func resolveSnippet(options PrepareOptions) (title, description string) {
+	title = strings.TrimSpace(options.Title)
 	if title == "" {
 		title = defaultBroadcastTitle
 	}
+	return title, options.Description
+}
+
+func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken string, options PrepareOptions) (string, error) {
+	title, description := resolveSnippet(options)
 	privacy := strings.TrimSpace(options.Privacy)
 	if privacy == "" {
 		privacy = defaultBroadcastPrivacy
 	}
 	payload := map[string]any{
 		"snippet": map[string]any{
-			"title": title,
+			"title":       title,
+			"description": description,
 			// autoStart를 쓰므로 예정 시각은 형식 요건일 뿐이다(실측: 예정
 			// 시각과 무관하게 송출 시작 13.7초 만에 live 전환).
 			"scheduledStartTime": p.now().Format(time.RFC3339),
@@ -296,22 +317,90 @@ func (p *YouTubeProvider) bind(ctx context.Context, accessToken, broadcastID, st
 	return p.post(ctx, accessToken, path, nil, &struct{}{})
 }
 
+// applyOptionalSettings는 카테고리·썸네일을 반영하고, 실패한 항목만 경고로
+// 돌려준다. 반환값이 비어 있으면 모두 반영된 것이다.
+func (p *YouTubeProvider) applyOptionalSettings(ctx context.Context, accessToken, broadcastID string, options PrepareOptions) []Warning {
+	var warnings []Warning
+	if strings.TrimSpace(options.CategoryID) != "" {
+		if err := p.updateVideoCategory(ctx, accessToken, broadcastID, options); err != nil {
+			warnings = append(warnings, Warning{
+				Code:    "category_not_applied",
+				Message: "The broadcast category could not be set: " + err.Error(),
+			})
+		}
+	}
+	if options.Thumbnail != nil {
+		if err := p.setThumbnail(ctx, accessToken, broadcastID, *options.Thumbnail); err != nil {
+			warning := Warning{
+				Code:    "thumbnail_not_applied",
+				Message: "The thumbnail could not be uploaded: " + err.Error(),
+			}
+			if errors.Is(err, ErrThumbnailForbidden) {
+				warning.Code = "thumbnail_forbidden"
+				warning.Message = "Uploading a custom thumbnail requires a verified YouTube channel (phone verification). See " + ThumbnailHelpURL
+			}
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings
+}
+
+// updateVideoCategory는 카테고리를 설정한다. liveBroadcasts에 카테고리가 없어
+// videos.update를 쓰는데, snippet이 부분 갱신이 아니라 통째 교체라 제목·설명을
+// 반드시 함께 싣는다.
+func (p *YouTubeProvider) updateVideoCategory(ctx context.Context, accessToken, videoID string, options PrepareOptions) error {
+	title, description := resolveSnippet(options)
+	payload := map[string]any{
+		"id": videoID,
+		"snippet": map[string]any{
+			"title":       title,
+			"description": description,
+			"categoryId":  strings.TrimSpace(options.CategoryID),
+		},
+	}
+	return p.do(ctx, accessToken, http.MethodPut, p.apiBase+"/videos?part=snippet", "application/json", payload, &struct{}{})
+}
+
+// setThumbnail은 thumbnails.set 미디어 업로드다 — 이미지 바이트를 본문에
+// 그대로 싣는 경로라 JSON 전용인 post로는 보낼 수 없다.
+func (p *YouTubeProvider) setThumbnail(ctx context.Context, accessToken, videoID string, thumbnail Thumbnail) error {
+	path := p.uploadBase + "/thumbnails/set?videoId=" + videoID + "&uploadType=media"
+	err := p.do(ctx, accessToken, http.MethodPost, path, thumbnail.MIME, thumbnail.Data, &struct{}{})
+	// 403은 채널 인증이 안 된 계정의 시그니처다 — 재시도 대상이 아니라
+	// 사용자 안내로 바꿔야 하므로 여기서만 도메인 에러로 승격한다.
+	var status apiStatusError
+	if errors.As(err, &status) && status.status == http.StatusForbidden {
+		return fmt.Errorf("%w: %s", ErrThumbnailForbidden, status.message)
+	}
+	return err
+}
+
 func (p *YouTubeProvider) post(ctx context.Context, accessToken, path string, payload, target any) error {
+	return p.do(ctx, accessToken, http.MethodPost, p.apiBase+path, "application/json", payload, target)
+}
+
+// do는 YouTube API 호출 1회다. payload가 []byte면 본문에 그대로 싣고(미디어
+// 업로드), 그 외에는 JSON으로 인코딩한다. nil이면 본문 없이 보낸다.
+func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, contentType string, payload, target any) error {
 	var body io.Reader
-	if payload != nil {
+	switch value := payload.(type) {
+	case nil:
+	case []byte:
+		body = bytes.NewReader(value)
+	default:
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
 		body = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiBase+path, body)
+	request, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
-	if payload != nil {
-		request.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		request.Header.Set("Content-Type", contentType)
 	}
 	response, err := p.httpClient.Do(request)
 	if err != nil {
@@ -322,6 +411,20 @@ func (p *YouTubeProvider) post(ctx context.Context, accessToken, path string, pa
 		return decodeYouTubeAPIError(response)
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(target)
+}
+
+// apiStatusError는 도메인 에러로 분류되지 않은 API 실패다. 상태 코드를
+// 남겨 호출자가 맥락에 맞게(예: 썸네일 403) 승격할 수 있게 한다.
+type apiStatusError struct {
+	status  int
+	message string
+}
+
+func (e apiStatusError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("YouTube API returned HTTP %d", e.status)
+	}
+	return fmt.Sprintf("YouTube API returned HTTP %d (%s)", e.status, e.message)
 }
 
 // decodeYouTubeAPIError는 오류 본문의 reason으로 도메인 에러를 구분한다.
@@ -337,12 +440,12 @@ func decodeYouTubeAPIError(response *http.Response) error {
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&payload); err != nil {
-		return fmt.Errorf("YouTube Live API returned HTTP %d", response.StatusCode)
+		return apiStatusError{status: response.StatusCode}
 	}
 	for _, item := range payload.Error.Errors {
 		if item.Reason == "livePermissionBlocked" {
 			return ErrLiveStreamingBlocked
 		}
 	}
-	return fmt.Errorf("YouTube Live API returned HTTP %d (%s)", response.StatusCode, payload.Error.Message)
+	return apiStatusError{status: response.StatusCode, message: payload.Error.Message}
 }

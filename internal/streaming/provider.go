@@ -22,6 +22,25 @@ type PrepareOptions struct {
 	// 플랫폼에 전달해야 하므로, "미선택"(nil)과 "아동용 아님"(false)을
 	// 구분하려고 포인터를 쓴다. nil이면 프로바이더가 준비를 거절한다.
 	MadeForKids *bool
+	// Description은 방송 설명. 비면 설명 없이 만든다.
+	Description string
+	// CategoryID는 플랫폼 카테고리 id. 비면 카테고리를 설정하지 않는다.
+	CategoryID string
+	// Thumbnail은 업로드할 썸네일 원본. nil이면 올리지 않는다.
+	Thumbnail *Thumbnail
+}
+
+// Thumbnail은 업로드할 썸네일 이미지다.
+type Thumbnail struct {
+	MIME string
+	Data []byte
+}
+
+// Warning은 방송은 진행되었지만 선택 항목이 반영되지 않았음을 알린다.
+// 카테고리·썸네일처럼 실패해도 송출을 막지 않는 항목에만 쓴다.
+type Warning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // PreparedBroadcast는 송출 시작에 필요한 준비 결과다.
@@ -31,6 +50,8 @@ type PreparedBroadcast struct {
 	IngestURL   string
 	BroadcastID string
 	StreamID    string
+	// Warnings는 선택 항목(카테고리·썸네일) 반영 실패 목록이다.
+	Warnings []Warning
 }
 
 // Provider는 플랫폼별 방송 라이프사이클 계약이다.

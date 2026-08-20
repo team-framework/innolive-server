@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,6 +153,14 @@ type youtubeAPIStub struct {
 	lastBroadcast    map[string]any
 	bindQuery        string
 	blockLive        bool
+	// 선택 항목(카테고리·썸네일) 기록·실패 주입.
+	videoUpdates       int
+	lastVideoUpdate    map[string]any
+	videoUpdateStatus  int
+	thumbnailUploads   int
+	lastThumbnailBody  []byte
+	lastThumbnailType  string
+	thumbnailSetStatus int
 }
 
 func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
@@ -171,6 +180,30 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 				"backupIngestionAddress":"rtmp://b.rtmp.youtube.com/live2?backup=1",
 				"rtmpsIngestionAddress":"rtmps://a.rtmps.youtube.com/live2",
 				"rtmpsBackupIngestionAddress":"rtmps://b.rtmps.youtube.com/live2?backup=1"}}}`))
+		case strings.HasPrefix(r.URL.Path, "/videos"):
+			s.videoUpdates++
+			if err := json.NewDecoder(r.Body).Decode(&s.lastVideoUpdate); err != nil {
+				t.Errorf("decode videos.update payload: %v", err)
+			}
+			if s.videoUpdateStatus != 0 {
+				w.WriteHeader(s.videoUpdateStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":400,"message":"invalid category"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
+		case strings.HasPrefix(r.URL.Path, "/thumbnails/set"):
+			s.thumbnailUploads++
+			body, _ := io.ReadAll(r.Body)
+			s.lastThumbnailBody = body
+			s.lastThumbnailType = r.Header.Get("Content-Type")
+			if s.thumbnailSetStatus != 0 {
+				w.WriteHeader(s.thumbnailSetStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"The user is not allowed to upload custom thumbnails."}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[]}`))
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/bind"):
 			s.binds++
 			s.bindQuery = r.URL.RawQuery
@@ -205,6 +238,7 @@ func testProviderWith(t *testing.T, stub *youtubeAPIStub, store auth.StreamingAc
 		t.Fatal(err)
 	}
 	provider.apiBase = server.URL
+	provider.uploadBase = server.URL
 	return provider
 }
 

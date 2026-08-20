@@ -85,7 +85,8 @@ type Response struct {
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
 		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
 	} `json:"media"`
-	Stream StreamState `json:"stream"`
+	Stream    StreamState        `json:"stream"`
+	Broadcast *BroadcastResponse `json:"broadcast"`
 }
 
 type Session struct {
@@ -125,6 +126,7 @@ type Session struct {
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
 	aiInputPaused        bool
 	anonymizationEnabled bool
+	broadcast            *BroadcastSettings
 	ignoredTracks        int
 	offerReceivedAt      time.Time
 	answerCreatedAt      time.Time
@@ -887,6 +889,10 @@ func (s *Session) Response() Response {
 		response.Media.AIFallbackActive = s.processor.FallbackActive()
 	}
 	response.Media.AnonymizationEnabled = s.anonymizationEnabled
+	if s.broadcast != nil {
+		broadcast := s.broadcast.response()
+		response.Broadcast = &broadcast
+	}
 	if s.egress != nil {
 		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)
 	}

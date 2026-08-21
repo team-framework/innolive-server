@@ -64,6 +64,10 @@ type Provider interface {
 	// YouTube: liveBroadcasts.transition(live). 방송 생성 API가 없어 송출
 	// 시작이 곧 라이브인 플랫폼(치지직 등)의 구현은 no-op이다.
 	GoLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
+	// EndLive는 이미 라이브가 된 방송을 즉시 끝낸다. 전환 요청이 플랫폼에
+	// 나간 뒤 중지가 들어온 경우, autoStop(실측 57.6초)을 기다리면 그동안
+	// 시청자에게 노출되므로 직접 종료시킨다.
+	EndLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
 	// Stop은 명시적 중지 시 플랫폼 쪽 마무리를 한다. 송출 중단 자체는
 	// egress 종료가 담당하므로, 플랫폼 API 호출이 불필요한 구현은 no-op이다.
 	// 라이브 전환 이후의 종료는 autoStop이 맡으므로, 호출자는 아직 라이브가

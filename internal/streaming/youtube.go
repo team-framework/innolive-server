@@ -142,6 +142,20 @@ func (p *YouTubeProvider) GoLive(ctx context.Context, userID uuid.UUID, prepared
 	return p.post(ctx, accessToken, path, nil, &struct{}{})
 }
 
+// EndLive는 라이브 방송을 complete로 전환해 즉시 끝낸다. autoStop이 같은 일을
+// 하지만 송출 중단 후 약 1분이 걸려, 그 사이 시청자에게 노출된다.
+func (p *YouTubeProvider) EndLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error {
+	if prepared.BroadcastID == "" {
+		return errors.New("prepared broadcast has no id")
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/liveBroadcasts/transition?broadcastStatus=complete&id=%s&part=id,status", prepared.BroadcastID)
+	return p.post(ctx, accessToken, path, nil, &struct{}{})
+}
+
 // Stop은 아직 라이브가 되지 않은 방송을 삭제한다. autoStart를 끈 뒤로는
 // prepare만 하고 중지한 방송이 채널에 ready 상태로 남기 때문이다. 라이브였던
 // 방송은 호출자가 여기까지 보내지 않고 autoStop에 맡긴다.

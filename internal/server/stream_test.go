@@ -35,9 +35,13 @@ type stubStreamingProvider struct {
 	lastGoLive   streaming.PreparedBroadcast
 	stopCalls    int
 	lastStopped  streaming.PreparedBroadcast
+	endLiveCalls int
+	lastEndLive  streaming.PreparedBroadcast
 	// 플랫폼 왕복 중간을 붙잡기 위한 동기화 채널(설정하지 않으면 무시된다).
 	prepareEntered chan struct{}
 	prepareRelease chan struct{}
+	goLiveEntered  chan struct{}
+	goLiveRelease  chan struct{}
 }
 
 func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
@@ -57,11 +61,35 @@ func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options 
 }
 
 func (s *stubStreamingProvider) GoLive(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	// goLiveEntered/goLiveRelease는 전환 왕복 구간을 테스트가 붙잡아 그동안의
+	// 중지 요청을 확인할 수 있게 한다.
+	if s.goLiveEntered != nil {
+		s.goLiveEntered <- struct{}{}
+	}
+	if s.goLiveRelease != nil {
+		<-s.goLiveRelease
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.goLiveCalls++
 	s.lastGoLive = prepared
 	return s.goLiveErr
+}
+
+// EndLive는 중지에 밀린 라이브 방송의 즉시 종료다.
+func (s *stubStreamingProvider) EndLive(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endLiveCalls++
+	s.lastEndLive = prepared
+	return nil
+}
+
+// ended는 비동기 없이도 잠금을 지켜 읽는 통로다.
+func (s *stubStreamingProvider) ended() (int, streaming.PreparedBroadcast) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endLiveCalls, s.lastEndLive
 }
 
 func (s *stubStreamingProvider) Stop(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {

@@ -35,6 +35,7 @@ var (
 	ErrBroadcastPrepared    = errors.New("the platform broadcast is already prepared")
 	ErrBroadcastNotPrepared = errors.New("the platform broadcast is not prepared")
 	ErrBroadcastLive        = errors.New("the platform broadcast is already live")
+	ErrBroadcastGoingLive   = errors.New("the platform broadcast is switching to live")
 )
 
 type Timing struct {
@@ -136,16 +137,20 @@ type Session struct {
 	broadcast            *YouTubeBroadcastSettings
 	platformBroadcast    *PlatformBroadcast
 	broadcastPhase       BroadcastPhase
-	ignoredTracks        int
-	offerReceivedAt      time.Time
-	answerCreatedAt      time.Time
-	pendingICE           []webrtc.ICECandidateInit
-	negotiationMu        sync.Mutex
-	cancel               context.CancelFunc
-	trackCancel          context.CancelFunc
-	disconnectTimer      *time.Timer
-	wasConnected         bool
-	closed               bool
+	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
+	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
+	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다.
+	goLiveStopRequested bool
+	ignoredTracks       int
+	offerReceivedAt     time.Time
+	answerCreatedAt     time.Time
+	pendingICE          []webrtc.ICECandidateInit
+	negotiationMu       sync.Mutex
+	cancel              context.CancelFunc
+	trackCancel         context.CancelFunc
+	disconnectTimer     *time.Timer
+	wasConnected        bool
+	closed              bool
 }
 
 type Manager struct {
@@ -478,17 +483,20 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 }
 
 // StopStream은 egress만 종료한다 — 세션과 뷰어(WebRTC) 송출은 유지된다.
+// 두 번째 반환값은 호출자가 플랫폼에서 지워야 할 방송이다(없으면 zero value와
+// false). 중지 시점의 단계 판정과 상태 전이가 갈라지면 라이브 전환과 경합하므로
+// 한 번의 잠금 안에서 함께 정한다.
 // 플랫폼 쪽 방송 종료는 enableAutoStop이 담당한다(송출 중단 약 1분 후 반영,
 // 실측 57.6초).
-func (m *Manager) StopStream(id string) (*Session, error) {
+func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, bool, error) {
 	s, err := m.Get(id)
 	if err != nil {
-		return nil, err
+		return nil, PlatformBroadcast{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
-		return nil, ErrStreamNotActive
+		return nil, PlatformBroadcast{}, false, ErrStreamNotActive
 	}
 	s.egressSlot.Clear()
 	s.egress.Stop()
@@ -499,11 +507,25 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 	s.setAIInputPaused(false)
 	reason := "user_requested"
 	s.streamStopReason = &reason
-	s.platformBroadcast = nil
-	s.broadcastPhase = BroadcastPhaseIdle
+	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
+	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
+	var discard PlatformBroadcast
+	shouldDiscard := false
+	if s.broadcastPhase == BroadcastPhaseGoingLive {
+		s.goLiveStopRequested = true
+	} else {
+		// 라이브까지 가지 못한 방송만 지운다. 라이브였던 방송의 종료는
+		// 플랫폼의 autoStop이 맡는다.
+		if s.platformBroadcast != nil && s.broadcastPhase == BroadcastPhasePrepared {
+			discard = *s.platformBroadcast
+			shouldDiscard = true
+		}
+		s.platformBroadcast = nil
+		s.broadcastPhase = BroadcastPhaseIdle
+	}
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
-	return s, nil
+	return s, discard, shouldDiscard, nil
 }
 
 // PauseStream은 RTMP 연결을 유지한 채 실행 중인 egress를 일시 중단 상태로

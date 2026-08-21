@@ -332,3 +332,62 @@ func TestSessionEndDiscardsPreparedBroadcast(t *testing.T) {
 		t.Fatalf("stop calls = %d, stopped = %+v, want the prepared broadcast discarded", calls, stopped)
 	}
 }
+
+// TestSessionEndDuringGoLiveEndsTheLiveBroadcast: 라이브 전환 왕복 중에 세션이
+// 끝나면 중지가 이긴다 — 이미 나간 전환 요청은 취소할 수 없으므로, 전환 결과를
+// 받은 서버가 방송을 즉시 종료시켜야 한다. autoStop(약 1분)에 맡기면 그동안
+// 시청자에게 노출된다(PR #146 리뷰).
+func TestSessionEndDuringGoLiveEndsTheLiveBroadcast(t *testing.T) {
+	provider := &stubStreamingProvider{
+		goLiveEntered: make(chan struct{}),
+		goLiveRelease: make(chan struct{}),
+	}
+	server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	if _, err := manager.BeginBroadcastPrepare(created.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkBroadcastPrepared(created.SessionID, session.PlatformBroadcast{
+		Provider:    string(auth.StreamingProviderYouTube),
+		BroadcastID: "bid-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var goLiveStatus int
+	var goLiveCode string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		response, payload := goLive(t, server.URL, created.SessionID, ownerToken)
+		goLiveStatus = response.StatusCode
+		goLiveCode = streamErrorCode(payload)
+	}()
+
+	// 전환 왕복 한가운데서 세션을 끝낸다.
+	<-provider.goLiveEntered
+	release := sync.OnceFunc(func() {
+		close(provider.goLiveRelease)
+		<-done
+	})
+	defer release()
+	if err := manager.Delete(created.SessionID, "peer_connection_failed"); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	if goLiveStatus != http.StatusConflict || goLiveCode != "broadcast_stopped" {
+		t.Fatalf("go live = %d %q, want 409 broadcast_stopped", goLiveStatus, goLiveCode)
+	}
+	calls, ended := provider.ended()
+	if calls != 1 || ended.BroadcastID != "bid-1" {
+		t.Fatalf("end live calls = %d, ended = %+v, want the live broadcast ended immediately", calls, ended)
+	}
+	// 라이브가 된 방송은 삭제가 아니라 종료 대상이다.
+	if stopCalls, _ := provider.stopped(); stopCalls != 0 {
+		t.Fatalf("stop calls = %d, want the broadcast ended, not deleted", stopCalls)
+	}
+}

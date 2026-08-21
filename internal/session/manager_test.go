@@ -246,7 +246,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatalf("pause before streaming error = %v, want ErrStreamNotActive", err)
 	}
 
-	if _, err := manager.StopStream(created.ID); err != nil {
+	if _, _, _, err := manager.StopStream(created.ID); err != nil {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
@@ -262,7 +262,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	if stream.StopReason == nil || *stream.StopReason != "user_requested" {
 		t.Fatalf("StopReason = %v, want user_requested", stream.StopReason)
 	}
-	if _, err := manager.StopStream(created.ID); !errors.Is(err, ErrStreamNotActive) {
+	if _, _, _, err := manager.StopStream(created.ID); !errors.Is(err, ErrStreamNotActive) {
 		t.Fatalf("double stop error = %v, want ErrStreamNotActive", err)
 	}
 	// 중지된 egress는 종료 타이밍과 무관하게 재시작을 막지 않아야 한다.

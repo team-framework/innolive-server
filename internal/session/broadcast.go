@@ -174,6 +174,10 @@ const (
 	BroadcastPhasePreparing BroadcastPhase = "preparing"
 	// BroadcastPhasePrepared: 방송이 만들어졌지만 시청자에게 노출되지 않는다.
 	BroadcastPhasePrepared BroadcastPhase = "prepared"
+	// BroadcastPhaseGoingLive: 라이브 전환 요청을 플랫폼에 보낸 뒤 응답을
+	// 기다리는 중이다. 이 구간에 들어온 중지는 전환 결과를 확인한 뒤에야
+	// 마무리할 수 있다 — 이미 나간 요청은 취소되지 않기 때문이다.
+	BroadcastPhaseGoingLive BroadcastPhase = "going_live"
 	// BroadcastPhaseLive: 라이브로 전환되어 시청자에게 노출된다.
 	BroadcastPhaseLive BroadcastPhase = "live"
 )
@@ -257,8 +261,10 @@ func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) 
 	return s, nil
 }
 
-// MarkBroadcastLive는 준비된 방송이 라이브로 전환되었음을 기록한다.
-func (m *Manager) MarkBroadcastLive(id string) (*Session, error) {
+// BeginGoLive는 라이브 전환 구간을 선점한다. 플랫폼에 요청을 보내고 나면
+// 취소할 수 없으므로, 그 사이에 들어온 중지는 즉시 방송을 지우는 대신 중지
+// 요청만 기록하고 전환 결과를 이 구간의 주인이 마무리한다.
+func (m *Manager) BeginGoLive(id string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
@@ -271,14 +277,73 @@ func (m *Manager) MarkBroadcastLive(id string) (*Session, error) {
 	switch s.broadcastPhase {
 	case BroadcastPhaseLive:
 		return nil, ErrBroadcastLive
+	case BroadcastPhaseGoingLive:
+		return nil, ErrBroadcastGoingLive
 	case BroadcastPhasePrepared:
 	default:
 		return nil, ErrBroadcastNotPrepared
 	}
+	s.broadcastPhase = BroadcastPhaseGoingLive
+	s.goLiveStopRequested = false
+	s.UpdatedAt = time.Now().UTC()
+	return s, nil
+}
+
+// CompleteGoLive는 플랫폼 전환이 성공한 뒤의 마무리다. 전환 도중 중지가
+// 요청됐으면 aborted=true와 함께 방송 정보를 돌려준다 — 호출자는 그 방송을
+// 즉시 종료시켜야 한다. 세션이 이미 사라진 경우도 중지로 본다.
+func (m *Manager) CompleteGoLive(id string) (aborted bool, broadcast PlatformBroadcast, err error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return true, PlatformBroadcast{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.platformBroadcast != nil {
+		broadcast = *s.platformBroadcast
+	}
+	if s.closed || s.goLiveStopRequested {
+		s.platformBroadcast = nil
+		s.broadcastPhase = BroadcastPhaseIdle
+		s.goLiveStopRequested = false
+		s.UpdatedAt = time.Now().UTC()
+		m.logger.Info("go live aborted by stop", "session_id", s.ID, "broadcast_id", broadcast.BroadcastID)
+		return true, broadcast, nil
+	}
+	if s.broadcastPhase != BroadcastPhaseGoingLive {
+		return true, broadcast, ErrBroadcastNotPrepared
+	}
 	s.broadcastPhase = BroadcastPhaseLive
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("platform broadcast is live", "session_id", s.ID)
-	return s, nil
+	return false, broadcast, nil
+}
+
+// AbortGoLive는 전환 요청이 실패했을 때 선점을 되돌린다. 그 사이 중지가
+// 요청됐으면 준비 상태로 돌아가지 않고 방송을 넘겨준다 — 호출자가 지운다.
+func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadcast) {
+	s, err := m.Get(id)
+	if err != nil {
+		return true, PlatformBroadcast{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.platformBroadcast != nil {
+		broadcast = *s.platformBroadcast
+	}
+	if s.broadcastPhase != BroadcastPhaseGoingLive {
+		return true, broadcast
+	}
+	if s.closed || s.goLiveStopRequested {
+		s.platformBroadcast = nil
+		s.broadcastPhase = BroadcastPhaseIdle
+		s.goLiveStopRequested = false
+		s.UpdatedAt = time.Now().UTC()
+		return true, broadcast
+	}
+	s.broadcastPhase = BroadcastPhasePrepared
+	s.UpdatedAt = time.Now().UTC()
+	return false, broadcast
 }
 
 // PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. preparing 구간에는

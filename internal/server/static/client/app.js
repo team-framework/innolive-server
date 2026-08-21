@@ -741,6 +741,8 @@ function renderBroadcastStreamStatus(stream) {
     // 송출 중이어도 라이브 전환 전이면 시청자에게 보이지 않는다.
     if (stream?.broadcast_phase === "live") {
       setBroadcastStatus(els.broadcastYoutubeState, "라이브 중", "ok");
+    } else if (stream?.broadcast_phase === "going_live") {
+      setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
     } else {
       setBroadcastStatus(els.broadcastYoutubeState, "준비됨 · 라이브 전환 대기", "warn");
     }
@@ -1271,6 +1273,15 @@ function renderBroadcastStartError(error) {
   }
   if (code === "broadcast_prepared" || code === "broadcast_live") {
     setBroadcastStatus(els.broadcastYoutubeState, "이미 준비된 방송이 있음", "warn");
+    return;
+  }
+  if (code === "broadcast_going_live") {
+    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    return;
+  }
+  if (code === "broadcast_stopped") {
+    // 전환 왕복 중에 중지가 들어와 중지가 이긴 경우다(#142).
+    setBroadcastStatus(els.broadcastYoutubeState, "중지되어 라이브 취소됨", "warn");
     return;
   }
   if (code === "stream_already_active") {

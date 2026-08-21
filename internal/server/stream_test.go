@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,9 @@ import (
 )
 
 type stubStreamingProvider struct {
+	// mu는 세션 종료 정리처럼 요청과 별개의 고루틴에서 들어오는 호출을
+	// 기록할 때 테스트의 읽기와 겹치지 않게 한다.
+	mu           sync.Mutex
 	prepared     streaming.PreparedBroadcast
 	prepareErr   error
 	prepareCalls int
@@ -31,27 +35,60 @@ type stubStreamingProvider struct {
 	lastGoLive   streaming.PreparedBroadcast
 	stopCalls    int
 	lastStopped  streaming.PreparedBroadcast
+	// 플랫폼 왕복 중간을 붙잡기 위한 동기화 채널(설정하지 않으면 무시된다).
+	prepareEntered chan struct{}
+	prepareRelease chan struct{}
 }
 
 func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
+	// prepareEntered/prepareRelease는 플랫폼 왕복 구간을 테스트가 붙잡아
+	// 그동안의 동시 요청을 확인할 수 있게 한다.
+	if s.prepareEntered != nil {
+		s.prepareEntered <- struct{}{}
+	}
+	if s.prepareRelease != nil {
+		<-s.prepareRelease
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.prepareCalls++
 	s.lastOptions = options
 	return s.prepared, s.prepareErr
 }
 
 func (s *stubStreamingProvider) GoLive(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.goLiveCalls++
 	s.lastGoLive = prepared
 	return s.goLiveErr
 }
 
 func (s *stubStreamingProvider) Stop(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopCalls++
 	s.lastStopped = prepared
 	return nil
 }
 
+// stopped는 비동기 정리(세션 종료 훅)를 기다리는 테스트가 안전하게 읽는 통로다.
+func (s *stubStreamingProvider) stopped() (int, streaming.PreparedBroadcast) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopCalls, s.lastStopped
+}
+
 func newStreamTestApplication(t *testing.T, providers map[auth.StreamingProvider]streaming.Provider) *httptest.Server {
+	t.Helper()
+	server, _ := newStreamTestApplicationWithManager(t, providers)
+	return server
+}
+
+// newStreamTestApplicationWithManager는 세션 매니저까지 돌려준다. HTTP로는
+// 만들 수 없는 상태(트랙이 필요한 준비 완료 등)를 세워두고 서버 동작을
+// 확인해야 하는 테스트가 쓴다.
+func newStreamTestApplicationWithManager(t *testing.T, providers map[auth.StreamingProvider]streaming.Provider) (*httptest.Server, *session.Manager) {
 	t.Helper()
 	cfg := config.Config{
 		HTTPAddr:                ":0",
@@ -78,7 +115,7 @@ func newStreamTestApplication(t *testing.T, providers map[auth.StreamingProvider
 	}
 	server := httptest.NewServer(New(cfg, logger, registry, manager, nil, origins, nil, providers).Handler())
 	t.Cleanup(server.Close)
-	return server
+	return server, manager
 }
 
 func prepareStream(t *testing.T, baseURL, sessionID, ownerToken, body string) (*http.Response, map[string]any) {

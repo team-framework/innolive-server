@@ -165,6 +165,33 @@ type Manager struct {
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
 	// MaxSessions 사용량에 계속 포함한다.
 	pipelines map[string]struct{}
+
+	// broadcastCleanup은 세션이 끝날 때 남은 플랫폼 방송을 치우는 훅이다.
+	// 세션 계층은 플랫폼 provider를 몰라야 하므로(역방향 결합) 서버가 조립
+	// 시점에 주입한다. nil이면 정리를 하지 않는다.
+	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast)
+}
+
+// SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
+// WebRTC 실패·유예 시간 초과·로그아웃·명시적 삭제가 모두 Delete로 모이므로
+// 훅 하나로 전부 덮인다. 서버 조립 직후 한 번만 호출한다.
+func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast)) {
+	m.broadcastCleanup = cleanup
+}
+
+// cleanupPlatformBroadcast는 라이브까지 가지 못한 방송을 치운다. 라이브였던
+// 방송은 플랫폼의 autoStop이 끝내므로 손대지 않는다. 플랫폼 왕복이 세션
+// teardown을 붙잡지 않도록 별도 고루틴에서 돌린다.
+func (m *Manager) cleanupPlatformBroadcast(s *Session) {
+	if m.broadcastCleanup == nil {
+		return
+	}
+	broadcast, phase := s.PlatformBroadcast()
+	if phase != BroadcastPhasePrepared {
+		return
+	}
+	userID := s.UserID
+	go m.broadcastCleanup(userID, broadcast)
 }
 
 // streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
@@ -614,6 +641,8 @@ func (m *Manager) Delete(id, reason string) error {
 	count := len(m.sessions)
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(count)
+	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
+	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
 	return nil
 }
@@ -628,6 +657,7 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(0)
 	for _, s := range sessions {
+		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
 	}
 	// 종료 중인 FFmpeg 쌍이 정상적으로 끝날 때까지 기다려, shutdown 중 프로세스가

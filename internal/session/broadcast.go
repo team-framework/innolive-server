@@ -137,7 +137,7 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 		return nil, ErrNotFound
 	}
 	switch s.broadcastPhase {
-	case BroadcastPhasePrepared:
+	case BroadcastPhasePreparing, BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
 		return nil, ErrBroadcastLive
@@ -168,6 +168,10 @@ type BroadcastPhase string
 const (
 	// BroadcastPhaseIdle: 플랫폼 방송이 없다.
 	BroadcastPhaseIdle BroadcastPhase = "idle"
+	// BroadcastPhasePreparing: 플랫폼에 방송을 만드는 중이다. 이 구간에도
+	// 설정 변경을 막아야 한다 — 준비가 읽어간 설정과 저장값이 갈리면 조회
+	// 결과와 실제 방송이 어긋난다.
+	BroadcastPhasePreparing BroadcastPhase = "preparing"
 	// BroadcastPhasePrepared: 방송이 만들어졌지만 시청자에게 노출되지 않는다.
 	BroadcastPhasePrepared BroadcastPhase = "prepared"
 	// BroadcastPhaseLive: 라이브로 전환되어 시청자에게 노출된다.
@@ -182,9 +186,50 @@ type PlatformBroadcast struct {
 	StreamID    string
 }
 
-// MarkBroadcastPrepared는 플랫폼 방송 준비 결과를 세션에 기록한다. 이미
-// 준비되었거나 라이브인 세션은 거절한다 — 방송 2개가 한 세션에 붙으면 어느
-// 쪽이 라이브가 되는지 알 수 없다.
+// BeginBroadcastPrepare는 플랫폼 호출을 시작하기 전에 준비 구간을 선점한다.
+// 플랫폼 왕복은 수 초가 걸리고, 그동안 설정이 바뀌면 만들어진 방송과 저장값이
+// 어긋나므로 phase를 먼저 preparing으로 옮겨 설정 변경과 중복 준비를 막는다.
+func (m *Manager) BeginBroadcastPrepare(id string) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrNotFound
+	}
+	switch s.broadcastPhase {
+	case BroadcastPhasePreparing, BroadcastPhasePrepared:
+		return nil, ErrBroadcastPrepared
+	case BroadcastPhaseLive:
+		return nil, ErrBroadcastLive
+	}
+	s.broadcastPhase = BroadcastPhasePreparing
+	s.UpdatedAt = time.Now().UTC()
+	return s, nil
+}
+
+// ResetBroadcastPreparation은 선점한 준비 구간을 되돌린다. 플랫폼 준비가
+// 실패했거나 egress를 붙이지 못했을 때 호출한다.
+func (m *Manager) ResetBroadcastPreparation(id string) {
+	s, err := m.Get(id)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broadcastPhase != BroadcastPhasePreparing {
+		return
+	}
+	s.platformBroadcast = nil
+	s.broadcastPhase = BroadcastPhaseIdle
+	s.UpdatedAt = time.Now().UTC()
+}
+
+// MarkBroadcastPrepared는 플랫폼 방송 준비 결과를 세션에 기록한다.
+// BeginBroadcastPrepare로 선점한 구간에서만 기록할 수 있다 — 방송 2개가 한
+// 세션에 붙으면 어느 쪽이 라이브가 되는지 알 수 없다.
 func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
@@ -200,6 +245,9 @@ func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) 
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
 		return nil, ErrBroadcastLive
+	case BroadcastPhasePreparing:
+	default:
+		return nil, ErrBroadcastNotPrepared
 	}
 	s.platformBroadcast = &broadcast
 	s.broadcastPhase = BroadcastPhasePrepared
@@ -233,13 +281,13 @@ func (m *Manager) MarkBroadcastLive(id string) (*Session, error) {
 	return s, nil
 }
 
-// PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. 준비된 방송이 없으면
-// phase는 idle이고 방송 정보는 zero value다.
+// PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. preparing 구간에는
+// 아직 방송 정보가 없으므로 방송은 zero value이고 단계만 유효하다.
 func (s *Session) PlatformBroadcast() (PlatformBroadcast, BroadcastPhase) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.platformBroadcast == nil {
-		return PlatformBroadcast{}, BroadcastPhaseIdle
+		return PlatformBroadcast{}, s.broadcastPhase
 	}
 	return *s.platformBroadcast, s.broadcastPhase
 }

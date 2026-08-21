@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
@@ -199,5 +201,134 @@ func TestGoLiveWithoutPrepare(t *testing.T) {
 	}
 	if provider.goLiveCalls != 0 {
 		t.Fatalf("go live calls = %d, want no platform call", provider.goLiveCalls)
+	}
+}
+
+// TestPutBroadcastRejectedWhilePreparing: 플랫폼 왕복 중에 들어온 설정 변경은
+// 거절해야 한다. 통과시키면 조회에는 새 설정이 보이지만 실제 YouTube 방송은
+// 이전 설정으로 만들어져 둘이 갈린다(PR #146 리뷰).
+func TestPutBroadcastRejectedWhilePreparing(t *testing.T) {
+	provider := &stubStreamingProvider{
+		prepared: streaming.PreparedBroadcast{
+			Provider:  auth.StreamingProviderYouTube,
+			IngestURL: "rtmps://a.rtmps.youtube.com/live2/secret",
+		},
+		prepareEntered: make(chan struct{}),
+		prepareRelease: make(chan struct{}),
+	}
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	if response, payload := putBroadcast(t, server.URL, created.SessionID, ownerToken,
+		`{"title":"설정 A","made_for_kids":false}`); response.StatusCode != http.StatusOK {
+		t.Fatalf("put broadcast status = %d (payload %v)", response.StatusCode, payload)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	}()
+
+	// 플랫폼 왕복 한가운데서 설정 변경을 시도한다. 단언이 실패해도 붙잡아 둔
+	// 준비를 반드시 풀어줘야 테스트가 멈추지 않는다.
+	<-provider.prepareEntered
+	// 단언이 실패해도 붙잡아 둔 준비를 반드시 풀어줘야 테스트가 멈추지 않는다.
+	release := sync.OnceFunc(func() {
+		close(provider.prepareRelease)
+		<-done
+	})
+	defer release()
+	response, payload := putBroadcast(t, server.URL, created.SessionID, ownerToken,
+		`{"title":"설정 B","made_for_kids":false}`)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 while preparing (payload %v)", response.StatusCode, payload)
+	}
+	release()
+
+	// 준비가 읽어간 설정과 저장값이 같아야 한다.
+	if provider.lastOptions.Title != "설정 A" {
+		t.Fatalf("prepare options title = %q, want 설정 A", provider.lastOptions.Title)
+	}
+	broadcast, _ := getSessionPayload(t, server.URL, created.SessionID, ownerToken)["broadcast"].(map[string]any)
+	if broadcast["title"] != "설정 A" {
+		t.Fatalf("stored title = %v, want 설정 A", broadcast["title"])
+	}
+}
+
+// TestPrepareRejectedWhilePreparing: 준비 요청이 겹치면 뒤엣것은 플랫폼을
+// 부르지 않고 409여야 한다 — 방송이 둘 만들어지면 하나는 고아가 된다.
+func TestPrepareRejectedWhilePreparing(t *testing.T) {
+	provider := &stubStreamingProvider{
+		prepared: streaming.PreparedBroadcast{
+			Provider:  auth.StreamingProviderYouTube,
+			IngestURL: "rtmps://a.rtmps.youtube.com/live2/secret",
+		},
+		prepareEntered: make(chan struct{}),
+		prepareRelease: make(chan struct{}),
+	}
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	}()
+
+	<-provider.prepareEntered
+	release := sync.OnceFunc(func() {
+		close(provider.prepareRelease)
+		<-done
+	})
+	defer release()
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 for the second prepare (payload %v)", response.StatusCode, payload)
+	}
+	if streamErrorCode(payload) != "broadcast_prepared" {
+		t.Fatalf("error code = %q, want broadcast_prepared", streamErrorCode(payload))
+	}
+	release()
+	if provider.prepareCalls != 1 {
+		t.Fatalf("prepare calls = %d, want 1", provider.prepareCalls)
+	}
+}
+
+// TestSessionEndDiscardsPreparedBroadcast: 세션이 어떤 이유로 끝나든 라이브까지
+// 가지 못한 방송은 플랫폼에서 지워야 한다(PR #146 리뷰). 정리 훅이 서버 조립
+// 시점에 실제로 걸려 있는지까지 확인한다.
+func TestSessionEndDiscardsPreparedBroadcast(t *testing.T) {
+	provider := &stubStreamingProvider{}
+	server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, _ := createTestSession(t, server.URL, nil)
+
+	if _, err := manager.BeginBroadcastPrepare(created.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := session.PlatformBroadcast{Provider: string(auth.StreamingProviderYouTube), BroadcastID: "bid-1"}
+	if _, err := manager.MarkBroadcastPrepared(created.SessionID, broadcast); err != nil {
+		t.Fatal(err)
+	}
+
+	// WebRTC 실패·유예 시간 초과·로그아웃이 모두 이 경로로 모인다.
+	if err := manager.Delete(created.SessionID, "peer_connection_failed"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	calls, stopped := provider.stopped()
+	for time.Now().Before(deadline) && calls == 0 {
+		time.Sleep(5 * time.Millisecond)
+		calls, stopped = provider.stopped()
+	}
+	if calls != 1 || stopped.BroadcastID != "bid-1" {
+		t.Fatalf("stop calls = %d, stopped = %+v, want the prepared broadcast discarded", calls, stopped)
 	}
 }

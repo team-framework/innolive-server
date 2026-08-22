@@ -170,6 +170,106 @@ func (p *YouTubeProvider) Stop(ctx context.Context, userID uuid.UUID, prepared P
 	return p.do(ctx, accessToken, http.MethodDelete, p.apiBase+"/liveBroadcasts?id="+prepared.BroadcastID, "", nil, nil)
 }
 
+// Defaults는 직전 방송의 표시 설정을 돌려준다(#143). YouTube 스튜디오의
+// "업로드 기본값"을 읽는 API가 없어 채널 기본값 대신 직전 방송을 쓴다.
+// 조회는 liveBroadcasts.list(1 unit) + videos.list(1 unit)로 끝난다 —
+// 쓰기(50 unit)에 비하면 무시할 만한 비용이다.
+func (p *YouTubeProvider) Defaults(ctx context.Context, userID uuid.UUID) (BroadcastDefaults, error) {
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return BroadcastDefaults{}, err
+	}
+	var response struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Snippet struct {
+				Title              string `json:"title"`
+				Description        string `json:"description"`
+				PublishedAt        string `json:"publishedAt"`
+				ScheduledStartTime string `json:"scheduledStartTime"`
+				ActualStartTime    string `json:"actualStartTime"`
+				ActualEndTime      string `json:"actualEndTime"`
+			} `json:"snippet"`
+			Status struct {
+				PrivacyStatus           string `json:"privacyStatus"`
+				SelfDeclaredMadeForKids *bool  `json:"selfDeclaredMadeForKids"`
+				MadeForKids             *bool  `json:"madeForKids"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	// broadcastStatus와 mine은 함께 쓸 수 없는 필터다 — completed 자체가
+	// 인증된 사용자의 방송만 돌려준다. 응답 정렬이 문서로 보장되지 않아
+	// 몇 건을 받아 시각으로 직접 고른다(비용은 그대로 1 unit).
+	if err := p.do(ctx, accessToken, http.MethodGet,
+		p.apiBase+"/liveBroadcasts?part=snippet,status&broadcastStatus=completed&broadcastType=all&maxResults=5",
+		"", nil, &response); err != nil {
+		return BroadcastDefaults{}, err
+	}
+	latest := -1
+	latestAt := ""
+	for index, item := range response.Items {
+		at := firstNonEmpty(item.Snippet.ActualEndTime, item.Snippet.ActualStartTime,
+			item.Snippet.ScheduledStartTime, item.Snippet.PublishedAt)
+		// RFC3339 UTC 문자열은 사전순 비교가 곧 시각 비교다.
+		if latest < 0 || at > latestAt {
+			latest, latestAt = index, at
+		}
+	}
+	if latest < 0 {
+		// 직전 방송이 없는 계정 — 폴백값으로 폼을 연다.
+		return FallbackDefaults(), nil
+	}
+	previous := response.Items[latest]
+	madeForKids := previous.Status.SelfDeclaredMadeForKids
+	if madeForKids == nil {
+		madeForKids = previous.Status.MadeForKids
+	}
+	defaults := BroadcastDefaults{
+		Title:       previous.Snippet.Title,
+		Description: previous.Snippet.Description,
+		Privacy:     previous.Status.PrivacyStatus,
+		MadeForKids: madeForKids,
+		CategoryID:  p.videoCategory(ctx, accessToken, previous.ID),
+	}
+	if strings.TrimSpace(defaults.Title) == "" {
+		defaults.Title = defaultBroadcastTitle
+	}
+	if strings.TrimSpace(defaults.Privacy) == "" {
+		defaults.Privacy = defaultBroadcastPrivacy
+	}
+	return defaults, nil
+}
+
+// videoCategory는 방송의 카테고리를 읽는다. liveBroadcasts에 카테고리 필드가
+// 없어 videos.list를 따로 부른다. 실패하면 카테고리만 미선택으로 두면 되므로
+// 에러를 올리지 않는다.
+func (p *YouTubeProvider) videoCategory(ctx context.Context, accessToken, videoID string) string {
+	var response struct {
+		Items []struct {
+			Snippet struct {
+				CategoryID string `json:"categoryId"`
+			} `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := p.do(ctx, accessToken, http.MethodGet,
+		p.apiBase+"/videos?part=snippet&id="+videoID, "", nil, &response); err != nil {
+		return ""
+	}
+	if len(response.Items) == 0 {
+		return ""
+	}
+	return response.Items[0].Snippet.CategoryID
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // CleanupStreamingResources는 연결 해제 전에 프리로딩된 재사용 스트림을
 // 플랫폼에서 삭제한다(#88 — DB 행만 지우면 사용자 채널에 고아 리소스가
 // 남고 재연결마다 누적된다). 토큰이 이미 무효면 실패하는데, 호출자

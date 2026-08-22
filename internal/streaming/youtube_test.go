@@ -168,6 +168,15 @@ type youtubeAPIStub struct {
 	transitionBody   string
 	deletes          int
 	deleteQuery      string
+	// 설정 기본값 조회(#143) 기록·응답 주입.
+	broadcastLists      int
+	broadcastListQuery  string
+	broadcastListBody   string
+	broadcastListStatus int
+	videoLists          int
+	videoListQuery      string
+	videoListBody       string
+	videoListStatus     int
 }
 
 func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
@@ -187,6 +196,16 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 				"backupIngestionAddress":"rtmp://b.rtmp.youtube.com/live2?backup=1",
 				"rtmpsIngestionAddress":"rtmps://a.rtmps.youtube.com/live2",
 				"rtmpsBackupIngestionAddress":"rtmps://b.rtmps.youtube.com/live2?backup=1"}}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/videos"):
+			s.videoLists++
+			s.videoListQuery = r.URL.RawQuery
+			if s.videoListStatus != 0 {
+				w.WriteHeader(s.videoListStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(s.videoListBody))
 		case strings.HasPrefix(r.URL.Path, "/videos"):
 			s.videoUpdates++
 			if err := json.NewDecoder(r.Body).Decode(&s.lastVideoUpdate); err != nil {
@@ -230,6 +249,16 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 			s.bindQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
+			s.broadcastLists++
+			s.broadcastListQuery = r.URL.RawQuery
+			if s.broadcastListStatus != 0 {
+				w.WriteHeader(s.broadcastListStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(s.broadcastListBody))
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
 			if s.blockLive {
 				// 라이브 미활성 채널의 실측 응답 형태(2026-08-09).

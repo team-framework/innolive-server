@@ -3,6 +3,7 @@ package streaming
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -228,5 +229,106 @@ func TestPrepareAutoStartOptIn(t *testing.T) {
 	contentDetails := stub.lastBroadcast["contentDetails"].(map[string]any)
 	if contentDetails["enableAutoStart"] != true {
 		t.Fatalf("enableAutoStart = %v, want true for the legacy path", contentDetails["enableAutoStart"])
+	}
+}
+
+// TestDefaultsReturnsLatestCompletedBroadcast: 직전 방송의 제목·설명·공개
+// 범위·아동용 여부와 videos.list의 카테고리가 그대로 나와야 한다. 응답 정렬은
+// 문서로 보장되지 않으므로 시각이 가장 늦은 방송을 골라야 한다.
+func TestDefaultsReturnsLatestCompletedBroadcast(t *testing.T) {
+	stub := &youtubeAPIStub{
+		broadcastListBody: `{"items":[
+			{"id":"older","snippet":{"title":"예전 방송","actualEndTime":"2026-08-01T10:00:00Z"},"status":{"privacyStatus":"private"}},
+			{"id":"latest","snippet":{"title":"직전 방송","description":"직전 설명","actualEndTime":"2026-08-20T10:00:00Z"},"status":{"privacyStatus":"public","selfDeclaredMadeForKids":false}}
+		]}`,
+		videoListBody: `{"items":[{"snippet":{"categoryId":"20"}}]}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	defaults, err := provider.Defaults(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Title != "직전 방송" || defaults.Description != "직전 설명" ||
+		defaults.Privacy != "public" || defaults.CategoryID != "20" {
+		t.Fatalf("defaults = %+v", defaults)
+	}
+	if defaults.MadeForKids == nil || *defaults.MadeForKids {
+		t.Fatalf("MadeForKids = %v, want false", defaults.MadeForKids)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	// broadcastStatus와 mine은 함께 못 쓰는 필터다 — mine이 실리면 400이 난다.
+	if !strings.Contains(stub.broadcastListQuery, "broadcastStatus=completed") ||
+		strings.Contains(stub.broadcastListQuery, "mine=") {
+		t.Fatalf("liveBroadcasts.list query = %q", stub.broadcastListQuery)
+	}
+	if !strings.Contains(stub.videoListQuery, "id=latest") {
+		t.Fatalf("videos.list query = %q", stub.videoListQuery)
+	}
+}
+
+// TestDefaultsFallsBackWithoutPreviousBroadcast: 직전 방송이 없으면 폴백값이
+// 나오고 videos.list는 부르지 않아야 한다(할당량 낭비 방지).
+func TestDefaultsFallsBackWithoutPreviousBroadcast(t *testing.T) {
+	stub := &youtubeAPIStub{broadcastListBody: `{"items":[]}`}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	defaults, err := provider.Defaults(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Title != defaultBroadcastTitle || defaults.Privacy != defaultBroadcastPrivacy ||
+		defaults.CategoryID != "" || defaults.MadeForKids != nil {
+		t.Fatalf("defaults = %+v, want fallback", defaults)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.videoLists != 0 {
+		t.Fatalf("videos.list calls = %d, want 0", stub.videoLists)
+	}
+}
+
+// TestDefaultsKeepsBroadcastValuesWhenCategoryLookupFails: 카테고리 조회 실패는
+// 카테고리만 미선택으로 두고 나머지 값은 살려야 한다.
+func TestDefaultsKeepsBroadcastValuesWhenCategoryLookupFails(t *testing.T) {
+	stub := &youtubeAPIStub{
+		broadcastListBody: `{"items":[{"id":"latest","snippet":{"title":"직전 방송","actualEndTime":"2026-08-20T10:00:00Z"},"status":{"privacyStatus":"unlisted","selfDeclaredMadeForKids":true}}]}`,
+		videoListStatus:   http.StatusForbidden,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	defaults, err := provider.Defaults(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Title != "직전 방송" || defaults.CategoryID != "" {
+		t.Fatalf("defaults = %+v", defaults)
+	}
+	if defaults.MadeForKids == nil || !*defaults.MadeForKids {
+		t.Fatalf("MadeForKids = %v, want true", defaults.MadeForKids)
+	}
+}
+
+// TestDefaultsPropagatesListFailure: 방송 목록 조회 실패는 호출자가 폴백으로
+// 덮을 수 있도록 에러로 올라와야 한다.
+func TestDefaultsPropagatesListFailure(t *testing.T) {
+	stub := &youtubeAPIStub{broadcastListStatus: http.StatusForbidden}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Defaults(context.Background(), userID); err == nil {
+		t.Fatal("Defaults did not fail on liveBroadcasts.list error")
 	}
 }

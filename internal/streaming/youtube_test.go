@@ -173,10 +173,14 @@ type youtubeAPIStub struct {
 	broadcastListQuery  string
 	broadcastListBody   string
 	broadcastListStatus int
-	videoLists          int
-	videoListQuery      string
-	videoListBody       string
-	videoListStatus     int
+	// broadcastListPages는 호출 순서대로 돌려줄 페이지 본문이다. 비면
+	// broadcastListBody를 매번 돌려준다.
+	broadcastListPages   []string
+	broadcastListQueries []string
+	videoLists           int
+	videoListQuery       string
+	videoListBody        string
+	videoListStatus      int
 }
 
 func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
@@ -252,13 +256,24 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
 			s.broadcastLists++
 			s.broadcastListQuery = r.URL.RawQuery
+			s.broadcastListQueries = append(s.broadcastListQueries, r.URL.RawQuery)
 			if s.broadcastListStatus != 0 {
 				w.WriteHeader(s.broadcastListStatus)
 				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
 				return
 			}
+			body := s.broadcastListBody
+			if len(s.broadcastListPages) > 0 {
+				// 마지막 페이지를 넘어선 호출은 계약 위반이라 테스트에서 잡는다.
+				if s.broadcastLists > len(s.broadcastListPages) {
+					t.Errorf("liveBroadcasts.list called %d times, want at most %d", s.broadcastLists, len(s.broadcastListPages))
+					body = `{"items":[]}`
+				} else {
+					body = s.broadcastListPages[s.broadcastLists-1]
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(s.broadcastListBody))
+			_, _ = w.Write([]byte(body))
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
 			if s.blockLive {
 				// 라이브 미활성 채널의 실측 응답 형태(2026-08-09).

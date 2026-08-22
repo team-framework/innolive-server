@@ -332,3 +332,71 @@ func TestDefaultsPropagatesListFailure(t *testing.T) {
 		t.Fatal("Defaults did not fail on liveBroadcasts.list error")
 	}
 }
+
+// TestDefaultsFollowsPagesToFindLatest: 첫 페이지가 가득 차면 실제 최신이 다음
+// 페이지에 있을 수 있다 — nextPageToken을 따라가 비교해야 한다(PR #151 리뷰).
+func TestDefaultsFollowsPagesToFindLatest(t *testing.T) {
+	stub := &youtubeAPIStub{
+		broadcastListPages: []string{
+			`{"nextPageToken":"page-2","items":[
+				{"id":"older","snippet":{"title":"예전 방송","actualEndTime":"2026-08-01T10:00:00Z"},"status":{"privacyStatus":"private"}}
+			]}`,
+			`{"items":[
+				{"id":"latest","snippet":{"title":"직전 방송","actualEndTime":"2026-08-20T10:00:00Z"},"status":{"privacyStatus":"public","selfDeclaredMadeForKids":false}}
+			]}`,
+		},
+		videoListBody: `{"items":[{"snippet":{"categoryId":"20"}}]}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	defaults, err := provider.Defaults(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Title != "직전 방송" || defaults.Privacy != "public" || defaults.CategoryID != "20" {
+		t.Fatalf("defaults = %+v, want the broadcast from the second page", defaults)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.broadcastLists != 2 {
+		t.Fatalf("liveBroadcasts.list calls = %d, want 2", stub.broadcastLists)
+	}
+	if !strings.Contains(stub.broadcastListQueries[0], "maxResults=50") {
+		t.Fatalf("first page query = %q, want maxResults=50", stub.broadcastListQueries[0])
+	}
+	if strings.Contains(stub.broadcastListQueries[0], "pageToken=") {
+		t.Fatalf("first page query carried a pageToken: %q", stub.broadcastListQueries[0])
+	}
+	if !strings.Contains(stub.broadcastListQueries[1], "pageToken=page-2") {
+		t.Fatalf("second page query = %q, want pageToken=page-2", stub.broadcastListQueries[1])
+	}
+}
+
+// TestDefaultsStopsAtPageCap: 이력이 긴 채널에서 폼 여는 시간이 무한정 늘지
+// 않도록 페이지 수에 상한이 있다 — 계약은 "최근 150건 중 최신"이다.
+func TestDefaultsStopsAtPageCap(t *testing.T) {
+	page := `{"nextPageToken":"more","items":[{"id":"b","snippet":{"title":"방송","actualEndTime":"2026-08-01T10:00:00Z"},"status":{"privacyStatus":"unlisted"}}]}`
+	pages := make([]string, defaultsMaxPages)
+	for index := range pages {
+		pages[index] = page
+	}
+	stub := &youtubeAPIStub{broadcastListPages: pages, videoListBody: `{"items":[]}`}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Defaults(context.Background(), userID); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	// 상한을 넘겨 호출하면 stub이 t.Errorf로 잡는다. 여기서는 상한까지는
+	// 실제로 따라갔는지 확인한다.
+	if stub.broadcastLists != defaultsMaxPages {
+		t.Fatalf("liveBroadcasts.list calls = %d, want %d", stub.broadcastLists, defaultsMaxPages)
+	}
+}

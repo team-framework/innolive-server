@@ -31,6 +31,9 @@ const state = {
   offerSent: false,
   lastSelectedCandidatePairId: null,
   lastSessionJson: null,
+  // 사용자가 직접 건드린 방송 설정 필드. 직전 방송 기본값(#143)이 이 필드를
+  // 덮으면 고른 공개 범위·아동용 신고가 뒤집히므로 여기에 담아 보존한다.
+  touchedBroadcastFields: new Set(),
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -192,6 +195,13 @@ function bindEvents() {
   els.saveBroadcastBtn.addEventListener("click", () =>
     void saveBroadcastSettings().catch(() => null),
   );
+  // select·checkbox는 값이 늘 차 있어 "비었는지"로 사용자 입력을 가려낼 수
+  // 없다 — 건드린 필드를 직접 표시해둔다.
+  for (const [field, element] of Object.entries(broadcastFormFields())) {
+    const markTouched = () => state.touchedBroadcastFields.add(field);
+    element.addEventListener("input", markTouched);
+    element.addEventListener("change", markTouched);
+  }
   els.clearLogBtn.addEventListener("click", () => {
     els.eventLog.replaceChildren();
   });
@@ -886,7 +896,54 @@ async function createSession() {
     session_id: session.session_id,
     metadata: session.metadata,
   });
+  await applyBroadcastDefaults(session.session_id);
   return session;
+}
+
+// broadcastFormFields는 직전 방송 기본값이 채우는 폼 필드다. 이벤트 등록과
+// 값 주입이 같은 목록을 보도록 한 곳에 둔다.
+function broadcastFormFields() {
+  return {
+    title: els.broadcastTitle,
+    description: els.broadcastDescription,
+    category_id: els.broadcastCategoryId,
+    privacy: els.broadcastPrivacy,
+    made_for_kids: els.madeForKids,
+  };
+}
+
+// applyBroadcastDefaults는 직전 방송 값을 폼에 채운다(#143). 사용자가 건드린
+// 필드는 덮지 않고, 조회가 실패해도 서버가 폴백값을 주므로 폼은 그대로 쓴다.
+async function applyBroadcastDefaults(sessionId) {
+  const untouched = (field) => !state.touchedBroadcastFields.has(field);
+  try {
+    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults`);
+    if (untouched("title")) {
+      els.broadcastTitle.value = defaults.title || "";
+    }
+    if (untouched("description")) {
+      els.broadcastDescription.value = defaults.description || "";
+    }
+    if (untouched("category_id")) {
+      els.broadcastCategoryId.value = defaults.category_id || "";
+    }
+    if (untouched("privacy") && defaults.privacy) {
+      els.broadcastPrivacy.value = defaults.privacy;
+    }
+    // 아동용 여부는 미선택(null)이면 사용자가 직접 골라야 하므로 두고 본다.
+    if (untouched("made_for_kids") && typeof defaults.made_for_kids === "boolean") {
+      els.madeForKids.checked = defaults.made_for_kids;
+    }
+    els.broadcastSettingsDetail.textContent =
+      "직전 방송 값을 불러왔습니다. 확인 후 저장하세요.";
+    logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
+  } catch (error) {
+    logEvent("warn", "Broadcast defaults load failed", {
+      session_id: sessionId,
+      message: error?.message,
+      status: error?.status,
+    });
+  }
 }
 
 function buildSessionMetadata() {

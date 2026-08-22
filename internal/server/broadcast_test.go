@@ -462,3 +462,79 @@ func TestLegacyStartStreamRejectedAfterPrepare(t *testing.T) {
 		t.Fatalf("prepare calls = %d, want no platform call", provider.prepareCalls)
 	}
 }
+
+func getBroadcastDefaults(t *testing.T, baseURL, sessionID, ownerToken string) (*http.Response, map[string]any) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/sessions/"+sessionID+"/broadcast/defaults", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Session-Owner-Token", ownerToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+	payload := map[string]any{}
+	_ = json.NewDecoder(response.Body).Decode(&payload)
+	return response, payload
+}
+
+// TestGetBroadcastDefaultsReturnsPreviousBroadcast: 직전 방송이 있는 계정은
+// 그 값이 그대로 폼 초기값으로 나와야 한다(#143).
+func TestGetBroadcastDefaultsReturnsPreviousBroadcast(t *testing.T) {
+	madeForKids := false
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{defaults: streaming.BroadcastDefaults{
+			Title:       "직전 방송",
+			Description: "직전 설명",
+			Privacy:     "public",
+			MadeForKids: &madeForKids,
+			CategoryID:  "20",
+		}},
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	response, payload := getBroadcastDefaults(t, server.URL, created.SessionID, ownerToken)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d (payload %v)", response.StatusCode, payload)
+	}
+	if payload["title"] != "직전 방송" || payload["description"] != "직전 설명" ||
+		payload["privacy"] != "public" || payload["category_id"] != "20" ||
+		payload["made_for_kids"] != false {
+		t.Fatalf("defaults = %v", payload)
+	}
+}
+
+// TestGetBroadcastDefaultsFallsBackOnLookupFailure: 조회에 실패해도 폼은 열려야
+// 하므로 200에 폴백값이 나와야 한다. 아동용 여부는 미선택(null)이다.
+func TestGetBroadcastDefaultsFallsBackOnLookupFailure(t *testing.T) {
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{defaultsErr: auth.ErrStreamingNotConnected},
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	response, payload := getBroadcastDefaults(t, server.URL, created.SessionID, ownerToken)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d (payload %v)", response.StatusCode, payload)
+	}
+	if payload["title"] != "InnoLive 방송" || payload["privacy"] != "unlisted" ||
+		payload["category_id"] != "" || payload["made_for_kids"] != nil {
+		t.Fatalf("defaults = %v, want fallback", payload)
+	}
+}
+
+// TestGetBroadcastDefaultsFallsBackWithoutProvider: 플랫폼 송출이 조립되지 않은
+// 배포(자격증명 미설정·벤치)에서도 폼은 폴백값으로 열린다.
+func TestGetBroadcastDefaultsFallsBackWithoutProvider(t *testing.T) {
+	server := newStreamTestApplication(t, nil)
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	response, payload := getBroadcastDefaults(t, server.URL, created.SessionID, ownerToken)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d (payload %v)", response.StatusCode, payload)
+	}
+	if payload["title"] != "InnoLive 방송" || payload["privacy"] != "unlisted" {
+		t.Fatalf("defaults = %v, want fallback", payload)
+	}
+}

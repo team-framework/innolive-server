@@ -31,6 +31,11 @@ var (
 	ErrStreamNotActive  = errors.New("stream egress is not active")
 	ErrStreamPaused     = errors.New("stream egress is already paused")
 	ErrStreamNotPaused  = errors.New("stream egress is not paused")
+	// 플랫폼 방송 라이프사이클(준비 → 라이브) 위반.
+	ErrBroadcastPrepared    = errors.New("the platform broadcast is already prepared")
+	ErrBroadcastNotPrepared = errors.New("the platform broadcast is not prepared")
+	ErrBroadcastLive        = errors.New("the platform broadcast is already live")
+	ErrBroadcastGoingLive   = errors.New("the platform broadcast is switching to live")
 )
 
 type Timing struct {
@@ -56,6 +61,9 @@ type StreamState struct {
 	VideoHeight       uint16     `json:"video_height"`
 	VideoFPS          int        `json:"video_fps"`
 	PausedAt          *time.Time `json:"paused_at"`
+	// BroadcastPhase는 플랫폼 방송의 위치(idle/prepared/live)다. egress는
+	// "준비만 된 방송"을 알 수 없어 egress phase에서 파생할 수 없다.
+	BroadcastPhase BroadcastPhase `json:"broadcast_phase"`
 }
 
 type TrackState struct {
@@ -127,16 +135,22 @@ type Session struct {
 	aiInputPaused        bool
 	anonymizationEnabled bool
 	broadcast            *YouTubeBroadcastSettings
-	ignoredTracks        int
-	offerReceivedAt      time.Time
-	answerCreatedAt      time.Time
-	pendingICE           []webrtc.ICECandidateInit
-	negotiationMu        sync.Mutex
-	cancel               context.CancelFunc
-	trackCancel          context.CancelFunc
-	disconnectTimer      *time.Timer
-	wasConnected         bool
-	closed               bool
+	platformBroadcast    *PlatformBroadcast
+	broadcastPhase       BroadcastPhase
+	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
+	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
+	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다.
+	goLiveStopRequested bool
+	ignoredTracks       int
+	offerReceivedAt     time.Time
+	answerCreatedAt     time.Time
+	pendingICE          []webrtc.ICECandidateInit
+	negotiationMu       sync.Mutex
+	cancel              context.CancelFunc
+	trackCancel         context.CancelFunc
+	disconnectTimer     *time.Timer
+	wasConnected        bool
+	closed              bool
 }
 
 type Manager struct {
@@ -156,6 +170,33 @@ type Manager struct {
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
 	// MaxSessions 사용량에 계속 포함한다.
 	pipelines map[string]struct{}
+
+	// broadcastCleanup은 세션이 끝날 때 남은 플랫폼 방송을 치우는 훅이다.
+	// 세션 계층은 플랫폼 provider를 몰라야 하므로(역방향 결합) 서버가 조립
+	// 시점에 주입한다. nil이면 정리를 하지 않는다.
+	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast)
+}
+
+// SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
+// WebRTC 실패·유예 시간 초과·로그아웃·명시적 삭제가 모두 Delete로 모이므로
+// 훅 하나로 전부 덮인다. 서버 조립 직후 한 번만 호출한다.
+func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast)) {
+	m.broadcastCleanup = cleanup
+}
+
+// cleanupPlatformBroadcast는 라이브까지 가지 못한 방송을 치운다. 라이브였던
+// 방송은 플랫폼의 autoStop이 끝내므로 손대지 않는다. 플랫폼 왕복이 세션
+// teardown을 붙잡지 않도록 별도 고루틴에서 돌린다.
+func (m *Manager) cleanupPlatformBroadcast(s *Session) {
+	if m.broadcastCleanup == nil {
+		return
+	}
+	broadcast, phase := s.PlatformBroadcast()
+	if phase != BroadcastPhasePrepared {
+		return
+	}
+	userID := s.UserID
+	go m.broadcastCleanup(userID, broadcast)
 }
 
 // streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
@@ -277,7 +318,8 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		Metadata:             copyMetadata(metadata),
 		Status:               "active",
 		PC:                   pc,
-		Stream:               StreamState{Status: "idle", UpdatedAt: now},
+		Stream:               StreamState{Status: "idle", UpdatedAt: now, BroadcastPhase: BroadcastPhaseIdle},
+		broadcastPhase:       BroadcastPhaseIdle,
 		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
 		ownerHash:            ownerHash,
 		cancel:               cancel,
@@ -482,17 +524,20 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 }
 
 // StopStream은 egress만 종료한다 — 세션과 뷰어(WebRTC) 송출은 유지된다.
+// 두 번째 반환값은 호출자가 플랫폼에서 지워야 할 방송이다(없으면 zero value와
+// false). 중지 시점의 단계 판정과 상태 전이가 갈라지면 라이브 전환과 경합하므로
+// 한 번의 잠금 안에서 함께 정한다.
 // 플랫폼 쪽 방송 종료는 enableAutoStop이 담당한다(송출 중단 약 1분 후 반영,
 // 실측 57.6초).
-func (m *Manager) StopStream(id string) (*Session, error) {
+func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, bool, error) {
 	s, err := m.Get(id)
 	if err != nil {
-		return nil, err
+		return nil, PlatformBroadcast{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
-		return nil, ErrStreamNotActive
+		return nil, PlatformBroadcast{}, false, ErrStreamNotActive
 	}
 	s.egressSlot.Clear()
 	s.egress.Stop()
@@ -503,9 +548,25 @@ func (m *Manager) StopStream(id string) (*Session, error) {
 	s.setAIInputPaused(false)
 	reason := "user_requested"
 	s.streamStopReason = &reason
+	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
+	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
+	var discard PlatformBroadcast
+	shouldDiscard := false
+	if s.broadcastPhase == BroadcastPhaseGoingLive {
+		s.goLiveStopRequested = true
+	} else {
+		// 라이브까지 가지 못한 방송만 지운다. 라이브였던 방송의 종료는
+		// 플랫폼의 autoStop이 맡는다.
+		if s.platformBroadcast != nil && s.broadcastPhase == BroadcastPhasePrepared {
+			discard = *s.platformBroadcast
+			shouldDiscard = true
+		}
+		s.platformBroadcast = nil
+		s.broadcastPhase = BroadcastPhaseIdle
+	}
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
-	return s, nil
+	return s, discard, shouldDiscard, nil
 }
 
 // PauseStream은 RTMP 연결을 유지한 채 실행 중인 egress를 일시 중단 상태로
@@ -643,6 +704,8 @@ func (m *Manager) Delete(id, reason string) error {
 	count := len(m.sessions)
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(count)
+	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
+	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
 	return nil
 }
@@ -657,6 +720,7 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(0)
 	for _, s := range sessions {
+		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
 	}
 	// 종료 중인 FFmpeg 쌍이 정상적으로 끝날 때까지 기다려, shutdown 중 프로세스가
@@ -937,6 +1001,7 @@ func (s *Session) Response() Response {
 	if s.egress != nil {
 		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)
 	}
+	response.Stream.BroadcastPhase = s.broadcastPhase
 	return response
 }
 

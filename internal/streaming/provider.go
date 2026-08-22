@@ -28,6 +28,10 @@ type PrepareOptions struct {
 	CategoryID string
 	// Thumbnail은 업로드할 썸네일 원본. nil이면 올리지 않는다.
 	Thumbnail *Thumbnail
+	// AutoStart는 송출이 감지되면 플랫폼이 알아서 라이브로 넘기게 한다.
+	// 준비와 라이브 전환을 분리한 뒤로 기본값은 false이고, 제거 예정인
+	// POST /stream/start(#142)만 종전 동작을 위해 true로 켠다.
+	AutoStart bool
 }
 
 // Thumbnail은 업로드할 썸네일 이미지다.
@@ -60,7 +64,17 @@ type Provider interface {
 	// YouTube: 재사용 스트림 확보 + broadcast 생성(autoStart/autoStop) + bind.
 	// 치지직(미래): 스트림 키 조회만으로 완결(방송 생성 API 없음).
 	Prepare(ctx context.Context, userID uuid.UUID, options PrepareOptions) (PreparedBroadcast, error)
+	// GoLive는 준비된 방송을 시청자에게 공개되는 라이브 상태로 전환한다.
+	// YouTube: liveBroadcasts.transition(live). 방송 생성 API가 없어 송출
+	// 시작이 곧 라이브인 플랫폼(치지직 등)의 구현은 no-op이다.
+	GoLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
+	// EndLive는 이미 라이브가 된 방송을 즉시 끝낸다. 전환 요청이 플랫폼에
+	// 나간 뒤 중지가 들어온 경우, autoStop(실측 57.6초)을 기다리면 그동안
+	// 시청자에게 노출되므로 직접 종료시킨다.
+	EndLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
 	// Stop은 명시적 중지 시 플랫폼 쪽 마무리를 한다. 송출 중단 자체는
 	// egress 종료가 담당하므로, 플랫폼 API 호출이 불필요한 구현은 no-op이다.
+	// 라이브 전환 이후의 종료는 autoStop이 맡으므로, 호출자는 아직 라이브가
+	// 되지 않은(prepare만 된) 방송에 대해서만 이걸 부른다.
 	Stop(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
 }

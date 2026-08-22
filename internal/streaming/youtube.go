@@ -34,6 +34,9 @@ var (
 	// ErrThumbnailForbidden: 썸네일 업로드가 거부된 상태(채널 전화번호 인증
 	// 미완료가 대표 원인). 선택 항목이므로 방송은 진행하고 경고로 알린다.
 	ErrThumbnailForbidden = errors.New("the YouTube channel is not allowed to upload custom thumbnails")
+	// ErrBroadcastNotReady: 라이브 전환 요건이 아직 안 갖춰진 상태.
+	// transition(live)는 바인딩된 스트림이 active여야 허용된다.
+	ErrBroadcastNotReady = errors.New("the YouTube broadcast is not ready to go live")
 	// ErrMadeForKidsRequired: 시청자층(아동용 여부)은 YouTube가 요구하는
 	// 법적 신고 항목이라 서버가 대신 추정하지 않는다 — 미선택이면 거절한다.
 	ErrMadeForKidsRequired = errors.New("made_for_kids must be specified by the user")
@@ -51,8 +54,8 @@ type AccessTokenProvider interface {
 }
 
 // YouTubeProvider는 YouTube Live 방송 라이프사이클 구현이다.
-// enableAutoStart/enableAutoStop을 사용하므로 transition 호출과 상태 폴링이
-// 없다(실측: 송출 시작 → 13.7초에 live, 중단 → 57.6초에 complete).
+// 라이브 전환은 GoLive의 transition 호출이 담당하고(enableAutoStart=false),
+// 종료만 enableAutoStop에 맡긴다(실측: 송출 중단 → 57.6초에 complete).
 type YouTubeProvider struct {
 	tokens     AccessTokenProvider
 	store      auth.StreamingAccountStore
@@ -79,8 +82,8 @@ func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountS
 }
 
 // Prepare는 재사용 스트림을 확보하고(첫 방송 때 1회 생성·저장, 이후 재사용),
-// autoStart/autoStop broadcast를 만들어 스트림에 바인딩한 뒤 ingest URL을
-// 돌려준다.
+// broadcast를 만들어 스트림에 바인딩한 뒤 ingest URL을 돌려준다. 방송은
+// 시청자에게 노출되지 않는 ready 상태로 남고, 라이브 전환은 GoLive가 한다.
 func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options PrepareOptions) (PreparedBroadcast, error) {
 	if options.MadeForKids == nil {
 		return PreparedBroadcast{}, ErrMadeForKidsRequired
@@ -125,8 +128,46 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 // Stop은 no-op이다: enableAutoStop이 송출 중단(egress 종료) 약 1분 후
 // 방송을 complete로 전환한다(실측 57.6초). 즉시 종료가 필요해지면
 // transition(complete) 호출을 여기 추가한다.
-func (p *YouTubeProvider) Stop(context.Context, uuid.UUID, PreparedBroadcast) error {
-	return nil
+// GoLive는 준비된 방송을 라이브로 전환한다. 바인딩된 스트림에 실제 프레임이
+// 도착해 active가 된 뒤에만 허용되므로, 아직 아니면 ErrBroadcastNotReady다.
+func (p *YouTubeProvider) GoLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error {
+	if prepared.BroadcastID == "" {
+		return errors.New("prepared broadcast has no id")
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/liveBroadcasts/transition?broadcastStatus=live&id=%s&part=id,status", prepared.BroadcastID)
+	return p.post(ctx, accessToken, path, nil, &struct{}{})
+}
+
+// EndLive는 라이브 방송을 complete로 전환해 즉시 끝낸다. autoStop이 같은 일을
+// 하지만 송출 중단 후 약 1분이 걸려, 그 사이 시청자에게 노출된다.
+func (p *YouTubeProvider) EndLive(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error {
+	if prepared.BroadcastID == "" {
+		return errors.New("prepared broadcast has no id")
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/liveBroadcasts/transition?broadcastStatus=complete&id=%s&part=id,status", prepared.BroadcastID)
+	return p.post(ctx, accessToken, path, nil, &struct{}{})
+}
+
+// Stop은 아직 라이브가 되지 않은 방송을 삭제한다. autoStart를 끈 뒤로는
+// prepare만 하고 중지한 방송이 채널에 ready 상태로 남기 때문이다. 라이브였던
+// 방송은 호출자가 여기까지 보내지 않고 autoStop에 맡긴다.
+func (p *YouTubeProvider) Stop(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error {
+	if prepared.BroadcastID == "" {
+		return nil
+	}
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return p.do(ctx, accessToken, http.MethodDelete, p.apiBase+"/liveBroadcasts?id="+prepared.BroadcastID, "", nil, nil)
 }
 
 // CleanupStreamingResources는 연결 해제 전에 프리로딩된 재사용 스트림을
@@ -286,8 +327,7 @@ func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken strin
 		"snippet": map[string]any{
 			"title":       title,
 			"description": description,
-			// autoStart를 쓰므로 예정 시각은 형식 요건일 뿐이다(실측: 예정
-			// 시각과 무관하게 송출 시작 13.7초 만에 live 전환).
+			// 라이브 전환은 GoLive가 하므로 예정 시각은 형식 요건일 뿐이다.
 			"scheduledStartTime": p.now().Format(time.RFC3339),
 		},
 		"status": map[string]any{
@@ -295,7 +335,10 @@ func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken strin
 			"selfDeclaredMadeForKids": *options.MadeForKids,
 		},
 		"contentDetails": map[string]any{
-			"enableAutoStart": true,
+			// 준비와 라이브 전환을 분리하려고 autoStart를 끈다(#142) —
+			// 켜져 있으면 egress가 붙는 즉시 방송이 시청자에게 공개된다.
+			// 제거 예정인 stream/start만 종전 동작을 위해 켠다.
+			"enableAutoStart": options.AutoStart,
 			"enableAutoStop":  true,
 			"monitorStream":   map[string]any{"enableMonitorStream": false},
 		},
@@ -410,6 +453,11 @@ func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, cont
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return decodeYouTubeAPIError(response)
 	}
+	if target == nil {
+		// 본문 없는 성공 응답(liveBroadcasts.delete의 204).
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+		return nil
+	}
 	return json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(target)
 }
 
@@ -443,8 +491,13 @@ func decodeYouTubeAPIError(response *http.Response) error {
 		return apiStatusError{status: response.StatusCode}
 	}
 	for _, item := range payload.Error.Errors {
-		if item.Reason == "livePermissionBlocked" {
+		switch item.Reason {
+		case "livePermissionBlocked":
 			return ErrLiveStreamingBlocked
+		case "errorStreamInactive", "invalidTransition":
+			// 스트림에 프레임이 아직 도착하지 않았거나 방송이 전환 가능한
+			// 상태가 아니다 — 재시도로 풀리는 상태라 별도 에러로 구분한다.
+			return ErrBroadcastNotReady
 		}
 	}
 	return apiStatusError{status: response.StatusCode, message: payload.Error.Message}

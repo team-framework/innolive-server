@@ -70,6 +70,7 @@ function bindElements() {
     "madeForKids",
     "autoPoll",
     "startBtn",
+    "goLiveBtn",
     "pauseBroadcastBtn",
     "resumeBroadcastBtn",
     "healthBtn",
@@ -172,6 +173,7 @@ function bindEvents() {
     void refreshSessions().catch(() => null),
   );
   els.startBtn.addEventListener("click", () => void startWebRtc());
+  els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
@@ -737,7 +739,15 @@ function renderBroadcastStreamStatus(stream) {
 
   if (status === "streaming") {
     setBroadcastStatus(els.broadcastRtmpState, "송출 중", "ok");
-    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 송출 중 · live 확인 전", "warn");
+    // broadcast_phase는 egress가 알 수 없는 YouTube 쪽 위치다(#142) —
+    // 송출 중이어도 라이브 전환 전이면 시청자에게 보이지 않는다.
+    if (stream?.broadcast_phase === "live") {
+      setBroadcastStatus(els.broadcastYoutubeState, "라이브 중", "ok");
+    } else if (stream?.broadcast_phase === "going_live") {
+      setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    } else {
+      setBroadcastStatus(els.broadcastYoutubeState, "준비됨 · 라이브 전환 대기", "warn");
+    }
     return;
   }
   if (status === "reconfiguring") {
@@ -992,7 +1002,7 @@ async function startWebRtc() {
           session_id: state.session.session_id,
         });
         const readySession = await waitForVideoTrack();
-        await startYouTubeBroadcast(readySession);
+        await prepareYouTubeBroadcast(readySession);
         return;
       }
 
@@ -1014,7 +1024,7 @@ async function startWebRtc() {
       await refreshSessions({ quiet: true });
 
       const readySession = await waitForVideoTrack();
-      await startYouTubeBroadcast(readySession);
+      await prepareYouTubeBroadcast(readySession);
     } catch (error) {
       await cleanupConnection({ keepSession: Boolean(state.session) });
       throw error;
@@ -1143,43 +1153,67 @@ function describeBroadcastSettings(broadcast) {
   return parts.join(" · ");
 }
 
-async function startYouTubeBroadcast(session) {
+async function prepareYouTubeBroadcast(session) {
   const sessionId = session?.session_id;
   if (!sessionId) {
-    throw new Error("YouTube 방송을 시작할 세션이 없습니다.");
+    throw new Error("YouTube 방송을 준비할 세션이 없습니다.");
   }
 
   setBroadcastStatus(els.broadcastRtmpState, "방송 준비 중", "warn");
   setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 중", "warn");
-  logEvent("ok", "YouTube broadcast start requested", { session_id: sessionId });
+  logEvent("ok", "YouTube broadcast prepare requested", { session_id: sessionId });
   try {
-    // 방송 설정은 저장된 값이 준비 옵션으로 쓰이므로 송출 직전에 폼을 반영한다.
+    // 준비 옵션은 저장된 설정이 단일 출처이므로 준비 직전에 폼을 반영한다.
     await saveBroadcastSettings();
-    const started = await apiFetch(`/sessions/${sessionId}/stream/start`, {
+    const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
       method: "POST",
-      // made_for_kids는 서버가 대신 신고하지 않는 사용자 선택값이다(#140).
-      body: JSON.stringify({
-        provider: "youtube",
-        privacy: els.broadcastPrivacy.value,
-        made_for_kids: els.madeForKids.checked,
-      }),
+      body: JSON.stringify({ provider: "youtube" }),
     });
-    setCurrentSession(started);
-    renderBroadcastStreamStatus(started.stream);
-    renderBroadcastWarnings(started.warnings);
-    logEvent("ok", "YouTube RTMP egress started", {
+    setCurrentSession(prepared);
+    renderBroadcastStreamStatus(prepared.stream);
+    renderBroadcastWarnings(prepared.warnings);
+    logEvent("ok", "YouTube broadcast prepared", {
       session_id: sessionId,
-      stream: started.stream,
+      stream: prepared.stream,
     });
   } catch (error) {
     renderBroadcastStartError(error);
-    logEvent("error", "YouTube broadcast start failed", {
+    logEvent("error", "YouTube broadcast prepare failed", {
       session_id: sessionId,
       code: error?.payload?.error?.code,
       message: error?.message,
       status: error?.status,
     });
   }
+}
+
+// goLiveBroadcast는 준비된 방송을 시청자에게 공개되는 라이브로 전환한다.
+// 준비(prepare)와 분리되어 있어 화면 확인을 끝낸 뒤 누를 수 있다(#142).
+async function goLiveBroadcast() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("라이브로 전환할 세션이 없습니다.");
+  }
+  await runBusy(async () => {
+    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    try {
+      const stream = await apiFetch(`/sessions/${sessionId}/stream/golive`, {
+        method: "POST",
+      });
+      renderBroadcastStreamStatus(stream);
+      setBroadcastStatus(els.broadcastYoutubeState, "라이브", "ok");
+      logEvent("ok", "YouTube broadcast is live", { session_id: sessionId, stream });
+      await refreshCurrentSession({ quiet: true });
+    } catch (error) {
+      renderBroadcastStartError(error);
+      logEvent("error", "YouTube go live failed", {
+        session_id: sessionId,
+        code: error?.payload?.error?.code,
+        message: error?.message,
+        status: error?.status,
+      });
+    }
+  });
 }
 
 async function pauseBroadcast() {
@@ -1246,6 +1280,24 @@ function renderBroadcastStartError(error) {
   if (code === "live_streaming_blocked") {
     setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
     setBroadcastStatus(els.broadcastYoutubeState, "채널 라이브 권한 없음", "error");
+    return;
+  }
+  if (code === "broadcast_not_ready") {
+    // 송출 프레임이 YouTube에 아직 도착하지 않은 상태 — 잠시 후 재시도.
+    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 대기 · 잠시 후 재시도", "warn");
+    return;
+  }
+  if (code === "broadcast_prepared" || code === "broadcast_live") {
+    setBroadcastStatus(els.broadcastYoutubeState, "이미 준비된 방송이 있음", "warn");
+    return;
+  }
+  if (code === "broadcast_going_live") {
+    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    return;
+  }
+  if (code === "broadcast_stopped") {
+    // 전환 왕복 중에 중지가 들어와 중지가 이긴 경우다(#142).
+    setBroadcastStatus(els.broadcastYoutubeState, "중지되어 라이브 취소됨", "warn");
     return;
   }
   if (code === "stream_already_active") {
@@ -2123,6 +2175,12 @@ function updateButtons() {
   els.signOutBtn.disabled = state.busy;
   // 세션 API는 RequireUser 뒤에 있으므로 로그인한 사용자에게만 열어 둔다.
   els.startBtn.disabled = state.busy || fileProtocol || !signedIn;
+  // 라이브 전환은 준비된 방송에만 열어 둔다 — 서버도 409로 막지만 버튼이
+  // 흐름(준비 → 라이브)을 그대로 보여줘야 한다.
+  els.goLiveBtn.disabled =
+    state.busy ||
+    !state.session?.session_id ||
+    state.session?.stream?.broadcast_phase !== "prepared";
   els.pauseBroadcastBtn.disabled =
     state.busy ||
     !state.session?.session_id ||

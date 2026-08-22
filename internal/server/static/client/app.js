@@ -886,7 +886,41 @@ async function createSession() {
     session_id: session.session_id,
     metadata: session.metadata,
   });
+  await applyBroadcastDefaults(session.session_id);
   return session;
+}
+
+// applyBroadcastDefaults는 직전 방송 값을 폼에 채운다(#143). 이미 입력해 둔
+// 값은 덮지 않고, 조회가 실패해도 서버가 폴백값을 주므로 폼은 그대로 쓴다.
+async function applyBroadcastDefaults(sessionId) {
+  try {
+    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults`);
+    if (!els.broadcastTitle.value.trim()) {
+      els.broadcastTitle.value = defaults.title || "";
+    }
+    if (!els.broadcastDescription.value) {
+      els.broadcastDescription.value = defaults.description || "";
+    }
+    if (!els.broadcastCategoryId.value.trim()) {
+      els.broadcastCategoryId.value = defaults.category_id || "";
+    }
+    if (defaults.privacy) {
+      els.broadcastPrivacy.value = defaults.privacy;
+    }
+    // 아동용 여부는 미선택(null)이면 사용자가 직접 골라야 하므로 두고 본다.
+    if (typeof defaults.made_for_kids === "boolean") {
+      els.madeForKids.checked = defaults.made_for_kids;
+    }
+    els.broadcastSettingsDetail.textContent =
+      "직전 방송 값을 불러왔습니다. 확인 후 저장하세요.";
+    logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
+  } catch (error) {
+    logEvent("warn", "Broadcast defaults load failed", {
+      session_id: sessionId,
+      message: error?.message,
+      status: error?.status,
+    });
+  }
 }
 
 function buildSessionMetadata() {

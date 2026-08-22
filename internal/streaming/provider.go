@@ -28,6 +28,10 @@ type PrepareOptions struct {
 	CategoryID string
 	// Thumbnail은 업로드할 썸네일 원본. nil이면 올리지 않는다.
 	Thumbnail *Thumbnail
+	// AutoStart는 송출이 감지되면 플랫폼이 알아서 라이브로 넘기게 한다.
+	// 준비와 라이브 전환을 분리한 뒤로 기본값은 false이고, 제거 예정인
+	// POST /stream/start(#142)만 종전 동작을 위해 true로 켠다.
+	AutoStart bool
 }
 
 // Thumbnail은 업로드할 썸네일 이미지다.

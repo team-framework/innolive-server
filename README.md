@@ -131,6 +131,7 @@ make proto        # protobuf 코드 생성
 | `GET` | `/webrtc/config` | 클라이언트용 ICE 서버 설정 |
 | `POST` | `/sessions` | 세션 생성 (소유권 토큰 발급) |
 | `GET`/`DELETE` | `/sessions/{id}` | 세션 조회/삭제 |
+| `POST` | `/sessions/{id}/stream/start` | **제거 예정.** 종전 송출 시작 — 방송 생성 + 송출, autoStart로 라이브까지 자동 전환. 클라이언트가 아래 두 경로로 옮겨가면 삭제한다 |
 | `POST` | `/sessions/{id}/stream/prepare` | 방송 준비 — 플랫폼 방송 생성 + RTMP 송출 시작 (시청자에게 노출되지 않음) |
 | `POST` | `/sessions/{id}/stream/golive` | 준비된 방송을 라이브로 전환 |
 | `POST` | `/sessions/{id}/stream/pause`\|`/resume`\|`/stop` | RTMP 송출 일시 중지/재개/중지 |

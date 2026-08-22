@@ -337,7 +337,8 @@ func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken strin
 		"contentDetails": map[string]any{
 			// 준비와 라이브 전환을 분리하려고 autoStart를 끈다(#142) —
 			// 켜져 있으면 egress가 붙는 즉시 방송이 시청자에게 공개된다.
-			"enableAutoStart": false,
+			// 제거 예정인 stream/start만 종전 동작을 위해 켠다.
+			"enableAutoStart": options.AutoStart,
 			"enableAutoStop":  true,
 			"monitorStream":   map[string]any{"enableMonitorStream": false},
 		},

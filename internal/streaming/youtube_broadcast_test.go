@@ -208,3 +208,25 @@ func TestStopWithoutBroadcastIsNoOp(t *testing.T) {
 		t.Fatalf("deletes = %d, want 0", stub.deletes)
 	}
 }
+
+// TestPrepareAutoStartOptIn: 제거 예정인 stream/start 경로만 autoStart를 켠다.
+func TestPrepareAutoStartOptIn(t *testing.T) {
+	stub := &youtubeAPIStub{}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{
+		MadeForKids: boolPtr(false),
+		AutoStart:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	contentDetails := stub.lastBroadcast["contentDetails"].(map[string]any)
+	if contentDetails["enableAutoStart"] != true {
+		t.Fatalf("enableAutoStart = %v, want true for the legacy path", contentDetails["enableAutoStart"])
+	}
+}

@@ -391,3 +391,74 @@ func TestSessionEndDuringGoLiveEndsTheLiveBroadcast(t *testing.T) {
 		t.Fatalf("stop calls = %d, want the broadcast ended, not deleted", stopCalls)
 	}
 }
+
+// TestLegacyStartStreamKeepsPreviousBehaviour: 제거 예정인 stream/start는
+// 클라이언트가 새 API로 옮겨갈 때까지 종전 계약 그대로 남는다(PR #146 리뷰).
+// 저장 설정 위에 바디가 덮어쓰고, autoStart를 켜 플랫폼이 알아서 라이브로
+// 넘기며, 새 경로의 방송 단계는 건드리지 않는다.
+func TestLegacyStartStreamKeepsPreviousBehaviour(t *testing.T) {
+	provider := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{
+		Provider:    auth.StreamingProviderYouTube,
+		IngestURL:   "rtmps://a.rtmps.youtube.com/live2/secret",
+		BroadcastID: "legacy-1",
+	}}
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"title":"저장 제목","made_for_kids":false}`)
+
+	// 트랙이 없어 409로 끝나지만 Prepare는 이미 호출된 뒤다.
+	response, payload := postStream(t, server.URL, created.SessionID, ownerToken, "start",
+		`{"provider":"youtube","title":"이번만","privacy":"public","made_for_kids":true}`)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 without a video track (payload %v)", response.StatusCode, payload)
+	}
+	options := provider.lastOptions
+	if !options.AutoStart {
+		t.Fatal("legacy start must keep autoStart on")
+	}
+	// 바디 오버라이드가 종전처럼 살아 있어야 한다.
+	if options.Title != "이번만" || options.Privacy != "public" || options.MadeForKids == nil || !*options.MadeForKids {
+		t.Fatalf("options = %+v, want the request body override", options)
+	}
+	// 단계를 기록하지 않으므로 설정 변경도 계속 열려 있다.
+	stream, _ := getSessionPayload(t, server.URL, created.SessionID, ownerToken)["stream"].(map[string]any)
+	if stream["broadcast_phase"] != string(session.BroadcastPhaseIdle) {
+		t.Fatalf("broadcast_phase = %v, want idle on the legacy path", stream["broadcast_phase"])
+	}
+	if response, _ := putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`); response.StatusCode != http.StatusOK {
+		t.Fatalf("put broadcast after legacy start = %d, want 200", response.StatusCode)
+	}
+}
+
+// TestLegacyStartStreamRejectedAfterPrepare: 새 경로가 이미 방송을 잡고 있으면
+// 종전 경로를 열어두지 않는다 — 방송이 둘 생기면 하나는 고아가 된다.
+func TestLegacyStartStreamRejectedAfterPrepare(t *testing.T) {
+	provider := &stubStreamingProvider{}
+	server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: provider,
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+	if _, err := manager.BeginBroadcastPrepare(created.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkBroadcastPrepared(created.SessionID, session.PlatformBroadcast{
+		Provider:    string(auth.StreamingProviderYouTube),
+		BroadcastID: "bid-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response, payload := postStream(t, server.URL, created.SessionID, ownerToken, "start", `{"made_for_kids":false}`)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (payload %v)", response.StatusCode, payload)
+	}
+	if streamErrorCode(payload) != "broadcast_prepared" {
+		t.Fatalf("error code = %q, want broadcast_prepared", streamErrorCode(payload))
+	}
+	if provider.prepareCalls != 0 {
+		t.Fatalf("prepare calls = %d, want no platform call", provider.prepareCalls)
+	}
+}

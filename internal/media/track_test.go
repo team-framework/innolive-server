@@ -30,6 +30,27 @@ func TestRTPSequenceTrackerRecordsGapRecoveryAndOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestEgressSlotClearIfKeepsReplacement(t *testing.T) {
+	slot := NewEgressSlot()
+	previous := &RTMPEgress{}
+	replacement := &RTMPEgress{}
+	slot.Set(previous)
+	slot.Set(replacement)
+
+	if slot.ClearIf(previous) {
+		t.Fatal("ClearIf must not clear a replacement egress")
+	}
+	if got := slot.Load(); got != replacement {
+		t.Fatalf("slot.Load() = %p, want replacement %p", got, replacement)
+	}
+	if !slot.ClearIf(replacement) {
+		t.Fatal("ClearIf must clear the current egress")
+	}
+	if got := slot.Load(); got != nil {
+		t.Fatalf("slot.Load() = %p after clear, want nil", got)
+	}
+}
+
 // TestProcessImagesSkipsPausedAIInput은 실제 트랙 처리 루프가 pause 중에는
 // Processor.Process를 호출하지 않고, 프레임을 AI 입력 차단 metric으로만
 // 기록하는지 검증한다.

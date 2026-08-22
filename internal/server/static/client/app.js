@@ -729,6 +729,8 @@ function resetBroadcastStatus() {
 
 function renderBroadcastStreamStatus(stream) {
   const status = stream?.status || "";
+  const attempts = Number(stream?.reconnect_attempts || 0);
+  const reconnectDetail = attempts > 0 ? ` · ${attempts}회 재시도` : "";
   if (!status) {
     setBroadcastStatus(els.broadcastRtmpState, "시작 전");
     setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
@@ -756,10 +758,14 @@ function renderBroadcastStreamStatus(stream) {
   if (status === "idle" || status === "reconnecting") {
     setBroadcastStatus(
       els.broadcastRtmpState,
-      status === "reconnecting" ? "재연결 중" : "연결 준비 중",
+      status === "reconnecting" ? `재연결 중${reconnectDetail}` : "연결 준비 중",
       "warn",
     );
-    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 연결 대기", "warn");
+    setBroadcastStatus(
+      els.broadcastYoutubeState,
+      status === "reconnecting" ? "RTMP 재연결 대기" : "RTMP 연결 대기",
+      "warn",
+    );
     return;
   }
   if (status === "paused") {
@@ -773,11 +779,21 @@ function renderBroadcastStreamStatus(stream) {
     return;
   }
   if (status === "paused_reconnecting") {
-    setBroadcastStatus(els.broadcastRtmpState, "일시 중지 화면 재연결 중", "warn");
+    setBroadcastStatus(els.broadcastRtmpState, `일시 중지 화면 재연결 중${reconnectDetail}`, "warn");
     setBroadcastStatus(els.broadcastYoutubeState, "RTMP 재연결 중", "warn");
     return;
   }
   if (status === "stopped") {
+    if (stream?.stop_reason === "rtmp_reconnect_exhausted") {
+      setBroadcastStatus(els.broadcastRtmpState, "RTMP 재연결 실패로 종료됨", "error");
+      setBroadcastStatus(els.broadcastYoutubeState, "다시 송출할 수 있습니다", "error");
+      return;
+    }
+    if (stream?.stop_reason === "reconnect_input_timeout") {
+      setBroadcastStatus(els.broadcastRtmpState, "입력 프레임 대기 시간 초과로 종료됨", "error");
+      setBroadcastStatus(els.broadcastYoutubeState, "다시 송출할 수 있습니다", "error");
+      return;
+    }
     setBroadcastStatus(els.broadcastRtmpState, "중지됨");
     setBroadcastStatus(els.broadcastYoutubeState, "종료 반영 대기");
     return;

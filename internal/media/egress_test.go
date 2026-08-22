@@ -3,9 +3,12 @@ package media
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +20,11 @@ func newTestEgress(wire config.WireFormat, url string) *RTMPEgress {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: wire}, url, nil, false, 0, "", "")
 }
+
+type failingWriteCloser struct{ cause error }
+
+func (w failingWriteCloser) Write([]byte) (int, error) { return 0, w.cause }
+func (failingWriteCloser) Close() error                { return nil }
 
 func TestVideoBitrateFor(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "out.flv")
@@ -393,7 +401,7 @@ func TestEgressStatusTransitions(t *testing.T) {
 	}
 	firstStart := *streaming.StartedAt
 
-	e.noteReconnect(io.ErrUnexpectedEOF)
+	e.noteReconnect(io.ErrUnexpectedEOF, 1)
 	reconnecting := e.Status()
 	if reconnecting.Phase != EgressPhaseReconnecting {
 		t.Fatalf("after noteReconnect: phase = %q", reconnecting.Phase)
@@ -445,6 +453,123 @@ func TestEgressStatusTransitions(t *testing.T) {
 	e.setStopped()
 	if again := e.Status(); !again.StoppedAt.Equal(firstStop) {
 		t.Fatal("StoppedAt must not change on repeated setStopped")
+	}
+}
+
+func TestEgressStopReasonPreservesFirstTerminalCause(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
+	e.setStreaming(1280, 720, 30)
+	e.StopWithReason(EgressStopReasonReconnectExhausted)
+
+	stopped := e.Status()
+	if stopped.Phase != EgressPhaseStopped {
+		t.Fatalf("phase = %q, want stopped", stopped.Phase)
+	}
+	if stopped.StopReason == nil || *stopped.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason = %v, want %q", stopped.StopReason, EgressStopReasonReconnectExhausted)
+	}
+
+	// 다른 종료 사건이 뒤늦게 와도 최초 종료 사유를 바꾸면 안 된다.
+	e.StopWithReason(EgressStopReasonReconnectInputTimeout)
+	if status := e.Status(); status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason after second stop = %v, want first reason", status.StopReason)
+	}
+}
+
+func TestEgressTerminalMetricsCountOnlyAppliedStop(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	if !e.StopWithError(EgressStopReasonReconnectExhausted, errors.New("broken pipe")) {
+		t.Fatal("first terminal stop must be applied")
+	}
+	if e.StopWithError(EgressStopReasonReconnectInputTimeout, errReconnectInputTimeout) {
+		t.Fatal("second terminal stop must not be applied")
+	}
+
+	metricsOutput := prometheusDump(e.metrics)
+	for _, expected := range []string{
+		"innolive_egress_reconnect_exhausted_total 1",
+		"innolive_egress_reconnect_input_timeout_total 0",
+	} {
+		if !strings.Contains(metricsOutput, expected) {
+			t.Fatalf("metrics output does not contain %q\n%s", expected, metricsOutput)
+		}
+	}
+}
+
+func TestEgressStatusMasksOutputURLInLastError(t *testing.T) {
+	const outputURL = "rtmp://host/live2/secret-key"
+	e := newTestEgress(config.WireFormatJPEG, outputURL)
+	e.setStreaming(1280, 720, 30)
+	e.noteReconnect(errors.New("write "+outputURL+": broken pipe"), 0)
+
+	status := e.Status()
+	if status.LastError == nil {
+		t.Fatal("LastError = nil")
+	}
+	if strings.Contains(*status.LastError, "secret-key") {
+		t.Fatalf("stream key leaked in LastError: %q", *status.LastError)
+	}
+	if !strings.Contains(*status.LastError, "live2/****") {
+		t.Fatalf("LastError = %q, want masked URL", *status.LastError)
+	}
+}
+
+func TestReconnectBudgetBoundsAttemptsAndElapsedTime(t *testing.T) {
+	policy := reconnectPolicy{
+		maxAttempts: 6,
+		maxElapsed:  90 * time.Second,
+		minBackoff:  time.Second,
+		maxBackoff:  30 * time.Second,
+	}
+	budget := newReconnectBudget(policy)
+	started := time.Date(2026, time.August, 22, 10, 0, 0, 0, time.UTC)
+	budget.noteFailure(started)
+
+	wantDelays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
+	now := started
+	for attempt, wantDelay := range wantDelays {
+		delay, ok := budget.nextDelay(now)
+		if !ok || delay != wantDelay {
+			t.Fatalf("attempt %d delay = (%s, %t), want (%s, true)", attempt+1, delay, ok, wantDelay)
+		}
+		now = now.Add(delay)
+		if !budget.beginAttempt(now) {
+			t.Fatalf("attempt %d was unexpectedly rejected", attempt+1)
+		}
+	}
+	if budget.attempts != len(wantDelays) {
+		t.Fatalf("attempts = %d, want %d", budget.attempts, len(wantDelays))
+	}
+	if _, ok := budget.nextDelay(now); ok {
+		t.Fatal("retry must stop after the configured maximum attempts")
+	}
+
+	budget.reset()
+	if !budget.firstFailed.IsZero() || budget.attempts != 0 {
+		t.Fatalf("reset budget = %+v, want empty incident", budget)
+	}
+}
+
+func TestReconnectBudgetNeverStartsAfterDeadline(t *testing.T) {
+	policy := reconnectPolicy{
+		maxAttempts: 6,
+		maxElapsed:  90 * time.Second,
+		minBackoff:  time.Second,
+		maxBackoff:  30 * time.Second,
+	}
+	budget := newReconnectBudget(policy)
+	started := time.Date(2026, time.August, 22, 10, 0, 0, 0, time.UTC)
+	budget.noteFailure(started)
+
+	// deadline 직전에는 남은 1초만 기다리고, 정확히 deadline에 도달한 뒤에는
+	// 새 FFmpeg 프로세스를 시작하지 않는다.
+	now := started.Add(89 * time.Second)
+	delay, ok := budget.nextDelay(now)
+	if !ok || delay != time.Second {
+		t.Fatalf("last delay = (%s, %t), want (1s, true)", delay, ok)
+	}
+	if budget.beginAttempt(now.Add(delay)) {
+		t.Fatal("attempt at the elapsed-time deadline must be rejected")
 	}
 }
 
@@ -504,11 +629,11 @@ func TestEgressStatusPreservesPauseAcrossReconfigureAndReconnect(t *testing.T) {
 		t.Fatalf("phase during paused reconfigure = %q, want %q", status.Phase, EgressPhasePausedReconfiguring)
 	}
 
-	e.noteReconnect(io.ErrUnexpectedEOF)
+	e.noteReconnect(io.ErrUnexpectedEOF, 1)
 	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
 		t.Fatalf("phase during paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
 	}
-	e.noteReconnect(io.ErrClosedPipe)
+	e.noteReconnect(io.ErrClosedPipe, 2)
 	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
 		t.Fatalf("phase during repeated paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
 	}
@@ -551,9 +676,9 @@ func TestCollectStartupFramesWithSeed(t *testing.T) {
 			e.input <- frame{timestamp: uint32(i), width: 640, height: 360}
 		}
 	}()
-	startup, ok := e.collectStartupFrames(t.Context(), []frame{seed})
-	if !ok {
-		t.Fatal("collectStartupFrames returned ok=false")
+	startup, result := e.collectStartupFrames(t.Context(), []frame{seed}, time.Time{})
+	if result != startupFramesReady {
+		t.Fatalf("collectStartupFrames result = %d, want ready", result)
 	}
 	if len(startup) != egressMeasureFrames {
 		t.Fatalf("collected %d frames, want %d", len(startup), egressMeasureFrames)
@@ -567,9 +692,318 @@ func TestCollectStartupFramesCancelled(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "out.flv")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, ok := e.collectStartupFrames(ctx, nil); ok {
-		t.Fatal("collectStartupFrames must return ok=false on cancelled context")
+	if _, result := e.collectStartupFrames(ctx, nil, time.Time{}); result != startupFramesCanceled {
+		t.Fatalf("collectStartupFrames result = %d, want canceled", result)
 	}
+}
+
+func TestCollectStartupFramesTimesOut(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	deadline := time.Now().Add(10 * time.Millisecond)
+	if _, result := e.collectStartupFrames(t.Context(), nil, deadline); result != startupFramesTimedOut {
+		t.Fatalf("collectStartupFrames result = %d, want timed out", result)
+	}
+}
+
+func TestRunStopsAfterReconnectBudgetExhausted(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  time.Second,
+		minBackoff:  5 * time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+
+	var starts atomic.Int32
+	e.transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		starts.Add(1)
+		return exec.CommandContext(ctx, "__innolive_missing_ffmpeg_for_reconnect_test__")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after reconnect budget exhaustion")
+	}
+
+	status := e.Status()
+	if status.Phase != EgressPhaseStopped {
+		t.Fatalf("phase = %q, want stopped", status.Phase)
+	}
+	if status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason = %v, want %q", status.StopReason, EgressStopReasonReconnectExhausted)
+	}
+	if status.ReconnectAttempts != 2 {
+		t.Fatalf("ReconnectAttempts = %d, want 2", status.ReconnectAttempts)
+	}
+	if got := starts.Load(); got != 3 {
+		t.Fatalf("FFmpeg starts = %d, want initial start plus 2 retries", got)
+	}
+}
+
+func TestRunResetsReconnectStatusAfterStableOutput(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  time.Second,
+		minBackoff:  5 * time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+
+	var starts atomic.Int32
+	e.transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			return exec.CommandContext(ctx, "__innolive_missing_ffmpeg_for_stability_test__")
+		}
+		return exec.CommandContext(ctx, "cat")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		status := e.Status()
+		if status.Phase == EgressPhaseStreaming && status.ReconnectAttempts == 1 && status.LastError != nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("egress did not recover from the first failure: %+v", status)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	validJPEG := []byte{0xff, 0xd8, 0xff, 0xd9}
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		for index := 0; index < egressStableFrames; index++ {
+			e.input <- frame{data: validJPEG, timestamp: uint32((egressMeasureFrames + index) * 3000), width: 640, height: 360}
+		}
+	}()
+	select {
+	case <-feedDone:
+	case <-time.After(time.Second):
+		t.Fatal("stable frame feed did not drain")
+	}
+
+	deadline = time.After(time.Second)
+	for {
+		status := e.Status()
+		if status.Phase == EgressPhaseStreaming && status.ReconnectAttempts == 0 && status.LastError == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stable output did not reset reconnect state: %+v", status)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
+func TestRunStopsAfterWriteFailuresExhaustReconnectBudget(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  time.Second,
+		minBackoff:  5 * time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+
+	var starts atomic.Int32
+	e.startProcess = func(ctx context.Context, _ uint16, _ uint16, _ int) (*ffmpegProcess, error) {
+		starts.Add(1)
+		command := exec.CommandContext(ctx, "true")
+		if err := command.Start(); err != nil {
+			return nil, err
+		}
+		return &ffmpegProcess{
+			cmd:     command,
+			stdin:   failingWriteCloser{cause: errors.New("injected write failure")},
+			metrics: e.metrics,
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			// 시작 프레임은 형식 측정에만 쓰고, helper가 stdin을 닫을 시간을
+			// 확보하려고 실제 FFmpeg stdin에는 쓰지 않는다.
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	deadline := time.After(time.Second)
+	for e.Status().Phase != EgressPhaseStreaming {
+		select {
+		case <-deadline:
+			t.Fatalf("egress did not reach streaming before write failure: %+v", e.Status())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	validJPEG := []byte{0xff, 0xd8, 0xff, 0xd9}
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				e.Enqueue(frame{data: validJPEG, width: 640, height: 360})
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not stop after write failure retry budget exhaustion: %+v input=%d", e.Status(), len(e.input))
+	}
+	<-feedDone
+
+	status := e.Status()
+	if status.Phase != EgressPhaseStopped || status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("terminal status = %+v, want reconnect exhaustion", status)
+	}
+	if status.ReconnectAttempts != 2 {
+		t.Fatalf("ReconnectAttempts = %d, want 2", status.ReconnectAttempts)
+	}
+	if got := starts.Load(); got != 3 {
+		t.Fatalf("FFmpeg starts = %d, want initial start plus 2 retries", got)
+	}
+}
+
+func TestRunStopsWhenReconfigurationInputTimesOut(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  10 * time.Millisecond,
+		minBackoff:  time.Millisecond,
+		maxBackoff:  time.Millisecond,
+	}
+	e.transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "cat")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	deadline := time.After(time.Second)
+	for e.Status().Phase != EgressPhaseStreaming {
+		select {
+		case <-deadline:
+			t.Fatalf("egress did not reach streaming before reconfiguration: %+v", e.Status())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	e.input <- frame{timestamp: 90000, width: 1280, height: 720}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after reconfiguration input timeout")
+	}
+	status := e.Status()
+	if status.Phase != EgressPhaseStopped || status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectInputTimeout {
+		t.Fatalf("terminal status = %+v, want input timeout", status)
+	}
+}
+
+func TestPausedReconnectExhaustionAndManualStopRace(t *testing.T) {
+	t.Run("paused reconnect exhaustion keeps terminal reason", func(t *testing.T) {
+		e := newTestEgress(config.WireFormatJPEG, "out.flv")
+		e.setStreaming(1280, 720, 30)
+		if !e.Pause() {
+			t.Fatal("Pause returned false")
+		}
+		budget := newReconnectBudget(reconnectPolicy{maxAttempts: 0, maxElapsed: time.Second, minBackoff: time.Millisecond, maxBackoff: time.Millisecond})
+		if e.waitForReconnect(t.Context(), &budget, errors.New("broken pipe")) {
+			t.Fatal("reconnect must not be allowed when max attempts is zero")
+		}
+		status := e.Status()
+		if status.Phase != EgressPhaseStopped || status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+			t.Fatalf("terminal status = %+v, want paused reconnect exhaustion", status)
+		}
+	})
+
+	t.Run("manual stop wins during paused reconnect backoff", func(t *testing.T) {
+		e := newTestEgress(config.WireFormatJPEG, "out.flv")
+		e.setStreaming(1280, 720, 30)
+		if !e.Pause() {
+			t.Fatal("Pause returned false")
+		}
+		budget := newReconnectBudget(reconnectPolicy{maxAttempts: 1, maxElapsed: time.Second, minBackoff: 100 * time.Millisecond, maxBackoff: 100 * time.Millisecond})
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan bool, 1)
+		go func() { result <- e.waitForReconnect(ctx, &budget, errors.New("broken pipe")) }()
+
+		deadline := time.After(time.Second)
+		for e.Status().Phase != EgressPhasePausedReconnecting {
+			select {
+			case <-deadline:
+				t.Fatalf("egress did not enter paused reconnecting: %+v", e.Status())
+			case <-time.After(time.Millisecond):
+			}
+		}
+		e.Stop()
+		cancel()
+		if allowed := <-result; allowed {
+			t.Fatal("manual stop must cancel the pending reconnect attempt")
+		}
+		status := e.Status()
+		if status.Phase != EgressPhaseStopped || status.StopReason != nil {
+			t.Fatalf("manual stop was overwritten by reconnect failure: %+v", status)
+		}
+	})
 }
 
 func TestResolutionChanged(t *testing.T) {

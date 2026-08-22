@@ -23,6 +23,8 @@ func TestWritePrometheusIncludesLoadTestSeries(t *testing.T) {
 	r.IncRTPOutOfOrder("real")
 	r.AddRTPPacketsDiscarded("real", 3)
 	r.IncRTPFramesAssembled("real")
+	r.IncEgressReconnectExhausted()
+	r.IncEgressReconnectInputTimeout()
 
 	var output bytes.Buffer
 	r.WritePrometheus(&output)
@@ -45,6 +47,8 @@ func TestWritePrometheusIncludesLoadTestSeries(t *testing.T) {
 		`innolive_rtp_out_of_order_total{mode="real"} 1`,
 		`innolive_rtp_packets_discarded_total{mode="real"} 3`,
 		`innolive_rtp_frames_assembled_total{mode="real"} 1`,
+		"innolive_egress_reconnect_exhausted_total 1",
+		"innolive_egress_reconnect_input_timeout_total 1",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Errorf("metrics output does not contain %q\n%s", expected, text)

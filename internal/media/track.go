@@ -61,6 +61,16 @@ func (s *EgressSlot) Set(egress *RTMPEgress) { s.current.Store(egress) }
 // Clear는 슬롯을 비운다. 이후 파이프라인 프레임은 egress로 가지 않는다.
 func (s *EgressSlot) Clear() { s.current.Store(nil) }
 
+// ClearIf는 현재 슬롯이 expected를 가리킬 때만 비운다. 이전 egress Run 고루틴이
+// 종료되는 사이 새 방송이 같은 슬롯에 설치될 수 있으므로, 무조건 Clear하면 새
+// 방송까지 끊길 수 있다.
+func (s *EgressSlot) ClearIf(expected *RTMPEgress) bool {
+	if s == nil {
+		return false
+	}
+	return s.current.CompareAndSwap(expected, nil)
+}
+
 // Load는 현재 활성 egress를 돌려준다(슬롯이 nil이거나 비었으면 nil).
 func (s *EgressSlot) Load() *RTMPEgress {
 	if s == nil {

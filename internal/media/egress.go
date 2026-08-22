@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -31,10 +32,19 @@ const (
 	egressAudioBitrate    = "128k"
 	egressBackoffMin      = time.Second
 	egressBackoffMax      = 30 * time.Second
+	// egressReconnectMaxAttempts는 최초 실패 뒤 실제로 다시 FFmpeg를 시작하는
+	// 횟수의 상한이다. 최초 시작 자체는 재시도가 아니므로 이 수에 포함하지 않는다.
+	egressReconnectMaxAttempts = 6
+	// egressReconnectMaxElapsed는 최초 송출 실패부터 egress가 재연결 상태에
+	// 머물 수 있는 최대 시간이다. backoff뿐 아니라 새 시작을 기다리는 시간도
+	// 이 예산 안에 들어간다.
+	egressReconnectMaxElapsed = 90 * time.Second
 	// egressStableFrames는 이후 실패 시 재연결 backoff를 최솟값으로 되돌리려면
 	// 프로세스가 받아야 하는 프레임 수다.
 	egressStableFrames = 300
 )
+
+var errReconnectInputTimeout = errors.New("timed out waiting for input frames while reconfiguring RTMP egress")
 
 // EgressPhase는 RTMP egress의 수명 단계다.
 type EgressPhase string
@@ -62,6 +72,20 @@ const (
 	EgressPhaseStopped EgressPhase = "stopped"
 )
 
+// EgressStopReason은 egress 자체가 최종 종료된 이유다. 세션 삭제·로그아웃처럼
+// 세션 계층이 결정하는 종료 사유와 달리, 이 값은 Run 고루틴이 스스로 포기했을
+// 때도 StreamState에 남길 수 있다.
+type EgressStopReason string
+
+const (
+	// EgressStopReasonReconnectExhausted는 RTMP 또는 FFmpeg 오류 재시도 예산을
+	// 모두 소진했음을 뜻한다.
+	EgressStopReasonReconnectExhausted EgressStopReason = "rtmp_reconnect_exhausted"
+	// EgressStopReasonReconnectInputTimeout은 재구성·복구 경로에서 새 출력
+	// 프로필을 만들 입력 프레임을 제한 시간 안에 얻지 못했음을 뜻한다.
+	EgressStopReasonReconnectInputTimeout EgressStopReason = "reconnect_input_timeout"
+)
+
 // EgressStatus는 Status()가 반환하는 egress 상태 스냅샷이다. 세션 계층이
 // StreamState 응답을 합성할 때 조회하는 pull 모델의 소스이며, egress 내부
 // 고루틴이 콜백으로 세션 락을 잡는 역방향 결합을 만들지 않기 위한 구조다.
@@ -72,6 +96,7 @@ type EgressStatus struct {
 	StoppedAt         *time.Time
 	UpdatedAt         time.Time
 	LastError         *string
+	StopReason        *EgressStopReason
 	ReconnectAttempts int
 	// Width, Height, FPS는 현재 측정된 egress 세대의 출력 형식이다. 일시
 	// 중단 상태에서도 유지하여 RTMP 연결을 재시작하지 않고 정확히 같은
@@ -99,11 +124,91 @@ const (
 )
 
 type egressTransition struct {
-	event  egressTransitionEvent
-	width  uint16
-	height uint16
-	fps    int
-	cause  error
+	event             egressTransitionEvent
+	width             uint16
+	height            uint16
+	fps               int
+	cause             error
+	reason            EgressStopReason
+	reconnectAttempts int
+}
+
+// reconnectPolicy는 한 egress 세대가 오류 뒤 자동으로 복구를 시도할 수 있는
+// 예산이다. 운영 중에 임의로 바뀌지 않게 코드 상수로 두며, 조정이 필요해지면
+// 설정 계약으로 승격한다.
+type reconnectPolicy struct {
+	maxAttempts int
+	maxElapsed  time.Duration
+	minBackoff  time.Duration
+	maxBackoff  time.Duration
+}
+
+var defaultReconnectPolicy = reconnectPolicy{
+	maxAttempts: egressReconnectMaxAttempts,
+	maxElapsed:  egressReconnectMaxElapsed,
+	minBackoff:  egressBackoffMin,
+	maxBackoff:  egressBackoffMax,
+}
+
+// reconnectBudget은 현재 장애 구간의 재시도 횟수와 시작 시각을 보관한다.
+// attempts는 오류 수가 아니라 실제로 다시 FFmpeg를 시작한 횟수다.
+type reconnectBudget struct {
+	policy      reconnectPolicy
+	firstFailed time.Time
+	attempts    int
+}
+
+func newReconnectBudget(policy reconnectPolicy) reconnectBudget {
+	return reconnectBudget{policy: policy}
+}
+
+func (b *reconnectBudget) noteFailure(now time.Time) {
+	if b.firstFailed.IsZero() {
+		b.firstFailed = now
+	}
+}
+
+func (b reconnectBudget) deadline() time.Time {
+	if b.firstFailed.IsZero() {
+		return time.Time{}
+	}
+	return b.firstFailed.Add(b.policy.maxElapsed)
+}
+
+// nextDelay는 다음 재시도 전의 대기 시간을 돌려준다. deadline을 넘기는
+// backoff는 남은 시간까지만 기다리게 하며, 호출자는 그 뒤 BeginAttempt가
+// false인지 확인해 새 프로세스를 시작하지 않는다.
+func (b reconnectBudget) nextDelay(now time.Time) (time.Duration, bool) {
+	if b.firstFailed.IsZero() || b.attempts >= b.policy.maxAttempts || !now.Before(b.deadline()) {
+		return 0, false
+	}
+	delay := b.policy.minBackoff
+	for attempt := 0; attempt < b.attempts; attempt++ {
+		delay *= 2
+		if delay >= b.policy.maxBackoff {
+			delay = b.policy.maxBackoff
+			break
+		}
+	}
+	if remaining := b.deadline().Sub(now); remaining < delay {
+		return remaining, true
+	}
+	return delay, true
+}
+
+// beginAttempt은 재연결용 FFmpeg 시작 직전에 호출한다. 시간·횟수 예산을 모두
+// 확인한 뒤에만 attempts를 올려, StreamState가 실제 시작한 재시도 수를 보인다.
+func (b *reconnectBudget) beginAttempt(now time.Time) bool {
+	if b.firstFailed.IsZero() || b.attempts >= b.policy.maxAttempts || !now.Before(b.deadline()) {
+		return false
+	}
+	b.attempts++
+	return true
+}
+
+func (b *reconnectBudget) reset() {
+	b.firstFailed = time.Time{}
+	b.attempts = 0
 }
 
 // cachedCancellationSlate는 한 egress가 현재 출력 규격에서 재사용하는 취소
@@ -145,6 +250,12 @@ type RTMPEgress struct {
 	// 따라 해상도를 바꿔도 RTMP 출력 프로필이 흔들리지 않게 한다.
 	videoSize string
 	input     chan frame
+	// reconnectPolicy는 이 egress가 사용하는 자동 복구 예산이다. 기본값은
+	// 코드 상수지만, 테스트에서는 짧은 정책으로 교체해 실제 Run 루프를 검증한다.
+	reconnectPolicy reconnectPolicy
+	// startProcess는 FFmpeg egress 프로세스를 만든다. 운영에서는 start를 쓰고,
+	// 테스트에서는 시작·쓰기 실패를 외부 FFmpeg 없이 재현하는 double로 바꾼다.
+	startProcess func(context.Context, uint16, uint16, int) (*ffmpegProcess, error)
 
 	statusMu sync.Mutex
 	status   EgressStatus
@@ -157,7 +268,7 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		options.WireFormat = config.WireFormatJPEG
 	}
 	egressLogger := logger.With("ffmpeg_role", "egress")
-	return &RTMPEgress{
+	egress := &RTMPEgress{
 		transcoder:      NewFFmpegTranscoder(path, logger, registry, options),
 		logger:          egressLogger,
 		metrics:         registry,
@@ -169,12 +280,15 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		bitrateOverride: videoBitrate,
 		videoSize:       videoSize,
 		input:           make(chan frame, egressQueueSize),
+		reconnectPolicy: defaultReconnectPolicy,
 		status: EgressStatus{
 			Phase:     EgressPhaseIdle,
 			TargetURL: maskStreamKey(outputURL),
 			UpdatedAt: time.Now().UTC(),
 		},
 	}
+	egress.startProcess = egress.start
+	return egress
 }
 
 // Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.
@@ -201,7 +315,7 @@ func (e *RTMPEgress) transition(change egressTransition) bool {
 		return false
 	}
 	if current == EgressPhaseStopped && change.event == egressTransitionStop {
-		return true
+		return false
 	}
 
 	now := time.Now().UTC()
@@ -219,14 +333,22 @@ func (e *RTMPEgress) transition(change egressTransition) bool {
 	case egressTransitionPause:
 		e.status.PausedAt = &now
 	case egressTransitionReconnect:
-		e.status.ReconnectAttempts++
+		e.status.ReconnectAttempts = change.reconnectAttempts
 		if change.cause != nil {
-			message := change.cause.Error()
+			message := e.sanitizeError(change.cause)
 			e.status.LastError = &message
 		}
 	case egressTransitionStop:
 		if e.status.StoppedAt == nil {
 			e.status.StoppedAt = &now
+		}
+		if change.reason != "" && e.status.StopReason == nil {
+			reason := change.reason
+			e.status.StopReason = &reason
+		}
+		if change.cause != nil {
+			message := e.sanitizeError(change.cause)
+			e.status.LastError = &message
 		}
 	}
 	return true
@@ -318,9 +440,67 @@ func (e *RTMPEgress) Stop() {
 	e.clearCancellationSlate()
 }
 
+// StopWithReason은 egress 내부 복구 경로가 더 이상 자동 복구하지 않기로 했을
+// 때 종료 사유까지 함께 기록한다. 먼저 stopped로 전이한 사건의 사유를 보존해
+// 수동 stop·세션 종료와 뒤늦은 재연결 실패가 서로 덮어쓰지 않게 한다.
+func (e *RTMPEgress) StopWithReason(reason EgressStopReason) {
+	e.transition(egressTransition{event: egressTransitionStop, reason: reason})
+	e.clearCancellationSlate()
+}
+
+// StopWithError는 종료 사유와 마지막 오류를 하나의 상태 전이로 기록한다.
+// 재연결 예산 소진처럼 Run 고루틴이 스스로 종료하는 경우에 사용한다. 이미
+// 수동 stop이 먼저 끝낸 egress라면 false를 돌려 종료 지표가 중복되지 않게 한다.
+func (e *RTMPEgress) StopWithError(reason EgressStopReason, cause error) bool {
+	if !e.transition(egressTransition{event: egressTransitionStop, reason: reason, cause: cause}) {
+		return false
+	}
+	e.clearCancellationSlate()
+	switch reason {
+	case EgressStopReasonReconnectExhausted:
+		e.metrics.IncEgressReconnectExhausted()
+	case EgressStopReasonReconnectInputTimeout:
+		e.metrics.IncEgressReconnectInputTimeout()
+	}
+	return true
+}
+
 // noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.
-func (e *RTMPEgress) noteReconnect(cause error) {
-	e.transition(egressTransition{event: egressTransitionReconnect, cause: cause})
+func (e *RTMPEgress) noteReconnect(cause error, attempts int) {
+	e.transition(egressTransition{event: egressTransitionReconnect, cause: cause, reconnectAttempts: attempts})
+}
+
+// setReconnectAttempts는 실제 재시도용 FFmpeg 프로세스를 시작한 직후 호출한다.
+// 오류 발생 시점과 프로세스 시작 시점이 다르므로 전이표를 다시 통과하지 않고
+// 재연결 상태의 관측값만 갱신한다.
+func (e *RTMPEgress) setReconnectAttempts(attempts int) {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status.Phase == EgressPhaseStopped {
+		return
+	}
+	e.status.ReconnectAttempts = attempts
+	e.status.UpdatedAt = time.Now().UTC()
+}
+
+// resetReconnectStatus는 한 출력 세대가 충분히 안정적으로 송출된 뒤 이전
+// 장애 구간의 API 표시를 지운다. Prometheus 누적 카운터는 여기서 건드리지 않는다.
+func (e *RTMPEgress) resetReconnectStatus() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status.Phase == EgressPhaseStopped {
+		return
+	}
+	e.status.ReconnectAttempts = 0
+	e.status.LastError = nil
+	e.status.UpdatedAt = time.Now().UTC()
+}
+
+// sanitizeError는 StreamState와 로그에 보관할 오류에서 출력 URL의 스트림 키를
+// 제거한다. RTMP endpoint가 오류 문구를 그대로 되돌려도 API 응답으로 비밀값이
+// 나가지 않게 한다.
+func (e *RTMPEgress) sanitizeError(cause error) string {
+	return strings.ReplaceAll(cause.Error(), e.outputURL, maskStreamKey(e.outputURL))
 }
 
 // beginReconfiguring은 입력 프레임의 해상도가 바뀌어 새 출력 프로필을
@@ -374,7 +554,7 @@ func (e *RTMPEgress) Enqueue(item frame) {
 
 // Run은 단일 writer 고루틴을 실행한다. 소스 프레임률을 측정하고 FFmpeg 자식
 // 프로세스를 생성해 프레임을 공급하며, 자식 프로세스 종료나 RTMP 쓰기 경로 실패
-// 시 지수 backoff로 재연결한다. 연결이 끊긴 동안 들어오는 프레임은 버리고
+// 시 제한된 지수 backoff로 재연결한다. 연결이 끊긴 동안 들어오는 프레임은 버리고
 // 버퍼링하지 않는다.
 //
 // egress가 세션 수명으로 살게 되면서(#84) 트랙 교체로 프레임 해상도가
@@ -383,14 +563,20 @@ func (e *RTMPEgress) Enqueue(item frame) {
 // 프레임을 만나면 백오프 없이 바깥 루프로 나가 새 해상도로 재측정한다.
 func (e *RTMPEgress) Run(ctx context.Context) {
 	defer e.setStopped()
-	backoff := egressBackoffMin
+	budget := newReconnectBudget(e.reconnectPolicy)
 	var seed []frame
+	var inputDeadline time.Time
 	for ctx.Err() == nil {
-		startup, ok := e.collectStartupFrames(ctx, seed)
-		if !ok {
+		startup, result := e.collectStartupFrames(ctx, seed, inputDeadline)
+		if result != startupFramesReady {
+			if result == startupFramesTimedOut && ctx.Err() == nil {
+				e.logger.Warn("RTMP egress input profile collection timed out", "error", errReconnectInputTimeout)
+				e.StopWithError(EgressStopReasonReconnectInputTimeout, errReconnectInputTimeout)
+			}
 			return
 		}
 		seed = nil
+		inputDeadline = time.Time{}
 		width, height := startup[0].width, startup[0].height
 		fps := measureFPS(startup)
 		e.logger.Info("starting RTMP egress",
@@ -399,18 +585,25 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 
 		pending := startup
 		for ctx.Err() == nil {
-			process, err := e.start(ctx, width, height, fps)
+			process, err := e.startProcess(ctx, width, height, fps)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				e.logger.Error("start RTMP egress FFmpeg failed", "error", err)
-				e.noteReconnect(err)
-				e.waitBackoff(ctx, &backoff)
+				e.logger.Error("start RTMP egress FFmpeg failed", "error", e.sanitizeError(err))
+				if !e.waitForReconnect(ctx, &budget, err) {
+					return
+				}
 				continue
 			}
 			e.setStreaming(width, height, fps)
-			written, mismatch, err := e.writeFrames(ctx, process, pending, width, height, fps)
+			_, mismatch, err := e.writeFrames(ctx, process, pending, width, height, fps, func() {
+				// 300프레임을 끊김 없이 넘긴 뒤에야 이전 장애 구간을 끝낸다.
+				// writeFrames와 같은 Run 고루틴에서 실행되므로 budget은 별도 잠금 없이
+				// 안전하게 초기화할 수 있다.
+				budget.reset()
+				e.resetReconnectStatus()
+			})
 			pending = nil
 			// 자식 프로세스가 pipe:3에서 EOF를 받아 종료하게 하고, 다음 spawn이
 			// 새 Ogg 스트림을 연결할 수 있도록 해제한다.
@@ -422,49 +615,85 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 				return
 			}
 			if mismatch != nil {
-				// 트랙 교체로 해상도가 바뀌었다. 송출 실패가 아니므로 백오프와
-				// 재연결 집계 없이, 이 프레임을 시드로 즉시 재측정에 들어간다.
+				// 트랙 교체로 해상도가 바뀌었다. 이 프레임을 시드로 새 프로필을
+				// 측정한다. 새 프레임을 받는 시간도 현재 재연결 예산을 넘지 않게
+				// 제한해, 입력이 끊긴 채 영구 대기하지 않는다.
 				e.beginReconfiguring()
 				e.logger.Info("video resolution changed; restarting RTMP egress",
 					"old_width", width, "old_height", height,
 					"new_width", mismatch.width, "new_height", mismatch.height)
 				seed = []frame{*mismatch}
+				inputDeadline = time.Now().UTC().Add(e.reconnectPolicy.maxElapsed)
+				if deadline := budget.deadline(); !deadline.IsZero() && deadline.Before(inputDeadline) {
+					inputDeadline = deadline
+				}
 				break
 			}
-			if written >= egressStableFrames {
-				backoff = egressBackoffMin
+			if err == nil {
+				err = errors.New("RTMP egress stopped without a write error")
 			}
-			e.metrics.IncEgressReconnect()
-			e.noteReconnect(err)
-			e.logger.Warn("RTMP egress disconnected; reconnecting",
-				"error", err, "frames_written", written, "backoff", backoff)
-			e.waitBackoff(ctx, &backoff)
+			if !e.waitForReconnect(ctx, &budget, err) {
+				return
+			}
 		}
 	}
 }
 
 // collectStartupFrames는 fps·해상도 측정에 쓸 프레임을 모은다. seed는 해상도
 // 재기동 시 이월되는 새 해상도의 첫 프레임으로, 수집 목표 수에 포함된다.
-func (e *RTMPEgress) collectStartupFrames(ctx context.Context, seed []frame) ([]frame, bool) {
+// deadline이 0이면 첫 시작처럼 시간 제한 없이 기다린다. 재구성·복구 경로는
+// 유한한 deadline을 전달해 입력 단절로 Run 고루틴이 영구 대기하지 않게 한다.
+type startupFramesResult uint8
+
+const (
+	startupFramesReady startupFramesResult = iota
+	startupFramesCanceled
+	startupFramesTimedOut
+)
+
+func (e *RTMPEgress) collectStartupFrames(ctx context.Context, seed []frame, deadline time.Time) ([]frame, startupFramesResult) {
 	startup := make([]frame, 0, egressMeasureFrames)
 	startup = append(startup, seed...)
+
+	var deadlineC <-chan time.Time
+	var timer *time.Timer
+	if !deadline.IsZero() {
+		until := time.Until(deadline)
+		if until <= 0 {
+			return nil, startupFramesTimedOut
+		}
+		timer = time.NewTimer(until)
+		defer timer.Stop()
+		deadlineC = timer.C
+	}
+
 	for len(startup) < egressMeasureFrames {
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil, startupFramesCanceled
+		case <-deadlineC:
+			return nil, startupFramesTimedOut
 		case item := <-e.input:
 			startup = append(startup, item)
 		}
 	}
-	return startup, true
+	return startup, startupFramesReady
 }
 
 // writeFrames는 프레임을 FFmpeg에 공급한다. 스폰 해상도와 다른 프레임을
 // 만나면 그 프레임을 반환하고 즉시 중단한다 — 해상도가 다른 데이터를 밀면
 // 인코더가 어차피 죽고, 죽은 뒤에는 재기동 기준 해상도를 알 수 없기 때문에
 // 죽기 전에 감지해 재측정 시드로 넘기는 것이다.
-func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame, width, height uint16, fps int) (int, *frame, error) {
+func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pending []frame, width, height uint16, fps int, onStable func()) (int, *frame, error) {
 	written := 0
+	stable := false
+	noteWritten := func() {
+		written++
+		if !stable && written >= egressStableFrames {
+			stable = true
+			onStable()
+		}
+	}
 	writeCamera := func(item frame) (*frame, error) {
 		if resolutionChanged(item, width, height) {
 			return &item, nil
@@ -476,7 +705,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		if _, err := process.stdin.Write(item.data); err != nil {
 			return nil, err
 		}
-		written++
+		noteWritten()
 		e.latency.observe(item.ingestAt)
 		return nil, nil
 	}
@@ -488,7 +717,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		if _, err := process.stdin.Write(slate.data); err != nil {
 			return err
 		}
-		written++
+		noteWritten()
 		return nil
 	}
 	for _, item := range pending {
@@ -584,23 +813,55 @@ func (e *RTMPEgress) validFrame(item frame) bool {
 	return isJPEG(item.data)
 }
 
-// waitBackoff는 현재 backoff 동안 프레임을 비우며(버리며) 대기한다. 프로세스가
-// 돌아왔을 때 큐에 최신 프레임이 남게 하며, 이후 backoff를 상한까지 두 배로 늘린다.
-func (e *RTMPEgress) waitBackoff(ctx context.Context, backoff *time.Duration) {
-	timer := time.NewTimer(*backoff)
+// waitForReconnect은 오류를 현재 장애 구간에 기록하고, 다음 실제 FFmpeg 시작을
+// 허용하는 경우에만 true를 반환한다. 재시도 횟수와 총 시간 중 하나라도 소진되면
+// 같은 오류를 종료 사유와 함께 보존하고 Run을 끝내게 한다.
+func (e *RTMPEgress) waitForReconnect(ctx context.Context, budget *reconnectBudget, cause error) bool {
+	now := time.Now().UTC()
+	budget.noteFailure(now)
+	e.noteReconnect(cause, budget.attempts)
+
+	delay, allowed := budget.nextDelay(now)
+	if !allowed {
+		if ctx.Err() == nil {
+			e.StopWithError(EgressStopReasonReconnectExhausted, cause)
+		}
+		return false
+	}
+
+	e.logger.Warn("RTMP egress disconnected; reconnecting",
+		"error", e.sanitizeError(cause),
+		"reconnect_attempts", budget.attempts,
+		"retry_in", delay)
+	if !e.waitBackoff(ctx, delay) {
+		return false
+	}
+
+	now = time.Now().UTC()
+	if !budget.beginAttempt(now) {
+		if ctx.Err() == nil {
+			e.StopWithError(EgressStopReasonReconnectExhausted, cause)
+		}
+		return false
+	}
+	e.setReconnectAttempts(budget.attempts)
+	e.metrics.IncEgressReconnect()
+	return true
+}
+
+// waitBackoff는 주어진 재연결 대기 시간 동안 프레임을 비우며(버리며) 대기한다.
+// 재시도 간격의 계산은 reconnectBudget이 담당하므로 이 함수는 대기·취소만 맡는다.
+func (e *RTMPEgress) waitBackoff(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-e.input:
 			e.metrics.IncEgressFrameDropped()
 		case <-timer.C:
-			*backoff *= 2
-			if *backoff > egressBackoffMax {
-				*backoff = egressBackoffMax
-			}
-			return
+			return true
 		}
 	}
 }

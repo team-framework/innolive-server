@@ -435,9 +435,46 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 	s.streamStopReason = nil
 	s.egressSlot.Set(egress)
 	s.UpdatedAt = time.Now().UTC()
-	go egress.Run(egressCtx)
+	go m.runEgress(s, egress, egressCtx)
 	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL)
 	return s, nil
+}
+
+// runEgress는 egress의 자체 종료를 세션 슬롯 정리와 연결한다. Run 고루틴이
+// 재연결 예산을 소진해 끝난 경우에도 세션과 WebRTC 미리보기는 살아 있어야 하므로,
+// 이 함수는 세션을 지우지 않고 해당 egress만 슬롯에서 분리한다.
+func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx context.Context) {
+	egress.Run(egressCtx)
+	status := egress.Status()
+
+	s.mu.Lock()
+	if s.egress != egress {
+		s.mu.Unlock()
+		return
+	}
+	// 같은 세션에서 새 방송이 먼저 시작된 경우에는 ClearIf가 새 egress를
+	// 지우지 않는다. 이 비교·교환은 트랙 파이프라인과의 경계를 원자적으로
+	// 유지한다.
+	s.egressSlot.ClearIf(egress)
+	if s.egressCancel != nil {
+		s.egressCancel()
+		s.egressCancel = nil
+	}
+	if !s.closed {
+		// pause 상태에서 재연결 예산이 소진된 경우에도 미리보기·AI 파이프라인은
+		// 계속 동작해야 하므로 egress 종료와 함께 AI 입력 차단을 해제한다.
+		s.setAIInputPaused(false)
+	}
+	s.UpdatedAt = time.Now().UTC()
+	s.mu.Unlock()
+
+	if status.StopReason != nil {
+		m.logger.Warn("RTMP egress stopped after terminal recovery failure",
+			"session_id", s.ID,
+			"stop_reason", *status.StopReason,
+			"reconnect_attempts", status.ReconnectAttempts,
+			"last_error", status.LastError)
+	}
 }
 
 // StopStream은 egress만 종료한다 — 세션과 뷰어(WebRTC) 송출은 유지된다.
@@ -902,6 +939,11 @@ func (s *Session) Response() Response {
 // streamStateFromEgress는 egress 상태 스냅샷을 API 응답 계약(StreamState)으로
 // 옮긴다.
 func streamStateFromEgress(status media.EgressStatus, publisherActive bool, stopReason *string) StreamState {
+	effectiveStopReason := stopReason
+	if effectiveStopReason == nil && status.StopReason != nil {
+		reason := string(*status.StopReason)
+		effectiveStopReason = &reason
+	}
 	state := StreamState{
 		Status:            string(status.Phase),
 		StartedAt:         status.StartedAt,
@@ -909,7 +951,7 @@ func streamStateFromEgress(status media.EgressStatus, publisherActive bool, stop
 		UpdatedAt:         status.UpdatedAt,
 		PublisherActive:   publisherActive,
 		LastError:         status.LastError,
-		StopReason:        stopReason,
+		StopReason:        effectiveStopReason,
 		ReconnectAttempts: status.ReconnectAttempts,
 		VideoWidth:        status.Width,
 		VideoHeight:       status.Height,

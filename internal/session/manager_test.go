@@ -283,6 +283,64 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	}
 }
 
+func TestTerminalEgressClearsSlotAndAllowsRestart(t *testing.T) {
+	manager := newTestManager(t, 0)
+	created, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.mu.Lock()
+	created.rawTrackID = "video-track"
+	created.mu.Unlock()
+
+	if _, err := manager.StartStream(created.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
+		t.Fatal(err)
+	}
+	created.mu.RLock()
+	egress := created.egress
+	cancel := created.egressCancel
+	created.mu.RUnlock()
+	if egress == nil || cancel == nil {
+		t.Fatal("StartStream must install an egress and cancellation function")
+	}
+
+	terminal := errors.New("RTMP write failed for rtmps://a.rtmps.youtube.com/live2/secret-key")
+	egress.StopWithError(media.EgressStopReasonReconnectExhausted, terminal)
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		created.mu.RLock()
+		slotted := created.egressSlot.Load()
+		created.mu.RUnlock()
+		if slotted == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	created.mu.RLock()
+	slotted := created.egressSlot.Load()
+	created.mu.RUnlock()
+	if slotted != nil {
+		t.Fatal("terminal egress must be removed from the egress slot")
+	}
+
+	stream := created.Response().Stream
+	if stream.Status != string(media.EgressPhaseStopped) {
+		t.Fatalf("Stream.Status = %q, want stopped", stream.Status)
+	}
+	if stream.StopReason == nil || *stream.StopReason != string(media.EgressStopReasonReconnectExhausted) {
+		t.Fatalf("Stream.StopReason = %v, want reconnect exhaustion", stream.StopReason)
+	}
+	if stream.LastError == nil || strings.Contains(*stream.LastError, "secret-key") {
+		t.Fatalf("Stream.LastError = %v, want sanitized terminal error", stream.LastError)
+	}
+
+	if _, err := manager.StartStream(created.ID, "rtmps://a.rtmps.youtube.com/live2/restarted-key"); err != nil {
+		t.Fatalf("StartStream after terminal egress error = %v", err)
+	}
+}
+
 type pauseControllerStub struct {
 	statuses     []media.EgressStatus
 	statusCalls  int
@@ -421,5 +479,17 @@ func TestStreamStateUsesEgressPhaseAsStatus(t *testing.T) {
 	}
 	if state.PausedAt == nil || !state.PausedAt.Equal(pausedAt) {
 		t.Fatalf("PausedAt = %v, want %v", state.PausedAt, pausedAt)
+	}
+}
+
+func TestStreamStatePrefersSessionStopReason(t *testing.T) {
+	egressReason := media.EgressStopReasonReconnectExhausted
+	sessionReason := "user_requested"
+	state := streamStateFromEgress(media.EgressStatus{
+		Phase:      media.EgressPhaseStopped,
+		StopReason: &egressReason,
+	}, true, &sessionReason)
+	if state.StopReason == nil || *state.StopReason != sessionReason {
+		t.Fatalf("StopReason = %v, want session reason %q", state.StopReason, sessionReason)
 	}
 }

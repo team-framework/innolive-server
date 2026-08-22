@@ -469,11 +469,15 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 	s.mu.Unlock()
 
 	if status.StopReason != nil {
+		lastError := ""
+		if status.LastError != nil {
+			lastError = *status.LastError
+		}
 		m.logger.Warn("RTMP egress stopped after terminal recovery failure",
 			"session_id", s.ID,
 			"stop_reason", *status.StopReason,
 			"reconnect_attempts", status.ReconnectAttempts,
-			"last_error", status.LastError)
+			"last_error", lastError)
 	}
 }
 

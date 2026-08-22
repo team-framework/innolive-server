@@ -471,6 +471,26 @@ func TestEgressStopReasonPreservesFirstTerminalCause(t *testing.T) {
 	}
 }
 
+func TestEgressTerminalMetricsCountOnlyAppliedStop(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	if !e.StopWithError(EgressStopReasonReconnectExhausted, errors.New("broken pipe")) {
+		t.Fatal("first terminal stop must be applied")
+	}
+	if e.StopWithError(EgressStopReasonReconnectInputTimeout, errReconnectInputTimeout) {
+		t.Fatal("second terminal stop must not be applied")
+	}
+
+	metricsOutput := prometheusDump(e.metrics)
+	for _, expected := range []string{
+		"innolive_egress_reconnect_exhausted_total 1",
+		"innolive_egress_reconnect_input_timeout_total 0",
+	} {
+		if !strings.Contains(metricsOutput, expected) {
+			t.Fatalf("metrics output does not contain %q\n%s", expected, metricsOutput)
+		}
+	}
+}
+
 func TestEgressStatusMasksOutputURLInLastError(t *testing.T) {
 	const outputURL = "rtmp://host/live2/secret-key"
 	e := newTestEgress(config.WireFormatJPEG, outputURL)

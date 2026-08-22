@@ -310,7 +310,7 @@ func (e *RTMPEgress) transition(change egressTransition) bool {
 		return false
 	}
 	if current == EgressPhaseStopped && change.event == egressTransitionStop {
-		return true
+		return false
 	}
 
 	now := time.Now().UTC()
@@ -444,10 +444,20 @@ func (e *RTMPEgress) StopWithReason(reason EgressStopReason) {
 }
 
 // StopWithError는 종료 사유와 마지막 오류를 하나의 상태 전이로 기록한다.
-// 재연결 예산 소진처럼 Run 고루틴이 스스로 종료하는 경우에 사용한다.
-func (e *RTMPEgress) StopWithError(reason EgressStopReason, cause error) {
-	e.transition(egressTransition{event: egressTransitionStop, reason: reason, cause: cause})
+// 재연결 예산 소진처럼 Run 고루틴이 스스로 종료하는 경우에 사용한다. 이미
+// 수동 stop이 먼저 끝낸 egress라면 false를 돌려 종료 지표가 중복되지 않게 한다.
+func (e *RTMPEgress) StopWithError(reason EgressStopReason, cause error) bool {
+	if !e.transition(egressTransition{event: egressTransitionStop, reason: reason, cause: cause}) {
+		return false
+	}
 	e.clearCancellationSlate()
+	switch reason {
+	case EgressStopReasonReconnectExhausted:
+		e.metrics.IncEgressReconnectExhausted()
+	case EgressStopReasonReconnectInputTimeout:
+		e.metrics.IncEgressReconnectInputTimeout()
+	}
+	return true
 }
 
 // noteReconnect는 송출 실패로 백오프 대기에 들어감을 기록한다.

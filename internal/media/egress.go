@@ -253,6 +253,9 @@ type RTMPEgress struct {
 	// reconnectPolicy는 이 egress가 사용하는 자동 복구 예산이다. 기본값은
 	// 코드 상수지만, 테스트에서는 짧은 정책으로 교체해 실제 Run 루프를 검증한다.
 	reconnectPolicy reconnectPolicy
+	// startProcess는 FFmpeg egress 프로세스를 만든다. 운영에서는 start를 쓰고,
+	// 테스트에서는 시작·쓰기 실패를 외부 FFmpeg 없이 재현하는 double로 바꾼다.
+	startProcess func(context.Context, uint16, uint16, int) (*ffmpegProcess, error)
 
 	statusMu sync.Mutex
 	status   EgressStatus
@@ -265,7 +268,7 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		options.WireFormat = config.WireFormatJPEG
 	}
 	egressLogger := logger.With("ffmpeg_role", "egress")
-	return &RTMPEgress{
+	egress := &RTMPEgress{
 		transcoder:      NewFFmpegTranscoder(path, logger, registry, options),
 		logger:          egressLogger,
 		metrics:         registry,
@@ -284,6 +287,8 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 			UpdatedAt: time.Now().UTC(),
 		},
 	}
+	egress.startProcess = egress.start
+	return egress
 }
 
 // Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.
@@ -580,7 +585,7 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 
 		pending := startup
 		for ctx.Err() == nil {
-			process, err := e.start(ctx, width, height, fps)
+			process, err := e.startProcess(ctx, width, height, fps)
 			if err != nil {
 				if ctx.Err() != nil {
 					return

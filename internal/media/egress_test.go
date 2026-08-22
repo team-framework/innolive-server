@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -394,7 +396,7 @@ func TestEgressStatusTransitions(t *testing.T) {
 	}
 	firstStart := *streaming.StartedAt
 
-	e.noteReconnect(io.ErrUnexpectedEOF)
+	e.noteReconnect(io.ErrUnexpectedEOF, 1)
 	reconnecting := e.Status()
 	if reconnecting.Phase != EgressPhaseReconnecting {
 		t.Fatalf("after noteReconnect: phase = %q", reconnecting.Phase)
@@ -473,7 +475,7 @@ func TestEgressStatusMasksOutputURLInLastError(t *testing.T) {
 	const outputURL = "rtmp://host/live2/secret-key"
 	e := newTestEgress(config.WireFormatJPEG, outputURL)
 	e.setStreaming(1280, 720, 30)
-	e.noteReconnect(errors.New("write " + outputURL + ": broken pipe"))
+	e.noteReconnect(errors.New("write "+outputURL+": broken pipe"), 0)
 
 	status := e.Status()
 	if status.LastError == nil {
@@ -602,11 +604,11 @@ func TestEgressStatusPreservesPauseAcrossReconfigureAndReconnect(t *testing.T) {
 		t.Fatalf("phase during paused reconfigure = %q, want %q", status.Phase, EgressPhasePausedReconfiguring)
 	}
 
-	e.noteReconnect(io.ErrUnexpectedEOF)
+	e.noteReconnect(io.ErrUnexpectedEOF, 1)
 	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
 		t.Fatalf("phase during paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
 	}
-	e.noteReconnect(io.ErrClosedPipe)
+	e.noteReconnect(io.ErrClosedPipe, 2)
 	if status := e.Status(); status.Phase != EgressPhasePausedReconnecting {
 		t.Fatalf("phase during repeated paused reconnect = %q, want %q", status.Phase, EgressPhasePausedReconnecting)
 	}
@@ -649,9 +651,9 @@ func TestCollectStartupFramesWithSeed(t *testing.T) {
 			e.input <- frame{timestamp: uint32(i), width: 640, height: 360}
 		}
 	}()
-	startup, ok := e.collectStartupFrames(t.Context(), []frame{seed})
-	if !ok {
-		t.Fatal("collectStartupFrames returned ok=false")
+	startup, result := e.collectStartupFrames(t.Context(), []frame{seed}, time.Time{})
+	if result != startupFramesReady {
+		t.Fatalf("collectStartupFrames result = %d, want ready", result)
 	}
 	if len(startup) != egressMeasureFrames {
 		t.Fatalf("collected %d frames, want %d", len(startup), egressMeasureFrames)
@@ -665,8 +667,142 @@ func TestCollectStartupFramesCancelled(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "out.flv")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, ok := e.collectStartupFrames(ctx, nil); ok {
-		t.Fatal("collectStartupFrames must return ok=false on cancelled context")
+	if _, result := e.collectStartupFrames(ctx, nil, time.Time{}); result != startupFramesCanceled {
+		t.Fatalf("collectStartupFrames result = %d, want canceled", result)
+	}
+}
+
+func TestCollectStartupFramesTimesOut(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	deadline := time.Now().Add(10 * time.Millisecond)
+	if _, result := e.collectStartupFrames(t.Context(), nil, deadline); result != startupFramesTimedOut {
+		t.Fatalf("collectStartupFrames result = %d, want timed out", result)
+	}
+}
+
+func TestRunStopsAfterReconnectBudgetExhausted(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  time.Second,
+		minBackoff:  5 * time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+
+	var starts atomic.Int32
+	e.transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		starts.Add(1)
+		return exec.CommandContext(ctx, "__innolive_missing_ffmpeg_for_reconnect_test__")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after reconnect budget exhaustion")
+	}
+
+	status := e.Status()
+	if status.Phase != EgressPhaseStopped {
+		t.Fatalf("phase = %q, want stopped", status.Phase)
+	}
+	if status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason = %v, want %q", status.StopReason, EgressStopReasonReconnectExhausted)
+	}
+	if status.ReconnectAttempts != 2 {
+		t.Fatalf("ReconnectAttempts = %d, want 2", status.ReconnectAttempts)
+	}
+	if got := starts.Load(); got != 3 {
+		t.Fatalf("FFmpeg starts = %d, want initial start plus 2 retries", got)
+	}
+}
+
+func TestRunResetsReconnectStatusAfterStableOutput(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "out.flv")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 2,
+		maxElapsed:  time.Second,
+		minBackoff:  5 * time.Millisecond,
+		maxBackoff:  5 * time.Millisecond,
+	}
+
+	var starts atomic.Int32
+	e.transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			return exec.CommandContext(ctx, "__innolive_missing_ffmpeg_for_stability_test__")
+		}
+		return exec.CommandContext(ctx, "cat")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	go func() {
+		for index := 0; index < egressMeasureFrames; index++ {
+			e.input <- frame{timestamp: uint32(index * 3000), width: 640, height: 360}
+		}
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		status := e.Status()
+		if status.Phase == EgressPhaseStreaming && status.ReconnectAttempts == 1 && status.LastError != nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("egress did not recover from the first failure: %+v", status)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	validJPEG := []byte{0xff, 0xd8, 0xff, 0xd9}
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		for index := 0; index < egressStableFrames; index++ {
+			e.input <- frame{data: validJPEG, timestamp: uint32((egressMeasureFrames + index) * 3000), width: 640, height: 360}
+		}
+	}()
+	select {
+	case <-feedDone:
+	case <-time.After(time.Second):
+		t.Fatal("stable frame feed did not drain")
+	}
+
+	deadline = time.After(time.Second)
+	for {
+		status := e.Status()
+		if status.Phase == EgressPhaseStreaming && status.ReconnectAttempts == 0 && status.LastError == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stable output did not reset reconnect state: %+v", status)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancellation")
 	}
 }
 

@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -445,6 +446,103 @@ func TestEgressStatusTransitions(t *testing.T) {
 	e.setStopped()
 	if again := e.Status(); !again.StoppedAt.Equal(firstStop) {
 		t.Fatal("StoppedAt must not change on repeated setStopped")
+	}
+}
+
+func TestEgressStopReasonPreservesFirstTerminalCause(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
+	e.setStreaming(1280, 720, 30)
+	e.StopWithReason(EgressStopReasonReconnectExhausted)
+
+	stopped := e.Status()
+	if stopped.Phase != EgressPhaseStopped {
+		t.Fatalf("phase = %q, want stopped", stopped.Phase)
+	}
+	if stopped.StopReason == nil || *stopped.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason = %v, want %q", stopped.StopReason, EgressStopReasonReconnectExhausted)
+	}
+
+	// 다른 종료 사건이 뒤늦게 와도 최초 종료 사유를 바꾸면 안 된다.
+	e.StopWithReason(EgressStopReasonReconnectInputTimeout)
+	if status := e.Status(); status.StopReason == nil || *status.StopReason != EgressStopReasonReconnectExhausted {
+		t.Fatalf("StopReason after second stop = %v, want first reason", status.StopReason)
+	}
+}
+
+func TestEgressStatusMasksOutputURLInLastError(t *testing.T) {
+	const outputURL = "rtmp://host/live2/secret-key"
+	e := newTestEgress(config.WireFormatJPEG, outputURL)
+	e.setStreaming(1280, 720, 30)
+	e.noteReconnect(errors.New("write " + outputURL + ": broken pipe"))
+
+	status := e.Status()
+	if status.LastError == nil {
+		t.Fatal("LastError = nil")
+	}
+	if strings.Contains(*status.LastError, "secret-key") {
+		t.Fatalf("stream key leaked in LastError: %q", *status.LastError)
+	}
+	if !strings.Contains(*status.LastError, "live2/****") {
+		t.Fatalf("LastError = %q, want masked URL", *status.LastError)
+	}
+}
+
+func TestReconnectBudgetBoundsAttemptsAndElapsedTime(t *testing.T) {
+	policy := reconnectPolicy{
+		maxAttempts: 6,
+		maxElapsed:  90 * time.Second,
+		minBackoff:  time.Second,
+		maxBackoff:  30 * time.Second,
+	}
+	budget := newReconnectBudget(policy)
+	started := time.Date(2026, time.August, 22, 10, 0, 0, 0, time.UTC)
+	budget.noteFailure(started)
+
+	wantDelays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
+	now := started
+	for attempt, wantDelay := range wantDelays {
+		delay, ok := budget.nextDelay(now)
+		if !ok || delay != wantDelay {
+			t.Fatalf("attempt %d delay = (%s, %t), want (%s, true)", attempt+1, delay, ok, wantDelay)
+		}
+		now = now.Add(delay)
+		if !budget.beginAttempt(now) {
+			t.Fatalf("attempt %d was unexpectedly rejected", attempt+1)
+		}
+	}
+	if budget.attempts != len(wantDelays) {
+		t.Fatalf("attempts = %d, want %d", budget.attempts, len(wantDelays))
+	}
+	if _, ok := budget.nextDelay(now); ok {
+		t.Fatal("retry must stop after the configured maximum attempts")
+	}
+
+	budget.reset()
+	if !budget.firstFailed.IsZero() || budget.attempts != 0 {
+		t.Fatalf("reset budget = %+v, want empty incident", budget)
+	}
+}
+
+func TestReconnectBudgetNeverStartsAfterDeadline(t *testing.T) {
+	policy := reconnectPolicy{
+		maxAttempts: 6,
+		maxElapsed:  90 * time.Second,
+		minBackoff:  time.Second,
+		maxBackoff:  30 * time.Second,
+	}
+	budget := newReconnectBudget(policy)
+	started := time.Date(2026, time.August, 22, 10, 0, 0, 0, time.UTC)
+	budget.noteFailure(started)
+
+	// deadline 직전에는 남은 1초만 기다리고, 정확히 deadline에 도달한 뒤에는
+	// 새 FFmpeg 프로세스를 시작하지 않는다.
+	now := started.Add(89 * time.Second)
+	delay, ok := budget.nextDelay(now)
+	if !ok || delay != time.Second {
+		t.Fatalf("last delay = (%s, %t), want (1s, true)", delay, ok)
+	}
+	if budget.beginAttempt(now.Add(delay)) {
+		t.Fatal("attempt at the elapsed-time deadline must be rejected")
 	}
 }
 

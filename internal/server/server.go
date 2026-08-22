@@ -13,6 +13,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -30,6 +31,10 @@ const maxJSONBody = 1 << 20
 // 방송 설정은 2MB 썸네일을 base64로 싣는다(약 1.34배 팽창) — 그 경로만
 // 본문 한계를 따로 둔다.
 const maxBroadcastBody = 4 << 20
+
+// platformCleanupTimeout은 요청 컨텍스트가 끝난 뒤 하는 플랫폼 정리 호출의
+// 한계다 — 요청이 취소·완료돼도 만들어둔 방송은 지워야 한다.
+const platformCleanupTimeout = 10 * time.Second
 
 type Server struct {
 	cfg              config.Config
@@ -83,6 +88,8 @@ func New(
 	mux.Handle("GET /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleGetSession)))
 	mux.Handle("DELETE /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleDeleteSession)))
 	mux.Handle("POST /sessions/{session_id}/stream/start", requireUser(s.requireSessionOwner(s.handleStartStream)))
+	mux.Handle("POST /sessions/{session_id}/stream/prepare", requireUser(s.requireSessionOwner(s.handlePrepareStream)))
+	mux.Handle("POST /sessions/{session_id}/stream/golive", requireUser(s.requireSessionOwner(s.handleGoLive)))
 	mux.Handle("POST /sessions/{session_id}/stream/pause", requireUser(s.requireSessionOwner(s.handlePauseStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
@@ -99,6 +106,12 @@ func New(
 	// 프로파일링이 필요할 때만 PPROF_ENABLED=true로 켠다.
 	if cfg.PprofEnabled {
 		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
+	// 세션이 어떤 이유로 끝나든(WebRTC 실패·유예 시간 초과·로그아웃·명시적
+	// 삭제) 라이브까지 가지 못한 방송은 채널에 남으므로 여기서 치운다.
+	// 세션 매니저 없이 조립되는 경로(일부 테스트)도 있어 nil을 확인한다.
+	if sessions != nil {
+		sessions.SetBroadcastCleanup(s.discardBroadcast)
 	}
 	s.handler = recoverMiddleware(logger, corsMiddleware(origins, requestIDMiddleware(mux)))
 	return s
@@ -186,6 +199,8 @@ func (s *Server) handleGetSession(w http.ResponseWriter, _ *http.Request, liveSe
 	writeJSON(w, http.StatusOK, liveSession.Response())
 }
 
+// 준비된 방송 정리는 세션 삭제 훅(SetBroadcastCleanup)이 맡는다 — 명시적
+// 삭제뿐 아니라 WebRTC 실패·유예 시간 초과·로그아웃도 같은 경로로 모인다.
 func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
 	if err := s.sessions.Delete(liveSession.ID, "delete_session"); err != nil {
 		writeSessionError(w, err, liveSession.ID)
@@ -194,8 +209,13 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleStartStream은 명시적 송출 시작(#83)이다: 요청 사용자의 연결된 플랫폼
-// 계정으로 방송을 준비(Prepare)하고, 세션의 처리 출력에 egress를 붙인다.
+// handleStartStream은 제거 예정인 종전 송출 시작(#83)이다. 클라이언트가
+// prepare/golive로 옮겨갈 때까지만 남기고 별도 PR에서 지운다(PR #146 리뷰).
+//
+// 동작은 종전 그대로다 — 저장 설정 위에 요청 바디가 덮어쓰고, autoStart를 켜
+// 송출이 감지되면 플랫폼이 알아서 라이브로 넘긴다. 새 경로와 달리 방송 단계를
+// 기록하지 않는다: autoStart로 이미 라이브가 된 방송을 서버가 "준비됨"으로 보고
+// 지워버리면 안 되기 때문이다.
 func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Provider    string `json:"provider"`
@@ -211,6 +231,7 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 	// 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 기본이고, 요청 바디에
 	// 실린 값이 이번 방송에 한해 덮어쓴다.
 	options := prepareOptionsFrom(liveSession.BroadcastSettings())
+	options.AutoStart = true
 	if strings.TrimSpace(request.Title) != "" {
 		options.Title = request.Title
 	}
@@ -237,32 +258,26 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
 		return
 	}
+	// 새 경로가 선점한 방송이 있는 세션에서는 종전 경로를 열어두지 않는다 —
+	// 방송이 둘 생기고 어느 쪽이 라이브가 되는지 알 수 없어진다.
+	if _, phase := liveSession.PlatformBroadcast(); phase != session.BroadcastPhaseIdle {
+		writeBroadcastPhaseError(w, phase, liveSession.ID)
+		return
+	}
 	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
 	if err != nil {
-		switch {
-		case errors.Is(err, auth.ErrStreamingNotConnected):
-			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}})
-		case errors.Is(err, auth.ErrStreamingReconnectRequired):
-			// 재시도로 복구되지 않는 상태 — "잠시 후 재시도"가 아니라
-			// "재연결"을 안내해야 하므로 일반 준비 실패(502)와 구분한다.
-			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
-		case errors.Is(err, streaming.ErrLiveStreamingBlocked):
-			writeError(w, apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}})
-		default:
-			s.logger.Error("prepare platform broadcast failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
-			writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_prepare_failed", Message: "The streaming platform could not prepare the broadcast."})
-		}
+		s.writePrepareError(w, err, liveSession.ID, providerName)
 		return
 	}
 	if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
-		switch {
-		case errors.Is(err, session.ErrNoVideoTrack):
-			writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": liveSession.ID}})
-		case errors.Is(err, session.ErrStreamActive):
-			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": liveSession.ID}})
-		default:
-			writeSessionError(w, err, liveSession.ID)
-		}
+		// egress를 못 붙였으면 방금 만든 방송은 쓸 데가 없다. autoStart가 켜져
+		// 있어도 프레임이 가지 않으므로 라이브가 되지 않는다.
+		s.discardBroadcast(liveSession.UserID, session.PlatformBroadcast{
+			Provider:    string(prepared.Provider),
+			BroadcastID: prepared.BroadcastID,
+			StreamID:    prepared.StreamID,
+		})
+		s.writeStartStreamError(w, err, liveSession.ID)
 		return
 	}
 	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
@@ -270,6 +285,263 @@ func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveS
 		session.Response
 		Warnings []streaming.Warning `json:"warnings,omitempty"`
 	}{Response: liveSession.Response(), Warnings: prepared.Warnings})
+}
+
+// handlePrepareStream은 송출 준비다(#142): 요청 사용자의 연결된 플랫폼 계정으로
+// 방송을 만들고(시청자에게 노출되지 않는 상태) egress를 붙인다. 시청자에게
+// 공개되는 전환은 golive가 따로 한다.
+//
+// 준비 옵션은 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 단일 출처다 —
+// 요청 바디로 덮어쓰는 경로를 두면 설정 화면과 실제 방송이 어긋난다.
+func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Provider string `json:"provider"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil {
+		writeError(w, badRequest("Invalid stream prepare request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
+	if providerName == "" {
+		providerName = auth.StreamingProviderYouTube
+	}
+	provider := s.streaming[providerName]
+	if provider == nil {
+		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
+		// 계약(501)을 유지한다.
+		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
+		return
+	}
+	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
+	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
+	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
+	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID); err != nil {
+		writeBroadcastBeginError(w, err, liveSession.ID)
+		return
+	}
+	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.
+	options := prepareOptionsFrom(liveSession.BroadcastSettings())
+	if options.MadeForKids == nil {
+		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
+		// 서버가 기본값으로 대신 신고하지 않는다.
+		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		writeError(w, badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"}))
+		return
+	}
+	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
+	preparedRecord := session.PlatformBroadcast{
+		Provider:    string(prepared.Provider),
+		BroadcastID: prepared.BroadcastID,
+		StreamID:    prepared.StreamID,
+	}
+	if err != nil {
+		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.writePrepareError(w, err, liveSession.ID, providerName)
+		return
+	}
+	if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
+		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
+		s.discardPreparedBroadcast(liveSession, preparedRecord)
+		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.writeStartStreamError(w, err, liveSession.ID)
+		return
+	}
+	if _, err := s.sessions.MarkBroadcastPrepared(liveSession.ID, preparedRecord); err != nil {
+		// 세션이 방금 닫힌 경우 등 — 기록하지 못한 방송은 남겨두지 않는다.
+		s.discardPreparedBroadcast(liveSession, preparedRecord)
+		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.logger.Error("record prepared broadcast failed", "session_id", liveSession.ID, "error", err)
+		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
+	writeJSON(w, http.StatusOK, struct {
+		session.Response
+		Warnings []streaming.Warning `json:"warnings,omitempty"`
+	}{Response: liveSession.Response(), Warnings: prepared.Warnings})
+}
+
+// handleGoLive는 준비된 방송을 시청자에게 공개되는 라이브로 전환한다.
+// 전환 요청은 플랫폼에 나가고 나면 취소할 수 없으므로, 그 사이에 들어온
+// 중지가 이기도록 정한다(PR #146 리뷰) — 중지가 요청됐으면 전환 결과를 받은
+// 이 핸들러가 방송을 즉시 종료시키고 요청은 409로 끝낸다.
+func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	broadcast, _ := liveSession.PlatformBroadcast()
+	if _, err := s.sessions.BeginGoLive(liveSession.ID); err != nil {
+		writeGoLiveBeginError(w, err, liveSession.ID)
+		return
+	}
+	providerName := auth.StreamingProvider(broadcast.Provider)
+	provider := s.streaming[providerName]
+	if provider == nil {
+		s.sessions.AbortGoLive(liveSession.ID)
+		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
+		return
+	}
+	prepared := streaming.PreparedBroadcast{
+		Provider:    providerName,
+		BroadcastID: broadcast.BroadcastID,
+		StreamID:    broadcast.StreamID,
+	}
+	if err := provider.GoLive(r.Context(), liveSession.UserID, prepared); err != nil {
+		// 전환에 실패했으면 준비 상태로 되돌린다. 그 사이 중지가 들어왔다면
+		// 되돌릴 곳이 없으므로 방송을 지운다.
+		if stopped, abandoned := s.sessions.AbortGoLive(liveSession.ID); stopped {
+			if abandoned.BroadcastID == "" {
+				abandoned = broadcast
+			}
+			s.discardBroadcast(liveSession.UserID, abandoned)
+		}
+		switch {
+		case errors.Is(err, streaming.ErrBroadcastNotReady):
+			// 송출 프레임이 플랫폼에 아직 도착하지 않은 상태 — 잠시 후 재시도로
+			// 풀리므로 준비 실패(502)와 구분한다.
+			writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}})
+		case errors.Is(err, auth.ErrStreamingReconnectRequired):
+			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
+		default:
+			s.logger.Error("go live failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
+			writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."})
+		}
+		return
+	}
+	aborted, live, err := s.sessions.CompleteGoLive(liveSession.ID)
+	if live.BroadcastID == "" {
+		// 세션이 이미 사라졌으면 매니저가 방송 정보를 돌려줄 수 없다.
+		// 전환을 시작할 때 들고 있던 값으로 마무리한다.
+		live = broadcast
+	}
+	if aborted {
+		// 전환은 성공했지만 중지가 이겼다 — autoStop(약 1분)을 기다리면 그동안
+		// 시청자에게 노출되므로 직접 끝낸다.
+		s.endLiveBroadcast(liveSession.UserID, live)
+		s.logger.Info("go live superseded by stop", "session_id", liveSession.ID, "error", err)
+		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_stopped", Message: "The stream was stopped while the broadcast was switching to live.", Details: map[string]any{"session_id": liveSession.ID}})
+		return
+	}
+	if err != nil {
+		s.logger.Error("record live broadcast failed", "session_id", liveSession.ID, "error", err)
+		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+// endLiveBroadcast는 중지에 밀린 라이브 방송을 플랫폼에서 즉시 끝낸다.
+// 실패해도 autoStop이 뒤늦게 정리하므로 로그만 남긴다.
+func (s *Server) endLiveBroadcast(userID uuid.UUID, broadcast session.PlatformBroadcast) {
+	providerName := auth.StreamingProvider(broadcast.Provider)
+	provider := s.streaming[providerName]
+	if provider == nil || broadcast.BroadcastID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), platformCleanupTimeout)
+	defer cancel()
+	err := provider.EndLive(ctx, userID, streaming.PreparedBroadcast{
+		Provider:    providerName,
+		BroadcastID: broadcast.BroadcastID,
+		StreamID:    broadcast.StreamID,
+	})
+	if err != nil {
+		s.logger.Warn("end superseded live broadcast failed", "user_id", userID, "broadcast_id", broadcast.BroadcastID, "error", err)
+	}
+}
+
+// writeGoLiveBeginError는 라이브 전환 선점 실패를 응답으로 옮긴다.
+func writeGoLiveBeginError(w http.ResponseWriter, err error, sessionID string) {
+	switch {
+	case errors.Is(err, session.ErrBroadcastLive):
+		writeBroadcastPhaseError(w, session.BroadcastPhaseLive, sessionID)
+	case errors.Is(err, session.ErrBroadcastGoingLive):
+		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_going_live", Message: "The broadcast is already switching to live.", Details: map[string]any{"session_id": sessionID}})
+	case errors.Is(err, session.ErrBroadcastNotPrepared):
+		writeBroadcastPhaseError(w, session.BroadcastPhaseIdle, sessionID)
+	default:
+		writeSessionError(w, err, sessionID)
+	}
+}
+
+// discardPreparedBroadcast는 준비까지 끝냈지만 쓰이지 못한 방송을 플랫폼에서
+// 정리한다. autoStart를 끈 뒤로는 이런 방송을 아무도 치워주지 않는다.
+// 실패해도 요청 처리에는 영향이 없으므로 로그만 남긴다.
+func (s *Server) discardPreparedBroadcast(liveSession *session.Session, broadcast session.PlatformBroadcast) {
+	s.discardBroadcast(liveSession.UserID, broadcast)
+}
+
+// discardBroadcast는 세션 객체 없이도 방송을 치운다 — 세션 종료 훅은 이미
+// 사라진 세션에 대해 호출되기 때문이다.
+func (s *Server) discardBroadcast(userID uuid.UUID, broadcast session.PlatformBroadcast) {
+	providerName := auth.StreamingProvider(broadcast.Provider)
+	provider := s.streaming[providerName]
+	if provider == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), platformCleanupTimeout)
+	defer cancel()
+	err := provider.Stop(ctx, userID, streaming.PreparedBroadcast{
+		Provider:    providerName,
+		BroadcastID: broadcast.BroadcastID,
+		StreamID:    broadcast.StreamID,
+	})
+	if err != nil {
+		s.logger.Warn("discard prepared broadcast failed", "user_id", userID, "provider", providerName, "broadcast_id", broadcast.BroadcastID, "error", err)
+	}
+}
+
+// writeBroadcastBeginError는 준비 선점 실패를 응답으로 옮긴다. 세션이 사라진
+// 경우와 단계 위반을 구분한다.
+func writeBroadcastBeginError(w http.ResponseWriter, err error, sessionID string) {
+	switch {
+	case errors.Is(err, session.ErrBroadcastLive):
+		writeBroadcastPhaseError(w, session.BroadcastPhaseLive, sessionID)
+	case errors.Is(err, session.ErrBroadcastPrepared):
+		writeBroadcastPhaseError(w, session.BroadcastPhasePrepared, sessionID)
+	default:
+		writeSessionError(w, err, sessionID)
+	}
+}
+
+// writeBroadcastPhaseError는 방송 단계 위반을 409로 옮긴다.
+func writeBroadcastPhaseError(w http.ResponseWriter, phase session.BroadcastPhase, sessionID string) {
+	switch phase {
+	case session.BroadcastPhaseLive:
+		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_live", Message: "The broadcast is already live.", Details: map[string]any{"session_id": sessionID}})
+	case session.BroadcastPhasePreparing, session.BroadcastPhasePrepared:
+		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_prepared", Message: "The broadcast is already prepared.", Details: map[string]any{"session_id": sessionID}})
+	default:
+		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_not_prepared", Message: "Prepare the broadcast before going live.", Details: map[string]any{"session_id": sessionID}})
+	}
+}
+
+// writePrepareError는 플랫폼 준비 실패를 응답으로 옮긴다. 종전 start와 새
+// prepare가 같은 계약을 유지하도록 한 곳에 둔다.
+func (s *Server) writePrepareError(w http.ResponseWriter, err error, sessionID string, providerName auth.StreamingProvider) {
+	switch {
+	case errors.Is(err, auth.ErrStreamingNotConnected):
+		writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}})
+	case errors.Is(err, auth.ErrStreamingReconnectRequired):
+		// 재시도로 복구되지 않는 상태 — "잠시 후 재시도"가 아니라
+		// "재연결"을 안내해야 하므로 일반 준비 실패(502)와 구분한다.
+		writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
+	case errors.Is(err, streaming.ErrLiveStreamingBlocked):
+		writeError(w, apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}})
+	default:
+		s.logger.Error("prepare platform broadcast failed", "session_id", sessionID, "provider", providerName, "error", err)
+		writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_prepare_failed", Message: "The streaming platform could not prepare the broadcast."})
+	}
+}
+
+// writeStartStreamError는 egress 부착 실패를 응답으로 옮긴다.
+func (s *Server) writeStartStreamError(w http.ResponseWriter, err error, sessionID string) {
+	switch {
+	case errors.Is(err, session.ErrNoVideoTrack):
+		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": sessionID}})
+	case errors.Is(err, session.ErrStreamActive):
+		writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": sessionID}})
+	default:
+		writeSessionError(w, err, sessionID)
+	}
 }
 
 // prepareOptionsFrom은 저장된 방송 설정을 플랫폼 준비 옵션으로 옮긴다.
@@ -324,27 +596,39 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 	}
 	if _, err := s.sessions.SetBroadcastSettings(liveSession.ID, settings); err != nil {
 		var invalid session.InvalidBroadcastSettingsError
-		if errors.As(err, &invalid) {
+		switch {
+		case errors.As(err, &invalid):
 			writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"field": invalid.Field, "reason": invalid.Reason}))
-			return
+		case errors.Is(err, session.ErrBroadcastPrepared):
+			writeBroadcastPhaseError(w, session.BroadcastPhasePrepared, liveSession.ID)
+		case errors.Is(err, session.ErrBroadcastLive):
+			writeBroadcastPhaseError(w, session.BroadcastPhaseLive, liveSession.ID)
+		default:
+			writeSessionError(w, err, liveSession.ID)
 		}
-		writeSessionError(w, err, liveSession.ID)
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response())
 }
 
-// handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 플랫폼 쪽
-// 방송 종료는 autoStop이 담당하므로(송출 중단 약 1분 후 반영) 플랫폼 API
-// 호출이 없다.
+// handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 라이브였던
+// 방송의 종료는 autoStop이 담당하므로(송출 중단 약 1분 후 반영) 플랫폼 API
+// 호출이 없다. 다만 라이브 전까지 못 간 방송은 autoStop이 손대지 않으므로
+// 여기서 지운다(#142).
 func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
-	if _, err := s.sessions.StopStream(liveSession.ID); err != nil {
+	_, discard, shouldDiscard, err := s.sessions.StopStream(liveSession.ID)
+	if err != nil {
 		if errors.Is(err, session.ErrStreamNotActive) {
 			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
 			return
 		}
 		writeSessionError(w, err, liveSession.ID)
 		return
+	}
+	// 라이브 전환 왕복 중이었다면 여기서 지우지 않는다 — 전환 결과를 받은
+	// golive 핸들러가 방송을 종료시킨다.
+	if shouldDiscard {
+		s.discardPreparedBroadcast(liveSession, discard)
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
 }

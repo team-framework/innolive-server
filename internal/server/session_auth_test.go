@@ -77,9 +77,9 @@ func TestSessionOwnershipEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("stream start without token is 401", func(t *testing.T) {
+	t.Run("stream prepare without token is 401", func(t *testing.T) {
 		created, _ := createTestSession(t, httpServer.URL, nil)
-		resp := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions/"+created.SessionID+"/stream/start", nil, nil)
+		resp := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions/"+created.SessionID+"/stream/prepare", nil, nil)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", resp.StatusCode)

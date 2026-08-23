@@ -13,3 +13,6 @@ loadtest/results/
 /docs/
 secrets/
 *.p8
+
+# macOS
+.DS_Store

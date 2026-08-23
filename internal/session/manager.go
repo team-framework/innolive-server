@@ -360,6 +360,13 @@ func AIClientIDForUser(userID uuid.UUID) string {
 	return "user:" + userID.String()
 }
 
+// maxNegotiationExtension은 미협상 세션이 활동으로 회수를 미룰 수 있는 상한이다.
+// 마지막 활동 기준으로 타임아웃을 다시 재면(#147) 방송 설정 저장을 반복하는 것만으로
+// 세션이 무기한 살아남아 MAX_SESSIONS 슬롯을 점유할 수 있어, 생성 이후 이 시간이
+// 지나면 더 연장하지 않는다. 폼을 채우는 데 걸리는 시간보다 넉넉하고, 상한에 걸려
+// 회수돼도 클라이언트는 새 세션으로 이어간다.
+var maxNegotiationExtension = 10 * time.Minute
+
 // reapUnnegotiated는 SESSION_NEGOTIATION_TIMEOUT 안에 협상을 시작하지 않은
 // 세션을 해제한다. POST /sessions만 호출해 MAX_SESSIONS 슬롯을 무기한 점유하지
 // 못하게 한다.
@@ -377,10 +384,15 @@ func (m *Manager) reapUnnegotiated(id string) {
 	}
 	// 방송 설정을 저장하는 소유자는 세션을 방치한 것이 아니다(#147). 마지막 활동
 	// 이후로 타임아웃을 다시 재, 폼을 채우는 동안 회수되지 않게 한다. 활동이 없는
-	// 세션은 원래대로 timeout 뒤에 슬롯을 돌려준다.
+	// 세션은 원래대로 timeout 뒤에 슬롯을 돌려준다. 연장은 maxNegotiationExtension까지만
+	// 허용해 협상 없는 세션의 수명 상한을 유지한다.
 	if remaining := m.cfg.NegotiationTimeout - idleFor; remaining > 0 {
-		time.AfterFunc(remaining, func() { m.reapUnnegotiated(id) })
-		return
+		if extendable := maxNegotiationExtension - time.Since(s.CreatedAt); extendable > 0 {
+			time.AfterFunc(min(remaining, extendable), func() { m.reapUnnegotiated(id) })
+			return
+		}
+		m.logger.Info("unnegotiated session exceeded extension limit", "session_id", id,
+			"limit", maxNegotiationExtension)
 	}
 	m.logger.Info("reaping unnegotiated session", "session_id", id, "timeout", m.cfg.NegotiationTimeout)
 	_ = m.Delete(id, "negotiation_timeout")

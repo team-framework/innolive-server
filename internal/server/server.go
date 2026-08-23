@@ -94,6 +94,7 @@ func New(
 	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
+	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
 	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
@@ -609,6 +610,39 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response())
+}
+
+// handleGetBroadcastDefaults는 설정 폼의 초기값을 돌려준다(#143). 직전 방송이
+// 있으면 그 값을, 없거나 조회에 실패하면 폴백값을 준다 — 폼은 어떤 경우에도
+// 열려야 하므로 조회 실패를 에러로 올리지 않는다.
+func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	providerName := auth.StreamingProvider(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if providerName == "" {
+		providerName = auth.StreamingProviderYouTube
+	}
+	defaults := streaming.FallbackDefaults()
+	if provider := s.streaming[providerName]; provider != nil {
+		if loaded, err := provider.Defaults(r.Context(), liveSession.UserID); err != nil {
+			// 계정 미연결·권한·네트워크 어느 쪽이든 사용자가 할 일은 같다:
+			// 폴백값으로 폼을 열고 직접 채운다.
+			s.logger.Info("load broadcast defaults failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
+		} else {
+			defaults = loaded
+		}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Privacy     string `json:"privacy"`
+		MadeForKids *bool  `json:"made_for_kids"`
+		CategoryID  string `json:"category_id"`
+	}{
+		Title:       defaults.Title,
+		Description: defaults.Description,
+		Privacy:     defaults.Privacy,
+		MadeForKids: defaults.MadeForKids,
+		CategoryID:  defaults.CategoryID,
+	})
 }
 
 // handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 라이브였던

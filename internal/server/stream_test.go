@@ -37,6 +37,8 @@ type stubStreamingProvider struct {
 	lastStopped  streaming.PreparedBroadcast
 	endLiveCalls int
 	lastEndLive  streaming.PreparedBroadcast
+	defaults     streaming.BroadcastDefaults
+	defaultsErr  error
 	// 플랫폼 왕복 중간을 붙잡기 위한 동기화 채널(설정하지 않으면 무시된다).
 	prepareEntered chan struct{}
 	prepareRelease chan struct{}
@@ -90,6 +92,11 @@ func (s *stubStreamingProvider) ended() (int, streaming.PreparedBroadcast) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.endLiveCalls, s.lastEndLive
+}
+
+// Defaults는 설정 폼 초기값 조회다(#143).
+func (s *stubStreamingProvider) Defaults(_ context.Context, _ uuid.UUID) (streaming.BroadcastDefaults, error) {
+	return s.defaults, s.defaultsErr
 }
 
 func (s *stubStreamingProvider) Stop(_ context.Context, _ uuid.UUID, prepared streaming.PreparedBroadcast) error {

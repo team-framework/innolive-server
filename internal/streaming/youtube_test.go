@@ -168,6 +168,19 @@ type youtubeAPIStub struct {
 	transitionBody   string
 	deletes          int
 	deleteQuery      string
+	// 설정 기본값 조회(#143) 기록·응답 주입.
+	broadcastLists      int
+	broadcastListQuery  string
+	broadcastListBody   string
+	broadcastListStatus int
+	// broadcastListPages는 호출 순서대로 돌려줄 페이지 본문이다. 비면
+	// broadcastListBody를 매번 돌려준다.
+	broadcastListPages   []string
+	broadcastListQueries []string
+	videoLists           int
+	videoListQuery       string
+	videoListBody        string
+	videoListStatus      int
 }
 
 func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
@@ -187,6 +200,16 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 				"backupIngestionAddress":"rtmp://b.rtmp.youtube.com/live2?backup=1",
 				"rtmpsIngestionAddress":"rtmps://a.rtmps.youtube.com/live2",
 				"rtmpsBackupIngestionAddress":"rtmps://b.rtmps.youtube.com/live2?backup=1"}}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/videos"):
+			s.videoLists++
+			s.videoListQuery = r.URL.RawQuery
+			if s.videoListStatus != 0 {
+				w.WriteHeader(s.videoListStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(s.videoListBody))
 		case strings.HasPrefix(r.URL.Path, "/videos"):
 			s.videoUpdates++
 			if err := json.NewDecoder(r.Body).Decode(&s.lastVideoUpdate); err != nil {
@@ -230,6 +253,27 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 			s.bindQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
+			s.broadcastLists++
+			s.broadcastListQuery = r.URL.RawQuery
+			s.broadcastListQueries = append(s.broadcastListQueries, r.URL.RawQuery)
+			if s.broadcastListStatus != 0 {
+				w.WriteHeader(s.broadcastListStatus)
+				_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+				return
+			}
+			body := s.broadcastListBody
+			if len(s.broadcastListPages) > 0 {
+				// 마지막 페이지를 넘어선 호출은 계약 위반이라 테스트에서 잡는다.
+				if s.broadcastLists > len(s.broadcastListPages) {
+					t.Errorf("liveBroadcasts.list called %d times, want at most %d", s.broadcastLists, len(s.broadcastListPages))
+					body = `{"items":[]}`
+				} else {
+					body = s.broadcastListPages[s.broadcastLists-1]
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):
 			if s.blockLive {
 				// 라이브 미활성 채널의 실측 응답 형태(2026-08-09).

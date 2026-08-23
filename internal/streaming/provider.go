@@ -58,6 +58,25 @@ type PreparedBroadcast struct {
 	Warnings []Warning
 }
 
+// BroadcastDefaults는 설정 폼의 초기값이다. 플랫폼에 "업로드 기본값"을 읽는
+// API가 없어(#143) 직전 방송의 값을 그대로 쓴다. 썸네일은 URL 참조로 옮길 수
+// 없어(다운로드 후 재업로드가 필요) 불러오지 않는다.
+type BroadcastDefaults struct {
+	Title       string
+	Description string
+	Privacy     string
+	// MadeForKids는 PrepareOptions와 같은 이유로 포인터다 — 직전 방송에서
+	// 읽지 못했으면 사용자가 직접 골라야 하는 미선택이다.
+	MadeForKids *bool
+	CategoryID  string
+}
+
+// FallbackDefaults는 직전 방송이 없거나 조회에 실패했을 때의 초기값이다.
+// 설정 폼 자체는 언제나 열려야 하므로 호출자는 조회 실패를 이 값으로 덮는다.
+func FallbackDefaults() BroadcastDefaults {
+	return BroadcastDefaults{Title: defaultBroadcastTitle, Privacy: defaultBroadcastPrivacy}
+}
+
 // Provider는 플랫폼별 방송 라이프사이클 계약이다.
 type Provider interface {
 	// Prepare는 플랫폼 쪽 방송 준비를 마치고 송출 대상 ingest URL을 돌려준다.
@@ -77,4 +96,7 @@ type Provider interface {
 	// 라이브 전환 이후의 종료는 autoStop이 맡으므로, 호출자는 아직 라이브가
 	// 되지 않은(prepare만 된) 방송에 대해서만 이걸 부른다.
 	Stop(ctx context.Context, userID uuid.UUID, prepared PreparedBroadcast) error
+	// Defaults는 설정 폼의 초기값을 돌려준다. 직전 방송이 없으면
+	// FallbackDefaults()를 그대로 돌려준다(에러가 아니다).
+	Defaults(ctx context.Context, userID uuid.UUID) (BroadcastDefaults, error)
 }

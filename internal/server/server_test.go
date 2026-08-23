@@ -686,3 +686,39 @@ func mustDecode(t *testing.T, reader io.Reader, target any) {
 		t.Fatal(fmt.Errorf("decode response: %w", err))
 	}
 }
+
+// 거절된 Origin이 로그에 남지 않으면 프로덕션에서 CORS 실패 원인을 좁힐 수
+// 없다 — 브라우저는 요청 헤더를 개발자에게만 보여주고 서버에는 흔적이 없다.
+func TestCORSRejectionLogsOrigin(t *testing.T) {
+	origins, err := origin.NewConfig(false, []string{"https://client.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	handler := corsMiddleware(logger, origins, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/webrtc/config", nil)
+	request.Header.Set("Origin", "https://evil.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	if got := logs.String(); !strings.Contains(got, "origin rejected") || !strings.Contains(got, "https://evil.example") {
+		t.Fatalf("rejected origin was not logged: %q", got)
+	}
+
+	// Origin은 인증 전에 거절되는 클라이언트 제어 헤더라, 자르지 않으면
+	// 누구나 반복 호출로 로그를 부풀릴 수 있다.
+	logs.Reset()
+	long := httptest.NewRequest(http.MethodGet, "/webrtc/config", nil)
+	long.Header.Set("Origin", "https://"+strings.Repeat("a", 4096)+".example")
+	handler.ServeHTTP(httptest.NewRecorder(), long)
+	if got := logs.String(); strings.Contains(got, strings.Repeat("a", 513)) {
+		t.Fatalf("oversized origin was not truncated: %d bytes logged", len(got))
+	}
+}

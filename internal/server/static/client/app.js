@@ -34,6 +34,9 @@ const state = {
   // 사용자가 직접 건드린 방송 설정 필드. 직전 방송 기본값(#143)이 이 필드를
   // 덮으면 고른 공개 범위·아동용 신고가 뒤집히므로 여기에 담아 보존한다.
   touchedBroadcastFields: new Set(),
+  // 방송 설정을 한 번이라도 저장했는지. 미협상 세션이 회수돼 새 세션으로 이어갈
+  // 때(#147) 저장했던 설정도 함께 사라지므로 폼 값을 다시 보내야 한다.
+  broadcastSettingsSaved: false,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1063,6 +1066,13 @@ async function startWebRtc() {
         return;
       }
 
+      // 방송 설정을 채우는 동안 미협상 세션이 회수될 수 있으므로(#147) offer 직전에
+      // 서버에 남아 있는지 확인한다. 404면 refreshCurrentSession이 현재 세션을
+      // 비우고, 아래에서 새 세션을 만들어 이어간다.
+      if (state.session && !state.pc) {
+        await refreshCurrentSession({ quiet: true });
+      }
+
       const reusableSession = canUseCurrentSessionForOffer();
       if (!reusableSession) {
         await cleanupConnection({ keepSession: false });
@@ -1071,6 +1081,11 @@ async function startWebRtc() {
       await ensureLocalMedia();
       if (!reusableSession) {
         setCurrentSession(await createSession());
+        // 회수된 세션과 함께 저장한 방송 설정도 사라진다. 사용자가 이미 저장했다면
+        // 폼 값을 그대로 새 세션에 다시 보내 입력을 잃지 않게 한다.
+        if (state.broadcastSettingsSaved) {
+          await saveBroadcastSettings();
+        }
       }
       setBroadcastStatus(els.broadcastVideoInput, "WebRTC 연결 중", "warn");
       setBroadcastStatus(els.broadcastRtmpState, "영상 입력 대기", "warn");
@@ -1174,6 +1189,7 @@ async function saveBroadcastSettings() {
       body: JSON.stringify(payload),
     });
     setCurrentSession(updated);
+    state.broadcastSettingsSaved = true;
     setBroadcastStatus(els.broadcastSettingsState, "저장됨", "ok");
     els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated.broadcast);
     logEvent("ok", "Broadcast settings saved", {

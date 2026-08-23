@@ -493,3 +493,37 @@ func TestStreamStatePrefersSessionStopReason(t *testing.T) {
 		t.Fatalf("StopReason = %v, want session reason %q", state.StopReason, sessionReason)
 	}
 }
+
+// 미협상 세션은 회수돼 Get에서 사라진다. 테스트 클라이언트는 offer 직전에 이
+// 404를 보고 새 세션으로 복구하므로(#147), 회수가 조회에 드러나는지 고정한다.
+func TestReapUnnegotiatedRemovesSession(t *testing.T) {
+	cfg := config.Config{
+		PrivacyMode:        config.PrivacyModeBypass,
+		FFmpegPath:         "ffmpeg",
+		UDPPortMin:         42000,
+		UDPPortMax:         42100,
+		FrameQueueSize:     2,
+		NegotiationTimeout: 30 * time.Millisecond,
+	}
+	manager, err := NewManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := manager.Get(s.ID); errors.Is(err, ErrNotFound) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session %s was not reaped after negotiation timeout", s.ID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

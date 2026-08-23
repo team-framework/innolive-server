@@ -42,7 +42,9 @@ health_ok() {
 
 active_sessions() {
   # 서버가 내려가 있으면(metrics 응답 없음) 0으로 취급한다 — 복구 배포를 막지 않기 위함.
-  curl -fsS --max-time 3 http://localhost:8000/metrics 2>>"${DETAIL_LOG}" \
+  local out
+  out="$(curl -fsS --max-time 3 http://localhost:8000/metrics 2>>"${DETAIL_LOG}")" || { echo 0; return 0; }
+  printf '%s\n' "${out}" \
     | awk '/^innolive_active_sessions /{print int($2); found=1} END{if(!found) print 0}'
 }
 

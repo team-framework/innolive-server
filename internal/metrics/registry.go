@@ -24,6 +24,9 @@ type Registry struct {
 	connections       atomic.Uint64
 	connectionFailure atomic.Uint64
 	reconnects        atomic.Uint64
+	peerRecoveryStart atomic.Uint64
+	peerRecoveryOK    atomic.Uint64
+	peerRecoveryEnd   atomic.Uint64
 	sessionsRejected  atomic.Uint64
 	queueSize         atomic.Int64
 	egressReconnects  atomic.Uint64
@@ -85,6 +88,9 @@ func (r *Registry) SetActiveSessions(value int) { r.activeSessions.Store(int64(v
 func (r *Registry) IncConnections()             { r.connections.Add(1) }
 func (r *Registry) IncConnectionFailures()      { r.connectionFailure.Add(1) }
 func (r *Registry) IncReconnects()              { r.reconnects.Add(1) }
+func (r *Registry) IncPeerRecoveryStarted()     { r.peerRecoveryStart.Add(1) }
+func (r *Registry) IncPeerRecoverySucceeded()   { r.peerRecoveryOK.Add(1) }
+func (r *Registry) IncPeerRecoveryExhausted()   { r.peerRecoveryEnd.Add(1) }
 func (r *Registry) IncSessionsRejected()        { r.sessionsRejected.Add(1) }
 func (r *Registry) AddQueue(delta int64)        { r.queueSize.Add(delta) }
 
@@ -212,6 +218,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "innolive_connection_total", "Number of WebRTC sessions created.", r.connections.Load())
 	writeCounter(w, "innolive_connection_failures_total", "Number of WebRTC connections that reached a failed state.", r.connectionFailure.Load())
 	writeCounter(w, "innolive_reconnect_total", "Number of WebRTC sessions that recovered after disconnecting.", r.reconnects.Load())
+	writeCounter(w, "innolive_peer_recovery_started_total", "Number of WebRTC peer recovery windows started after network loss.", r.peerRecoveryStart.Load())
+	writeCounter(w, "innolive_peer_recovery_succeeded_total", "Number of WebRTC peer recovery windows completed after a processed camera frame returned.", r.peerRecoveryOK.Load())
+	writeCounter(w, "innolive_peer_recovery_exhausted_total", "Number of WebRTC sessions ended after their network recovery window expired.", r.peerRecoveryEnd.Load())
 	writeCounter(w, "innolive_sessions_rejected_total", "Number of session creations rejected by the MAX_SESSIONS admission control.", r.sessionsRejected.Load())
 	writeGauge(w, "innolive_processing_queue_size", "Number of complete video frames waiting for processing.", r.queueSize.Load())
 	writeCounter(w, "innolive_egress_reconnect_total", "Number of times the RTMP egress FFmpeg process was restarted.", r.egressReconnects.Load())

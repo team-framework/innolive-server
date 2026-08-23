@@ -358,6 +358,32 @@ func TestSignalingOriginPolicyRejectsDisallowedWebSocketOrigin(t *testing.T) {
 	connection.Close()
 }
 
+func TestWebRTCConfigPublishesRecoveryContract(t *testing.T) {
+	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	response := mustRequest(t, http.MethodGet, httpServer.URL+"/webrtc/config", nil, nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /webrtc/config status = %d", response.StatusCode)
+	}
+	var payload struct {
+		Recovery struct {
+			WindowMS    int64 `json:"window_ms"`
+			DebounceMS  int64 `json:"debounce_ms"`
+			MaxAttempts int   `json:"max_attempts"`
+		} `json:"recovery"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Recovery.WindowMS != 45000 || payload.Recovery.DebounceMS != 2000 || payload.Recovery.MaxAttempts != 6 {
+		t.Fatalf("recovery = %+v, want 45000ms/2000ms/6", payload.Recovery)
+	}
+}
+
 func TestBypassWebRTCEndToEnd(t *testing.T) {
 	application, manager := newTestApplication(t)
 	defer manager.CloseAll()
@@ -383,6 +409,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer peerConnection.Close()
+	negotiationID := uuid.NewString()
 	connected := make(chan struct{}, 1)
 	received := make(chan []byte, 1)
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -394,7 +421,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 	})
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "candidate": nil}
+		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "negotiation_id": negotiationID, "candidate": nil}
 		if candidate != nil {
 			jsonCandidate := candidate.ToJSON()
 			message["candidate"] = jsonCandidate.Candidate
@@ -452,7 +479,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP}); err != nil {
+	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP, "negotiation_id": negotiationID, "ice_restart": false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -462,9 +489,10 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		var message struct {
-			Type  string          `json:"type"`
-			SDP   string          `json:"sdp"`
-			Error json.RawMessage `json:"error"`
+			Type          string          `json:"type"`
+			SDP           string          `json:"sdp"`
+			NegotiationID string          `json:"negotiation_id"`
+			Error         json.RawMessage `json:"error"`
 		}
 		if err := connection.ReadJSON(&message); err != nil {
 			t.Fatalf("read signaling response: %v", err)
@@ -474,6 +502,9 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 		if message.Type != "answer" {
 			continue
+		}
+		if message.NegotiationID != negotiationID {
+			t.Fatalf("answer negotiation_id = %q, want %q", message.NegotiationID, negotiationID)
 		}
 		if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: message.SDP}); err != nil {
 			t.Fatalf("set remote answer: %v", err)
@@ -610,6 +641,9 @@ func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Ha
 		UDPPortMin:              41000,
 		UDPPortMax:              41100,
 		DisconnectedGracePeriod: 100 * time.Millisecond,
+		WebRTCRecoveryWindow:    45 * time.Second,
+		WebRTCRecoveryDebounce:  2 * time.Second,
+		WebRTCRecoveryAttempts:  6,
 		FrameQueueSize:          2,
 		RequireSessionAuth:      true,
 	}

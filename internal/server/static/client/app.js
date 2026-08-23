@@ -5,6 +5,12 @@ const MAX_LOG_ITEMS = 120;
 const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const VIDEO_TRACK_WAIT_ATTEMPTS = 15;
 const VIDEO_TRACK_WAIT_INTERVAL_MS = 1000;
+const DEFAULT_RECOVERY_POLICY = {
+  window_ms: 45000,
+  debounce_ms: 2000,
+  max_attempts: 6,
+};
+const RECOVERY_RETRY_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 16000];
 
 const els = {};
 const state = {
@@ -29,6 +35,20 @@ const state = {
   candidateQueue: [],
   remoteCandidateQueue: [],
   offerSent: false,
+  activeNegotiationId: null,
+  webrtcConfig: {
+    iceServers: DEFAULT_ICE_SERVERS,
+    recovery: DEFAULT_RECOVERY_POLICY,
+  },
+  closingConnection: false,
+  recovery: {
+    active: false,
+    attempts: 0,
+    deadlineAt: 0,
+    generation: 0,
+    debounceTimer: null,
+    retryTimer: null,
+  },
   lastSelectedCandidatePairId: null,
   lastSessionJson: null,
   // 사용자가 직접 건드린 방송 설정 필드. 직전 방송 기본값(#143)이 이 필드를
@@ -1491,18 +1511,35 @@ async function connectPeer(sessionId) {
   state.candidateQueue = [];
   state.remoteCandidateQueue = [];
   state.offerSent = false;
+  state.activeNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
 
-  const iceServers = await loadIceServers();
-  const pc = new RTCPeerConnection({ iceServers });
+  const config = await loadWebRTCConfig({ allowFallback: true });
+  const pc = new RTCPeerConnection({ iceServers: config.iceServers });
   state.pc = pc;
   wirePeerConnection(pc);
 
   addLocalTracks(pc);
 
-  const ws = await openSignalingSocket();
-  state.ws = ws;
-  const answerPromise = waitForAnswer(sessionId);
+  await negotiatePeer(pc, sessionId, { iceRestart: false });
+}
+
+// negotiatePeer는 첫 연결과 네트워크 복구 ICE restart가 공유하는 offer·answer
+// 경로다. negotiation ID는 뒤늦게 도착한 이전 후보를 서버와 클라이언트 모두에서
+// 버리기 위한 세대 식별자다.
+async function negotiatePeer(pc, sessionId, { iceRestart }) {
+  state.candidateQueue = [];
+  state.remoteCandidateQueue = [];
+  state.offerSent = false;
+  const negotiationId = createNegotiationId();
+  state.activeNegotiationId = negotiationId;
+
+  await ensureSignalingSocket();
+  const answerPromise = waitForAnswer(sessionId, negotiationId, iceRestart ? 8000 : 15000);
+
+  if (iceRestart) {
+    pc.restartIce();
+  }
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -1514,6 +1551,8 @@ async function connectPeer(sessionId) {
     owner_token: state.ownerToken,
     access_token: state.accessToken,
     sdp: pc.localDescription.sdp,
+    negotiation_id: negotiationId,
+    ice_restart: iceRestart,
   });
   state.offerSent = true;
   flushCandidateQueue();
@@ -1527,28 +1566,228 @@ async function connectPeer(sessionId) {
   updatePeerUi();
   logEvent("ok", "Remote answer applied", {
     session_id: answer.session_id,
+    negotiation_id: negotiationId,
+    ice_restart: iceRestart,
     sdp_lines: answer.sdp.split(/\r?\n/).length,
   });
 }
 
-async function loadIceServers() {
+function createNegotiationId() {
+  if (crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
+}
+
+async function ensureSignalingSocket() {
+  if (state.ws?.readyState === WebSocket.OPEN) {
+    return state.ws;
+  }
+  return openSignalingSocket();
+}
+
+async function loadWebRTCConfig({ allowFallback }) {
   try {
     const payload = await apiFetch("/webrtc/config");
     const iceServers = Array.isArray(payload?.iceServers)
       ? payload.iceServers
       : [];
+    const recovery = normalizeRecoveryPolicy(payload?.recovery);
+    state.webrtcConfig = { iceServers, recovery };
     if (!iceServers.length) {
       logEvent("warn", "Server returned no ICE servers; using host candidates only");
-      return [];
+      return state.webrtcConfig;
     }
     logEvent("ok", "Loaded ICE server configuration", {
       urls: iceServers.map((server) => server.urls),
+      recovery,
     });
-    return iceServers;
+    return state.webrtcConfig;
   } catch (error) {
+    if (!allowFallback) {
+      throw error;
+    }
+    // 처음 연결할 때만 보수적인 STUN 기본값을 쓴다. 복구 중 이 값으로 기존
+    // TURN 설정을 덮으면 VPN·망 전환에서 relay 후보를 잃을 수 있다.
     logError("Failed to load ICE server configuration; using default STUN", error);
-    return DEFAULT_ICE_SERVERS;
+    state.webrtcConfig = {
+      iceServers: DEFAULT_ICE_SERVERS,
+      recovery: DEFAULT_RECOVERY_POLICY,
+    };
+    return state.webrtcConfig;
   }
+}
+
+function normalizeRecoveryPolicy(value) {
+  const windowMs = Number(value?.window_ms);
+  const debounceMs = Number(value?.debounce_ms);
+  const maxAttempts = Number(value?.max_attempts);
+  return {
+    window_ms: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DEFAULT_RECOVERY_POLICY.window_ms,
+    debounce_ms: Number.isFinite(debounceMs) && debounceMs >= 0 ? debounceMs : DEFAULT_RECOVERY_POLICY.debounce_ms,
+    max_attempts: Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : DEFAULT_RECOVERY_POLICY.max_attempts,
+  };
+}
+
+function scheduleNetworkRecovery(pc, reason, { immediate = false } = {}) {
+  if (
+    state.closingConnection ||
+    state.pc !== pc ||
+    !state.session?.session_id ||
+    pc.connectionState === "closed"
+  ) {
+    return;
+  }
+
+  if (!state.recovery.active) {
+    state.recovery.active = true;
+    state.recovery.attempts = 0;
+    state.recovery.generation += 1;
+    state.recovery.deadlineAt = Date.now() + state.webrtcConfig.recovery.window_ms;
+    logEvent("warn", "WebRTC network recovery scheduled", {
+      session_id: state.session.session_id,
+      reason,
+      recovery_deadline: new Date(state.recovery.deadlineAt).toISOString(),
+      max_attempts: state.webrtcConfig.recovery.max_attempts,
+    });
+  }
+
+  if (state.recovery.debounceTimer || state.recovery.retryTimer) {
+    if (!immediate) {
+      updatePeerUi();
+      return;
+    }
+    window.clearTimeout(state.recovery.debounceTimer);
+    window.clearTimeout(state.recovery.retryTimer);
+    state.recovery.debounceTimer = null;
+    state.recovery.retryTimer = null;
+  }
+
+  const generation = state.recovery.generation;
+  const start = () => {
+    state.recovery.debounceTimer = null;
+    void runNetworkRecoveryAttempt(pc, generation, reason);
+  };
+  if (immediate) {
+    start();
+  } else {
+    state.recovery.debounceTimer = window.setTimeout(
+      start,
+      state.webrtcConfig.recovery.debounce_ms,
+    );
+  }
+  updatePeerUi();
+}
+
+async function runNetworkRecoveryAttempt(pc, generation, reason) {
+  if (!isCurrentRecovery(pc, generation)) {
+    return;
+  }
+  if (pc.connectionState === "connected") {
+    completeNetworkRecovery(pc, generation);
+    return;
+  }
+  if (Date.now() >= state.recovery.deadlineAt) {
+    logEvent("error", "WebRTC recovery deadline reached; server will close the session", {
+      session_id: state.session?.session_id,
+      attempts: state.recovery.attempts,
+      reason,
+    });
+    updatePeerUi();
+    return;
+  }
+  if (state.recovery.attempts >= state.webrtcConfig.recovery.max_attempts) {
+    logEvent("warn", "WebRTC recovery offers exhausted; waiting for server deadline", {
+      session_id: state.session?.session_id,
+      attempts: state.recovery.attempts,
+    });
+    updatePeerUi();
+    return;
+  }
+  if (pc.signalingState !== "stable") {
+    scheduleNextRecoveryAttempt(pc, generation, reason);
+    return;
+  }
+
+  state.recovery.attempts += 1;
+  updatePeerUi();
+  try {
+    const config = await loadWebRTCConfig({ allowFallback: false });
+    if (!isCurrentRecovery(pc, generation)) {
+      return;
+    }
+    pc.setConfiguration({ iceServers: config.iceServers });
+    await ensureSignalingSocket();
+    await negotiatePeer(pc, state.session.session_id, { iceRestart: true });
+    logEvent("ok", "ICE restart offer accepted", {
+      session_id: state.session.session_id,
+      attempt: state.recovery.attempts,
+      reason,
+    });
+  } catch (error) {
+    logError("ICE restart attempt failed", error);
+    if (error?.status === 401 || error?.code === "unauthorized") {
+      logEvent("error", "WebRTC recovery stopped because authentication could not be refreshed", {
+        session_id: state.session?.session_id,
+      });
+      await cleanupConnection({ keepSession: false });
+      return;
+    }
+  }
+
+  if (isCurrentRecovery(pc, generation) && pc.connectionState !== "connected") {
+    scheduleNextRecoveryAttempt(pc, generation, reason);
+  }
+}
+
+function scheduleNextRecoveryAttempt(pc, generation, reason) {
+  if (!isCurrentRecovery(pc, generation) || state.recovery.retryTimer) {
+    return;
+  }
+  const delayMs = RECOVERY_RETRY_DELAYS_MS[
+    Math.min(state.recovery.attempts, RECOVERY_RETRY_DELAYS_MS.length - 1)
+  ];
+  const remainingMs = state.recovery.deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    return;
+  }
+  state.recovery.retryTimer = window.setTimeout(() => {
+    state.recovery.retryTimer = null;
+    void runNetworkRecoveryAttempt(pc, generation, reason);
+  }, Math.min(delayMs, remainingMs));
+  updatePeerUi();
+}
+
+function isCurrentRecovery(pc, generation) {
+  return (
+    !state.closingConnection &&
+    state.pc === pc &&
+    state.recovery.active &&
+    state.recovery.generation === generation
+  );
+}
+
+function completeNetworkRecovery(pc, generation) {
+  if (!isCurrentRecovery(pc, generation)) {
+    return;
+  }
+  const attempts = state.recovery.attempts;
+  clearNetworkRecovery();
+  logEvent("ok", "WebRTC peer connection recovered", {
+    session_id: state.session?.session_id,
+    attempts,
+  });
+  updatePeerUi();
+}
+
+function clearNetworkRecovery() {
+  window.clearTimeout(state.recovery.debounceTimer);
+  window.clearTimeout(state.recovery.retryTimer);
+  state.recovery.active = false;
+  state.recovery.attempts = 0;
+  state.recovery.deadlineAt = 0;
+  state.recovery.debounceTimer = null;
+  state.recovery.retryTimer = null;
 }
 
 function wirePeerConnection(pc) {
@@ -1566,6 +1805,11 @@ function wirePeerConnection(pc) {
     });
     if (pc.connectionState === "connected") {
       void logSelectedCandidatePair(pc, "connectionstatechange");
+      completeNetworkRecovery(pc, state.recovery.generation);
+    } else if (pc.connectionState === "disconnected") {
+      scheduleNetworkRecovery(pc, "peer_connection_disconnected");
+    } else if (pc.connectionState === "failed") {
+      scheduleNetworkRecovery(pc, "peer_connection_failed", { immediate: true });
     }
   });
   pc.addEventListener("iceconnectionstatechange", () => {
@@ -1695,7 +1939,7 @@ function openSignalingSocket() {
   });
 }
 
-function waitForAnswer(sessionId) {
+function waitForAnswer(sessionId, negotiationId, timeoutMs) {
   if (state.answerWaiter) {
     rejectWaitingAnswer(new Error("Replaced pending answer waiter."));
   }
@@ -1703,10 +1947,11 @@ function waitForAnswer(sessionId) {
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
       rejectWaitingAnswer(new Error("Timed out waiting for WebRTC answer."));
-    }, 15000);
+    }, timeoutMs);
 
     state.answerWaiter = {
       sessionId,
+      negotiationId,
       resolve: (payload) => {
         window.clearTimeout(timeout);
         state.answerWaiter = null;
@@ -1739,7 +1984,8 @@ async function handleSignalingMessage(rawData) {
     logEvent("ok", "Received WebRTC answer", payload);
     if (
       state.answerWaiter &&
-      state.answerWaiter.sessionId === payload.session_id
+      state.answerWaiter.sessionId === payload.session_id &&
+      state.answerWaiter.negotiationId === payload.negotiation_id
     ) {
       state.answerWaiter.resolve(payload);
     }
@@ -1759,9 +2005,9 @@ async function handleSignalingMessage(rawData) {
   if (payload.type === "error") {
     logEvent("error", "Signaling error response", payload);
     if (state.answerWaiter) {
-      rejectWaitingAnswer(
-        new Error(payload.error?.message || "Signaling error response."),
-      );
+      const error = new Error(payload.error?.message || "Signaling error response.");
+      error.code = payload.error?.code;
+      rejectWaitingAnswer(error);
     }
     return;
   }
@@ -1770,6 +2016,16 @@ async function handleSignalingMessage(rawData) {
 }
 
 async function addRemoteCandidate(payload) {
+  if (
+    payload.negotiation_id &&
+    payload.negotiation_id !== state.activeNegotiationId
+  ) {
+    logEvent("warn", "Dropped stale remote ICE candidate", {
+      negotiation_id: payload.negotiation_id,
+      active_negotiation_id: state.activeNegotiationId,
+    });
+    return;
+  }
   const candidateInit = payload.candidate
     ? {
         candidate: payload.candidate,
@@ -1822,6 +2078,7 @@ function queueOrSendCandidate(candidate) {
         session_id: state.session?.session_id,
         owner_token: state.ownerToken,
         access_token: state.accessToken,
+        negotiation_id: state.activeNegotiationId,
         candidate: candidate.candidate,
         sdpMid: candidate.sdpMid,
         sdpMLineIndex: candidate.sdpMLineIndex,
@@ -1831,6 +2088,7 @@ function queueOrSendCandidate(candidate) {
         session_id: state.session?.session_id,
         owner_token: state.ownerToken,
         access_token: state.accessToken,
+        negotiation_id: state.activeNegotiationId,
         candidate: null,
       };
 
@@ -1906,6 +2164,8 @@ async function deleteSessionById(sessionId) {
 }
 
 async function cleanupConnection({ keepSession }) {
+  state.closingConnection = true;
+  clearNetworkRecovery();
   stopPolling();
   rejectWaitingAnswer(new Error("Connection cleanup started."));
 
@@ -1934,6 +2194,7 @@ async function cleanupConnection({ keepSession }) {
   state.candidateQueue = [];
   state.remoteCandidateQueue = [];
   state.offerSent = false;
+  state.activeNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
   setPill(els.websocketState, "WS idle", "idle");
   updatePeerUi();
@@ -1941,6 +2202,7 @@ async function cleanupConnection({ keepSession }) {
   if (!keepSession) {
     clearCurrentSession();
   }
+  state.closingConnection = false;
   updateButtons();
 }
 
@@ -2071,6 +2333,19 @@ function updatePeerUi() {
   const ice = pc.iceConnectionState || "unknown";
   const signaling = pc.signalingState || "unknown";
 
+  if (state.recovery.active) {
+    const remainingSeconds = Math.max(
+      0,
+      Math.ceil((state.recovery.deadlineAt - Date.now()) / 1000),
+    );
+    setPill(
+      els.peerState,
+      `Peer recovering ${state.recovery.attempts}/${state.webrtcConfig.recovery.max_attempts} · ${remainingSeconds}s`,
+      "warn",
+    );
+    updateButtons();
+    return;
+  }
   const visualState = getVisualState(connection);
   setPill(els.peerState, `Peer ${connection}`, visualState);
 

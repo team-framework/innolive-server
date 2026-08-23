@@ -114,6 +114,8 @@ make proto        # protobuf 코드 생성
 | `FFMPEG_PATH` | `ffmpeg` | FFmpeg 실행 경로 |
 | `WEBRTC_STUN_URLS` / `WEBRTC_TURN_*` | — | ICE 서버 설정 |
 | `WEBRTC_UDP_PORT_MIN/MAX` | `50002` / `50020` | WebRTC UDP 포트 범위 |
+| `WEBRTC_RECOVERY_WINDOW` | `45s` | 네트워크 전환 뒤 ICE restart를 기다리는 세션 유지 시간 |
+| `WEBRTC_RECOVERY_DEBOUNCE` / `WEBRTC_RECOVERY_MAX_ATTEMPTS` | `2s` / `6` | 일시 끊김 필터와 서버가 수락할 ICE restart offer 상한 |
 | `YOUTUBE_STREAM_KEY` | — | YouTube RTMP 스트림 키 |
 | `ENABLE_AUDIO_EGRESS` | `false` | 발행자 마이크 오디오 송출 여부 |
 | `DATABASE_URL` | — | PostgreSQL 연결 문자열 |
@@ -121,6 +123,30 @@ make proto        # protobuf 코드 생성
 | `AUTH_EMAIL_SMTP_HOST` | — | SMTP 호스트. 비어 있으면 이메일 로그인 API가 비활성화됨 |
 | `AUTH_EMAIL_REDIS_ADDR` | — | 가입 대기 정보·인증 코드를 보관하는 Redis 주소 |
 | `AUTH_EMAIL_VERIFICATION_CODE_TTL` | `5m` | 회원가입 인증 코드 만료 시간 |
+
+### WebRTC 네트워크 복구 계약
+
+`GET /webrtc/config`은 ICE 서버 목록과 함께 아래 `recovery` 값을 반환합니다.
+클라이언트는 네트워크 전환 뒤 이 값을 상한으로 사용하되, 재시도 시점 자체를
+플랫폼마다 완전히 같게 맞출 필요는 없습니다.
+
+```json
+{
+  "iceServers": [{ "urls": ["turn:turn.example:3478"], "username": "…", "credential": "…" }],
+  "recovery": { "window_ms": 45000, "debounce_ms": 2000, "max_attempts": 6 }
+}
+```
+
+`disconnected`는 `debounce_ms` 뒤, `failed`는 즉시 같은 `RTCPeerConnection`의
+ICE restart를 시도합니다. 각 offer에는 새 UUID `negotiation_id`와
+`ice_restart: true`를 넣고, 그 offer에서 발생한 모든 ICE candidate에도 같은
+`negotiation_id`를 넣습니다. 서버는 한 복구 창에서 유효한 restart offer를 최대
+`max_attempts`개 수락하며, 여섯 번째 수락 뒤에도 `window_ms`가 끝날 때까지는
+세션을 유지합니다. 이전 세대 candidate는 `409 stale_negotiation`으로 거절됩니다.
+
+복구 중 활성 RTMP egress는 사용자 pause 상태로 바뀌지 않습니다. 대신 기존 취소
+슬레이트와 무음 Opus를 유지하다가, ICE 연결과 첫 정상 처리 카메라 프레임이 모두
+확인된 뒤에만 카메라 영상·오디오로 돌아갑니다.
 
 ## 주요 HTTP 엔드포인트
 

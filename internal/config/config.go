@@ -77,6 +77,9 @@ type Config struct {
 	UDPPortMax              uint16
 	UDPMuxPort              int
 	DisconnectedGracePeriod time.Duration
+	WebRTCRecoveryWindow    time.Duration
+	WebRTCRecoveryDebounce  time.Duration
+	WebRTCRecoveryAttempts  int
 	FrameQueueSize          int
 	EnableAudioEgress       bool
 	EgressLatencyLog        bool
@@ -119,6 +122,9 @@ func Load() (Config, error) {
 		TURNCredential:          strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
 		AnnouncedIP:             strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
 		DisconnectedGracePeriod: envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
+		WebRTCRecoveryWindow:    envDuration("WEBRTC_RECOVERY_WINDOW", 45*time.Second),
+		WebRTCRecoveryDebounce:  envDuration("WEBRTC_RECOVERY_DEBOUNCE", 2*time.Second),
+		WebRTCRecoveryAttempts:  envInt("WEBRTC_RECOVERY_MAX_ATTEMPTS", 6),
 		AITimeout:               envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
 		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
 		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
@@ -251,6 +257,15 @@ func (c Config) Validate() error {
 	}
 	if c.NegotiationTimeout < 0 {
 		return errors.New("SESSION_NEGOTIATION_TIMEOUT must not be negative")
+	}
+	if c.WebRTCRecoveryWindow < 0 {
+		return errors.New("WEBRTC_RECOVERY_WINDOW must not be negative")
+	}
+	if c.WebRTCRecoveryDebounce < 0 {
+		return errors.New("WEBRTC_RECOVERY_DEBOUNCE must not be negative")
+	}
+	if c.WebRTCRecoveryAttempts < 0 {
+		return errors.New("WEBRTC_RECOVERY_MAX_ATTEMPTS must not be negative")
 	}
 	if c.PrivacyMode == PrivacyModeReal {
 		for _, target := range c.AITargets {

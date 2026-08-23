@@ -69,26 +69,40 @@ func (s *Server) handleSignalingMessage(data []byte) (any, *apiError) {
 
 func (s *Server) handleOffer(payload map[string]json.RawMessage) (any, *apiError) {
 	var request struct {
-		SessionID   string `json:"session_id"`
-		OwnerToken  string `json:"owner_token"`
-		AccessToken string `json:"access_token"`
-		SDP         string `json:"sdp"`
+		SessionID     string `json:"session_id"`
+		OwnerToken    string `json:"owner_token"`
+		AccessToken   string `json:"access_token"`
+		SDP           string `json:"sdp"`
+		NegotiationID string `json:"negotiation_id"`
+		ICERestart    bool   `json:"ice_restart"`
 	}
 	data, _ := json.Marshal(payload)
-	if err := json.Unmarshal(data, &request); err != nil || strings.TrimSpace(request.SessionID) == "" || !validSDP(request.SDP) {
+	if err := json.Unmarshal(data, &request); err != nil {
+		result := badRequest("Invalid signaling message.", nil)
+		return nil, &result
+	}
+	request.NegotiationID = strings.TrimSpace(request.NegotiationID)
+	if strings.TrimSpace(request.SessionID) == "" || !validSDP(request.SDP) || (request.NegotiationID != "" && !validNegotiationID(request.NegotiationID)) || (request.ICERestart && request.NegotiationID == "") {
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
 	}
 	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
 		return nil, apiErr
 	}
-	answer, err := s.sessions.CreateAnswer(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP)
+	answer, err := s.sessions.CreateAnswerWithOptions(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP, session.NegotiationOptions{
+		NegotiationID: request.NegotiationID,
+		ICERestart:    request.ICERestart,
+	})
 	if errors.Is(err, session.ErrNotFound) {
 		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": request.SessionID}}
 		return nil, &result
 	}
 	if errors.Is(err, session.ErrUnauthorized) {
 		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": request.SessionID}}
+		return nil, &result
+	}
+	if errors.Is(err, session.ErrRecoveryAttemptsExhausted) {
+		result := apiError{Status: http.StatusConflict, Code: "peer_recovery_attempts_exhausted", Message: "The WebRTC recovery attempt limit has been reached.", Details: map[string]any{"session_id": request.SessionID}}
 		return nil, &result
 	}
 	if err != nil {
@@ -106,15 +120,21 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 		return nil, &result
 	}
 	var request struct {
-		SessionID    string  `json:"session_id"`
-		OwnerToken   string  `json:"owner_token"`
-		AccessToken  string  `json:"access_token"`
-		Candidate    *string `json:"candidate"`
-		SDPMid       *string `json:"sdpMid"`
-		SDPLineIndex *uint16 `json:"sdpMLineIndex"`
+		SessionID     string  `json:"session_id"`
+		OwnerToken    string  `json:"owner_token"`
+		AccessToken   string  `json:"access_token"`
+		Candidate     *string `json:"candidate"`
+		SDPMid        *string `json:"sdpMid"`
+		SDPLineIndex  *uint16 `json:"sdpMLineIndex"`
+		NegotiationID string  `json:"negotiation_id"`
 	}
 	data, _ := json.Marshal(payload)
-	if err := json.Unmarshal(data, &request); err != nil || strings.TrimSpace(request.SessionID) == "" {
+	if err := json.Unmarshal(data, &request); err != nil {
+		result := badRequest("Invalid signaling message.", nil)
+		return nil, &result
+	}
+	request.NegotiationID = strings.TrimSpace(request.NegotiationID)
+	if strings.TrimSpace(request.SessionID) == "" || (request.NegotiationID != "" && !validNegotiationID(request.NegotiationID)) {
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
 	}
@@ -133,7 +153,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
 		return nil, apiErr
 	}
-	result, err := s.sessions.AddICECandidate(strings.TrimSpace(request.SessionID), request.OwnerToken, webrtc.ICECandidateInit{
+	result, err := s.sessions.AddICECandidateWithNegotiation(strings.TrimSpace(request.SessionID), request.OwnerToken, request.NegotiationID, webrtc.ICECandidateInit{
 		Candidate:     candidateValue,
 		SDPMid:        request.SDPMid,
 		SDPMLineIndex: request.SDPLineIndex,
@@ -144,6 +164,10 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 	}
 	if errors.Is(err, session.ErrUnauthorized) {
 		apiErr := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": request.SessionID}}
+		return nil, &apiErr
+	}
+	if errors.Is(err, session.ErrStaleNegotiation) {
+		apiErr := apiError{Status: http.StatusConflict, Code: "stale_negotiation", Message: "ICE candidate belongs to a stale negotiation.", Details: map[string]any{"session_id": request.SessionID}}
 		return nil, &apiErr
 	}
 	if err != nil {
@@ -202,4 +226,9 @@ func signalingErrorResponse(err apiError) map[string]any {
 func validSDP(value string) bool {
 	value = strings.TrimSpace(value)
 	return strings.HasPrefix(value, "v=0") && (strings.Contains(value, "\nm=") || strings.Contains(value, "\r\nm="))
+}
+
+func validNegotiationID(value string) bool {
+	_, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil
 }

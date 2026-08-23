@@ -239,7 +239,7 @@ func (h *tokenHTTPHandler) middleware(next http.Handler) http.Handler {
 			if !ok {
 				// 거절된 Origin을 남기지 않으면 CORS 실패를 서버 쪽에서
 				// 진단할 방법이 없다 — 브라우저는 요청 헤더를 숨긴다.
-				h.logger.Warn("origin rejected", "origin", origin, "method", r.Method, "path", r.URL.Path, "request_id", id)
+				h.logger.Warn("origin rejected", "origin", truncateTokenMetadata(origin, 512), "method", r.Method, "path", r.URL.Path, "request_id", id)
 				h.writeError(w, r, http.StatusForbidden, "origin_not_allowed", "Origin is not allowed.")
 				return
 			}

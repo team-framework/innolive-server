@@ -14,6 +14,7 @@ import (
 	_ "net/http/pprof"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -786,6 +787,22 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// truncateOrigin은 로그에 남길 Origin 길이를 제한한다. Origin은 인증 전
+// 단계에서 거절되는 클라이언트 제어 헤더라, 자르지 않으면 누구나 반복
+// 호출로 로그를 부풀릴 수 있다.
+func truncateOrigin(value string) string {
+	const limit = 512
+	value = strings.ToValidUTF8(value, "")
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestOrigin := strings.TrimSpace(r.Header.Get("Origin"))
@@ -794,7 +811,7 @@ func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handle
 			if !ok {
 				// 거절된 Origin을 남기지 않으면 CORS 실패를 서버 쪽에서
 				// 진단할 방법이 없다 — 브라우저는 요청 헤더를 숨긴다.
-				logger.Warn("origin rejected", "origin", requestOrigin, "method", r.Method, "path", r.URL.Path)
+				logger.Warn("origin rejected", "origin", truncateOrigin(requestOrigin), "method", r.Method, "path", r.URL.Path)
 				writeError(w, apiError{Status: http.StatusForbidden, Code: "origin_not_allowed", Message: "Origin is not allowed."})
 				return
 			}

@@ -711,4 +711,14 @@ func TestCORSRejectionLogsOrigin(t *testing.T) {
 	if got := logs.String(); !strings.Contains(got, "origin rejected") || !strings.Contains(got, "https://evil.example") {
 		t.Fatalf("rejected origin was not logged: %q", got)
 	}
+
+	// Origin은 인증 전에 거절되는 클라이언트 제어 헤더라, 자르지 않으면
+	// 누구나 반복 호출로 로그를 부풀릴 수 있다.
+	logs.Reset()
+	long := httptest.NewRequest(http.MethodGet, "/webrtc/config", nil)
+	long.Header.Set("Origin", "https://"+strings.Repeat("a", 4096)+".example")
+	handler.ServeHTTP(httptest.NewRecorder(), long)
+	if got := logs.String(); strings.Contains(got, strings.Repeat("a", 513)) {
+		t.Fatalf("oversized origin was not truncated: %d bytes logged", len(got))
+	}
 }

@@ -494,36 +494,73 @@ func TestStreamStatePrefersSessionStopReason(t *testing.T) {
 	}
 }
 
-// 미협상 세션은 회수돼 Get에서 사라진다. 테스트 클라이언트는 offer 직전에 이
-// 404를 보고 새 세션으로 복구하므로(#147), 회수가 조회에 드러나는지 고정한다.
-func TestReapUnnegotiatedRemovesSession(t *testing.T) {
+// newReapTestManager는 회수 타임아웃을 짧게 준 매니저다.
+func newReapTestManager(t *testing.T, timeout time.Duration) *Manager {
+	t.Helper()
 	cfg := config.Config{
 		PrivacyMode:        config.PrivacyModeBypass,
 		FFmpegPath:         "ffmpeg",
 		UDPPortMin:         42000,
 		UDPPortMax:         42100,
 		FrameQueueSize:     2,
-		NegotiationTimeout: 30 * time.Millisecond,
+		NegotiationTimeout: timeout,
 	}
 	manager, err := NewManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(manager.CloseAll)
+	return manager
+}
+
+// waitUntilReaped는 세션이 회수될 때까지 기다린다. 기다린 시간을 돌려준다.
+func waitUntilReaped(t *testing.T, manager *Manager, id string, within time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	for time.Since(start) < within {
+		if _, err := manager.Get(id); errors.Is(err, ErrNotFound) {
+			return time.Since(start)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("session %s was not reaped within %s", id, within)
+	return 0
+}
+
+// 미협상 세션은 회수돼 Get에서 사라진다. 테스트 클라이언트는 offer 직전에 이
+// 404를 보고 새 세션으로 복구하므로(#147), 회수가 조회에 드러나는지 고정한다.
+func TestReapUnnegotiatedRemovesSession(t *testing.T) {
+	manager := newReapTestManager(t, 30*time.Millisecond)
 
 	s, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := manager.Get(s.ID); errors.Is(err, ErrNotFound) {
-			return
+	waitUntilReaped(t, manager, s.ID, 2*time.Second)
+}
+
+// 방송 설정을 저장하는 동안에는 회수되지 않는다(#147). 저장은 방치가 아니므로
+// 타임아웃을 마지막 저장 시점부터 다시 재야 한다.
+func TestReapUnnegotiatedDefersWhileBroadcastSettingsUpdated(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+	manager := newReapTestManager(t, timeout)
+
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 원래 회수 시점을 넘길 때까지 설정을 저장하며 버틴다.
+	for i := 0; i < 3; i++ {
+		time.Sleep(timeout / 2)
+		if _, err := manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "작성 중"}); err != nil {
+			t.Fatalf("SetBroadcastSettings after %s: %v", time.Duration(i+1)*timeout/2, err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("session %s was not reaped after negotiation timeout", s.ID)
-		}
-		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 저장을 멈추면 마지막 저장 이후 timeout이 지나 회수된다.
+	if elapsed := waitUntilReaped(t, manager, s.ID, 2*time.Second); elapsed < timeout {
+		t.Fatalf("session reaped after %s, want at least %s since last activity", elapsed, timeout)
 	}
 }

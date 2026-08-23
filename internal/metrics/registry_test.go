@@ -69,3 +69,31 @@ func TestProcessTreeKeepsCompletedChildCPU(t *testing.T) {
 		t.Fatalf("process tree RSS = %d, want 1024", rssBytes)
 	}
 }
+
+// TestAITargetReadyGauge: 게이지는 target별로 갈라져야 하고, not-ready로 떨어진
+// 뒤 다시 ready가 되면 0에 머무르지 않고 올라와야 한다(#162).
+func TestAITargetReadyGauge(t *testing.T) {
+	r := New()
+	r.SetAITargetReady("127.0.0.1:50051", true)
+	r.SetAITargetReady("127.0.0.1:50052", false)
+
+	var output bytes.Buffer
+	r.WritePrometheus(&output)
+	text := output.String()
+	for _, expected := range []string{
+		"# TYPE innolive_ai_target_ready gauge",
+		`innolive_ai_target_ready{target="127.0.0.1:50051"} 1`,
+		`innolive_ai_target_ready{target="127.0.0.1:50052"} 0`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("metrics output missing %q", expected)
+		}
+	}
+
+	r.SetAITargetReady("127.0.0.1:50052", true)
+	output.Reset()
+	r.WritePrometheus(&output)
+	if !strings.Contains(output.String(), `innolive_ai_target_ready{target="127.0.0.1:50052"} 1`) {
+		t.Error("recovered target did not return to 1")
+	}
+}

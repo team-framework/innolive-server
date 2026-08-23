@@ -44,6 +44,7 @@ type Registry struct {
 	aiFallbackFrames    map[string]uint64
 	aiInputPausedFrames map[string]uint64
 	aiTargetSessions    map[string]uint64
+	aiTargetReady       map[string]int64
 	framesReceived      map[string]uint64
 	framesProcessed     map[string]uint64
 	framesDropped       map[string]uint64
@@ -66,6 +67,7 @@ func New() *Registry {
 		aiFallbackFrames:    make(map[string]uint64),
 		aiInputPausedFrames: make(map[string]uint64),
 		aiTargetSessions:    make(map[string]uint64),
+		aiTargetReady:       make(map[string]int64),
 		framesReceived:      make(map[string]uint64),
 		framesProcessed:     make(map[string]uint64),
 		framesDropped:       make(map[string]uint64),
@@ -120,6 +122,19 @@ func (r *Registry) IncAIInputPausedFrame(mode string) {
 
 func (r *Registry) IncAITargetSession(target string) {
 	r.increment(r.aiTargetSessions, target)
+}
+
+// SetAITargetReady는 한 AI worker가 마지막 preflight 프로브에서 실제로 추론을
+// 돌려줬는지를 기록한다. 프로세스가 살아 있어도 런타임이 죽어 있는 상태를
+// 드러내려는 것이므로(#162), 값의 근거는 언제나 왕복 프로브여야 한다.
+func (r *Registry) SetAITargetReady(target string, ready bool) {
+	value := int64(0)
+	if ready {
+		value = 1
+	}
+	r.mu.Lock()
+	r.aiTargetReady[target] = value
+	r.mu.Unlock()
 }
 
 func (r *Registry) IncFrameReceived(mode string) {
@@ -238,6 +253,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_input_paused_frames_total", "Number of camera frames discarded before AI processing while a broadcast is paused.", "mode", r.aiInputPausedFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)
+	writeLabeledGaugesWithKey(w, "innolive_ai_target_ready", "Whether the AI worker target answered the most recent preflight probe (1) or not (0).", "target", r.aiTargetReady)
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
 	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of processed video frames returned to WebRTC.", r.framesProcessed)
 	writeLabeledCounters(w, "innolive_frame_dropped_total", "Number of stale decoded frames discarded by the processing queue.", r.framesDropped)
@@ -274,6 +290,13 @@ func writeLabeledCounters(w io.Writer, name, help string, values map[string]uint
 
 func writeLabeledCountersWithKey(w io.Writer, name, help, labelKey string, values map[string]uint64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+	for _, label := range sortedKeys(values) {
+		fmt.Fprintf(w, "%s{%s=%q} %d\n", name, labelKey, label, values[label])
+	}
+}
+
+func writeLabeledGaugesWithKey(w io.Writer, name, help, labelKey string, values map[string]int64) {
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
 	for _, label := range sortedKeys(values) {
 		fmt.Fprintf(w, "%s{%s=%q} %d\n", name, labelKey, label, values[label])
 	}

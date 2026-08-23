@@ -527,17 +527,38 @@ func waitUntilReaped(t *testing.T, manager *Manager, id string, within time.Dura
 	return 0
 }
 
-// 미협상 세션은 회수돼 Get에서 사라진다. 테스트 클라이언트는 offer 직전에 이
-// 404를 보고 새 세션으로 복구하므로(#147), 회수가 조회에 드러나는지 고정한다.
-func TestReapUnnegotiatedRemovesSession(t *testing.T) {
-	manager := newReapTestManager(t, 30*time.Millisecond)
+// 연장에는 상한이 있다(#147). 방송 설정 저장을 계속해도 생성 후
+// maxNegotiationExtension이 지나면 협상 없는 세션은 회수된다.
+func TestReapUnnegotiatedStopsExtendingAfterLimit(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	original := maxNegotiationExtension
+	maxNegotiationExtension = 120 * time.Millisecond
+	t.Cleanup(func() { maxNegotiationExtension = original })
+
+	manager := newReapTestManager(t, timeout)
 
 	s, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	waitUntilReaped(t, manager, s.ID, 2*time.Second)
+	// 상한을 넘길 때까지 저장을 계속해도 회수를 막지 못한다.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(timeout / 2):
+				_, _ = manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "작성 중"})
+			}
+		}
+	}()
+
+	if elapsed := waitUntilReaped(t, manager, s.ID, 2*time.Second); elapsed < maxNegotiationExtension {
+		t.Fatalf("session reaped after %s, want at least the extension limit %s", elapsed, maxNegotiationExtension)
+	}
 }
 
 // 방송 설정을 저장하는 동안에는 회수되지 않는다(#147). 저장은 방치가 아니므로

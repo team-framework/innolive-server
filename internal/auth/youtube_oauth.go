@@ -214,13 +214,16 @@ func (c *youtubeOAuthClient) requestToken(ctx context.Context, form url.Values) 
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<10))
+		// 응답 본문을 버리면 실패 원인(client_secret 불일치·코드 만료·
+		// redirect_uri 불일치)을 서버에서도 알 수 없다. 자격증명은 요청에만
+		// 있고 응답에는 없으므로 error/error_description은 남겨도 안전하다.
+		detail := googleTokenErrorDetail(response.Body)
 		// 4xx는 코드 자체의 문제(만료·재사용·위조)라 클라이언트 오류로,
 		// 그 외는 Google 쪽 장애로 구분한다.
 		if response.StatusCode >= 400 && response.StatusCode < 500 {
-			return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d", ErrYouTubeAuthCodeRejected, response.StatusCode)
+			return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d%s", ErrYouTubeAuthCodeRejected, response.StatusCode, detail)
 		}
-		return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d", ErrYouTubeTokenExchange, response.StatusCode)
+		return YouTubeTokenResponse{}, fmt.Errorf("%w: HTTP %d%s", ErrYouTubeTokenExchange, response.StatusCode, detail)
 	}
 	var result YouTubeTokenResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&result); err != nil {
@@ -230,6 +233,35 @@ func (c *youtubeOAuthClient) requestToken(ctx context.Context, form url.Values) 
 		return YouTubeTokenResponse{}, fmt.Errorf("%w: response has no access_token", ErrYouTubeTokenExchange)
 	}
 	return result, nil
+}
+
+// googleTokenErrorDetail은 토큰 엔드포인트 오류 응답의 error /
+// error_description을 사람이 읽을 수 있는 접미사로 만든다. 본문이 JSON이
+// 아니거나 필드가 없으면 빈 문자열을 돌려준다.
+func googleTokenErrorDetail(body io.Reader) string {
+	var payload struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	limited := io.LimitReader(body, 8<<10)
+	err := json.NewDecoder(limited).Decode(&payload)
+	// 본문을 끝까지 읽어야 연결이 재사용된다 — 종전 io.Copy(io.Discard) 가
+	// 하던 일이다.
+	_, _ = io.Copy(io.Discard, limited)
+	if err != nil {
+		return ""
+	}
+	code := truncateTokenMetadata(strings.TrimSpace(payload.Error), 128)
+	description := truncateTokenMetadata(strings.TrimSpace(payload.Description), 256)
+	switch {
+	case code != "" && description != "":
+		return fmt.Sprintf(" (%s: %s)", code, description)
+	case code != "":
+		return " (" + code + ")"
+	case description != "":
+		return " (" + description + ")"
+	}
+	return ""
 }
 
 // ChannelForToken은 토큰이 매핑되는 YouTube 채널을 식별한다. 채널이 없는

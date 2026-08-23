@@ -182,6 +182,24 @@ func main() {
 		}
 	}
 
+	// AI worker 상시 감시: 런타임이 죽어도 프로세스와 포트는 살아 있어서
+	// systemd는 active running으로 본다. 주기적 preflight만이 그것을 구분하므로
+	// innolive_ai_target_ready{target} 게이지로 노출한다(#162).
+	if aiPool != nil && cfg.AIPreflightInterval > 0 {
+		monitorContext, stopMonitor := context.WithCancel(context.Background())
+		defer stopMonitor()
+
+		go ai.NewReadinessMonitor(
+			aiPool,
+			registry,
+			logger,
+			string(cfg.AIWireFormat),
+			cfg.AIPreflightTimeout,
+			cfg.AIPreflightInterval,
+			cfg.DecoderPinLongEdge,
+		).Run(monitorContext)
+	}
+
 	spawnGate := media.NewSpawnGate(
 		cfg.FFmpegSpawnConcurrency,
 	)

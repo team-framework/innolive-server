@@ -61,6 +61,7 @@ type Config struct {
 	AITimeoutLatchThreshold int
 	AIPreflightTimeout      time.Duration
 	AIPreflightRequired     bool
+	AIPreflightInterval     time.Duration
 	AIMeImagePath           string
 	ReferenceStorePath      string
 	FFmpegPath              string
@@ -109,6 +110,7 @@ func Load() (Config, error) {
 		AITimeoutLatchThreshold: envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		AIPreflightTimeout:      envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
 		AIPreflightRequired:     envBool("AI_PREFLIGHT_REQUIRED", false),
+		AIPreflightInterval:     envDuration("AI_PREFLIGHT_INTERVAL", 5*time.Minute),
 		AIMeImagePath:           strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
 		ReferenceStorePath:      strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
 		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
@@ -254,6 +256,17 @@ func (c Config) Validate() error {
 	}
 	if c.AIPreflightTimeout <= 0 {
 		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")
+	}
+	// 0은 상시 감시 비활성이다. 프로브 하나가 끝나기도 전에 다음 주기가 오면
+	// 워커에 프로브가 쌓이므로, 주기는 타임아웃보다 길어야 한다.
+	if c.AIPreflightInterval < 0 {
+		return errors.New("AI_PREFLIGHT_INTERVAL must not be negative")
+	}
+	if c.AIPreflightInterval > 0 && c.AIPreflightInterval <= c.AIPreflightTimeout {
+		return fmt.Errorf(
+			"AI_PREFLIGHT_INTERVAL must be longer than AI_PREFLIGHT_TIMEOUT (%s): %s",
+			c.AIPreflightTimeout, c.AIPreflightInterval,
+		)
 	}
 	if c.NegotiationTimeout < 0 {
 		return errors.New("SESSION_NEGOTIATION_TIMEOUT must not be negative")

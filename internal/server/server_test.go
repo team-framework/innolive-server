@@ -722,3 +722,64 @@ func TestCORSRejectionLogsOrigin(t *testing.T) {
 		t.Fatalf("oversized origin was not truncated: %d bytes logged", len(got))
 	}
 }
+
+// CORS 거절 응답에 request_id가 없으면 사용자가 보여준 에러와 서버 로그를
+// 묶을 방법이 없다. 미들웨어 순서가 뒤집히면 조용히 사라지는 성질이라 고정한다.
+func TestCORSRejectionCarriesRequestIDInResponseAndLog(t *testing.T) {
+	origins, err := origin.NewConfig(false, []string{"https://client.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	handler := requestIDMiddleware(corsMiddleware(logger, origins, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	request := httptest.NewRequest(http.MethodPost, "/sessions", nil)
+	request.Header.Set("Origin", "https://evil.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	headerID := response.Header().Get("X-Request-ID")
+	if headerID == "" {
+		t.Fatal("X-Request-ID header is missing from the rejection response")
+	}
+	var payload struct {
+		RequestID string `json:"request_id"`
+	}
+	mustDecode(t, response.Body, &payload)
+	if payload.RequestID != headerID {
+		t.Fatalf("body request_id = %q, header = %q", payload.RequestID, headerID)
+	}
+	if got := logs.String(); !strings.Contains(got, headerID) {
+		t.Fatalf("log does not carry request_id %q: %q", headerID, got)
+	}
+}
+
+// New()가 조립한 실제 핸들러에서도 순서가 유지되는지 확인한다.
+func TestApplicationCORSRejectionCarriesRequestID(t *testing.T) {
+	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	response := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, http.Header{"Origin": []string{"https://evil.example"}})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+	if response.Header.Get("X-Request-ID") == "" {
+		t.Fatal("X-Request-ID header is missing from the rejection response")
+	}
+	var payload struct {
+		RequestID string `json:"request_id"`
+	}
+	mustDecode(t, response.Body, &payload)
+	if payload.RequestID != response.Header.Get("X-Request-ID") {
+		t.Fatalf("body request_id = %q, header = %q", payload.RequestID, response.Header.Get("X-Request-ID"))
+	}
+}

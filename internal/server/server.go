@@ -115,7 +115,9 @@ func New(
 	if sessions != nil {
 		sessions.SetBroadcastCleanup(s.discardBroadcast)
 	}
-	s.handler = recoverMiddleware(logger, corsMiddleware(logger, origins, requestIDMiddleware(mux)))
+	// requestIDMiddleware가 corsMiddleware보다 바깥이어야 CORS 거절 응답에도
+	// request_id가 실린다 — 그래야 사용자가 보여준 에러와 로그를 묶을 수 있다.
+	s.handler = recoverMiddleware(logger, requestIDMiddleware(corsMiddleware(logger, origins, mux)))
 	return s
 }
 
@@ -811,7 +813,7 @@ func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handle
 			if !ok {
 				// 거절된 Origin을 남기지 않으면 CORS 실패를 서버 쪽에서
 				// 진단할 방법이 없다 — 브라우저는 요청 헤더를 숨긴다.
-				logger.Warn("origin rejected", "origin", truncateOrigin(requestOrigin), "method", r.Method, "path", r.URL.Path)
+				logger.Warn("origin rejected", "origin", truncateOrigin(requestOrigin), "method", r.Method, "path", r.URL.Path, "request_id", w.Header().Get("X-Request-ID"))
 				writeError(w, apiError{Status: http.StatusForbidden, Code: "origin_not_allowed", Message: "Origin is not allowed."})
 				return
 			}

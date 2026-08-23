@@ -144,13 +144,16 @@ type Session struct {
 	ignoredTracks       int
 	offerReceivedAt     time.Time
 	answerCreatedAt     time.Time
-	pendingICE          []webrtc.ICECandidateInit
-	negotiationMu       sync.Mutex
-	cancel              context.CancelFunc
-	trackCancel         context.CancelFunc
-	disconnectTimer     *time.Timer
-	wasConnected        bool
-	closed              bool
+	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
+	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
+	lastActivityAt  time.Time
+	pendingICE      []webrtc.ICECandidateInit
+	negotiationMu   sync.Mutex
+	cancel          context.CancelFunc
+	trackCancel     context.CancelFunc
+	disconnectTimer *time.Timer
+	wasConnected    bool
+	closed          bool
 }
 
 type Manager struct {
@@ -315,6 +318,7 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		AIClientID:           AIClientIDForUser(userID),
 		CreatedAt:            now,
 		UpdatedAt:            now,
+		lastActivityAt:       now,
 		Metadata:             copyMetadata(metadata),
 		Status:               "active",
 		PC:                   pc,
@@ -366,8 +370,16 @@ func (m *Manager) reapUnnegotiated(id string) {
 	}
 	s.mu.RLock()
 	bare := s.offerReceivedAt.IsZero() && !s.wasConnected && !s.closed
+	idleFor := time.Since(s.lastActivityAt)
 	s.mu.RUnlock()
 	if !bare {
+		return
+	}
+	// 방송 설정을 저장하는 소유자는 세션을 방치한 것이 아니다(#147). 마지막 활동
+	// 이후로 타임아웃을 다시 재, 폼을 채우는 동안 회수되지 않게 한다. 활동이 없는
+	// 세션은 원래대로 timeout 뒤에 슬롯을 돌려준다.
+	if remaining := m.cfg.NegotiationTimeout - idleFor; remaining > 0 {
+		time.AfterFunc(remaining, func() { m.reapUnnegotiated(id) })
 		return
 	}
 	m.logger.Info("reaping unnegotiated session", "session_id", id, "timeout", m.cfg.NegotiationTimeout)

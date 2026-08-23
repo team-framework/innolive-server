@@ -218,3 +218,31 @@ func TestTruncateTokenMetadataPreservesUTF8(t *testing.T) {
 		t.Fatalf("truncated metadata is invalid UTF-8: %q", truncated)
 	}
 }
+
+// 거절된 Origin이 로그에 남지 않으면 프로덕션에서 CORS 실패 원인을 좁힐 수
+// 없다 — 브라우저는 요청 헤더를 개발자에게만 보여주고 서버에는 흔적이 없다.
+func TestTokenHTTPCORSRejectionLogsOrigin(t *testing.T) {
+	config, err := NewTokenHTTPConfig(false, []string{"http://localhost:5173"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	service := testTokenService(newMemoryRefreshStore())
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	handler := MountTokenHTTP(next, service, logger, config)
+
+	request := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	request.Header.Set("Origin", "https://evil.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	if got := logs.String(); !strings.Contains(got, "origin rejected") || !strings.Contains(got, "https://evil.example") {
+		t.Fatalf("rejected origin was not logged: %q", got)
+	}
+}

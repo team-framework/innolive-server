@@ -175,12 +175,17 @@ type Session struct {
 	answerCreatedAt     time.Time
 	pendingICE          []webrtc.ICECandidateInit
 	activeNegotiationID string
-	negotiationMu       sync.Mutex
-	cancel              context.CancelFunc
-	trackCancel         context.CancelFunc
-	recovery            peerRecovery
-	wasConnected        bool
-	closed              bool
+	// localCandidateHandler는 서버가 수집한 ICE 후보를 signaling 계층으로
+	// 전달하는 현재 협상 세대의 sink다. WebSocket을 세션 계층이 직접 알지 않게
+	// 함수 계약으로만 보관하며, 새 offer가 오면 새 세대로 교체한다.
+	localCandidateHandler    LocalCandidateHandler
+	localCandidateGeneration string
+	negotiationMu            sync.Mutex
+	cancel                   context.CancelFunc
+	trackCancel              context.CancelFunc
+	recovery                 peerRecovery
+	wasConnected             bool
+	closed                   bool
 	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
 	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
 	lastActivityAt time.Time
@@ -862,6 +867,10 @@ func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrt
 }
 
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
+	s.PC.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		s.dispatchLocalICECandidate(candidate)
+	})
+
 	s.PC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		// RTPReceiver.ReadRTCP는 Pion의 receiver-report interceptor를 실행한다.
 		// interceptor는 들어온 Sender Report를 소비하고 LastSenderReport 값이 든
@@ -1136,6 +1145,10 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 	s.closed = true
 	s.Status = "closing"
 	s.cancelRecoveryLocked()
+	// 닫힌 WebSocket의 signaling callback을 세션과 함께 놓아, 후보 수집
+	// goroutine이 종료된 연결을 계속 참조하지 않게 한다.
+	s.localCandidateHandler = nil
+	s.localCandidateGeneration = ""
 	// 세션 ctx 취소로도 전파되지만, egress 종료가 세션 teardown의 일부임을
 	// 명시하기 위해 상태를 먼저 stopped로 전이하고 전용 cancel을 직접 호출한다.
 	// 이 순서로 WebRTC 종료·세션 삭제·로그아웃 모두 재구성 완료를 기다리지

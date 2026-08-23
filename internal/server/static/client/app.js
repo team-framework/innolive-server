@@ -11,6 +11,11 @@ const DEFAULT_RECOVERY_POLICY = {
   max_attempts: 6,
 };
 const RECOVERY_RETRY_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 16000];
+// 현재 서버는 ICE 후보 수집을 마친 SDP answer를 한 번에 보낸다. STUN/TURN
+// 응답이 늦을 수 있으므로 ICE restart의 answer 대기 시간은 일반 협상보다 길게
+// 잡되, 연결 자체가 성립할 시간을 남기기 위해 복구 창 전체를 쓰지는 않는다.
+const RECOVERY_ANSWER_TIMEOUT_MS = 35000;
+const RECOVERY_CONNECTION_RESERVE_MS = 5000;
 
 const els = {};
 const state = {
@@ -1535,41 +1540,88 @@ async function negotiatePeer(pc, sessionId, { iceRestart }) {
   state.activeNegotiationId = negotiationId;
 
   await ensureSignalingSocket();
-  const answerPromise = waitForAnswer(sessionId, negotiationId, iceRestart ? 8000 : 15000);
 
-  if (iceRestart) {
-    pc.restartIce();
+  try {
+    if (iceRestart) {
+      pc.restartIce();
+    }
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    updatePeerUi();
+
+    sendSignaling({
+      type: "offer",
+      session_id: sessionId,
+      owner_token: state.ownerToken,
+      access_token: state.accessToken,
+      sdp: pc.localDescription.sdp,
+      negotiation_id: negotiationId,
+      ice_restart: iceRestart,
+    });
+    state.offerSent = true;
+    flushCandidateQueue();
+
+    // WebSocket message는 현재 JavaScript 작업이 끝난 뒤에 처리되므로 offer를
+    // 보낸 직후 여기서 waiter를 등록해도 answer를 놓치지 않는다. 반대로 offer
+    // 생성·전송 실패 전에 waiter를 만들면 timeout rejection이 고아가 된다.
+    const answer = await waitForAnswer(
+      sessionId,
+      negotiationId,
+      negotiationTimeoutMs(iceRestart),
+    );
+    await pc.setRemoteDescription({
+      type: "answer",
+      sdp: answer.sdp,
+    });
+    await flushRemoteCandidateQueue();
+    updatePeerUi();
+    logEvent("ok", "Remote answer applied", {
+      session_id: answer.session_id,
+      negotiation_id: negotiationId,
+      ice_restart: iceRestart,
+      sdp_lines: answer.sdp.split(/\r?\n/).length,
+    });
+  } catch (error) {
+    // answer를 적용하지 못한 local offer는 PeerConnection을 have-local-offer에
+    // 남긴다. 이를 rollback하지 않으면 이후 복구 시도가 stable 상태를 기다리다
+    // 복구 창을 모두 소진하게 된다.
+    if (iceRestart) {
+      await rollbackRecoveryOffer(pc, sessionId, negotiationId);
+    }
+    throw error;
   }
+}
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  updatePeerUi();
+function negotiationTimeoutMs(iceRestart) {
+  if (!iceRestart || !state.recovery.active) {
+    return 15000;
+  }
+  const remainingMs = state.recovery.deadlineAt - Date.now() - RECOVERY_CONNECTION_RESERVE_MS;
+  return Math.max(1000, Math.min(RECOVERY_ANSWER_TIMEOUT_MS, remainingMs));
+}
 
-  sendSignaling({
-    type: "offer",
-    session_id: sessionId,
-    owner_token: state.ownerToken,
-    access_token: state.accessToken,
-    sdp: pc.localDescription.sdp,
-    negotiation_id: negotiationId,
-    ice_restart: iceRestart,
-  });
-  state.offerSent = true;
-  flushCandidateQueue();
-
-  const answer = await answerPromise;
-  await pc.setRemoteDescription({
-    type: "answer",
-    sdp: answer.sdp,
-  });
-  await flushRemoteCandidateQueue();
-  updatePeerUi();
-  logEvent("ok", "Remote answer applied", {
-    session_id: answer.session_id,
-    negotiation_id: negotiationId,
-    ice_restart: iceRestart,
-    sdp_lines: answer.sdp.split(/\r?\n/).length,
-  });
+async function rollbackRecoveryOffer(pc, sessionId, negotiationId) {
+  if (
+    state.pc !== pc ||
+    state.activeNegotiationId !== negotiationId ||
+    pc.signalingState !== "have-local-offer"
+  ) {
+    return;
+  }
+  try {
+    await pc.setLocalDescription({ type: "rollback" });
+    state.offerSent = false;
+    state.candidateQueue = [];
+    state.remoteCandidateQueue = [];
+    updatePeerUi();
+    logEvent("warn", "Rolled back incomplete ICE restart offer", {
+      session_id: sessionId,
+      negotiation_id: negotiationId,
+    });
+  } catch (error) {
+    logError("Failed to roll back incomplete ICE restart offer", error);
+  }
 }
 
 function createNegotiationId() {
@@ -1946,7 +1998,9 @@ function waitForAnswer(sessionId, negotiationId, timeoutMs) {
 
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
-      rejectWaitingAnswer(new Error("Timed out waiting for WebRTC answer."));
+      const error = new Error("Timed out waiting for WebRTC answer.");
+      error.code = "webrtc_answer_timeout";
+      rejectWaitingAnswer(error);
     }, timeoutMs);
 
     state.answerWaiter = {
@@ -1981,13 +2035,22 @@ async function handleSignalingMessage(rawData) {
   }
 
   if (payload.type === "answer") {
-    logEvent("ok", "Received WebRTC answer", payload);
-    if (
+    const isWaitingForAnswer = Boolean(
       state.answerWaiter &&
       state.answerWaiter.sessionId === payload.session_id &&
-      state.answerWaiter.negotiationId === payload.negotiation_id
-    ) {
+      state.answerWaiter.negotiationId === payload.negotiation_id,
+    );
+    if (isWaitingForAnswer) {
+      logEvent("ok", "Received WebRTC answer", payload);
       state.answerWaiter.resolve(payload);
+    } else {
+      // timeout 뒤 도착한 answer는 rollback된 local offer의 응답일 수 있다.
+      // 이를 현재 answer처럼 적용하면 새 ICE restart 세대와 충돌하므로 버린다.
+      logEvent("warn", "Dropped late or stale WebRTC answer", {
+        session_id: payload.session_id,
+        negotiation_id: payload.negotiation_id,
+        active_negotiation_id: state.activeNegotiationId,
+      });
     }
     return;
   }

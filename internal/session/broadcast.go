@@ -145,6 +145,7 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 	settings.UpdatedAt = time.Now().UTC()
 	s.broadcast = &settings
 	s.UpdatedAt = settings.UpdatedAt
+	s.lastActivityAt = settings.UpdatedAt
 	m.logger.Info("broadcast settings updated", "session_id", s.ID,
 		"privacy", settings.Privacy, "has_thumbnail", settings.Thumbnail != nil)
 	return s, nil

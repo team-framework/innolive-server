@@ -144,16 +144,16 @@ type Session struct {
 	ignoredTracks       int
 	offerReceivedAt     time.Time
 	answerCreatedAt     time.Time
+	pendingICE          []webrtc.ICECandidateInit
+	negotiationMu       sync.Mutex
+	cancel              context.CancelFunc
+	trackCancel         context.CancelFunc
+	disconnectTimer     *time.Timer
+	wasConnected        bool
+	closed              bool
 	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
 	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
-	lastActivityAt  time.Time
-	pendingICE      []webrtc.ICECandidateInit
-	negotiationMu   sync.Mutex
-	cancel          context.CancelFunc
-	trackCancel     context.CancelFunc
-	disconnectTimer *time.Timer
-	wasConnected    bool
-	closed          bool
+	lastActivityAt time.Time
 }
 
 type Manager struct {

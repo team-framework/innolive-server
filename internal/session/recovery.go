@@ -83,7 +83,13 @@ func (m *Manager) scheduleDisconnectedRecovery(s *Session) {
 // 백그라운드 전환이나 클라이언트 오류로 세션이 무기한 남지 않게 한다.
 func (m *Manager) beginRecovery(s *Session, generation uint64, cause string) {
 	s.mu.Lock()
-	if s.closed || !s.wasConnected || (generation != 0 && generation != s.recovery.generation) {
+	// 클라이언트는 서버의 connected 콜백보다 먼저 connected를 관찰하고 ICE
+	// restart offer를 보낼 수 있다. 실제 restart offer는 이미 stable 상태에서
+	// 검증된 요청이므로, 이 경우 wasConnected 기록을 기다리지 않고 복구를
+	// 시작한다. disconnected·failed 콜백은 여전히 최초 협상 실패를 복구로
+	// 오인하지 않도록 wasConnected 뒤에만 처리한다.
+	isRestartOffer := cause == "ice_restart"
+	if s.closed || (!s.wasConnected && !isRestartOffer) || (generation != 0 && generation != s.recovery.generation) {
 		s.mu.Unlock()
 		return
 	}

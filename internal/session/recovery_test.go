@@ -48,6 +48,28 @@ func TestPeerRecoveryAcceptsOnlyConfiguredICERestartOffers(t *testing.T) {
 	}
 }
 
+func TestPeerRecoveryAcceptsRestartBeforeServerConnectedCallback(t *testing.T) {
+	manager := newTestManager(t, 0)
+	liveSession, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 실제 연결에서는 클라이언트가 connected를 먼저 보고 restart offer를 보낸
+	// 뒤 서버의 connected 콜백이 wasConnected를 기록할 수 있다. 이 기록이
+	// 늦어도 유효한 ICE restart offer를 session not found로 거부하면 안 된다.
+	if err := manager.registerRecoveryOffer(liveSession); err != nil {
+		t.Fatalf("registerRecoveryOffer() error = %v", err)
+	}
+	response := liveSession.Response()
+	if response.Peer.RecoveryStatus != PeerRecoveryStatusRecovering {
+		t.Fatalf("RecoveryStatus = %q, want %q", response.Peer.RecoveryStatus, PeerRecoveryStatusRecovering)
+	}
+	if response.Peer.ReconnectAttempts != 1 {
+		t.Fatalf("ReconnectAttempts = %d, want 1", response.Peer.ReconnectAttempts)
+	}
+}
+
 func TestPeerRecoveryDeadlineDeletesSession(t *testing.T) {
 	cfg := config.Config{
 		PrivacyMode:            config.PrivacyModeBypass,

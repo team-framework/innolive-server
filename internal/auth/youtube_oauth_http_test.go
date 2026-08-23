@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -21,6 +22,18 @@ func testYouTubeHTTPHandler(t *testing.T, service *YouTubeConnectService) (*Toke
 	}
 	tokens := testTokenService(newMemoryRefreshStore())
 	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), config, service)
+	return tokens, handler
+}
+
+// testYouTubeHTTPHandlerWithLogs는 로그를 검사해야 하는 테스트용이다.
+func testYouTubeHTTPHandlerWithLogs(t *testing.T, service *YouTubeConnectService, logs *bytes.Buffer) (*TokenService, http.Handler) {
+	t.Helper()
+	config, err := NewTokenHTTPConfig(false, []string{"http://localhost:3000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := testTokenService(newMemoryRefreshStore())
+	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, nil, nil, slog.New(slog.NewTextHandler(logs, nil)), config, service)
 	return tokens, handler
 }
 
@@ -262,5 +275,82 @@ func TestYouTubeRoutesAbsentWhenServiceNil(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 when service is absent", response.Code)
+	}
+}
+
+// 연동 실패가 로그에 남지 않으면 원인을 서버에서 특정할 수 없다. 클라이언트는
+// `연결 실패`라는 뭉뚱그린 문구만 보여준다.
+func TestYouTubeConnectHTTPLogsFailures(t *testing.T) {
+	const authCode = "4/0AXsecret-authorization-code"
+	cases := []struct {
+		name       string
+		stub       *stubYouTubeAuthorizer
+		body       string
+		wantReason string
+		wantLevel  string
+	}{
+		{
+			name:       "rejected code",
+			stub:       &stubYouTubeAuthorizer{exchangeErr: ErrYouTubeAuthCodeRejected},
+			body:       `{"server_auth_code":"` + authCode + `"}`,
+			wantReason: "auth_code_rejected",
+			wantLevel:  "WARN",
+		},
+		{
+			name:       "channel missing",
+			stub:       &stubYouTubeAuthorizer{token: YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt"}, channelErr: ErrYouTubeChannelMissing},
+			body:       `{"server_auth_code":"` + authCode + `"}`,
+			wantReason: "channel_missing",
+			wantLevel:  "WARN",
+		},
+		{
+			name:      "token exchange failed",
+			stub:      &stubYouTubeAuthorizer{exchangeErr: ErrYouTubeTokenExchange},
+			body:      `{"server_auth_code":"` + authCode + `"}`,
+			wantLevel: "ERROR",
+		},
+		{
+			name:       "malformed request",
+			stub:       &stubYouTubeAuthorizer{},
+			body:       `{"server_auth_code":""}`,
+			wantReason: "invalid_request",
+			wantLevel:  "WARN",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			service := testYouTubeConnectService(t, tc.stub, newMemoryStreamingAccountStore(), UserStatusActive)
+			tokens, handler := testYouTubeHTTPHandlerWithLogs(t, service, &logs)
+			pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler.ServeHTTP(httptest.NewRecorder(), youtubeConnectRequest(t, pair.AccessToken, tc.body))
+
+			got := logs.String()
+			if !strings.Contains(got, tc.wantLevel) {
+				t.Fatalf("level %s missing: %q", tc.wantLevel, got)
+			}
+			if tc.wantReason != "" && !strings.Contains(got, tc.wantReason) {
+				t.Fatalf("reason %s missing: %q", tc.wantReason, got)
+			}
+			// 인가 코드는 자격증명이라 어떤 분기에서도 로그에 남으면 안 된다.
+			if strings.Contains(got, authCode) {
+				t.Fatalf("authorization code leaked into logs: %q", got)
+			}
+		})
+	}
+}
+
+// 인증 실패도 남아야 한다 — 토큰 만료와 헤더 누락은 클라이언트 버그 추적의 출발점이다.
+func TestYouTubeConnectHTTPLogsMissingBearer(t *testing.T) {
+	var logs bytes.Buffer
+	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusActive)
+	_, handler := testYouTubeHTTPHandlerWithLogs(t, service, &logs)
+
+	handler.ServeHTTP(httptest.NewRecorder(), youtubeConnectRequest(t, "", `{"server_auth_code":"code"}`))
+	if got := logs.String(); !strings.Contains(got, "missing_bearer_token") {
+		t.Fatalf("missing bearer was not logged: %q", got)
 	}
 }

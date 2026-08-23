@@ -23,21 +23,25 @@ func (h *tokenHTTPHandler) handleYouTubeConnect(w http.ResponseWriter, r *http.R
 	}
 	raw, ok := accessBearerToken(r)
 	if !ok {
+		h.logYouTubeConnectFailure(r, "missing_bearer_token", nil)
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
 	claims, err := h.service.ValidateAccessToken(raw)
 	if err != nil {
+		h.logYouTubeConnectFailure(r, "invalid_access_token", err)
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
+		h.logYouTubeConnectFailure(r, "invalid_subject", err)
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
 	code, source, err := decodeYouTubeConnectRequest(w, r)
 	if err != nil {
+		h.logYouTubeConnectFailure(r, "invalid_request", err)
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid YouTube connect request.")
 		return
 	}
@@ -45,15 +49,21 @@ func (h *tokenHTTPHandler) handleYouTubeConnect(w http.ResponseWriter, r *http.R
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUserInactive):
+			h.logYouTubeConnectFailure(r, "user_inactive", err, "code_source", source)
 			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		case errors.Is(err, ErrYouTubeAuthCodeRejected):
+			h.logYouTubeConnectFailure(r, "auth_code_rejected", err, "code_source", source)
 			h.writeError(w, r, http.StatusBadRequest, "invalid_auth_code", "The authorization code was rejected. Sign in with Google again.")
 		case errors.Is(err, ErrYouTubeChannelMissing):
+			h.logYouTubeConnectFailure(r, "channel_missing", err, "code_source", source)
 			h.writeError(w, r, http.StatusUnprocessableEntity, "youtube_channel_missing", "The Google account has no YouTube channel.")
 		case errors.Is(err, ErrYouTubeTokenExchange):
+			// 서버↔Google 통신 실패다. 클라이언트에는 뭉뚱그린 문구만 가므로
+			// 원인은 이 로그에만 남는다.
+			h.logger.Error("YouTube token exchange failed", "request_id", tokenRequestID(r), "code_source", source, "error", err)
 			h.writeError(w, r, http.StatusBadGateway, "youtube_token_exchange_failed", "YouTube authorization could not be completed.")
 		default:
-			h.logger.Error("YouTube connect failed", "request_id", tokenRequestID(r), "error", err)
+			h.logger.Error("YouTube connect failed", "request_id", tokenRequestID(r), "code_source", source, "error", err)
 			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
 		}
 		return
@@ -63,6 +73,18 @@ func (h *tokenHTTPHandler) handleYouTubeConnect(w http.ResponseWriter, r *http.R
 		"provider":  StreamingProviderYouTube,
 		"channel":   channel,
 	})
+}
+
+// logYouTubeConnectFailure는 연동 실패를 한 형식으로 남긴다. 실패 대부분은
+// 사용자 입력·인증 문제라 WARN이다. server_auth_code는 자격증명이므로
+// 어떤 경우에도 인자로 넘기지 않는다.
+func (h *tokenHTTPHandler) logYouTubeConnectFailure(r *http.Request, reason string, err error, attrs ...any) {
+	args := []any{"request_id", tokenRequestID(r), "reason", reason}
+	args = append(args, attrs...)
+	if err != nil {
+		args = append(args, "error", err)
+	}
+	h.logger.Warn("YouTube connect rejected", args...)
 }
 
 func decodeYouTubeConnectRequest(w http.ResponseWriter, r *http.Request) (string, CodeSource, error) {

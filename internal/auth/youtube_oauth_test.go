@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -615,5 +616,56 @@ func TestYouTubeAccessTokenProviderPersistsRotatedToken(t *testing.T) {
 	plaintext, err := cipher.Decrypt(account.RefreshTokenCiphertext, account.TokenKeyVersion)
 	if err != nil || plaintext != "rt-new" {
 		t.Fatalf("stored refresh token = (%q, %v), want rt-new", plaintext, err)
+	}
+}
+
+// 토큰 엔드포인트의 error/error_description을 버리면 502의 실제 원인을
+// 서버에서도 알 수 없다. 코드 만료와 client_secret 불일치가 같은 메시지가 된다.
+func TestYouTubeExchangeErrorCarriesGoogleErrorDetail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_client","error_description":"Unauthorized"}`))
+	}))
+	defer upstream.Close()
+
+	client, err := NewYouTubeOAuthClient(YouTubeOAuthConfig{ClientID: "id", ClientSecret: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.tokenURL = upstream.URL
+
+	_, err = client.Exchange(context.Background(), "some-code", "")
+	if !errors.Is(err, ErrYouTubeAuthCodeRejected) {
+		t.Fatalf("error = %v, want ErrYouTubeAuthCodeRejected", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "invalid_client") || !strings.Contains(got, "Unauthorized") {
+		t.Fatalf("error detail was dropped: %q", got)
+	}
+	// 인가 코드는 자격증명이므로 에러 문자열에 실려서는 안 된다.
+	if strings.Contains(err.Error(), "some-code") {
+		t.Fatalf("authorization code leaked into error: %q", err.Error())
+	}
+}
+
+// 본문이 JSON이 아니거나 필드가 없어도 기존 형식을 유지해야 한다.
+func TestYouTubeExchangeErrorWithoutDetailStaysStable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html>gateway error</html>"))
+	}))
+	defer upstream.Close()
+
+	client, err := NewYouTubeOAuthClient(YouTubeOAuthConfig{ClientID: "id", ClientSecret: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.tokenURL = upstream.URL
+
+	_, err = client.Exchange(context.Background(), "code", "")
+	if !errors.Is(err, ErrYouTubeTokenExchange) {
+		t.Fatalf("error = %v, want ErrYouTubeTokenExchange", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "HTTP 502") {
+		t.Fatalf("status was dropped: %q", got)
 	}
 }

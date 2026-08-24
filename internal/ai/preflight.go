@@ -45,36 +45,18 @@ func probeDimension(pinLongEdge int) int {
 // 있도록 정상 상태의 AI_GRPC_TIMEOUT과 의도적으로 분리했다.
 func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Duration, pinLongEdge int) error {
 	var errs []error
-	for _, result := range p.PreflightTargets(ctx, wireFormat, timeout, pinLongEdge) {
-		if result.Err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", result.Target, result.Err))
+	for _, client := range p.clients {
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := client.Preflight(callCtx, wireFormat, pinLongEdge)
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", client.Address(), err))
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("AI preflight failed on %d/%d target(s): %w", len(errs), len(p.clients), errors.Join(errs...))
 	}
 	return nil
-}
-
-// TargetResult는 한 worker의 preflight 결과다. Err가 nil이면 그 worker는 실제로
-// 추론을 돌려주고 있다.
-type TargetResult struct {
-	Target string
-	Err    error
-}
-
-// PreflightTargets는 모든 worker에 preflight를 돌리고 target별 결과를 pool 순서대로
-// 돌려준다. 실패를 하나로 합치는 Preflight와 달리 어느 worker가 죽었는지 남기므로,
-// 상시 감시가 target별 게이지를 채우는 데 쓴다.
-func (p *Pool) PreflightTargets(ctx context.Context, wireFormat string, timeout time.Duration, pinLongEdge int) []TargetResult {
-	results := make([]TargetResult, 0, len(p.clients))
-	for _, client := range p.clients {
-		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		err := client.Preflight(callCtx, wireFormat, pinLongEdge)
-		cancel()
-		results = append(results, TargetResult{Target: client.Address(), Err: err})
-	}
-	return results
 }
 
 // Preflight는 이 worker를 상대로 합성 ProcessVideo 왕복을 한 번 수행한다.

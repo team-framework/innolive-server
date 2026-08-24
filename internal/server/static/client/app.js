@@ -6,14 +6,17 @@ const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const VIDEO_TRACK_WAIT_ATTEMPTS = 15;
 const VIDEO_TRACK_WAIT_INTERVAL_MS = 1000;
 const DEFAULT_RECOVERY_POLICY = {
-  window_ms: 45000,
+  window_ms: 50000,
   debounce_ms: 2000,
-  max_attempts: 6,
+  max_attempts: 10,
 };
-const RECOVERY_RETRY_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 16000];
-// 현재 서버는 ICE 후보 수집을 마친 SDP answer를 한 번에 보낸다. STUN/TURN
-// 응답이 늦을 수 있으므로 ICE restart의 answer 대기 시간은 일반 협상보다 길게
-// 잡되, 연결 자체가 성립할 시간을 남기기 위해 복구 창 전체를 쓰지는 않는다.
+// 복구 창 안에서 ICE restart offer는 한 번만 보낸다. 이후에는 브라우저가 이미
+// 시작한 STUN/TURN 후보 수집·연결 검사를 유지하고, 이 간격으로 로컬 상태만
+// 관찰한다. 이 타이머는 HTTP·WebSocket 요청을 보내지 않는다.
+const RECOVERY_STATUS_CHECK_INTERVAL_MS = 5000;
+// trickle ICE answer는 후보 수집 완료를 기다리지 않고 도착한다. 다만 느린
+// 네트워크에서 signaling 응답 자체가 늦을 수 있으므로, 일반 협상보다 긴 시간을
+// 허용하되 연결 검사를 위한 여유를 복구 창에 남긴다.
 const RECOVERY_ANSWER_TIMEOUT_MS = 35000;
 const RECOVERY_CONNECTION_RESERVE_MS = 5000;
 
@@ -52,7 +55,7 @@ const state = {
     deadlineAt: 0,
     generation: 0,
     debounceTimer: null,
-    retryTimer: null,
+    statusTimer: null,
   },
   lastSelectedCandidatePairId: null,
   lastSessionJson: null,
@@ -1700,19 +1703,26 @@ function scheduleNetworkRecovery(pc, reason, { immediate = false } = {}) {
       session_id: state.session.session_id,
       reason,
       recovery_deadline: new Date(state.recovery.deadlineAt).toISOString(),
-      max_attempts: state.webrtcConfig.recovery.max_attempts,
+      server_max_ice_restart_offers: state.webrtcConfig.recovery.max_attempts,
     });
+    startNetworkRecoveryStatusObserver(pc, state.recovery.generation, reason);
   }
 
-  if (state.recovery.debounceTimer || state.recovery.retryTimer) {
+  // recovery 창마다 ICE restart offer는 한 번만 전송한다. 이후 failed 이벤트는
+  // 브라우저가 같은 ICE 검사 실패를 다시 알린 것일 수 있으므로, 기존 검사를
+  // 취소하거나 새 offer를 만들지 않고 상태 관찰만 계속한다.
+  if (state.recovery.attempts > 0) {
+    updatePeerUi();
+    return;
+  }
+
+  if (state.recovery.debounceTimer) {
     if (!immediate) {
       updatePeerUi();
       return;
     }
     window.clearTimeout(state.recovery.debounceTimer);
-    window.clearTimeout(state.recovery.retryTimer);
     state.recovery.debounceTimer = null;
-    state.recovery.retryTimer = null;
   }
 
   const generation = state.recovery.generation;
@@ -1748,16 +1758,18 @@ async function runNetworkRecoveryAttempt(pc, generation, reason) {
     updatePeerUi();
     return;
   }
-  if (state.recovery.attempts >= state.webrtcConfig.recovery.max_attempts) {
-    logEvent("warn", "WebRTC recovery offers exhausted; waiting for server deadline", {
-      session_id: state.session?.session_id,
-      attempts: state.recovery.attempts,
-    });
-    updatePeerUi();
+  // 이 테스트 클라이언트의 정상 경로는 recovery 창당 하나의 ICE restart다.
+  // 서버의 max_attempts는 반복 offer를 보내는 클라이언트에 대한 방어 한도이며,
+  // 이 로컬 상태 확인 주기와는 관계가 없다.
+  if (state.recovery.attempts > 0) {
     return;
   }
   if (pc.signalingState !== "stable") {
-    scheduleNextRecoveryAttempt(pc, generation, reason);
+    logEvent("warn", "Waiting for signaling state before initial ICE restart", {
+      session_id: state.session?.session_id,
+      signaling_state: pc.signalingState,
+      reason,
+    });
     return;
   }
 
@@ -1786,28 +1798,59 @@ async function runNetworkRecoveryAttempt(pc, generation, reason) {
       return;
     }
   }
-
-  if (isCurrentRecovery(pc, generation) && pc.connectionState !== "connected") {
-    scheduleNextRecoveryAttempt(pc, generation, reason);
-  }
 }
 
-function scheduleNextRecoveryAttempt(pc, generation, reason) {
-  if (!isCurrentRecovery(pc, generation) || state.recovery.retryTimer) {
+function startNetworkRecoveryStatusObserver(pc, generation, reason) {
+  if (!isCurrentRecovery(pc, generation) || state.recovery.statusTimer) {
     return;
   }
-  const delayMs = RECOVERY_RETRY_DELAYS_MS[
-    Math.min(state.recovery.attempts, RECOVERY_RETRY_DELAYS_MS.length - 1)
-  ];
-  const remainingMs = state.recovery.deadlineAt - Date.now();
-  if (remainingMs <= 0) {
-    return;
-  }
-  state.recovery.retryTimer = window.setTimeout(() => {
-    state.recovery.retryTimer = null;
-    void runNetworkRecoveryAttempt(pc, generation, reason);
-  }, Math.min(delayMs, remainingMs));
-  updatePeerUi();
+  const observe = () => {
+    if (!isCurrentRecovery(pc, generation)) {
+      return;
+    }
+    if (pc.connectionState === "connected") {
+      completeNetworkRecovery(pc, generation);
+      return;
+    }
+
+    const remainingMs = state.recovery.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      state.recovery.statusTimer = null;
+      logEvent("error", "WebRTC recovery deadline reached; server will close the session", {
+        session_id: state.session?.session_id,
+        attempts: state.recovery.attempts,
+        reason,
+      });
+      updatePeerUi();
+      return;
+    }
+
+    logEvent("warn", "WebRTC recovery status observed", {
+      session_id: state.session?.session_id,
+      connection_state: pc.connectionState,
+      ice_connection_state: pc.iceConnectionState,
+      ice_gathering_state: pc.iceGatheringState,
+      signaling_state: pc.signalingState,
+      ice_restart_offers: state.recovery.attempts,
+      remaining_ms: remainingMs,
+    });
+
+    // debounce 시점에 signaling이 stable이 아니었던 경우에만, 아직 보내지 않은
+    // 최초 restart offer를 여기서 시작한다. 이미 offer를 보냈다면 절대 재시도하지
+    // 않고 브라우저의 ICE 검사 결과를 기다린다.
+    if (state.recovery.attempts === 0 && pc.signalingState === "stable") {
+      void runNetworkRecoveryAttempt(pc, generation, reason);
+    }
+    state.recovery.statusTimer = window.setTimeout(
+      observe,
+      Math.min(RECOVERY_STATUS_CHECK_INTERVAL_MS, remainingMs),
+    );
+    updatePeerUi();
+  };
+  state.recovery.statusTimer = window.setTimeout(
+    observe,
+    RECOVERY_STATUS_CHECK_INTERVAL_MS,
+  );
 }
 
 function isCurrentRecovery(pc, generation) {
@@ -1834,12 +1877,12 @@ function completeNetworkRecovery(pc, generation) {
 
 function clearNetworkRecovery() {
   window.clearTimeout(state.recovery.debounceTimer);
-  window.clearTimeout(state.recovery.retryTimer);
+  window.clearTimeout(state.recovery.statusTimer);
   state.recovery.active = false;
   state.recovery.attempts = 0;
   state.recovery.deadlineAt = 0;
   state.recovery.debounceTimer = null;
-  state.recovery.retryTimer = null;
+  state.recovery.statusTimer = null;
 }
 
 function wirePeerConnection(pc) {
@@ -2401,9 +2444,12 @@ function updatePeerUi() {
       0,
       Math.ceil((state.recovery.deadlineAt - Date.now()) / 1000),
     );
+    const restartDetail = state.recovery.attempts > 0
+      ? `ICE restart ${state.recovery.attempts}회`
+      : "ICE restart 대기";
     setPill(
       els.peerState,
-      `Peer recovering ${state.recovery.attempts}/${state.webrtcConfig.recovery.max_attempts} · ${remainingSeconds}s`,
+      `Peer recovering · ${restartDetail} · ${remainingSeconds}s`,
       "warn",
     );
     updateButtons();

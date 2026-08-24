@@ -175,12 +175,17 @@ type Session struct {
 	answerCreatedAt     time.Time
 	pendingICE          []webrtc.ICECandidateInit
 	activeNegotiationID string
-	negotiationMu       sync.Mutex
-	cancel              context.CancelFunc
-	trackCancel         context.CancelFunc
-	recovery            peerRecovery
-	wasConnected        bool
-	closed              bool
+	// localCandidateRoutes는 Pion이 만든 candidate의 ufrag를 해당 candidate를
+	// 수집한 signaling generation에 연결한다. Pion의 내부 queue는 callback을
+	// 늦게 실행할 수 있으므로, 가변 "현재 generation"으로 후보를 표기하면 안 된다.
+	localCandidateRoutes     map[string]localCandidateRoute
+	localCandidateRouteOrder []string
+	negotiationMu            sync.Mutex
+	cancel                   context.CancelFunc
+	trackCancel              context.CancelFunc
+	recovery                 peerRecovery
+	wasConnected             bool
+	closed                   bool
 	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
 	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
 	lastActivityAt time.Time
@@ -862,6 +867,10 @@ func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrt
 }
 
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
+	s.PC.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		s.dispatchLocalICECandidate(candidate)
+	})
+
 	s.PC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		// RTPReceiver.ReadRTCP는 Pion의 receiver-report interceptor를 실행한다.
 		// interceptor는 들어온 Sender Report를 소비하고 LastSenderReport 값이 든

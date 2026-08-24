@@ -1,44 +1,112 @@
 package session
 
-import "testing"
+import (
+	"testing"
+	"time"
 
-// TestDeferredServerTrickleCompletionKeepsOriginalNegotiationID는 initial
-// gathering의 completion callback이 ICE restart offer 뒤에 실행되는 순서를
-// 재현한다. callback이 Session의 현재 generation을 읽으면 restart ID로 잘못
-// 표시되므로, callback 생성 시점의 initial ID가 유지돼야 한다.
-func TestDeferredServerTrickleCompletionKeepsOriginalNegotiationID(t *testing.T) {
+	"github.com/pion/webrtc/v4"
+)
+
+// TestQueuedPionCandidateKeepsOriginalNegotiationID는 Pion이 initial candidate를
+// 내부 queue에 두었다가 ICE restart offer 뒤에 callback으로 넘기는 경로를 재현한다.
+// callback을 generation별로 교체하면 Pion은 새 handler를 읽어 old candidate를 restart
+// generation으로 잘못 표기한다. 실제 Pion candidate의 ufrag로 route를 찾으면 initial
+// generation으로 전달된다.
+func TestQueuedPionCandidateKeepsOriginalNegotiationID(t *testing.T) {
+	queuedCandidate := gatherPionLocalCandidate(t)
+	initialUfrag := localCandidateUsernameFragment(queuedCandidate.ToJSON().Candidate)
+	if initialUfrag == "" {
+		t.Fatalf("Pion candidate has no ufrag: %q", queuedCandidate.ToJSON().Candidate)
+	}
+
 	liveSession := &Session{ID: "session-1"}
 	initialID := "11111111-1111-4111-8111-111111111111"
 	restartID := "22222222-2222-4222-8222-222222222222"
 	initialMessages := make(chan LocalICECandidate, 1)
 	restartMessages := make(chan LocalICECandidate, 1)
 
-	// Pion이 initial gathering 중 callback을 이미 읽어 둔 뒤, restart offer가
-	// 새 callback을 설치하는 상황이다. activeNegotiationID는 이미 restart ID로
-	// 바뀌었어도, 서버가 클라이언트로 보내는 initial completion은 initial ID여야 한다.
-	initialCallback := liveSession.localICECandidateDispatcher(initialID, func(candidate LocalICECandidate) {
+	if err := liveSession.registerLocalCandidateRoute("a=ice-ufrag:"+initialUfrag+"\r\n", initialID, func(candidate LocalICECandidate) {
 		initialMessages <- candidate
-	})
-	liveSession.mu.Lock()
-	liveSession.activeNegotiationID = restartID
-	liveSession.mu.Unlock()
-	_ = liveSession.localICECandidateDispatcher(restartID, func(candidate LocalICECandidate) {
+	}); err != nil {
+		t.Fatalf("register initial route: %v", err)
+	}
+	if err := liveSession.registerLocalCandidateRoute("a=ice-ufrag:restart-ufrag\r\n", restartID, func(candidate LocalICECandidate) {
 		restartMessages <- candidate
-	})
+	}); err != nil {
+		t.Fatalf("register restart route: %v", err)
+	}
 
-	initialCallback(nil)
+	// Pion queue에서 꺼낸 initial candidate가 restart route 등록 뒤에 도착한다.
+	liveSession.dispatchLocalICECandidate(queuedCandidate)
 
 	select {
 	case message := <-initialMessages:
 		if message.NegotiationID != initialID {
-			t.Fatalf("deferred initial completion negotiation_id = %q, want %q", message.NegotiationID, initialID)
+			t.Fatalf("queued initial candidate negotiation_id = %q, want %q", message.NegotiationID, initialID)
 		}
-		if message.Candidate != nil {
-			t.Fatalf("deferred initial completion candidate = %q, want nil", *message.Candidate)
+		if message.Candidate == nil {
+			t.Fatal("queued initial candidate must not be serialized as end-of-candidates")
 		}
 	case <-restartMessages:
-		t.Fatal("deferred initial completion was delivered to the restart generation")
+		t.Fatal("queued initial candidate was relabeled as the restart generation")
+	case <-time.After(time.Second):
+		t.Fatal("queued initial candidate was not delivered")
+	}
+
+	// Pion의 nil 완료 신호에는 ufrag가 없으므로, 이전 gathering completion을 새
+	// generation의 완료로 잘못 보내지 않도록 서버는 원격에 전달하지 않는다.
+	liveSession.dispatchLocalICECandidate(nil)
+	select {
+	case message := <-initialMessages:
+		t.Fatalf("end-of-candidates was sent to initial generation: %+v", message)
+	case message := <-restartMessages:
+		t.Fatalf("end-of-candidates was sent to restart generation: %+v", message)
 	default:
-		t.Fatal("deferred initial completion was not delivered")
+	}
+}
+
+func TestLocalICEUsernameFragments(t *testing.T) {
+	fragments := localICEUsernameFragments("v=0\r\na=ice-ufrag:session\r\na=ice-ufrag:video\r\na=ice-ufrag:session\r\n")
+	if len(fragments) != 2 || fragments[0] != "session" || fragments[1] != "video" {
+		t.Fatalf("local ICE username fragments = %v, want [session video]", fragments)
+	}
+}
+
+func gatherPionLocalCandidate(t *testing.T) *webrtc.ICECandidate {
+	t.Helper()
+	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = peerConnection.Close()
+	})
+
+	candidates := make(chan *webrtc.ICECandidate, 1)
+	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+		select {
+		case candidates <- candidate:
+		default:
+		}
+	})
+	if _, err := peerConnection.CreateDataChannel("candidate-generation-test", nil); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := peerConnection.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peerConnection.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case candidate := <-candidates:
+		return candidate
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pion did not gather a local candidate")
+		return nil
 	}
 }

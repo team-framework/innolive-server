@@ -562,9 +562,8 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	answerDeadline := time.Now().Add(10 * time.Second)
 	answerApplied := false
 	serverCandidateCount := 0
-	serverCandidateGatheringComplete := false
 	var pendingServerCandidates []webrtc.ICECandidateInit
-	for !(answerApplied && serverCandidateGatheringComplete) {
+	for !(answerApplied && serverCandidateCount > 0) {
 		if err := connection.SetReadDeadline(answerDeadline); err != nil {
 			t.Fatal(err)
 		}
@@ -593,7 +592,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 				SDPMLineIndex: message.SDPLineIndex,
 			}
 			if message.Candidate == nil {
-				serverCandidateGatheringComplete = true
+				t.Fatal("server must not send an ambiguous end-of-candidates signal")
 			} else {
 				candidate.Candidate = *message.Candidate
 				serverCandidateCount++

@@ -141,8 +141,10 @@ ICE restart 복구 창으로 전이합니다. 각 복구 창에서는 restart of
 보냅니다. 해당 offer에는 새 UUID `negotiation_id`와 `ice_restart: true`를 넣고,
 그 offer의 SDP에 있는 ICE `usernameFragment`와 일치하는 **클라이언트 local
 candidate**만 같은 `negotiation_id`로 보냅니다. 이전 generation client candidate와
-`candidate: null` 종료 신호는 서버에 보내지 않습니다. 서버가 trickle로 보내는
-candidate는 callback을 수집한 당시의 negotiation ID에 고정됩니다.
+`candidate: null` 종료 신호는 서버에 보내지 않습니다. 서버도 `candidate: null`
+종료 신호를 보내지 않습니다. 서버가 trickle로 보내는 candidate는 candidate 안의
+ICE `ufrag`를 answer SDP의 local ufrag에 연결해 해당 generation의
+`negotiation_id`로 전달합니다.
 
 offer를 보낸 뒤에는 브라우저의 STUN/TURN 연결 검사가 계속 진행됩니다. 클라이언트는
 5초마다 로컬 `RTCPeerConnection` 상태만 관찰하며, 그 관찰 타이머에서 추가 offer를

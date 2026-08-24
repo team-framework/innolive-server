@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -24,8 +25,9 @@ type CandidateResult struct {
 	ConnectionState    string `json:"connection_state"`
 }
 
-// LocalICECandidate는 서버가 trickle ICE로 클라이언트에 전달하는 후보 하나다.
-// Candidate가 nil이면 해당 negotiation 세대의 후보 수집이 완료됐다는 뜻이다.
+// LocalICECandidate는 서버가 trickle ICE로 클라이언트에 전달하는 실제 후보 하나다.
+// Pion의 후보 수집 완료 nil 신호는 generation을 안전하게 판별할 수 없으므로 원격에
+// 전달하지 않는다.
 type LocalICECandidate struct {
 	Type          string  `json:"type"`
 	SessionID     string  `json:"session_id"`
@@ -39,6 +41,13 @@ type LocalICECandidate struct {
 // 서버 후보 전달 계약이다. callback은 Session.mu 밖에서 호출돼 WebSocket
 // backpressure가 세션 상태 변경을 막지 않는다.
 type LocalCandidateHandler func(LocalICECandidate)
+
+type localCandidateRoute struct {
+	negotiationID string
+	handler       LocalCandidateHandler
+}
+
+const maxLocalCandidateRoutes = 2
 
 // NegotiationOptions는 하나의 offer·candidate 세대를 식별한다. ICE restart는
 // 기존 PeerConnection을 유지한 채 후보를 새로 수집하므로, 이전 세대 후보가 늦게
@@ -97,13 +106,6 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 		s.activeNegotiationID = options.NegotiationID
 		s.UpdatedAt = time.Now().UTC()
 		s.mu.Unlock()
-		if trickle {
-			// Pion은 후보를 발견한 시점의 OnICECandidate callback을 호출한다.
-			// callback 안에서 Session의 가변 current generation을 다시 읽으면,
-			// 이전 gathering의 지연 callback이 새 ICE restart ID로 재표시될 수 있다.
-			// 따라서 offer마다 generation·handler를 closure로 캡처한다.
-			s.bindLocalICECandidateHandler(options.NegotiationID, options.OnLocalICECandidate)
-		}
 	}
 	if err := s.prepareOutputForOffer(offerSDP); err != nil {
 		return Answer{}, err
@@ -114,6 +116,16 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 	answer, err := s.PC.CreateAnswer(nil)
 	if err != nil {
 		return Answer{}, fmt.Errorf("create WebRTC answer: %w", err)
+	}
+	if trickle {
+		// Pion은 OnICECandidate callback을 바꾸는 시점이 아니라 내부 queue에서
+		// notification을 꺼내는 시점에 handler를 읽는다. 따라서 generation별
+		// handler 교체는 이전 candidate를 새 generation으로 재표시할 수 있다.
+		// 답변 SDP의 local ufrag와 handler를 먼저 등록하고, 고정 callback이 각
+		// candidate 안의 ufrag로 올바른 route를 찾게 한다.
+		if err := s.registerLocalCandidateRoute(answer.SDP, options.NegotiationID, options.OnLocalICECandidate); err != nil {
+			return Answer{}, err
+		}
 	}
 	var gatheringComplete <-chan struct{}
 	if !trickle {
@@ -143,46 +155,104 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 	return Answer{SessionID: sessionID, Type: "answer", SDP: local.SDP, NegotiationID: options.NegotiationID}, nil
 }
 
-// bindLocalICECandidateHandler는 Pion callback에 해당 offer의 generation을
-// closure로 고정한다. 이전 gathering에서 이미 읽힌 callback이 뒤늦게 실행돼도
-// 새 ICE restart generation으로 재표시되지 않는다.
-func (s *Session) bindLocalICECandidateHandler(negotiationID string, handler LocalCandidateHandler) {
-	s.PC.OnICECandidate(s.localICECandidateDispatcher(negotiationID, handler))
-}
-
-// localICECandidateDispatcher는 테스트 가능한 generation 고정 callback을 만든다.
-// Pion은 후보 수집 완료를 nil로 전달하며, 이 경우에도 callback을 만든 순간의
-// negotiation ID가 유지돼야 한다.
-func (s *Session) localICECandidateDispatcher(negotiationID string, handler LocalCandidateHandler) func(*webrtc.ICECandidate) {
-	return func(candidate *webrtc.ICECandidate) {
-		s.dispatchLocalICECandidate(negotiationID, handler, candidate)
+// registerLocalCandidateRoute는 answer SDP에 있는 local ICE ufrag를 해당 offer의
+// signaling route에 연결한다. 가장 최근 두 generation만 보관하고, 더 오래된
+// queue 후보는 전송하지 않아도 새 generation으로 잘못 표기하지 않는다.
+func (s *Session) registerLocalCandidateRoute(answerSDP, negotiationID string, handler LocalCandidateHandler) error {
+	ufrags := localICEUsernameFragments(answerSDP)
+	if len(ufrags) == 0 {
+		return fmt.Errorf("answer SDP is missing local ICE username fragment")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.localCandidateRoutes == nil {
+		s.localCandidateRoutes = make(map[string]localCandidateRoute)
+	}
+	for _, ufrag := range ufrags {
+		for index, existing := range s.localCandidateRouteOrder {
+			if existing == ufrag {
+				s.localCandidateRouteOrder = append(s.localCandidateRouteOrder[:index], s.localCandidateRouteOrder[index+1:]...)
+				break
+			}
+		}
+		s.localCandidateRoutes[ufrag] = localCandidateRoute{negotiationID: negotiationID, handler: handler}
+		s.localCandidateRouteOrder = append(s.localCandidateRouteOrder, ufrag)
+	}
+	for len(s.localCandidateRouteOrder) > maxLocalCandidateRoutes {
+		oldest := s.localCandidateRouteOrder[0]
+		s.localCandidateRouteOrder = s.localCandidateRouteOrder[1:]
+		delete(s.localCandidateRoutes, oldest)
+	}
+	return nil
 }
 
-// dispatchLocalICECandidate는 generation이 고정된 서버 후보를 signaling 계층으로
-// 전달한다. handler 호출은 Session.mu 밖에서 수행해 WebSocket backpressure가
-// 세션 상태 변경을 막지 않게 한다.
-func (s *Session) dispatchLocalICECandidate(negotiationID string, handler LocalCandidateHandler, candidate *webrtc.ICECandidate) {
+// dispatchLocalICECandidate는 Pion이 실제로 생성한 candidate의 ufrag로 route를
+// 찾는다. Pion queue가 이전 generation candidate를 새 offer 뒤에 callback으로
+// 넘겨도, candidate 자체의 ufrag가 이전 route를 선택한다. nil 완료 신호는 ufrag가
+// 없어서 세대를 판별할 수 없으므로 원격에 전달하지 않는다.
+func (s *Session) dispatchLocalICECandidate(candidate *webrtc.ICECandidate) {
+	if candidate == nil {
+		return
+	}
+	encoded := candidate.ToJSON()
+	ufrag := ""
+	if encoded.UsernameFragment != nil {
+		ufrag = *encoded.UsernameFragment
+	}
+	if ufrag == "" {
+		ufrag = localCandidateUsernameFragment(encoded.Candidate)
+	}
 	s.mu.RLock()
+	route, ok := s.localCandidateRoutes[ufrag]
 	closed := s.closed
 	s.mu.RUnlock()
-	if handler == nil || negotiationID == "" || closed {
+	if !ok || route.handler == nil || route.negotiationID == "" || closed {
 		return
 	}
 
 	message := LocalICECandidate{
 		Type:          "ice_candidate",
 		SessionID:     s.ID,
-		NegotiationID: negotiationID,
+		NegotiationID: route.negotiationID,
 	}
-	if candidate != nil {
-		encoded := candidate.ToJSON()
-		candidateValue := encoded.Candidate
-		message.Candidate = &candidateValue
-		message.SDPMid = encoded.SDPMid
-		message.SDPLineIndex = encoded.SDPMLineIndex
+	candidateValue := encoded.Candidate
+	message.Candidate = &candidateValue
+	message.SDPMid = encoded.SDPMid
+	message.SDPLineIndex = encoded.SDPMLineIndex
+	route.handler(message)
+}
+
+func localICEUsernameFragments(sessionDescription string) []string {
+	seen := make(map[string]struct{})
+	var fragments []string
+	for _, line := range strings.Split(sessionDescription, "\n") {
+		const prefix = "a=ice-ufrag:"
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		fragment := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		if fragment == "" {
+			continue
+		}
+		if _, exists := seen[fragment]; exists {
+			continue
+		}
+		seen[fragment] = struct{}{}
+		fragments = append(fragments, fragment)
 	}
-	handler(message)
+	return fragments
+}
+
+func localCandidateUsernameFragment(candidate string) string {
+	fields := strings.Fields(strings.TrimPrefix(candidate, "candidate:"))
+	for index := 0; index+1 < len(fields); index++ {
+		if fields[index] == "ufrag" {
+			return fields[index+1]
+		}
+	}
+	return ""
 }
 
 func (m *Manager) AddICECandidate(sessionID, ownerToken string, candidate webrtc.ICECandidateInit) (CandidateResult, error) {

@@ -91,13 +91,19 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 	if err := s.PC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
 		return Answer{}, fmt.Errorf("set remote offer: %w", err)
 	}
+	trickle := options.NegotiationID != "" && options.OnLocalICECandidate != nil
 	if options.NegotiationID != "" {
 		s.mu.Lock()
 		s.activeNegotiationID = options.NegotiationID
-		s.localCandidateHandler = options.OnLocalICECandidate
-		s.localCandidateGeneration = options.NegotiationID
 		s.UpdatedAt = time.Now().UTC()
 		s.mu.Unlock()
+		if trickle {
+			// Pion은 후보를 발견한 시점의 OnICECandidate callback을 호출한다.
+			// callback 안에서 Session의 가변 current generation을 다시 읽으면,
+			// 이전 gathering의 지연 callback이 새 ICE restart ID로 재표시될 수 있다.
+			// 따라서 offer마다 generation·handler를 closure로 캡처한다.
+			s.bindLocalICECandidateHandler(options.NegotiationID, options.OnLocalICECandidate)
+		}
 	}
 	if err := s.prepareOutputForOffer(offerSDP); err != nil {
 		return Answer{}, err
@@ -109,7 +115,6 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 	if err != nil {
 		return Answer{}, fmt.Errorf("create WebRTC answer: %w", err)
 	}
-	trickle := options.NegotiationID != "" && options.OnLocalICECandidate != nil
 	var gatheringComplete <-chan struct{}
 	if !trickle {
 		// 직접 Manager API를 쓰는 기존 호출자는 후보를 별도 전달받을 방법이
@@ -138,14 +143,27 @@ func (m *Manager) CreateAnswerWithOptions(sessionID, ownerToken, offerSDP string
 	return Answer{SessionID: sessionID, Type: "answer", SDP: local.SDP, NegotiationID: options.NegotiationID}, nil
 }
 
-// dispatchLocalICECandidate는 Pion이 발견한 서버 후보를 현재 협상 세대에만
-// 전달한다. OnICECandidate(nil)는 후보 수집 완료 신호이며 candidate:null로
-// 직렬화한다. handler 호출은 Session.mu 밖에서 수행해 WebSocket backpressure가
+// bindLocalICECandidateHandler는 Pion callback에 해당 offer의 generation을
+// closure로 고정한다. 이전 gathering에서 이미 읽힌 callback이 뒤늦게 실행돼도
+// 새 ICE restart generation으로 재표시되지 않는다.
+func (s *Session) bindLocalICECandidateHandler(negotiationID string, handler LocalCandidateHandler) {
+	s.PC.OnICECandidate(s.localICECandidateDispatcher(negotiationID, handler))
+}
+
+// localICECandidateDispatcher는 테스트 가능한 generation 고정 callback을 만든다.
+// Pion은 후보 수집 완료를 nil로 전달하며, 이 경우에도 callback을 만든 순간의
+// negotiation ID가 유지돼야 한다.
+func (s *Session) localICECandidateDispatcher(negotiationID string, handler LocalCandidateHandler) func(*webrtc.ICECandidate) {
+	return func(candidate *webrtc.ICECandidate) {
+		s.dispatchLocalICECandidate(negotiationID, handler, candidate)
+	}
+}
+
+// dispatchLocalICECandidate는 generation이 고정된 서버 후보를 signaling 계층으로
+// 전달한다. handler 호출은 Session.mu 밖에서 수행해 WebSocket backpressure가
 // 세션 상태 변경을 막지 않게 한다.
-func (s *Session) dispatchLocalICECandidate(candidate *webrtc.ICECandidate) {
+func (s *Session) dispatchLocalICECandidate(negotiationID string, handler LocalCandidateHandler, candidate *webrtc.ICECandidate) {
 	s.mu.RLock()
-	handler := s.localCandidateHandler
-	negotiationID := s.localCandidateGeneration
 	closed := s.closed
 	s.mu.RUnlock()
 	if handler == nil || negotiationID == "" || closed {

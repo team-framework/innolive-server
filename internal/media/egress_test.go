@@ -525,6 +525,61 @@ func TestInputRecoveryKeepsCancellationSlateWithoutChangingUserPauseState(t *tes
 	}
 }
 
+func TestEndInputRecoveryKeepsAudioMutedDuringUserPauseTransitions(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition func(*RTMPEgress)
+		wantPhase  EgressPhase
+	}{
+		{
+			name: "일시 중지 재연결 중",
+			transition: func(e *RTMPEgress) {
+				e.noteReconnect(io.ErrUnexpectedEOF, 1)
+			},
+			wantPhase: EgressPhasePausedReconnecting,
+		},
+		{
+			name: "일시 중지 재구성 중",
+			transition: func(e *RTMPEgress) {
+				e.beginReconfiguring()
+			},
+			wantPhase: EgressPhasePausedReconfiguring,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			audio := NewAudioPipe(testLogger(), metrics.New(), 2)
+			e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+			e.audio = audio
+			e.setStreaming(1280, 720, 30)
+			if !e.Pause() {
+				t.Fatal("Pause returned false")
+			}
+			if !audio.Muted() {
+				t.Fatal("Pause must mute audio")
+			}
+			if !e.BeginInputRecovery() {
+				t.Fatal("BeginInputRecovery returned false")
+			}
+
+			tc.transition(e)
+			if status := e.Status(); status.Phase != tc.wantPhase || !status.InputRecovering {
+				t.Fatalf("status before input recovery completion = %+v, want phase %q with InputRecovering", status, tc.wantPhase)
+			}
+			if !e.EndInputRecovery() {
+				t.Fatal("EndInputRecovery returned false")
+			}
+			if !audio.Muted() {
+				t.Fatal("input recovery completion must keep audio muted while user pause is preserved")
+			}
+			if status := e.Status(); status.Phase != tc.wantPhase || status.InputRecovering {
+				t.Fatalf("status after input recovery completion = %+v, want phase %q without InputRecovering", status, tc.wantPhase)
+			}
+		})
+	}
+}
+
 func TestInputRecoveryWritesSlateInsteadOfPendingCameraFrame(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
 	e.setStreaming(320, 180, 60)

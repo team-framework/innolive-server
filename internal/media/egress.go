@@ -462,13 +462,24 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 		return false
 	}
 	e.status.InputRecovering = false
-	phase := e.status.Phase
 	e.status.UpdatedAt = time.Now().UTC()
-	e.statusMu.Unlock()
-	if e.audio != nil && phase != EgressPhasePaused {
-		e.audio.SetMuted(false)
+	if e.audio != nil {
+		e.audio.SetMuted(userPausePhase(e.status.Phase))
 	}
+	e.statusMu.Unlock()
 	return true
+}
+
+// userPausePhase는 사용자가 명시적으로 일시 중지를 요청한 의도가 유지되는
+// 상태인지 반환한다. 재연결·재구성은 일시적인 내부 단계이므로, 이 상태에서는
+// 입력 복구가 끝나도 마이크 오디오를 다시 열면 안 된다.
+func userPausePhase(phase EgressPhase) bool {
+	switch phase {
+	case EgressPhasePaused, EgressPhasePausedReconfiguring, EgressPhasePausedReconnecting:
+		return true
+	default:
+		return false
+	}
 }
 
 // Stop은 egress를 즉시 stopped로 전이한다. 실제 FFmpeg 종료와 RTMP 연결

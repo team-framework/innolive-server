@@ -7,6 +7,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	aiv1 "inno-live-server/api/gen/aiv1"
+
+	"google.golang.org/grpc"
 )
 
 // readySpy는 감시가 기록한 target별 최신 판정을 모은다.
@@ -57,6 +61,18 @@ func (s *readySpy) waitForUpdates(t *testing.T, want int) {
 			t.Fatalf("readiness updates = %d, want at least %d", updates, want)
 		}
 	}
+}
+
+// hangingServer는 프레임을 받고 아무것도 돌려주지 않는다. 프로세스와 소켓은
+// 살아 있는데 런타임만 죽어 프로브가 타임아웃까지 매달리는 worker를 대신한다 —
+// #162에서 실제로 관측된 상태다.
+type hangingServer struct {
+	aiv1.UnimplementedAiProcessorServer
+}
+
+func (hangingServer) ProcessVideo(stream grpc.BidiStreamingServer[aiv1.VideoChunk, aiv1.ProcessedVideoChunk]) error {
+	<-stream.Context().Done()
+	return stream.Context().Err()
 }
 
 func testMonitor(pool *Pool, sink ReadinessSink, interval time.Duration) *ReadinessMonitor {
@@ -117,5 +133,46 @@ func TestReadinessMonitorRunProbesRepeatedly(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not return after the context was cancelled")
+	}
+}
+
+// TestReadinessMonitorProbesTargetsConcurrently: 매달린 worker가 섞여 있어도
+// 한 회차는 타임아웃 하나만큼만 걸려야 하고, 멀쩡한 worker의 판정은 죽은
+// worker를 기다리지 않고 먼저 기록돼야 한다. 순차로 돌리면 회차가
+// 타임아웃×타깃수로 늘어나 interval을 넘기고, 워커가 죽었을 때 관측이 가장
+// 늦어진다.
+func TestReadinessMonitorProbesTargetsConcurrently(t *testing.T) {
+	healthy := preflightClient(t, echoAIServer{})
+	healthy.address = "healthy:50051"
+	hung := preflightClient(t, hangingServer{})
+	hung.address = "hung:50052"
+	alsoHung := preflightClient(t, hangingServer{})
+	alsoHung.address = "also-hung:50053"
+
+	spy := newReadySpy()
+	monitor := testMonitor(&Pool{clients: []*Client{hung, alsoHung, healthy}}, spy, time.Hour)
+	const timeout = 300 * time.Millisecond
+	monitor.timeout = timeout
+
+	start := time.Now()
+	monitor.probe(context.Background())
+	elapsed := time.Since(start)
+
+	// 순차라면 타임아웃 2회(매달린 worker 2대)를 합쳐 최소 2×timeout이 걸린다.
+	if elapsed >= 2*timeout {
+		t.Errorf("probe round took %s, want well under %s — targets are not probed concurrently", elapsed, 2*timeout)
+	}
+
+	states, updates := spy.snapshot()
+	if updates != 3 {
+		t.Errorf("readiness updates = %d, want 3 (one per target)", updates)
+	}
+	if !states["healthy:50051"] {
+		t.Error("healthy target ready = false, want true")
+	}
+	for _, dead := range []string{"hung:50052", "also-hung:50053"} {
+		if states[dead] {
+			t.Errorf("%s ready = true, want false", dead)
+		}
 	}
 }

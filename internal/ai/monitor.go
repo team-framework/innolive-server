@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -66,15 +67,31 @@ func (m *ReadinessMonitor) Run(ctx context.Context) {
 
 // probe는 한 바퀴 돌며 결과를 기록한다. 실패는 로그와 게이지로만 남는다 —
 // 진행 중인 방송을 죽이지 않기 위해서다. 대응은 게이지를 보는 알림의 몫이다.
+//
+// 타깃을 동시에 찔러 각각 끝나는 대로 기록한다. 순차로 돌리면 한 회차가
+// timeout×타깃수까지 늘어나 interval을 넘겨버리고(그래서 주기가 설정값보다
+// 길어진다), 죽은 워커를 기다리느라 멀쩡한 워커의 시계열까지 늦게 찍힌다 —
+// 워커가 죽었을 때 관측이 가장 늦어지는 셈이라 감시의 목적과 반대다.
 func (m *ReadinessMonitor) probe(ctx context.Context) {
-	for _, result := range m.pool.PreflightTargets(ctx, m.wireFormat, m.timeout, m.pinLongEdge) {
-		m.sink.SetAITargetReady(result.Target, result.Err == nil)
-		if result.Err != nil {
-			m.logger.Warn(
-				"AI worker readiness probe failed",
-				"target", result.Target,
-				"error", result.Err,
-			)
-		}
+	var wg sync.WaitGroup
+	for _, client := range m.pool.Clients() {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+
+			callCtx, cancel := context.WithTimeout(ctx, m.timeout)
+			err := c.Preflight(callCtx, m.wireFormat, m.pinLongEdge)
+			cancel()
+
+			m.sink.SetAITargetReady(c.Address(), err == nil)
+			if err != nil {
+				m.logger.Warn(
+					"AI worker readiness probe failed",
+					"target", c.Address(),
+					"error", err,
+				)
+			}
+		}(client)
 	}
+	wg.Wait()
 }

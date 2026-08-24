@@ -71,6 +71,15 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET deleted session status = %d", response.StatusCode)
 	}
+	var missingSession struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	mustDecode(t, response.Body, &missingSession)
+	if missingSession.Error.Code != "not_found" {
+		t.Fatalf("GET deleted session error code = %q, want not_found", missingSession.Error.Code)
+	}
 }
 
 func TestCORSAndSignalingValidation(t *testing.T) {

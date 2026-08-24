@@ -44,6 +44,10 @@ const state = {
   remoteCandidateQueue: [],
   offerSent: false,
   activeNegotiationId: null,
+  // remoteDescription이 존재하더라도 현재 offer 세대의 answer가 아닐 수 있다.
+  // ICE restart 중 이전 answer에 새 세대 후보를 적용하지 않도록, answer 적용이
+  // 완료된 negotiation ID를 별도로 추적한다.
+  remoteDescriptionNegotiationId: null,
   webrtcConfig: {
     iceServers: DEFAULT_ICE_SERVERS,
     recovery: DEFAULT_RECOVERY_POLICY,
@@ -56,6 +60,8 @@ const state = {
     generation: 0,
     debounceTimer: null,
     statusTimer: null,
+    initialOfferPending: false,
+    reason: null,
   },
   lastSelectedCandidatePairId: null,
   lastSessionJson: null,
@@ -1003,12 +1009,18 @@ async function refreshSessions({ quiet = false } = {}) {
 }
 
 async function refreshCurrentSession({ quiet = true } = {}) {
-  if (!state.session?.session_id) {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
     return null;
   }
 
   try {
-    const session = await apiFetch(`/sessions/${state.session.session_id}`);
+    const session = await apiFetch(`/sessions/${sessionId}`);
+    // 요청 중 사용자가 다른 세션으로 전환했으면, 늦게 도착한 이전 세션 응답이
+    // 현재 세션 화면을 덮어쓰지 않게 버린다.
+    if (state.session?.session_id !== sessionId) {
+      return state.session;
+    }
     setCurrentSession(session);
     if (!quiet) {
       logEvent("ok", "Session refreshed", { session_id: session.session_id });
@@ -1017,10 +1029,15 @@ async function refreshCurrentSession({ quiet = true } = {}) {
   } catch (error) {
     if (error.status === 404) {
       logEvent("warn", "Current session no longer exists", {
-        session_id: state.session.session_id,
+        session_id: sessionId,
       });
-      clearCurrentSession();
-      stopPolling();
+      // recovery 만료 등으로 서버가 세션을 제거하면, polling 표시만 지우지
+      // 않고 카메라·마이크·PeerConnection·signaling WebSocket까지 정리한다.
+      // 요청 중 새 세션으로 바뀐 경우에는 그 새 연결을 정리하지 않는다.
+      await cleanupConnection({
+        keepSession: false,
+        expectedSessionId: sessionId,
+      });
       return null;
     }
     logError("Failed to refresh current session", error);
@@ -1520,6 +1537,7 @@ async function connectPeer(sessionId) {
   state.remoteCandidateQueue = [];
   state.offerSent = false;
   state.activeNegotiationId = null;
+  state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
 
   const config = await loadWebRTCConfig({ allowFallback: true });
@@ -1541,6 +1559,9 @@ async function negotiatePeer(pc, sessionId, { iceRestart }) {
   state.offerSent = false;
   const negotiationId = createNegotiationId();
   state.activeNegotiationId = negotiationId;
+  // 새 offer를 시작한 순간부터 이전 remoteDescription은 이 세대의 후보를 받을
+  // 수 없다. 새 answer의 setRemoteDescription이 끝날 때까지 후보를 queue한다.
+  state.remoteDescriptionNegotiationId = null;
 
   await ensureSignalingSocket();
 
@@ -1577,7 +1598,8 @@ async function negotiatePeer(pc, sessionId, { iceRestart }) {
       type: "answer",
       sdp: answer.sdp,
     });
-    await flushRemoteCandidateQueue();
+    state.remoteDescriptionNegotiationId = negotiationId;
+    await flushRemoteCandidateQueue(negotiationId);
     updatePeerUi();
     logEvent("ok", "Remote answer applied", {
       session_id: answer.session_id,
@@ -1617,6 +1639,7 @@ async function rollbackRecoveryOffer(pc, sessionId, negotiationId) {
     state.offerSent = false;
     state.candidateQueue = [];
     state.remoteCandidateQueue = [];
+    state.remoteDescriptionNegotiationId = null;
     updatePeerUi();
     logEvent("warn", "Rolled back incomplete ICE restart offer", {
       session_id: sessionId,
@@ -1699,6 +1722,8 @@ function scheduleNetworkRecovery(pc, reason, { immediate = false } = {}) {
     state.recovery.attempts = 0;
     state.recovery.generation += 1;
     state.recovery.deadlineAt = Date.now() + state.webrtcConfig.recovery.window_ms;
+    state.recovery.initialOfferPending = false;
+    state.recovery.reason = reason;
     logEvent("warn", "WebRTC network recovery scheduled", {
       session_id: state.session.session_id,
       reason,
@@ -1765,6 +1790,7 @@ async function runNetworkRecoveryAttempt(pc, generation, reason) {
     return;
   }
   if (pc.signalingState !== "stable") {
+    state.recovery.initialOfferPending = true;
     logEvent("warn", "Waiting for signaling state before initial ICE restart", {
       session_id: state.session?.session_id,
       signaling_state: pc.signalingState,
@@ -1773,14 +1799,16 @@ async function runNetworkRecoveryAttempt(pc, generation, reason) {
     return;
   }
 
+  state.recovery.initialOfferPending = false;
   state.recovery.attempts += 1;
   updatePeerUi();
   try {
-    const config = await loadWebRTCConfig({ allowFallback: false });
     if (!isCurrentRecovery(pc, generation)) {
       return;
     }
-    pc.setConfiguration({ iceServers: config.iceServers });
+    // 최초 연결에서 생성한 PeerConnection은 이미 /webrtc/config의 ICE/TURN
+    // 설정을 가진다. 복구 중 재조회가 실패해 restart offer 자체가 막히지 않게
+    // 기존 구성을 그대로 재사용한다.
     await ensureSignalingSocket();
     await negotiatePeer(pc, state.session.session_id, { iceRestart: true });
     logEvent("ok", "ICE restart offer accepted", {
@@ -1835,12 +1863,6 @@ function startNetworkRecoveryStatusObserver(pc, generation, reason) {
       remaining_ms: remainingMs,
     });
 
-    // debounce 시점에 signaling이 stable이 아니었던 경우에만, 아직 보내지 않은
-    // 최초 restart offer를 여기서 시작한다. 이미 offer를 보냈다면 절대 재시도하지
-    // 않고 브라우저의 ICE 검사 결과를 기다린다.
-    if (state.recovery.attempts === 0 && pc.signalingState === "stable") {
-      void runNetworkRecoveryAttempt(pc, generation, reason);
-    }
     state.recovery.statusTimer = window.setTimeout(
       observe,
       Math.min(RECOVERY_STATUS_CHECK_INTERVAL_MS, remainingMs),
@@ -1883,6 +1905,8 @@ function clearNetworkRecovery() {
   state.recovery.deadlineAt = 0;
   state.recovery.debounceTimer = null;
   state.recovery.statusTimer = null;
+  state.recovery.initialOfferPending = false;
+  state.recovery.reason = null;
 }
 
 function wirePeerConnection(pc) {
@@ -1921,6 +1945,21 @@ function wirePeerConnection(pc) {
     logEvent("ok", "Signaling state changed", {
       signalingState: pc.signalingState,
     });
+    // debounce 시점에 기존 협상이 끝나지 않아 최초 restart offer를 보내지 못한
+    // 경우만 여기서 한 번 시작한다. 5초 상태 관찰 타이머는 offer를 만들지 않는다.
+    if (
+      state.recovery.active &&
+      state.recovery.initialOfferPending &&
+      state.recovery.attempts === 0 &&
+      pc.signalingState === "stable"
+    ) {
+      state.recovery.initialOfferPending = false;
+      void runNetworkRecoveryAttempt(
+        pc,
+        state.recovery.generation,
+        state.recovery.reason,
+      );
+    }
   });
   pc.addEventListener("icegatheringstatechange", () => {
     updatePeerUi();
@@ -2122,12 +2161,10 @@ async function handleSignalingMessage(rawData) {
 }
 
 async function addRemoteCandidate(payload) {
-  if (
-    payload.negotiation_id &&
-    payload.negotiation_id !== state.activeNegotiationId
-  ) {
+  const negotiationId = payload.negotiation_id;
+  if (!negotiationId || negotiationId !== state.activeNegotiationId) {
     logEvent("warn", "Dropped stale remote ICE candidate", {
-      negotiation_id: payload.negotiation_id,
+      negotiation_id: negotiationId || null,
       active_negotiation_id: state.activeNegotiationId,
     });
     return;
@@ -2151,9 +2188,14 @@ async function addRemoteCandidate(payload) {
     return;
   }
 
-  if (!state.pc.remoteDescription) {
-    state.remoteCandidateQueue.push(candidateInit);
-    logEvent("warn", "Queued remote ICE candidate until remote description is set", {
+  if (
+    !state.pc.remoteDescription ||
+    state.remoteDescriptionNegotiationId !== negotiationId
+  ) {
+    state.remoteCandidateQueue.push({ negotiationId, candidateInit });
+    logEvent("warn", "Queued remote ICE candidate until current answer is applied", {
+      negotiation_id: negotiationId,
+      remote_description_negotiation_id: state.remoteDescriptionNegotiationId,
       queued: state.remoteCandidateQueue.length,
     });
     return;
@@ -2166,9 +2208,17 @@ async function addRemoteCandidate(payload) {
   });
 }
 
-async function flushRemoteCandidateQueue() {
+async function flushRemoteCandidateQueue(negotiationId) {
   while (state.remoteCandidateQueue.length) {
-    const candidateInit = state.remoteCandidateQueue.shift();
+    const queued = state.remoteCandidateQueue.shift();
+    if (queued.negotiationId !== negotiationId) {
+      logEvent("warn", "Dropped queued stale remote ICE candidate", {
+        negotiation_id: queued.negotiationId,
+        active_negotiation_id: negotiationId,
+      });
+      continue;
+    }
+    const { candidateInit } = queued;
     await state.pc.addIceCandidate(candidateInit);
     logEvent("ok", "Added queued remote ICE candidate", {
       end_of_candidates: candidateInit === null,
@@ -2269,7 +2319,16 @@ async function deleteSessionById(sessionId) {
   });
 }
 
-async function cleanupConnection({ keepSession }) {
+async function cleanupConnection({ keepSession, expectedSessionId = null }) {
+  // polling 중이던 이전 세션의 404가 새로 생성한 세션의 미디어 자원을 닫지 않게
+  // 한다. expectedSessionId가 없으면 사용자 버튼에서 명시적으로 요청한 정리다.
+  if (
+    expectedSessionId &&
+    state.session?.session_id !== expectedSessionId
+  ) {
+    return false;
+  }
+
   state.closingConnection = true;
   clearNetworkRecovery();
   stopPolling();
@@ -2301,6 +2360,7 @@ async function cleanupConnection({ keepSession }) {
   state.remoteCandidateQueue = [];
   state.offerSent = false;
   state.activeNegotiationId = null;
+  state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
   setPill(els.websocketState, "WS idle", "idle");
   updatePeerUi();
@@ -2310,6 +2370,7 @@ async function cleanupConnection({ keepSession }) {
   }
   state.closingConnection = false;
   updateButtons();
+  return true;
 }
 
 function stopLocalStream() {

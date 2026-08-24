@@ -121,7 +121,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver };`,
     context,
     { filename: appPath },
   );
@@ -176,6 +176,43 @@ test("새 세대 후보는 새 answer를 적용할 때까지 queue한다", async
   assert.equal(added.length, 1);
   assert.equal(added[0].candidate, "candidate:1 1 udp 1 192.0.2.1 5000 typ relay");
   assert.equal(state.remoteCandidateQueue.length, 0);
+});
+
+test("local ICE candidate는 username fragment가 연결한 현재 offer 세대로만 전송한다", async () => {
+  const { queueOrSendCandidate, rememberLocalCandidateGeneration, state } = await loadApp();
+  const sent = [];
+  state.session = { session_id: "session-1" };
+  state.ownerToken = "owner-token";
+  state.accessToken = "access-token";
+  state.ws = {
+    readyState: 1,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  state.offerSent = true;
+  state.activeNegotiationId = "new-generation";
+  rememberLocalCandidateGeneration(
+    { sdp: "v=0\r\na=ice-ufrag:new-ufrag\r\n" },
+    "new-generation",
+  );
+
+  queueOrSendCandidate({
+    candidate: "candidate:1 1 udp 1 192.0.2.1 5000 typ relay ufrag new-ufrag",
+    sdpMid: "0",
+    sdpMLineIndex: 0,
+  });
+  queueOrSendCandidate({
+    candidate: "candidate:2 1 udp 1 192.0.2.2 5001 typ relay",
+    usernameFragment: "old-ufrag",
+    sdpMid: "0",
+    sdpMLineIndex: 0,
+  });
+  queueOrSendCandidate(null);
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].negotiation_id, "new-generation");
+  assert.match(sent[0].candidate, /ufrag new-ufrag$/);
 });
 
 test("5초 recovery observer는 stable 상태여도 ICE restart offer를 시작하지 않는다", async () => {

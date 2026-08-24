@@ -44,6 +44,10 @@ const state = {
   remoteCandidateQueue: [],
   offerSent: false,
   activeNegotiationId: null,
+  // local candidate는 candidate.usernameFragment로 offer 세대를 식별한다. 새
+  // ICE restart offer를 만들기 시작한 뒤에도 이전 세대 candidate 이벤트가 늦게
+  // 도착할 수 있으므로 activeNegotiationId만으로 후보를 표기하면 안 된다.
+  localCandidateNegotiationIds: new Map(),
   // remoteDescription이 존재하더라도 현재 offer 세대의 answer가 아닐 수 있다.
   // ICE restart 중 이전 answer에 새 세대 후보를 적용하지 않도록, answer 적용이
   // 완료된 negotiation ID를 별도로 추적한다.
@@ -1537,6 +1541,7 @@ async function connectPeer(sessionId) {
   state.remoteCandidateQueue = [];
   state.offerSent = false;
   state.activeNegotiationId = null;
+  state.localCandidateNegotiationIds.clear();
   state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
 
@@ -1557,6 +1562,7 @@ async function negotiatePeer(pc, sessionId, { iceRestart }) {
   state.candidateQueue = [];
   state.remoteCandidateQueue = [];
   state.offerSent = false;
+  state.localCandidateNegotiationIds.clear();
   const negotiationId = createNegotiationId();
   state.activeNegotiationId = negotiationId;
   // 새 offer를 시작한 순간부터 이전 remoteDescription은 이 세대의 후보를 받을
@@ -1572,6 +1578,7 @@ async function negotiatePeer(pc, sessionId, { iceRestart }) {
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    rememberLocalCandidateGeneration(pc.localDescription, negotiationId);
     updatePeerUi();
 
     sendSignaling({
@@ -1639,6 +1646,7 @@ async function rollbackRecoveryOffer(pc, sessionId, negotiationId) {
     state.offerSent = false;
     state.candidateQueue = [];
     state.remoteCandidateQueue = [];
+    state.localCandidateNegotiationIds.clear();
     state.remoteDescriptionNegotiationId = null;
     updatePeerUi();
     logEvent("warn", "Rolled back incomplete ICE restart offer", {
@@ -2228,25 +2236,39 @@ async function flushRemoteCandidateQueue(negotiationId) {
 }
 
 function queueOrSendCandidate(candidate) {
-  const payload = candidate
-    ? {
-        type: "ice_candidate",
-        session_id: state.session?.session_id,
-        owner_token: state.ownerToken,
-        access_token: state.accessToken,
-        negotiation_id: state.activeNegotiationId,
-        candidate: candidate.candidate,
-        sdpMid: candidate.sdpMid,
-        sdpMLineIndex: candidate.sdpMLineIndex,
-      }
-    : {
-        type: "ice_candidate",
-        session_id: state.session?.session_id,
-        owner_token: state.ownerToken,
-        access_token: state.accessToken,
-        negotiation_id: state.activeNegotiationId,
-        candidate: null,
-      };
+  // end-of-candidates 표시는 원격에 별도로 전달하지 않는다. 새 generation으로
+  // 잘못 표기되면 느린 TURN candidate 수집을 끝난 것으로 처리할 수 있고, 이
+  // 프로토콜에서는 answer 및 이후 trickle candidate만으로 충분하다.
+  if (!candidate) {
+    logEvent("ok", "Local ICE gathering completed");
+    return;
+  }
+
+  const usernameFragment = localCandidateUsernameFragment(candidate);
+  const negotiationId = usernameFragment
+    ? state.localCandidateNegotiationIds.get(usernameFragment)
+    : null;
+  if (!negotiationId || negotiationId !== state.activeNegotiationId) {
+    // 새 offer를 시작한 직후 이전 ICE generation에서 나온 candidate는 현재
+    // negotiation ID로 다시 표기하지 않고 버린다. usernameFragment를 알 수 없는
+    // candidate도 안전하게 연결할 세대를 판단할 수 없으므로 보내지 않는다.
+    logEvent("warn", "Dropped local ICE candidate from unknown or stale generation", {
+      candidate_username_fragment: usernameFragment,
+      active_negotiation_id: state.activeNegotiationId,
+    });
+    return;
+  }
+
+  const payload = {
+    type: "ice_candidate",
+    session_id: state.session?.session_id,
+    owner_token: state.ownerToken,
+    access_token: state.accessToken,
+    negotiation_id: negotiationId,
+    candidate: candidate.candidate,
+    sdpMid: candidate.sdpMid,
+    sdpMLineIndex: candidate.sdpMLineIndex,
+  };
 
   if (!state.offerSent) {
     state.candidateQueue.push(payload);
@@ -2259,6 +2281,40 @@ function flushCandidateQueue() {
   while (state.candidateQueue.length) {
     sendSignaling(state.candidateQueue.shift());
   }
+}
+
+// rememberLocalCandidateGeneration은 setLocalDescription이 확정한 SDP에서 모든
+// ICE username fragment를 찾아 현재 negotiation ID에 연결한다. candidate event의
+// usernameFragment가 이 목록에 없으면 이전 generation 또는 판별 불가 후보다.
+function rememberLocalCandidateGeneration(description, negotiationId) {
+  state.localCandidateNegotiationIds.clear();
+  const usernameFragments = new Set(
+    [...(description?.sdp || "").matchAll(/^a=ice-ufrag:([^\r\n]+)$/gm)].map(
+      (match) => match[1].trim(),
+    ),
+  );
+  for (const usernameFragment of usernameFragments) {
+    if (usernameFragment) {
+      state.localCandidateNegotiationIds.set(usernameFragment, negotiationId);
+    }
+  }
+
+  if (!state.localCandidateNegotiationIds.size) {
+    logEvent("warn", "Local offer did not contain an ICE username fragment", {
+      negotiation_id: negotiationId,
+    });
+  }
+}
+
+// localCandidateUsernameFragment는 표준 usernameFragment 속성을 우선 사용한다.
+// 일부 브라우저가 이 속성을 제공하지 않는 경우 candidate SDP의 ufrag 확장값을
+// 읽는다. 둘 다 없으면 세대를 안전하게 판단할 수 없다.
+function localCandidateUsernameFragment(candidate) {
+  if (typeof candidate?.usernameFragment === "string" && candidate.usernameFragment) {
+    return candidate.usernameFragment;
+  }
+  const match = candidate?.candidate?.match(/(?:^|\s)ufrag\s+([^\s]+)/);
+  return match?.[1] || null;
 }
 
 function sendSignaling(payload) {
@@ -2360,6 +2416,7 @@ async function cleanupConnection({ keepSession, expectedSessionId = null }) {
   state.remoteCandidateQueue = [];
   state.offerSent = false;
   state.activeNegotiationId = null;
+  state.localCandidateNegotiationIds.clear();
   state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
   setPill(els.websocketState, "WS idle", "idle");

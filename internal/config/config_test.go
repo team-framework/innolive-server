@@ -178,6 +178,27 @@ func TestValidateDecoderPinLongEdge(t *testing.T) {
 	}
 }
 
+// TestValidateAIPreflightInterval: 0은 상시 감시 비활성이므로 통과해야 하고,
+// 주기가 타임아웃보다 짧거나 같으면 프로브가 워커에 쌓이므로 거부해야 한다(#162).
+func TestValidateAIPreflightInterval(t *testing.T) {
+	for _, valid := range []time.Duration{0, 31 * time.Second, 5 * time.Minute} {
+		cfg := validConfig()
+		cfg.AIPreflightTimeout = 30 * time.Second
+		cfg.AIPreflightInterval = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with AIPreflightInterval=%s error = %v", valid, err)
+		}
+	}
+	for _, invalid := range []time.Duration{-time.Second, 10 * time.Second, 30 * time.Second} {
+		cfg := validConfig()
+		cfg.AIPreflightTimeout = 30 * time.Second
+		cfg.AIPreflightInterval = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected AIPreflightInterval=%s to be rejected", invalid)
+		}
+	}
+}
+
 func TestLoadAcceptsPythonServerDelayAlias(t *testing.T) {
 	setRequiredEnv(t)
 

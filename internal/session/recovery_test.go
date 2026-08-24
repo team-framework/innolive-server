@@ -33,7 +33,7 @@ func TestPeerRecoveryAcceptsOnlyConfiguredICERestartOffers(t *testing.T) {
 		}
 	}
 	if err := manager.registerRecoveryOffer(liveSession); !errors.Is(err, ErrRecoveryAttemptsExhausted) {
-		t.Fatalf("seventh registerRecoveryOffer error = %v, want ErrRecoveryAttemptsExhausted", err)
+		t.Fatalf("eleventh registerRecoveryOffer error = %v, want ErrRecoveryAttemptsExhausted", err)
 	}
 
 	response := liveSession.Response()

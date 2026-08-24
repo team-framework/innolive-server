@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	defaultWebRTCRecoveryWindow      = 45 * time.Second
+	defaultWebRTCRecoveryWindow      = 50 * time.Second
 	defaultWebRTCRecoveryDebounce    = 2 * time.Second
-	defaultWebRTCRecoveryMaxAttempts = 6
+	defaultWebRTCRecoveryMaxAttempts = 10
 )
 
 // peerRecovery는 Session.mu로 보호한다. generation은 이전 disconnected 타이머와

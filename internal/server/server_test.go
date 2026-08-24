@@ -379,8 +379,8 @@ func TestWebRTCConfigPublishesRecoveryContract(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Recovery.WindowMS != 45000 || payload.Recovery.DebounceMS != 2000 || payload.Recovery.MaxAttempts != 6 {
-		t.Fatalf("recovery = %+v, want 45000ms/2000ms/6", payload.Recovery)
+	if payload.Recovery.WindowMS != 50000 || payload.Recovery.DebounceMS != 2000 || payload.Recovery.MaxAttempts != 10 {
+		t.Fatalf("recovery = %+v, want 50000ms/2000ms/10", payload.Recovery)
 	}
 }
 
@@ -750,9 +750,9 @@ func testServerConfig() config.Config {
 		UDPPortMin:              41000,
 		UDPPortMax:              41100,
 		DisconnectedGracePeriod: 100 * time.Millisecond,
-		WebRTCRecoveryWindow:    45 * time.Second,
+		WebRTCRecoveryWindow:    50 * time.Second,
 		WebRTCRecoveryDebounce:  2 * time.Second,
-		WebRTCRecoveryAttempts:  6,
+		WebRTCRecoveryAttempts:  10,
 		FrameQueueSize:          2,
 		RequireSessionAuth:      true,
 	}

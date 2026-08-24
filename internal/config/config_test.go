@@ -63,14 +63,14 @@ func TestLoadWebRTCRecoveryDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.WebRTCRecoveryWindow != 45*time.Second {
-		t.Fatalf("WebRTCRecoveryWindow = %s, want 45s", cfg.WebRTCRecoveryWindow)
+	if cfg.WebRTCRecoveryWindow != 50*time.Second {
+		t.Fatalf("WebRTCRecoveryWindow = %s, want 50s", cfg.WebRTCRecoveryWindow)
 	}
 	if cfg.WebRTCRecoveryDebounce != 2*time.Second {
 		t.Fatalf("WebRTCRecoveryDebounce = %s, want 2s", cfg.WebRTCRecoveryDebounce)
 	}
-	if cfg.WebRTCRecoveryAttempts != 6 {
-		t.Fatalf("WebRTCRecoveryAttempts = %d, want 6", cfg.WebRTCRecoveryAttempts)
+	if cfg.WebRTCRecoveryAttempts != 10 {
+		t.Fatalf("WebRTCRecoveryAttempts = %d, want 10", cfg.WebRTCRecoveryAttempts)
 	}
 }
 

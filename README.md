@@ -127,8 +127,7 @@ make proto        # protobuf 코드 생성
 ### WebRTC 네트워크 복구 계약
 
 `GET /webrtc/config`은 ICE 서버 목록과 함께 아래 `recovery` 값을 반환합니다.
-클라이언트는 네트워크 전환 뒤 이 값을 상한으로 사용하되, 재시도 시점 자체를
-플랫폼마다 완전히 같게 맞출 필요는 없습니다.
+웹·iOS·macOS·Android 클라이언트는 이 값을 같은 복구 계약으로 사용합니다.
 
 ```json
 {
@@ -138,11 +137,19 @@ make proto        # protobuf 코드 생성
 ```
 
 `disconnected`는 `debounce_ms` 뒤, `failed`는 즉시 같은 `RTCPeerConnection`의
-ICE restart를 시도합니다. 각 offer에는 새 UUID `negotiation_id`와
-`ice_restart: true`를 넣고, 그 offer에서 발생한 모든 ICE candidate에도 같은
-`negotiation_id`를 넣습니다. 서버는 한 복구 창에서 유효한 restart offer를 최대
-`max_attempts`개 수락하며, 열 번째 수락 뒤에도 `window_ms`가 끝날 때까지는
-세션을 유지합니다. 이전 세대 candidate는 `409 stale_negotiation`으로 거절됩니다.
+ICE restart 복구 창으로 전이합니다. 각 복구 창에서는 restart offer를 **한 번만**
+보냅니다. 해당 offer에는 새 UUID `negotiation_id`와 `ice_restart: true`를 넣고,
+그 offer의 SDP에 있는 ICE `usernameFragment`와 일치하는 local candidate만 같은
+`negotiation_id`로 보냅니다. 이전 generation candidate와 `candidate: null` 종료
+신호는 원격에 보내지 않습니다.
+
+offer를 보낸 뒤에는 브라우저의 STUN/TURN 연결 검사가 계속 진행됩니다. 클라이언트는
+5초마다 로컬 `RTCPeerConnection` 상태만 관찰하며, 그 관찰 타이머에서 추가 offer를
+보내거나 `/webrtc/config`를 다시 요청하지 않습니다. 서버의 `max_attempts`는 잘못된
+복구 요청을 막는 수락 상한(현재 10)이며, 정상 클라이언트의 복구 횟수 정책이 아닙니다.
+`window_ms` 안에 연결되지 않으면 서버가 세션을 종료하고,
+`peer_connection_recovery_exhausted`를 반환합니다. 이전 세대 candidate는
+`409 stale_negotiation`으로 거절됩니다.
 
 복구 중 활성 RTMP egress는 사용자 pause 상태로 바뀌지 않습니다. 대신 기존 취소
 슬레이트와 무음 Opus를 유지하다가, ICE 연결과 첫 정상 처리 카메라 프레임이 모두

@@ -1,10 +1,14 @@
-.PHONY: build test test-race run proto
+.PHONY: build test test-client test-race run proto
 
 build:
 	go build ./cmd/server
 
 test:
 	go test ./...
+	node --test internal/server/static/client/app.test.mjs
+
+test-client:
+	node --test internal/server/static/client/app.test.mjs
 
 test-race:
 	go test -race ./...

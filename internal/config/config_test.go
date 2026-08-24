@@ -56,6 +56,24 @@ func TestLoadAudioEgressDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestLoadWebRTCRecoveryDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.WebRTCRecoveryWindow != 50*time.Second {
+		t.Fatalf("WebRTCRecoveryWindow = %s, want 50s", cfg.WebRTCRecoveryWindow)
+	}
+	if cfg.WebRTCRecoveryDebounce != 2*time.Second {
+		t.Fatalf("WebRTCRecoveryDebounce = %s, want 2s", cfg.WebRTCRecoveryDebounce)
+	}
+	if cfg.WebRTCRecoveryAttempts != 10 {
+		t.Fatalf("WebRTCRecoveryAttempts = %d, want 10", cfg.WebRTCRecoveryAttempts)
+	}
+}
+
 // offset은 부호 있는 값이라 튜닝으로 오디오를 어느 쪽으로든 밀 수 있다.
 func TestLoadAudioOffsetAcceptsNegative(t *testing.T) {
 	setRequiredEnv(t)

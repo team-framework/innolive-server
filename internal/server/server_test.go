@@ -71,6 +71,15 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET deleted session status = %d", response.StatusCode)
 	}
+	var missingSession struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	mustDecode(t, response.Body, &missingSession)
+	if missingSession.Error.Code != "not_found" {
+		t.Fatalf("GET deleted session error code = %q, want not_found", missingSession.Error.Code)
+	}
 }
 
 func TestCORSAndSignalingValidation(t *testing.T) {
@@ -358,6 +367,99 @@ func TestSignalingOriginPolicyRejectsDisallowedWebSocketOrigin(t *testing.T) {
 	connection.Close()
 }
 
+func TestWebRTCConfigPublishesRecoveryContract(t *testing.T) {
+	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	response := mustRequest(t, http.MethodGet, httpServer.URL+"/webrtc/config", nil, nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /webrtc/config status = %d", response.StatusCode)
+	}
+	var payload struct {
+		Recovery struct {
+			WindowMS    int64 `json:"window_ms"`
+			DebounceMS  int64 `json:"debounce_ms"`
+			MaxAttempts int   `json:"max_attempts"`
+		} `json:"recovery"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Recovery.WindowMS != 50000 || payload.Recovery.DebounceMS != 2000 || payload.Recovery.MaxAttempts != 10 {
+		t.Fatalf("recovery = %+v, want 50000ms/2000ms/10", payload.Recovery)
+	}
+}
+
+func TestSignalingTricklesAnswerBeforeSTUNGatheringCompletes(t *testing.T) {
+	cfg := testServerConfig()
+	// TEST-NET 주소는 STUN 응답을 주지 않는다. 이전처럼 gathering complete까지
+	// 기다리면 이 테스트의 짧은 deadline 안에 answer를 보낼 수 없다.
+	cfg.STUNURLs = []string{"stun:192.0.2.1:3478"}
+	application, manager := newTestApplicationWithConfig(t, cfg, nil)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+	liveSession, ownerToken := createTestSession(t, httpServer.URL, nil)
+
+	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerConnection.Close()
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		"video",
+		"trickle-answer-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peerConnection.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv}); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := peerConnection.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peerConnection.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
+	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	negotiationID := uuid.NewString()
+	startedAt := time.Now()
+	if err := connection.WriteJSON(map[string]any{
+		"type":           "offer",
+		"session_id":     liveSession.SessionID,
+		"owner_token":    ownerToken,
+		"sdp":            offer.SDP,
+		"negotiation_id": negotiationID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.SetReadDeadline(startedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Type          string `json:"type"`
+		NegotiationID string `json:"negotiation_id"`
+	}
+	if err := connection.ReadJSON(&response); err != nil {
+		t.Fatalf("read trickled answer: %v", err)
+	}
+	if response.Type != "answer" || response.NegotiationID != negotiationID {
+		t.Fatalf("first signaling response = %+v, want answer for %s", response, negotiationID)
+	}
+}
+
 func TestBypassWebRTCEndToEnd(t *testing.T) {
 	application, manager := newTestApplication(t)
 	defer manager.CloseAll()
@@ -383,6 +485,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer peerConnection.Close()
+	negotiationID := uuid.NewString()
 	connected := make(chan struct{}, 1)
 	received := make(chan []byte, 1)
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -394,7 +497,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 	})
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "candidate": nil}
+		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "negotiation_id": negotiationID, "candidate": nil}
 		if candidate != nil {
 			jsonCandidate := candidate.ToJSON()
 			message["candidate"] = jsonCandidate.Candidate
@@ -452,19 +555,26 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP}); err != nil {
+	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP, "negotiation_id": negotiationID, "ice_restart": false}); err != nil {
 		t.Fatal(err)
 	}
 
 	answerDeadline := time.Now().Add(10 * time.Second)
-	for {
+	answerApplied := false
+	serverCandidateCount := 0
+	var pendingServerCandidates []webrtc.ICECandidateInit
+	for !(answerApplied && serverCandidateCount > 0) {
 		if err := connection.SetReadDeadline(answerDeadline); err != nil {
 			t.Fatal(err)
 		}
 		var message struct {
-			Type  string          `json:"type"`
-			SDP   string          `json:"sdp"`
-			Error json.RawMessage `json:"error"`
+			Type          string          `json:"type"`
+			SDP           string          `json:"sdp"`
+			NegotiationID string          `json:"negotiation_id"`
+			Candidate     *string         `json:"candidate"`
+			SDPMid        *string         `json:"sdpMid"`
+			SDPLineIndex  *uint16         `json:"sdpMLineIndex"`
+			Error         json.RawMessage `json:"error"`
 		}
 		if err := connection.ReadJSON(&message); err != nil {
 			t.Fatalf("read signaling response: %v", err)
@@ -472,13 +582,47 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		if message.Type == "error" {
 			t.Fatalf("signaling failed: %s", message.Error)
 		}
-		if message.Type != "answer" {
+		switch message.Type {
+		case "ice_candidate":
+			if message.NegotiationID != negotiationID {
+				t.Fatalf("server candidate negotiation_id = %q, want %q", message.NegotiationID, negotiationID)
+			}
+			candidate := webrtc.ICECandidateInit{
+				SDPMid:        message.SDPMid,
+				SDPMLineIndex: message.SDPLineIndex,
+			}
+			if message.Candidate == nil {
+				t.Fatal("server must not send an ambiguous end-of-candidates signal")
+			} else {
+				candidate.Candidate = *message.Candidate
+				serverCandidateCount++
+			}
+			if answerApplied {
+				if err := peerConnection.AddICECandidate(candidate); err != nil {
+					t.Fatalf("add trickled server ICE candidate: %v", err)
+				}
+			} else {
+				pendingServerCandidates = append(pendingServerCandidates, candidate)
+			}
 			continue
+		case "answer":
+			if message.NegotiationID != negotiationID {
+				t.Fatalf("answer negotiation_id = %q, want %q", message.NegotiationID, negotiationID)
+			}
+			if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: message.SDP}); err != nil {
+				t.Fatalf("set remote answer: %v", err)
+			}
+			answerApplied = true
+			for _, candidate := range pendingServerCandidates {
+				if err := peerConnection.AddICECandidate(candidate); err != nil {
+					t.Fatalf("add queued trickled server ICE candidate: %v", err)
+				}
+			}
+			pendingServerCandidates = nil
 		}
-		if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: message.SDP}); err != nil {
-			t.Fatalf("set remote answer: %v", err)
-		}
-		break
+	}
+	if serverCandidateCount == 0 {
+		t.Fatal("server did not trickle any ICE candidates")
 	}
 
 	select {
@@ -601,7 +745,11 @@ func newTestApplication(t *testing.T) (*Server, *session.Manager) {
 
 func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Handler) http.Handler, authenticateUsers ...func(context.Context, string) (uuid.UUID, error)) (*Server, *session.Manager) {
 	t.Helper()
-	cfg := config.Config{
+	return newTestApplicationWithConfig(t, testServerConfig(), requireUser, authenticateUsers...)
+}
+
+func testServerConfig() config.Config {
+	return config.Config{
 		HTTPAddr:                ":0",
 		PrivacyMode:             config.PrivacyModeBypass,
 		PrivacyFixedDelay:       time.Millisecond,
@@ -610,9 +758,16 @@ func newTestApplicationWithUserMiddleware(t *testing.T, requireUser func(http.Ha
 		UDPPortMin:              41000,
 		UDPPortMax:              41100,
 		DisconnectedGracePeriod: 100 * time.Millisecond,
+		WebRTCRecoveryWindow:    50 * time.Second,
+		WebRTCRecoveryDebounce:  2 * time.Second,
+		WebRTCRecoveryAttempts:  10,
 		FrameQueueSize:          2,
 		RequireSessionAuth:      true,
 	}
+}
+
+func newTestApplicationWithConfig(t *testing.T, cfg config.Config, requireUser func(http.Handler) http.Handler, authenticateUsers ...func(context.Context, string) (uuid.UUID, error)) (*Server, *session.Manager) {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry := metrics.New()
 	manager, err := session.NewManager(cfg, logger, registry, nil, nil)

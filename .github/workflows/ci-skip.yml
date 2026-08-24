@@ -9,6 +9,7 @@ on:
       - 'internal/**'
       - 'go.mod'
       - 'go.sum'
+      - 'Makefile'
       - '.github/workflows/ci.yml'
       - '.github/actions/**'
 

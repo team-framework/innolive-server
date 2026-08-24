@@ -114,6 +114,8 @@ make proto        # protobuf 코드 생성
 | `FFMPEG_PATH` | `ffmpeg` | FFmpeg 실행 경로 |
 | `WEBRTC_STUN_URLS` / `WEBRTC_TURN_*` | — | ICE 서버 설정 |
 | `WEBRTC_UDP_PORT_MIN/MAX` | `50002` / `50020` | WebRTC UDP 포트 범위 |
+| `WEBRTC_RECOVERY_WINDOW` | `50s` | 네트워크 전환 뒤 ICE restart를 기다리는 세션 유지 시간 |
+| `WEBRTC_RECOVERY_DEBOUNCE` / `WEBRTC_RECOVERY_MAX_ATTEMPTS` | `2s` / `10` | 일시 끊김 필터와 서버가 수락할 ICE restart offer 상한 |
 | `YOUTUBE_STREAM_KEY` | — | YouTube RTMP 스트림 키 |
 | `ENABLE_AUDIO_EGRESS` | `false` | 발행자 마이크 오디오 송출 여부 |
 | `DATABASE_URL` | — | PostgreSQL 연결 문자열 |
@@ -121,6 +123,42 @@ make proto        # protobuf 코드 생성
 | `AUTH_EMAIL_SMTP_HOST` | — | SMTP 호스트. 비어 있으면 이메일 로그인 API가 비활성화됨 |
 | `AUTH_EMAIL_REDIS_ADDR` | — | 가입 대기 정보·인증 코드를 보관하는 Redis 주소 |
 | `AUTH_EMAIL_VERIFICATION_CODE_TTL` | `5m` | 회원가입 인증 코드 만료 시간 |
+
+### WebRTC 네트워크 복구 계약
+
+`GET /webrtc/config`은 ICE 서버 목록과 함께 아래 `recovery` 값을 반환합니다.
+웹·iOS·macOS·Android 클라이언트는 이 값을 같은 복구 계약으로 사용합니다.
+
+```json
+{
+  "iceServers": [{ "urls": ["turn:turn.example:3478"], "username": "…", "credential": "…" }],
+  "recovery": { "window_ms": 50000, "debounce_ms": 2000, "max_attempts": 10 }
+}
+```
+
+`disconnected`는 `debounce_ms` 뒤, `failed`는 즉시 같은 `RTCPeerConnection`의
+ICE restart 복구 창으로 전이합니다. 각 복구 창에서는 restart offer를 **한 번만**
+보냅니다. 해당 offer에는 새 UUID `negotiation_id`와 `ice_restart: true`를 넣고,
+그 offer의 SDP에 있는 ICE `usernameFragment`와 일치하는 **클라이언트 local
+candidate**만 같은 `negotiation_id`로 보냅니다. 이전 generation client candidate와
+`candidate: null` 종료 신호는 서버에 보내지 않습니다. 서버도 `candidate: null`
+종료 신호를 보내지 않습니다. 서버가 trickle로 보내는 candidate는 candidate 안의
+ICE `ufrag`를 answer SDP의 local ufrag에 연결해 해당 generation의
+`negotiation_id`로 전달합니다.
+
+offer를 보낸 뒤에는 브라우저의 STUN/TURN 연결 검사가 계속 진행됩니다. 클라이언트는
+5초마다 로컬 `RTCPeerConnection` 상태만 관찰하며, 그 관찰 타이머에서 추가 offer를
+보내거나 `/webrtc/config`를 다시 요청하지 않습니다. 서버의 `max_attempts`는 잘못된
+복구 요청을 막는 수락 상한(현재 10)이며, 정상 클라이언트의 복구 횟수 정책이 아닙니다.
+`window_ms` 안에 연결되지 않으면 서버가 세션을 종료합니다. 이후 클라이언트의
+`GET /sessions/{id}` polling은 `404 not_found`를 받고 PeerConnection·signaling
+WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_exhausted`는 서버
+로그와 세션 close reason에서만 쓰이며 HTTP 응답 code는 아닙니다. 이전 세대 candidate는
+`409 stale_negotiation`으로 거절됩니다.
+
+복구 중 활성 RTMP egress는 사용자 pause 상태로 바뀌지 않습니다. 대신 기존 취소
+슬레이트와 무음 Opus를 유지하다가, ICE 연결과 첫 정상 처리 카메라 프레임이 모두
+확인된 뒤에만 카메라 영상·오디오로 돌아갑니다.
 
 ## 주요 HTTP 엔드포인트
 

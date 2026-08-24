@@ -79,7 +79,7 @@ func TestProcessImagesSkipsPausedAIInput(t *testing.T) {
 	decoded <- frame{data: []byte("camera-frame"), width: 640, height: 480}
 	close(decoded)
 	processed := make(chan frame, 1)
-	processImages(context.Background(), nil, processor, decoded, processed, NewEgressSlot(), registry, config.PrivacyModeReal)
+	processImages(context.Background(), nil, processor, decoded, processed, NewEgressSlot(), registry, config.PrivacyModeReal, nil)
 
 	if calls != 0 {
 		t.Fatalf("AI Process calls = %d, want 0 while paused", calls)

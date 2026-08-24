@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,37 @@ type failingWriteCloser struct{ cause error }
 
 func (w failingWriteCloser) Write([]byte) (int, error) { return 0, w.cause }
 func (failingWriteCloser) Close() error                { return nil }
+
+type recordingWriteCloser struct {
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (w *recordingWriteCloser) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	w.writes = append(w.writes, append([]byte(nil), value...))
+	w.mu.Unlock()
+	return len(value), nil
+}
+
+func (*recordingWriteCloser) Close() error { return nil }
+
+func (w *recordingWriteCloser) contains(value []byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, written := range w.writes {
+		if bytes.Equal(written, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *recordingWriteCloser) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.writes)
+}
 
 func TestVideoBitrateFor(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "out.flv")
@@ -453,6 +485,128 @@ func TestEgressStatusTransitions(t *testing.T) {
 	e.setStopped()
 	if again := e.Status(); !again.StoppedAt.Equal(firstStop) {
 		t.Fatal("StoppedAt must not change on repeated setStopped")
+	}
+}
+
+func TestInputRecoveryKeepsCancellationSlateWithoutChangingUserPauseState(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	e.setStreaming(1280, 720, 30)
+
+	if !e.BeginInputRecovery() {
+		t.Fatal("BeginInputRecovery returned false for a streaming egress")
+	}
+	if status := e.Status(); status.Phase != EgressPhaseStreaming || !status.InputRecovering {
+		t.Fatalf("status during input recovery = %+v, want streaming with InputRecovering", status)
+	}
+	if !e.shouldWriteCancellationSlate() {
+		t.Fatal("input recovery must write cancellation slate")
+	}
+	if !e.EndInputRecovery() {
+		t.Fatal("EndInputRecovery returned false")
+	}
+	if status := e.Status(); status.Phase != EgressPhaseStreaming || status.InputRecovering {
+		t.Fatalf("status after input recovery = %+v, want streaming without InputRecovering", status)
+	}
+
+	if !e.Pause() {
+		t.Fatal("Pause returned false for streaming egress")
+	}
+	if !e.BeginInputRecovery() {
+		t.Fatal("BeginInputRecovery returned false while user-paused")
+	}
+	if !e.EndInputRecovery() {
+		t.Fatal("EndInputRecovery returned false while user-paused")
+	}
+	if status := e.Status(); status.Phase != EgressPhasePaused || status.InputRecovering {
+		t.Fatalf("user pause changed by input recovery = %+v", status)
+	}
+	if !e.shouldWriteCancellationSlate() {
+		t.Fatal("user pause must keep cancellation slate after input recovery")
+	}
+}
+
+func TestEndInputRecoveryKeepsAudioMutedDuringUserPauseTransitions(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition func(*RTMPEgress)
+		wantPhase  EgressPhase
+	}{
+		{
+			name: "일시 중지 재연결 중",
+			transition: func(e *RTMPEgress) {
+				e.noteReconnect(io.ErrUnexpectedEOF, 1)
+			},
+			wantPhase: EgressPhasePausedReconnecting,
+		},
+		{
+			name: "일시 중지 재구성 중",
+			transition: func(e *RTMPEgress) {
+				e.beginReconfiguring()
+			},
+			wantPhase: EgressPhasePausedReconfiguring,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			audio := NewAudioPipe(testLogger(), metrics.New(), 2)
+			e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+			e.audio = audio
+			e.setStreaming(1280, 720, 30)
+			if !e.Pause() {
+				t.Fatal("Pause returned false")
+			}
+			if !audio.Muted() {
+				t.Fatal("Pause must mute audio")
+			}
+			if !e.BeginInputRecovery() {
+				t.Fatal("BeginInputRecovery returned false")
+			}
+
+			tc.transition(e)
+			if status := e.Status(); status.Phase != tc.wantPhase || !status.InputRecovering {
+				t.Fatalf("status before input recovery completion = %+v, want phase %q with InputRecovering", status, tc.wantPhase)
+			}
+			if !e.EndInputRecovery() {
+				t.Fatal("EndInputRecovery returned false")
+			}
+			if !audio.Muted() {
+				t.Fatal("input recovery completion must keep audio muted while user pause is preserved")
+			}
+			if status := e.Status(); status.Phase != tc.wantPhase || status.InputRecovering {
+				t.Fatalf("status after input recovery completion = %+v, want phase %q without InputRecovering", status, tc.wantPhase)
+			}
+		})
+	}
+}
+
+func TestInputRecoveryWritesSlateInsteadOfPendingCameraFrame(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	e.setStreaming(320, 180, 60)
+	if !e.BeginInputRecovery() {
+		t.Fatal("BeginInputRecovery returned false")
+	}
+	slate, err := e.cancellationSlate(320, 180)
+	if err != nil {
+		t.Fatalf("cancellationSlate: %v", err)
+	}
+	camera := append([]byte(nil), slate.data...)
+	camera[len(camera)/2] ^= 0x01
+	if !isJPEG(camera) {
+		t.Fatal("test camera frame must remain JPEG-shaped")
+	}
+	writer := &recordingWriteCloser{}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_, _, err = e.writeFrames(ctx, &ffmpegProcess{stdin: writer}, []frame{{data: camera, width: 320, height: 180}}, 320, 180, 60, func() {})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("writeFrames error = %v, want context deadline", err)
+	}
+	if writer.count() == 0 {
+		t.Fatal("input recovery did not write any cancellation slate frame")
+	}
+	if writer.contains(camera) {
+		t.Fatal("input recovery wrote a pending camera frame instead of cancellation slate")
 	}
 }
 

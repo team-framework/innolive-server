@@ -5,6 +5,20 @@ const MAX_LOG_ITEMS = 120;
 const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const VIDEO_TRACK_WAIT_ATTEMPTS = 15;
 const VIDEO_TRACK_WAIT_INTERVAL_MS = 1000;
+const DEFAULT_RECOVERY_POLICY = {
+  window_ms: 50000,
+  debounce_ms: 2000,
+  max_attempts: 10,
+};
+// 복구 창 안에서 ICE restart offer는 한 번만 보낸다. 이후에는 브라우저가 이미
+// 시작한 STUN/TURN 후보 수집·연결 검사를 유지하고, 이 간격으로 로컬 상태만
+// 관찰한다. 이 타이머는 HTTP·WebSocket 요청을 보내지 않는다.
+const RECOVERY_STATUS_CHECK_INTERVAL_MS = 5000;
+// trickle ICE answer는 후보 수집 완료를 기다리지 않고 도착한다. 다만 느린
+// 네트워크에서 signaling 응답 자체가 늦을 수 있으므로, 일반 협상보다 긴 시간을
+// 허용하되 연결 검사를 위한 여유를 복구 창에 남긴다.
+const RECOVERY_ANSWER_TIMEOUT_MS = 35000;
+const RECOVERY_CONNECTION_RESERVE_MS = 5000;
 
 const els = {};
 const state = {
@@ -29,6 +43,30 @@ const state = {
   candidateQueue: [],
   remoteCandidateQueue: [],
   offerSent: false,
+  activeNegotiationId: null,
+  // local candidate는 candidate.usernameFragment로 offer 세대를 식별한다. 새
+  // ICE restart offer를 만들기 시작한 뒤에도 이전 세대 candidate 이벤트가 늦게
+  // 도착할 수 있으므로 activeNegotiationId만으로 후보를 표기하면 안 된다.
+  localCandidateNegotiationIds: new Map(),
+  // remoteDescription이 존재하더라도 현재 offer 세대의 answer가 아닐 수 있다.
+  // ICE restart 중 이전 answer에 새 세대 후보를 적용하지 않도록, answer 적용이
+  // 완료된 negotiation ID를 별도로 추적한다.
+  remoteDescriptionNegotiationId: null,
+  webrtcConfig: {
+    iceServers: DEFAULT_ICE_SERVERS,
+    recovery: DEFAULT_RECOVERY_POLICY,
+  },
+  closingConnection: false,
+  recovery: {
+    active: false,
+    attempts: 0,
+    deadlineAt: 0,
+    generation: 0,
+    debounceTimer: null,
+    statusTimer: null,
+    initialOfferPending: false,
+    reason: null,
+  },
   lastSelectedCandidatePairId: null,
   lastSessionJson: null,
   // 사용자가 직접 건드린 방송 설정 필드. 직전 방송 기본값(#143)이 이 필드를
@@ -975,12 +1013,18 @@ async function refreshSessions({ quiet = false } = {}) {
 }
 
 async function refreshCurrentSession({ quiet = true } = {}) {
-  if (!state.session?.session_id) {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
     return null;
   }
 
   try {
-    const session = await apiFetch(`/sessions/${state.session.session_id}`);
+    const session = await apiFetch(`/sessions/${sessionId}`);
+    // 요청 중 사용자가 다른 세션으로 전환했으면, 늦게 도착한 이전 세션 응답이
+    // 현재 세션 화면을 덮어쓰지 않게 버린다.
+    if (state.session?.session_id !== sessionId) {
+      return state.session;
+    }
     setCurrentSession(session);
     if (!quiet) {
       logEvent("ok", "Session refreshed", { session_id: session.session_id });
@@ -989,10 +1033,15 @@ async function refreshCurrentSession({ quiet = true } = {}) {
   } catch (error) {
     if (error.status === 404) {
       logEvent("warn", "Current session no longer exists", {
-        session_id: state.session.session_id,
+        session_id: sessionId,
       });
-      clearCurrentSession();
-      stopPolling();
+      // recovery 만료 등으로 서버가 세션을 제거하면, polling 표시만 지우지
+      // 않고 카메라·마이크·PeerConnection·signaling WebSocket까지 정리한다.
+      // 요청 중 새 세션으로 바뀐 경우에는 그 새 연결을 정리하지 않는다.
+      await cleanupConnection({
+        keepSession: false,
+        expectedSessionId: sessionId,
+      });
       return null;
     }
     logError("Failed to refresh current session", error);
@@ -1491,64 +1540,381 @@ async function connectPeer(sessionId) {
   state.candidateQueue = [];
   state.remoteCandidateQueue = [];
   state.offerSent = false;
+  state.activeNegotiationId = null;
+  state.localCandidateNegotiationIds.clear();
+  state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
 
-  const iceServers = await loadIceServers();
-  const pc = new RTCPeerConnection({ iceServers });
+  const config = await loadWebRTCConfig({ allowFallback: true });
+  const pc = new RTCPeerConnection({ iceServers: config.iceServers });
   state.pc = pc;
   wirePeerConnection(pc);
 
   addLocalTracks(pc);
 
-  const ws = await openSignalingSocket();
-  state.ws = ws;
-  const answerPromise = waitForAnswer(sessionId);
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  updatePeerUi();
-
-  sendSignaling({
-    type: "offer",
-    session_id: sessionId,
-    owner_token: state.ownerToken,
-    access_token: state.accessToken,
-    sdp: pc.localDescription.sdp,
-  });
-  state.offerSent = true;
-  flushCandidateQueue();
-
-  const answer = await answerPromise;
-  await pc.setRemoteDescription({
-    type: "answer",
-    sdp: answer.sdp,
-  });
-  await flushRemoteCandidateQueue();
-  updatePeerUi();
-  logEvent("ok", "Remote answer applied", {
-    session_id: answer.session_id,
-    sdp_lines: answer.sdp.split(/\r?\n/).length,
-  });
+  await negotiatePeer(pc, sessionId, { iceRestart: false });
 }
 
-async function loadIceServers() {
+// negotiatePeer는 첫 연결과 네트워크 복구 ICE restart가 공유하는 offer·answer
+// 경로다. negotiation ID는 뒤늦게 도착한 이전 후보를 서버와 클라이언트 모두에서
+// 버리기 위한 세대 식별자다.
+async function negotiatePeer(pc, sessionId, { iceRestart }) {
+  state.candidateQueue = [];
+  state.remoteCandidateQueue = [];
+  state.offerSent = false;
+  state.localCandidateNegotiationIds.clear();
+  const negotiationId = createNegotiationId();
+  state.activeNegotiationId = negotiationId;
+  // 새 offer를 시작한 순간부터 이전 remoteDescription은 이 세대의 후보를 받을
+  // 수 없다. 새 answer의 setRemoteDescription이 끝날 때까지 후보를 queue한다.
+  state.remoteDescriptionNegotiationId = null;
+
+  await ensureSignalingSocket();
+
+  try {
+    if (iceRestart) {
+      pc.restartIce();
+    }
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    rememberLocalCandidateGeneration(pc.localDescription, negotiationId);
+    updatePeerUi();
+
+    sendSignaling({
+      type: "offer",
+      session_id: sessionId,
+      owner_token: state.ownerToken,
+      access_token: state.accessToken,
+      sdp: pc.localDescription.sdp,
+      negotiation_id: negotiationId,
+      ice_restart: iceRestart,
+    });
+    state.offerSent = true;
+    flushCandidateQueue();
+
+    // WebSocket message는 현재 JavaScript 작업이 끝난 뒤에 처리되므로 offer를
+    // 보낸 직후 여기서 waiter를 등록해도 answer를 놓치지 않는다. 반대로 offer
+    // 생성·전송 실패 전에 waiter를 만들면 timeout rejection이 고아가 된다.
+    const answer = await waitForAnswer(
+      sessionId,
+      negotiationId,
+      negotiationTimeoutMs(iceRestart),
+    );
+    await pc.setRemoteDescription({
+      type: "answer",
+      sdp: answer.sdp,
+    });
+    state.remoteDescriptionNegotiationId = negotiationId;
+    await flushRemoteCandidateQueue(negotiationId);
+    updatePeerUi();
+    logEvent("ok", "Remote answer applied", {
+      session_id: answer.session_id,
+      negotiation_id: negotiationId,
+      ice_restart: iceRestart,
+      sdp_lines: answer.sdp.split(/\r?\n/).length,
+    });
+  } catch (error) {
+    // answer를 적용하지 못한 local offer는 PeerConnection을 have-local-offer에
+    // 남긴다. 이를 rollback하지 않으면 이후 복구 시도가 stable 상태를 기다리다
+    // 복구 창을 모두 소진하게 된다.
+    if (iceRestart) {
+      await rollbackRecoveryOffer(pc, sessionId, negotiationId);
+    }
+    throw error;
+  }
+}
+
+function negotiationTimeoutMs(iceRestart) {
+  if (!iceRestart || !state.recovery.active) {
+    return 15000;
+  }
+  const remainingMs = state.recovery.deadlineAt - Date.now() - RECOVERY_CONNECTION_RESERVE_MS;
+  return Math.max(1000, Math.min(RECOVERY_ANSWER_TIMEOUT_MS, remainingMs));
+}
+
+async function rollbackRecoveryOffer(pc, sessionId, negotiationId) {
+  if (
+    state.pc !== pc ||
+    state.activeNegotiationId !== negotiationId ||
+    pc.signalingState !== "have-local-offer"
+  ) {
+    return;
+  }
+  try {
+    await pc.setLocalDescription({ type: "rollback" });
+    state.offerSent = false;
+    state.candidateQueue = [];
+    state.remoteCandidateQueue = [];
+    state.localCandidateNegotiationIds.clear();
+    state.remoteDescriptionNegotiationId = null;
+    updatePeerUi();
+    logEvent("warn", "Rolled back incomplete ICE restart offer", {
+      session_id: sessionId,
+      negotiation_id: negotiationId,
+    });
+  } catch (error) {
+    logError("Failed to roll back incomplete ICE restart offer", error);
+  }
+}
+
+function createNegotiationId() {
+  if (crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
+}
+
+async function ensureSignalingSocket() {
+  if (state.ws?.readyState === WebSocket.OPEN) {
+    return state.ws;
+  }
+  return openSignalingSocket();
+}
+
+async function loadWebRTCConfig({ allowFallback }) {
   try {
     const payload = await apiFetch("/webrtc/config");
     const iceServers = Array.isArray(payload?.iceServers)
       ? payload.iceServers
       : [];
+    const recovery = normalizeRecoveryPolicy(payload?.recovery);
+    state.webrtcConfig = { iceServers, recovery };
     if (!iceServers.length) {
       logEvent("warn", "Server returned no ICE servers; using host candidates only");
-      return [];
+      return state.webrtcConfig;
     }
     logEvent("ok", "Loaded ICE server configuration", {
       urls: iceServers.map((server) => server.urls),
+      recovery,
     });
-    return iceServers;
+    return state.webrtcConfig;
   } catch (error) {
+    if (!allowFallback) {
+      throw error;
+    }
+    // 처음 연결할 때만 보수적인 STUN 기본값을 쓴다. 복구 중 이 값으로 기존
+    // TURN 설정을 덮으면 VPN·망 전환에서 relay 후보를 잃을 수 있다.
     logError("Failed to load ICE server configuration; using default STUN", error);
-    return DEFAULT_ICE_SERVERS;
+    state.webrtcConfig = {
+      iceServers: DEFAULT_ICE_SERVERS,
+      recovery: DEFAULT_RECOVERY_POLICY,
+    };
+    return state.webrtcConfig;
   }
+}
+
+function normalizeRecoveryPolicy(value) {
+  const windowMs = Number(value?.window_ms);
+  const debounceMs = Number(value?.debounce_ms);
+  const maxAttempts = Number(value?.max_attempts);
+  return {
+    window_ms: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DEFAULT_RECOVERY_POLICY.window_ms,
+    debounce_ms: Number.isFinite(debounceMs) && debounceMs >= 0 ? debounceMs : DEFAULT_RECOVERY_POLICY.debounce_ms,
+    max_attempts: Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : DEFAULT_RECOVERY_POLICY.max_attempts,
+  };
+}
+
+function scheduleNetworkRecovery(pc, reason, { immediate = false } = {}) {
+  if (
+    state.closingConnection ||
+    state.pc !== pc ||
+    !state.session?.session_id ||
+    pc.connectionState === "closed"
+  ) {
+    return;
+  }
+
+  if (!state.recovery.active) {
+    state.recovery.active = true;
+    state.recovery.attempts = 0;
+    state.recovery.generation += 1;
+    state.recovery.deadlineAt = Date.now() + state.webrtcConfig.recovery.window_ms;
+    state.recovery.initialOfferPending = false;
+    state.recovery.reason = reason;
+    logEvent("warn", "WebRTC network recovery scheduled", {
+      session_id: state.session.session_id,
+      reason,
+      recovery_deadline: new Date(state.recovery.deadlineAt).toISOString(),
+      server_max_ice_restart_offers: state.webrtcConfig.recovery.max_attempts,
+    });
+    startNetworkRecoveryStatusObserver(pc, state.recovery.generation, reason);
+  }
+
+  // recovery 창마다 ICE restart offer는 한 번만 전송한다. 이후 failed 이벤트는
+  // 브라우저가 같은 ICE 검사 실패를 다시 알린 것일 수 있으므로, 기존 검사를
+  // 취소하거나 새 offer를 만들지 않고 상태 관찰만 계속한다.
+  if (state.recovery.attempts > 0) {
+    updatePeerUi();
+    return;
+  }
+
+  if (state.recovery.debounceTimer) {
+    if (!immediate) {
+      updatePeerUi();
+      return;
+    }
+    window.clearTimeout(state.recovery.debounceTimer);
+    state.recovery.debounceTimer = null;
+  }
+
+  const generation = state.recovery.generation;
+  const start = () => {
+    state.recovery.debounceTimer = null;
+    void runNetworkRecoveryAttempt(pc, generation, reason);
+  };
+  if (immediate) {
+    start();
+  } else {
+    state.recovery.debounceTimer = window.setTimeout(
+      start,
+      state.webrtcConfig.recovery.debounce_ms,
+    );
+  }
+  updatePeerUi();
+}
+
+async function runNetworkRecoveryAttempt(pc, generation, reason) {
+  if (!isCurrentRecovery(pc, generation)) {
+    return;
+  }
+  if (pc.connectionState === "connected") {
+    completeNetworkRecovery(pc, generation);
+    return;
+  }
+  if (Date.now() >= state.recovery.deadlineAt) {
+    logEvent("error", "WebRTC recovery deadline reached; server will close the session", {
+      session_id: state.session?.session_id,
+      attempts: state.recovery.attempts,
+      reason,
+    });
+    updatePeerUi();
+    return;
+  }
+  // 이 테스트 클라이언트의 정상 경로는 recovery 창당 하나의 ICE restart다.
+  // 서버의 max_attempts는 반복 offer를 보내는 클라이언트에 대한 방어 한도이며,
+  // 이 로컬 상태 확인 주기와는 관계가 없다.
+  if (state.recovery.attempts > 0) {
+    return;
+  }
+  if (pc.signalingState !== "stable") {
+    state.recovery.initialOfferPending = true;
+    logEvent("warn", "Waiting for signaling state before initial ICE restart", {
+      session_id: state.session?.session_id,
+      signaling_state: pc.signalingState,
+      reason,
+    });
+    return;
+  }
+
+  state.recovery.initialOfferPending = false;
+  state.recovery.attempts += 1;
+  updatePeerUi();
+  try {
+    if (!isCurrentRecovery(pc, generation)) {
+      return;
+    }
+    // 최초 연결에서 생성한 PeerConnection은 이미 /webrtc/config의 ICE/TURN
+    // 설정을 가진다. 복구 중 재조회가 실패해 restart offer 자체가 막히지 않게
+    // 기존 구성을 그대로 재사용한다.
+    await ensureSignalingSocket();
+    await negotiatePeer(pc, state.session.session_id, { iceRestart: true });
+    logEvent("ok", "ICE restart offer accepted", {
+      session_id: state.session.session_id,
+      attempt: state.recovery.attempts,
+      reason,
+    });
+  } catch (error) {
+    logError("ICE restart attempt failed", error);
+    if (error?.status === 401 || error?.code === "unauthorized") {
+      logEvent("error", "WebRTC recovery stopped because authentication could not be refreshed", {
+        session_id: state.session?.session_id,
+      });
+      await cleanupConnection({ keepSession: false });
+      return;
+    }
+  }
+}
+
+function startNetworkRecoveryStatusObserver(pc, generation, reason) {
+  if (!isCurrentRecovery(pc, generation) || state.recovery.statusTimer) {
+    return;
+  }
+  const observe = () => {
+    if (!isCurrentRecovery(pc, generation)) {
+      return;
+    }
+    if (pc.connectionState === "connected") {
+      completeNetworkRecovery(pc, generation);
+      return;
+    }
+
+    const remainingMs = state.recovery.deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      state.recovery.statusTimer = null;
+      logEvent("error", "WebRTC recovery deadline reached; server will close the session", {
+        session_id: state.session?.session_id,
+        attempts: state.recovery.attempts,
+        reason,
+      });
+      updatePeerUi();
+      return;
+    }
+
+    logEvent("warn", "WebRTC recovery status observed", {
+      session_id: state.session?.session_id,
+      connection_state: pc.connectionState,
+      ice_connection_state: pc.iceConnectionState,
+      ice_gathering_state: pc.iceGatheringState,
+      signaling_state: pc.signalingState,
+      ice_restart_offers: state.recovery.attempts,
+      remaining_ms: remainingMs,
+    });
+
+    state.recovery.statusTimer = window.setTimeout(
+      observe,
+      Math.min(RECOVERY_STATUS_CHECK_INTERVAL_MS, remainingMs),
+    );
+    updatePeerUi();
+  };
+  state.recovery.statusTimer = window.setTimeout(
+    observe,
+    RECOVERY_STATUS_CHECK_INTERVAL_MS,
+  );
+}
+
+function isCurrentRecovery(pc, generation) {
+  return (
+    !state.closingConnection &&
+    state.pc === pc &&
+    state.recovery.active &&
+    state.recovery.generation === generation
+  );
+}
+
+function completeNetworkRecovery(pc, generation) {
+  if (!isCurrentRecovery(pc, generation)) {
+    return;
+  }
+  const attempts = state.recovery.attempts;
+  clearNetworkRecovery();
+  logEvent("ok", "WebRTC peer connection recovered", {
+    session_id: state.session?.session_id,
+    attempts,
+  });
+  updatePeerUi();
+}
+
+function clearNetworkRecovery() {
+  window.clearTimeout(state.recovery.debounceTimer);
+  window.clearTimeout(state.recovery.statusTimer);
+  state.recovery.active = false;
+  state.recovery.attempts = 0;
+  state.recovery.deadlineAt = 0;
+  state.recovery.debounceTimer = null;
+  state.recovery.statusTimer = null;
+  state.recovery.initialOfferPending = false;
+  state.recovery.reason = null;
 }
 
 function wirePeerConnection(pc) {
@@ -1566,6 +1932,11 @@ function wirePeerConnection(pc) {
     });
     if (pc.connectionState === "connected") {
       void logSelectedCandidatePair(pc, "connectionstatechange");
+      completeNetworkRecovery(pc, state.recovery.generation);
+    } else if (pc.connectionState === "disconnected") {
+      scheduleNetworkRecovery(pc, "peer_connection_disconnected");
+    } else if (pc.connectionState === "failed") {
+      scheduleNetworkRecovery(pc, "peer_connection_failed", { immediate: true });
     }
   });
   pc.addEventListener("iceconnectionstatechange", () => {
@@ -1582,6 +1953,21 @@ function wirePeerConnection(pc) {
     logEvent("ok", "Signaling state changed", {
       signalingState: pc.signalingState,
     });
+    // debounce 시점에 기존 협상이 끝나지 않아 최초 restart offer를 보내지 못한
+    // 경우만 여기서 한 번 시작한다. 5초 상태 관찰 타이머는 offer를 만들지 않는다.
+    if (
+      state.recovery.active &&
+      state.recovery.initialOfferPending &&
+      state.recovery.attempts === 0 &&
+      pc.signalingState === "stable"
+    ) {
+      state.recovery.initialOfferPending = false;
+      void runNetworkRecoveryAttempt(
+        pc,
+        state.recovery.generation,
+        state.recovery.reason,
+      );
+    }
   });
   pc.addEventListener("icegatheringstatechange", () => {
     updatePeerUi();
@@ -1695,18 +2081,21 @@ function openSignalingSocket() {
   });
 }
 
-function waitForAnswer(sessionId) {
+function waitForAnswer(sessionId, negotiationId, timeoutMs) {
   if (state.answerWaiter) {
     rejectWaitingAnswer(new Error("Replaced pending answer waiter."));
   }
 
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
-      rejectWaitingAnswer(new Error("Timed out waiting for WebRTC answer."));
-    }, 15000);
+      const error = new Error("Timed out waiting for WebRTC answer.");
+      error.code = "webrtc_answer_timeout";
+      rejectWaitingAnswer(error);
+    }, timeoutMs);
 
     state.answerWaiter = {
       sessionId,
+      negotiationId,
       resolve: (payload) => {
         window.clearTimeout(timeout);
         state.answerWaiter = null;
@@ -1736,12 +2125,22 @@ async function handleSignalingMessage(rawData) {
   }
 
   if (payload.type === "answer") {
-    logEvent("ok", "Received WebRTC answer", payload);
-    if (
+    const isWaitingForAnswer = Boolean(
       state.answerWaiter &&
-      state.answerWaiter.sessionId === payload.session_id
-    ) {
+      state.answerWaiter.sessionId === payload.session_id &&
+      state.answerWaiter.negotiationId === payload.negotiation_id,
+    );
+    if (isWaitingForAnswer) {
+      logEvent("ok", "Received WebRTC answer", payload);
       state.answerWaiter.resolve(payload);
+    } else {
+      // timeout 뒤 도착한 answer는 rollback된 local offer의 응답일 수 있다.
+      // 이를 현재 answer처럼 적용하면 새 ICE restart 세대와 충돌하므로 버린다.
+      logEvent("warn", "Dropped late or stale WebRTC answer", {
+        session_id: payload.session_id,
+        negotiation_id: payload.negotiation_id,
+        active_negotiation_id: state.activeNegotiationId,
+      });
     }
     return;
   }
@@ -1759,9 +2158,9 @@ async function handleSignalingMessage(rawData) {
   if (payload.type === "error") {
     logEvent("error", "Signaling error response", payload);
     if (state.answerWaiter) {
-      rejectWaitingAnswer(
-        new Error(payload.error?.message || "Signaling error response."),
-      );
+      const error = new Error(payload.error?.message || "Signaling error response.");
+      error.code = payload.error?.code;
+      rejectWaitingAnswer(error);
     }
     return;
   }
@@ -1770,6 +2169,14 @@ async function handleSignalingMessage(rawData) {
 }
 
 async function addRemoteCandidate(payload) {
+  const negotiationId = payload.negotiation_id;
+  if (!negotiationId || negotiationId !== state.activeNegotiationId) {
+    logEvent("warn", "Dropped stale remote ICE candidate", {
+      negotiation_id: negotiationId || null,
+      active_negotiation_id: state.activeNegotiationId,
+    });
+    return;
+  }
   const candidateInit = payload.candidate
     ? {
         candidate: payload.candidate,
@@ -1789,9 +2196,14 @@ async function addRemoteCandidate(payload) {
     return;
   }
 
-  if (!state.pc.remoteDescription) {
-    state.remoteCandidateQueue.push(candidateInit);
-    logEvent("warn", "Queued remote ICE candidate until remote description is set", {
+  if (
+    !state.pc.remoteDescription ||
+    state.remoteDescriptionNegotiationId !== negotiationId
+  ) {
+    state.remoteCandidateQueue.push({ negotiationId, candidateInit });
+    logEvent("warn", "Queued remote ICE candidate until current answer is applied", {
+      negotiation_id: negotiationId,
+      remote_description_negotiation_id: state.remoteDescriptionNegotiationId,
       queued: state.remoteCandidateQueue.length,
     });
     return;
@@ -1804,9 +2216,17 @@ async function addRemoteCandidate(payload) {
   });
 }
 
-async function flushRemoteCandidateQueue() {
+async function flushRemoteCandidateQueue(negotiationId) {
   while (state.remoteCandidateQueue.length) {
-    const candidateInit = state.remoteCandidateQueue.shift();
+    const queued = state.remoteCandidateQueue.shift();
+    if (queued.negotiationId !== negotiationId) {
+      logEvent("warn", "Dropped queued stale remote ICE candidate", {
+        negotiation_id: queued.negotiationId,
+        active_negotiation_id: negotiationId,
+      });
+      continue;
+    }
+    const { candidateInit } = queued;
     await state.pc.addIceCandidate(candidateInit);
     logEvent("ok", "Added queued remote ICE candidate", {
       end_of_candidates: candidateInit === null,
@@ -1816,23 +2236,39 @@ async function flushRemoteCandidateQueue() {
 }
 
 function queueOrSendCandidate(candidate) {
-  const payload = candidate
-    ? {
-        type: "ice_candidate",
-        session_id: state.session?.session_id,
-        owner_token: state.ownerToken,
-        access_token: state.accessToken,
-        candidate: candidate.candidate,
-        sdpMid: candidate.sdpMid,
-        sdpMLineIndex: candidate.sdpMLineIndex,
-      }
-    : {
-        type: "ice_candidate",
-        session_id: state.session?.session_id,
-        owner_token: state.ownerToken,
-        access_token: state.accessToken,
-        candidate: null,
-      };
+  // end-of-candidates 표시는 원격에 별도로 전달하지 않는다. 새 generation으로
+  // 잘못 표기되면 느린 TURN candidate 수집을 끝난 것으로 처리할 수 있고, 이
+  // 프로토콜에서는 answer 및 이후 trickle candidate만으로 충분하다.
+  if (!candidate) {
+    logEvent("ok", "Local ICE gathering completed");
+    return;
+  }
+
+  const usernameFragment = localCandidateUsernameFragment(candidate);
+  const negotiationId = usernameFragment
+    ? state.localCandidateNegotiationIds.get(usernameFragment)
+    : null;
+  if (!negotiationId || negotiationId !== state.activeNegotiationId) {
+    // 새 offer를 시작한 직후 이전 ICE generation에서 나온 candidate는 현재
+    // negotiation ID로 다시 표기하지 않고 버린다. usernameFragment를 알 수 없는
+    // candidate도 안전하게 연결할 세대를 판단할 수 없으므로 보내지 않는다.
+    logEvent("warn", "Dropped local ICE candidate from unknown or stale generation", {
+      candidate_username_fragment: usernameFragment,
+      active_negotiation_id: state.activeNegotiationId,
+    });
+    return;
+  }
+
+  const payload = {
+    type: "ice_candidate",
+    session_id: state.session?.session_id,
+    owner_token: state.ownerToken,
+    access_token: state.accessToken,
+    negotiation_id: negotiationId,
+    candidate: candidate.candidate,
+    sdpMid: candidate.sdpMid,
+    sdpMLineIndex: candidate.sdpMLineIndex,
+  };
 
   if (!state.offerSent) {
     state.candidateQueue.push(payload);
@@ -1845,6 +2281,40 @@ function flushCandidateQueue() {
   while (state.candidateQueue.length) {
     sendSignaling(state.candidateQueue.shift());
   }
+}
+
+// rememberLocalCandidateGeneration은 setLocalDescription이 확정한 SDP에서 모든
+// ICE username fragment를 찾아 현재 negotiation ID에 연결한다. candidate event의
+// usernameFragment가 이 목록에 없으면 이전 generation 또는 판별 불가 후보다.
+function rememberLocalCandidateGeneration(description, negotiationId) {
+  state.localCandidateNegotiationIds.clear();
+  const usernameFragments = new Set(
+    [...(description?.sdp || "").matchAll(/^a=ice-ufrag:([^\r\n]+)$/gm)].map(
+      (match) => match[1].trim(),
+    ),
+  );
+  for (const usernameFragment of usernameFragments) {
+    if (usernameFragment) {
+      state.localCandidateNegotiationIds.set(usernameFragment, negotiationId);
+    }
+  }
+
+  if (!state.localCandidateNegotiationIds.size) {
+    logEvent("warn", "Local offer did not contain an ICE username fragment", {
+      negotiation_id: negotiationId,
+    });
+  }
+}
+
+// localCandidateUsernameFragment는 표준 usernameFragment 속성을 우선 사용한다.
+// 일부 브라우저가 이 속성을 제공하지 않는 경우 candidate SDP의 ufrag 확장값을
+// 읽는다. 둘 다 없으면 세대를 안전하게 판단할 수 없다.
+function localCandidateUsernameFragment(candidate) {
+  if (typeof candidate?.usernameFragment === "string" && candidate.usernameFragment) {
+    return candidate.usernameFragment;
+  }
+  const match = candidate?.candidate?.match(/(?:^|\s)ufrag\s+([^\s]+)/);
+  return match?.[1] || null;
 }
 
 function sendSignaling(payload) {
@@ -1905,7 +2375,18 @@ async function deleteSessionById(sessionId) {
   });
 }
 
-async function cleanupConnection({ keepSession }) {
+async function cleanupConnection({ keepSession, expectedSessionId = null }) {
+  // polling 중이던 이전 세션의 404가 새로 생성한 세션의 미디어 자원을 닫지 않게
+  // 한다. expectedSessionId가 없으면 사용자 버튼에서 명시적으로 요청한 정리다.
+  if (
+    expectedSessionId &&
+    state.session?.session_id !== expectedSessionId
+  ) {
+    return false;
+  }
+
+  state.closingConnection = true;
+  clearNetworkRecovery();
   stopPolling();
   rejectWaitingAnswer(new Error("Connection cleanup started."));
 
@@ -1934,6 +2415,9 @@ async function cleanupConnection({ keepSession }) {
   state.candidateQueue = [];
   state.remoteCandidateQueue = [];
   state.offerSent = false;
+  state.activeNegotiationId = null;
+  state.localCandidateNegotiationIds.clear();
+  state.remoteDescriptionNegotiationId = null;
   state.lastSelectedCandidatePairId = null;
   setPill(els.websocketState, "WS idle", "idle");
   updatePeerUi();
@@ -1941,7 +2425,9 @@ async function cleanupConnection({ keepSession }) {
   if (!keepSession) {
     clearCurrentSession();
   }
+  state.closingConnection = false;
   updateButtons();
+  return true;
 }
 
 function stopLocalStream() {
@@ -2071,6 +2557,22 @@ function updatePeerUi() {
   const ice = pc.iceConnectionState || "unknown";
   const signaling = pc.signalingState || "unknown";
 
+  if (state.recovery.active) {
+    const remainingSeconds = Math.max(
+      0,
+      Math.ceil((state.recovery.deadlineAt - Date.now()) / 1000),
+    );
+    const restartDetail = state.recovery.attempts > 0
+      ? `ICE restart ${state.recovery.attempts}회`
+      : "ICE restart 대기";
+    setPill(
+      els.peerState,
+      `Peer recovering · ${restartDetail} · ${remainingSeconds}s`,
+      "warn",
+    );
+    updateButtons();
+    return;
+  }
   const visualState = getVisualState(connection);
   setPill(els.peerState, `Peer ${connection}`, visualState);
 

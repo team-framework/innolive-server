@@ -24,13 +24,15 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("session not found")
-	ErrCapacityExceeded = errors.New("session capacity exceeded")
-	ErrNoVideoTrack     = errors.New("no video track is available")
-	ErrStreamActive     = errors.New("stream egress is already active")
-	ErrStreamNotActive  = errors.New("stream egress is not active")
-	ErrStreamPaused     = errors.New("stream egress is already paused")
-	ErrStreamNotPaused  = errors.New("stream egress is not paused")
+	ErrNotFound                  = errors.New("session not found")
+	ErrCapacityExceeded          = errors.New("session capacity exceeded")
+	ErrNoVideoTrack              = errors.New("no video track is available")
+	ErrStreamActive              = errors.New("stream egress is already active")
+	ErrStreamNotActive           = errors.New("stream egress is not active")
+	ErrStreamPaused              = errors.New("stream egress is already paused")
+	ErrStreamNotPaused           = errors.New("stream egress is not paused")
+	ErrRecoveryAttemptsExhausted = errors.New("WebRTC recovery attempts are exhausted")
+	ErrStaleNegotiation          = errors.New("signaling message belongs to a stale negotiation")
 	// 플랫폼 방송 라이프사이클(준비 → 라이브) 위반.
 	ErrBroadcastPrepared    = errors.New("the platform broadcast is already prepared")
 	ErrBroadcastNotPrepared = errors.New("the platform broadcast is not prepared")
@@ -66,6 +68,37 @@ type StreamState struct {
 	BroadcastPhase BroadcastPhase `json:"broadcast_phase"`
 }
 
+// PeerRecoveryStatus는 WebRTC 입력 연결의 네트워크 복구 단계다. RTMP egress의
+// 재연결 상태와 달리, 이 값은 같은 PeerConnection에서 ICE 후보를 다시 모으는
+// 세션 계층의 수명만 나타낸다.
+type PeerRecoveryStatus string
+
+const (
+	PeerRecoveryStatusIdle       PeerRecoveryStatus = "idle"
+	PeerRecoveryStatusWaiting    PeerRecoveryStatus = "waiting"
+	PeerRecoveryStatusRecovering PeerRecoveryStatus = "recovering"
+)
+
+// PeerConnectionState는 WebRTC 연결과 네트워크 복구 관측값을 함께 반환한다.
+// StreamState와 분리하여 RTMP 장애와 입력 연결 장애를 API에서 혼동하지 않게 한다.
+type PeerConnectionState struct {
+	ConnectionState     string             `json:"connection_state"`
+	ICEConnectionState  string             `json:"ice_connection_state"`
+	SignalingState      string             `json:"signaling_state"`
+	RecoveryStatus      PeerRecoveryStatus `json:"recovery_status"`
+	ReconnectAttempts   int                `json:"reconnect_attempts"`
+	RecoveryDeadline    *time.Time         `json:"recovery_deadline"`
+	LastConnectionError *string            `json:"last_connection_error"`
+}
+
+// WebRTCRecoveryPolicy는 모든 클라이언트가 동일한 서버 복구 창 안에서 ICE
+// restart를 시도하도록 /webrtc/config으로 전달하는 읽기 전용 계약이다.
+type WebRTCRecoveryPolicy struct {
+	WindowMS    int64 `json:"window_ms"`
+	DebounceMS  int64 `json:"debounce_ms"`
+	MaxAttempts int   `json:"max_attempts"`
+}
+
 type TrackState struct {
 	ID         string `json:"id"`
 	Kind       string `json:"kind"`
@@ -73,18 +106,14 @@ type TrackState struct {
 }
 
 type Response struct {
-	SessionID string            `json:"session_id"`
-	Status    string            `json:"status"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
-	Metadata  map[string]string `json:"metadata"`
-	Peer      struct {
-		ConnectionState    string `json:"connection_state"`
-		ICEConnectionState string `json:"ice_connection_state"`
-		SignalingState     string `json:"signaling_state"`
-	} `json:"peer_connection"`
-	Timing Timing `json:"timing"`
-	Media  struct {
+	SessionID string              `json:"session_id"`
+	Status    string              `json:"status"`
+	CreatedAt time.Time           `json:"created_at"`
+	UpdatedAt time.Time           `json:"updated_at"`
+	Metadata  map[string]string   `json:"metadata"`
+	Peer      PeerConnectionState `json:"peer_connection"`
+	Timing    Timing              `json:"timing"`
+	Media     struct {
 		RawVideoTrack          *TrackState `json:"raw_video_track"`
 		ProcessedVideoTrack    *TrackState `json:"processed_video_track"`
 		VideoSenderActive      bool        `json:"video_sender_active"`
@@ -145,12 +174,18 @@ type Session struct {
 	offerReceivedAt     time.Time
 	answerCreatedAt     time.Time
 	pendingICE          []webrtc.ICECandidateInit
-	negotiationMu       sync.Mutex
-	cancel              context.CancelFunc
-	trackCancel         context.CancelFunc
-	disconnectTimer     *time.Timer
-	wasConnected        bool
-	closed              bool
+	activeNegotiationID string
+	// localCandidateRoutes는 Pion이 만든 candidate의 ufrag를 해당 candidate를
+	// 수집한 signaling generation에 연결한다. Pion의 내부 queue는 callback을
+	// 늦게 실행할 수 있으므로, 가변 "현재 generation"으로 후보를 표기하면 안 된다.
+	localCandidateRoutes     map[string]localCandidateRoute
+	localCandidateRouteOrder []string
+	negotiationMu            sync.Mutex
+	cancel                   context.CancelFunc
+	trackCancel              context.CancelFunc
+	recovery                 peerRecovery
+	wasConnected             bool
+	closed                   bool
 	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
 	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
 	lastActivityAt time.Time
@@ -253,6 +288,14 @@ func (m *Manager) ICEServers() []webrtc.ICEServer {
 	return result
 }
 
+func (m *Manager) WebRTCRecoveryPolicy() WebRTCRecoveryPolicy {
+	return WebRTCRecoveryPolicy{
+		WindowMS:    recoveryWindow(m.cfg).Milliseconds(),
+		DebounceMS:  recoveryDebounce(m.cfg).Milliseconds(),
+		MaxAttempts: recoveryMaxAttempts(m.cfg),
+	}
+}
+
 // Capacity는 용량을 사용하는 세션 수(실행 중 + 예약)와 설정한 제한을 반환한다.
 // 제한값 0은 무제한을 뜻한다.
 func (m *Manager) Capacity() (active, limit int) {
@@ -327,6 +370,7 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
 		ownerHash:            ownerHash,
 		cancel:               cancel,
+		recovery:             peerRecovery{status: PeerRecoveryStatusIdle},
 	}
 	s.baseCtx = ctx
 	s.egressSlot = media.NewEgressSlot()
@@ -823,6 +867,10 @@ func (m *Manager) handleAudioTrack(ctx context.Context, s *Session, track *webrt
 }
 
 func (m *Manager) installHandlers(ctx context.Context, s *Session) {
+	s.PC.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		s.dispatchLocalICECandidate(candidate)
+	})
+
 	s.PC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		// RTPReceiver.ReadRTCP는 Pion의 receiver-report interceptor를 실행한다.
 		// interceptor는 들어온 Sender Report를 소비하고 LastSenderReport 값이 든
@@ -924,7 +972,20 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				delete(m.pipelines, s.ID)
 				m.mu.Unlock()
 			}()
-			media.RunTrack(trackCtx, m.logger.With("session_id", s.ID), track, s.Output, processor, transcoder, egressSlot, m.metrics, m.cfg.PrivacyMode, m.cfg.FrameQueueSize, requestKeyframe)
+			media.RunTrack(
+				trackCtx,
+				m.logger.With("session_id", s.ID),
+				track,
+				s.Output,
+				processor,
+				transcoder,
+				egressSlot,
+				m.metrics,
+				m.cfg.PrivacyMode,
+				m.cfg.FrameQueueSize,
+				requestKeyframe,
+				func() { m.noteProcessedMediaFrame(s) },
+			)
 			s.mu.Lock()
 			// 아직 활성 트랙일 때만 비운다. 이전 파이프라인을 비우는 사이 새
 			// 교체 트랙이 활성화됐을 수 있다.
@@ -949,27 +1010,34 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			if !s.answerCreatedAt.IsZero() {
 				s.Timing.AnswerToConnectedMS = millisecondsPtr(now.Sub(s.answerCreatedAt))
 			}
-			if s.disconnectTimer != nil {
-				s.disconnectTimer.Stop()
-				s.disconnectTimer = nil
-				m.metrics.IncReconnects()
-			}
 			s.wasConnected = true
 		}
-		if state == webrtc.PeerConnectionStateDisconnected && s.disconnectTimer == nil {
-			s.disconnectTimer = time.AfterFunc(m.cfg.DisconnectedGracePeriod, func() {
-				if s.PC.ConnectionState() == webrtc.PeerConnectionStateDisconnected {
-					_ = m.Delete(s.ID, "peer_connection_disconnected_timeout")
-				}
-			})
-		}
 		s.mu.Unlock()
-		if state == webrtc.PeerConnectionStateFailed {
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			m.connectedDuringRecovery(s)
+		case webrtc.PeerConnectionStateDisconnected:
+			m.scheduleDisconnectedRecovery(s)
+		case webrtc.PeerConnectionStateFailed:
 			m.metrics.IncConnectionFailures()
-			go func() { _ = m.Delete(s.ID, "peer_connection_failed") }()
+			s.mu.RLock()
+			wasConnected := s.wasConnected
+			s.mu.RUnlock()
+			if wasConnected {
+				m.beginRecovery(s, 0, "peer_connection_failed")
+			} else {
+				go func() { _ = m.Delete(s.ID, "peer_connection_failed") }()
+			}
 		}
 		if state == webrtc.PeerConnectionStateClosed {
-			go func() { _ = m.Delete(s.ID, "peer_connection_closed") }()
+			// Session.close가 직접 닫은 경우에는 이미 정리 중이다. 외부에서 닫힌
+			// 경우에만 세션 정리를 예약한다.
+			s.mu.RLock()
+			closed := s.closed
+			s.mu.RUnlock()
+			if !closed {
+				go func() { _ = m.Delete(s.ID, "peer_connection_closed") }()
+			}
 		}
 	})
 
@@ -1005,6 +1073,16 @@ func (s *Session) Response() Response {
 	response.Peer.ConnectionState = s.PC.ConnectionState().String()
 	response.Peer.ICEConnectionState = s.PC.ICEConnectionState().String()
 	response.Peer.SignalingState = s.PC.SignalingState().String()
+	response.Peer.RecoveryStatus = s.recovery.status
+	response.Peer.ReconnectAttempts = s.recovery.attempts
+	if s.recovery.deadline != nil {
+		deadline := *s.recovery.deadline
+		response.Peer.RecoveryDeadline = &deadline
+	}
+	if s.recovery.lastError != nil {
+		lastError := *s.recovery.lastError
+		response.Peer.LastConnectionError = &lastError
+	}
 	if s.rawTrackID != "" {
 		response.Media.RawVideoTrack = &TrackState{ID: s.rawTrackID, Kind: "video", ReadyState: "live"}
 	}
@@ -1066,10 +1144,7 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 	}
 	s.closed = true
 	s.Status = "closing"
-	if s.disconnectTimer != nil {
-		s.disconnectTimer.Stop()
-		s.disconnectTimer = nil
-	}
+	s.cancelRecoveryLocked()
 	// 세션 ctx 취소로도 전파되지만, egress 종료가 세션 teardown의 일부임을
 	// 명시하기 위해 상태를 먼저 stopped로 전이하고 전용 cancel을 직접 호출한다.
 	// 이 순서로 WebRTC 종료·세션 삭제·로그아웃 모두 재구성 완료를 기다리지

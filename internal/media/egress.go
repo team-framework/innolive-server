@@ -107,6 +107,9 @@ type EgressStatus struct {
 	// PausedAt은 마지막 일시 중단이 시작된 시각이다. resume과 stop 뒤에도
 	// 마지막 일시 중단 이력으로 보존한다.
 	PausedAt *time.Time
+	// InputRecovering은 WebRTC 입력 연결을 복구하는 동안 사용자 pause와 별개로
+	// 취소 슬레이트·무음을 출력하고 있는지를 나타낸다.
+	InputRecovering bool
 }
 
 // egressTransitionEvent는 egress 상태를 바꾸는 외부 사건이다. 상태 전이는
@@ -426,10 +429,57 @@ func (e *RTMPEgress) Resume() bool {
 	if !e.transition(egressTransition{event: egressTransitionResume}) {
 		return false
 	}
-	if e.audio != nil {
+	if e.audio != nil && !e.inputRecovering() {
 		e.audio.SetMuted(false)
 	}
 	return true
+}
+
+// BeginInputRecovery는 WebRTC 입력 경로가 끊긴 동안 RTMP 연결을 유지하며 기존
+// 취소 슬레이트·무음을 내보내게 한다. 사용자 pause와 다른 원인이므로 egress
+// phase를 paused로 바꾸지 않고 별도 관측값으로만 기록한다.
+func (e *RTMPEgress) BeginInputRecovery() bool {
+	e.statusMu.Lock()
+	if e.status.Phase == EgressPhaseStopped || e.status.InputRecovering {
+		e.statusMu.Unlock()
+		return false
+	}
+	e.status.InputRecovering = true
+	e.status.UpdatedAt = time.Now().UTC()
+	e.statusMu.Unlock()
+	if e.audio != nil {
+		e.audio.SetMuted(true)
+	}
+	return true
+}
+
+// EndInputRecovery는 첫 정상 처리 프레임을 확인한 뒤에만 호출한다. 사용자가
+// 여전히 pause 상태면 오디오 무음과 취소 슬레이트는 그대로 유지한다.
+func (e *RTMPEgress) EndInputRecovery() bool {
+	e.statusMu.Lock()
+	if !e.status.InputRecovering {
+		e.statusMu.Unlock()
+		return false
+	}
+	e.status.InputRecovering = false
+	e.status.UpdatedAt = time.Now().UTC()
+	if e.audio != nil {
+		e.audio.SetMuted(userPausePhase(e.status.Phase))
+	}
+	e.statusMu.Unlock()
+	return true
+}
+
+// userPausePhase는 사용자가 명시적으로 일시 중지를 요청한 의도가 유지되는
+// 상태인지 반환한다. 재연결·재구성은 일시적인 내부 단계이므로, 이 상태에서는
+// 입력 복구가 끝나도 마이크 오디오를 다시 열면 안 된다.
+func userPausePhase(phase EgressPhase) bool {
+	switch phase {
+	case EgressPhasePaused, EgressPhasePausedReconfiguring, EgressPhasePausedReconnecting:
+		return true
+	default:
+		return false
+	}
 }
 
 // Stop은 egress를 즉시 stopped로 전이한다. 실제 FFmpeg 종료와 RTMP 연결
@@ -721,7 +771,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		return nil
 	}
 	for _, item := range pending {
-		if e.isPaused() {
+		if e.shouldWriteCancellationSlate() {
 			if resolutionChanged(item, width, height) {
 				return written, &item, nil
 			}
@@ -741,7 +791,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		case <-ctx.Done():
 			return written, nil, ctx.Err()
 		case item := <-e.input:
-			if e.isPaused() {
+			if e.shouldWriteCancellationSlate() {
 				if resolutionChanged(item, width, height) {
 					return written, &item, nil
 				}
@@ -751,7 +801,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 				return written, mismatch, err
 			}
 		case <-slateTicker.C:
-			if e.isPaused() {
+			if e.shouldWriteCancellationSlate() {
 				if err := writeSlate(); err != nil {
 					return written, nil, err
 				}
@@ -792,8 +842,16 @@ func (e *RTMPEgress) clearCancellationSlate() {
 	e.slateMu.Unlock()
 }
 
-func (e *RTMPEgress) isPaused() bool {
-	return e.Status().Phase == EgressPhasePaused
+func (e *RTMPEgress) inputRecovering() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.status.InputRecovering
+}
+
+func (e *RTMPEgress) shouldWriteCancellationSlate() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.status.Phase == EgressPhasePaused || e.status.InputRecovering
 }
 
 // resolutionChanged는 프레임 해상도가 현재 스폰 해상도와 다른지 판정한다.

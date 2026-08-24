@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -81,6 +82,32 @@ func TestConnectedPeerNegotiatesRTCPFeedback(t *testing.T) {
 	case <-connected:
 	case <-time.After(15 * time.Second):
 		t.Fatalf("peer connection never connected (ice=%s, state=%s)", client.ICEConnectionState(), client.ConnectionState())
+	}
+
+	// 실제 연결 뒤에도 같은 PeerConnection에 ICE restart offer를 적용할 수
+	// 있어야 네트워크 전환 시 세션·송출 egress를 새로 만들지 않는다.
+	restartOffer, err := client.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		t.Fatalf("create ICE restart offer: %v", err)
+	}
+	restartGathered := webrtc.GatheringCompletePromise(client)
+	if err = client.SetLocalDescription(restartOffer); err != nil {
+		t.Fatalf("set local ICE restart offer: %v", err)
+	}
+	<-restartGathered
+	negotiationID := uuid.NewString()
+	restartAnswer, err := manager.CreateAnswerWithOptions(liveSession.ID, ownerToken, client.LocalDescription().SDP, NegotiationOptions{
+		NegotiationID: negotiationID,
+		ICERestart:    true,
+	})
+	if err != nil {
+		t.Fatalf("create ICE restart answer: %v", err)
+	}
+	if restartAnswer.NegotiationID != negotiationID {
+		t.Fatalf("restart answer negotiation ID = %q, want %q", restartAnswer.NegotiationID, negotiationID)
+	}
+	if err = client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: restartAnswer.SDP}); err != nil {
+		t.Fatalf("set remote ICE restart answer: %v", err)
 	}
 
 	want := []string{"ccm fir", "goog-remb", "nack", "nack pli", "transport-cc"}

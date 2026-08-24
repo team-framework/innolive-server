@@ -238,9 +238,10 @@ func RunTrack(
 	mode config.PrivacyMode,
 	queueSize int,
 	requestKeyframe func(),
+	onProcessedFrame func(),
 ) {
 	defer processor.Close()
-	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, egress, registry, mode, queueSize, requestKeyframe)
+	runTranscodedTrack(ctx, logger, remote, local, processor, transcoder, egress, registry, mode, queueSize, requestKeyframe, onProcessedFrame)
 }
 
 func runTranscodedTrack(
@@ -255,6 +256,7 @@ func runTranscodedTrack(
 	mode config.PrivacyMode,
 	queueSize int,
 	requestKeyframe func(),
+	onProcessedFrame func(),
 ) {
 	if transcoder == nil {
 		registry.IncFrameFailure(string(mode))
@@ -293,7 +295,7 @@ func runTranscodedTrack(
 	}()
 	go func() {
 		defer queueWorkers.Done()
-		processImages(pipelineContext, logger, processor, decoded, processed, egress, registry, mode)
+		processImages(pipelineContext, logger, processor, decoded, processed, egress, registry, mode, onProcessedFrame)
 	}()
 	go func() {
 		defer streamWorkers.Done()
@@ -396,6 +398,7 @@ func processImages(
 	egress *EgressSlot,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
+	onProcessedFrame func(),
 ) {
 	defer close(processed)
 	var failureLog failureLogger
@@ -423,6 +426,9 @@ func processImages(
 			item.stageAt = time.Now()
 			if sink := egress.Load(); sink != nil {
 				sink.Enqueue(item)
+			}
+			if onProcessedFrame != nil {
+				onProcessedFrame()
 			}
 			select {
 			case processed <- item:

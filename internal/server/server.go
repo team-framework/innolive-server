@@ -162,7 +162,10 @@ func (s *Server) handleWebRTCConfig(w http.ResponseWriter, _ *http.Request) {
 	for _, server := range s.sessions.ICEServers() {
 		items = append(items, iceServer{URLs: server.URLs, Username: server.Username, Credential: server.Credential})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"iceServers": items})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"iceServers": items,
+		"recovery":   s.sessions.WebRTCRecoveryPolicy(),
+	})
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {

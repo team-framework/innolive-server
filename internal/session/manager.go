@@ -211,30 +211,55 @@ type Manager struct {
 
 	// broadcastCleanup은 세션이 끝날 때 남은 플랫폼 방송을 치우는 훅이다.
 	// 세션 계층은 플랫폼 provider를 몰라야 하므로(역방향 결합) 서버가 조립
-	// 시점에 주입한다. nil이면 정리를 하지 않는다.
-	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast)
+	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
+	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
+	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
 }
 
 // SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
 // WebRTC 실패·유예 시간 초과·로그아웃·명시적 삭제가 모두 Delete로 모이므로
 // 훅 하나로 전부 덮인다. 서버 조립 직후 한 번만 호출한다.
-func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast)) {
+func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)) {
 	m.broadcastCleanup = cleanup
 }
 
-// cleanupPlatformBroadcast는 라이브까지 가지 못한 방송을 치운다. 라이브였던
-// 방송은 플랫폼의 autoStop이 끝내므로 손대지 않는다. 플랫폼 왕복이 세션
-// teardown을 붙잡지 않도록 별도 고루틴에서 돌린다.
+// cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
+// 방송도 여기서 끝낸다 — autoStop을 기다리면 그 사이(실측 약 1분)에 시작한
+// 다음 방송과 겹쳐 라이브가 둘이 된다. 플랫폼 왕복이 세션 teardown을 붙잡지
+// 않도록 별도 고루틴에서 돌린다.
 func (m *Manager) cleanupPlatformBroadcast(s *Session) {
-	if m.broadcastCleanup == nil {
+	s.mu.Lock()
+	broadcast, phase := takeBroadcastLocked(s)
+	s.mu.Unlock()
+	m.disposeBroadcast(s.UserID, broadcast, phase)
+}
+
+// takeBroadcastLocked는 정리해야 할 방송을 세션에서 떼어내고 단계를 idle로
+// 되돌린다. 라이브 전환 왕복 중이면 손대지 않는다 — 이미 나간 요청의 결과를
+// 받는 쪽이 마무리해야 하기 때문이다. Session.mu를 가진 호출자만 쓴다.
+func takeBroadcastLocked(s *Session) (PlatformBroadcast, BroadcastPhase) {
+	phase := s.broadcastPhase
+	if phase == BroadcastPhaseGoingLive {
+		return PlatformBroadcast{}, BroadcastPhaseIdle
+	}
+	var broadcast PlatformBroadcast
+	if s.platformBroadcast != nil && (phase == BroadcastPhasePrepared || phase == BroadcastPhaseLive) {
+		broadcast = *s.platformBroadcast
+	} else {
+		phase = BroadcastPhaseIdle
+	}
+	s.platformBroadcast = nil
+	s.broadcastPhase = BroadcastPhaseIdle
+	return broadcast, phase
+}
+
+// disposeBroadcast는 떼어낸 방송을 플랫폼에서 치운다. 치울 것이 없으면 아무
+// 일도 하지 않는다.
+func (m *Manager) disposeBroadcast(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) {
+	if m.broadcastCleanup == nil || phase == BroadcastPhaseIdle || broadcast.BroadcastID == "" {
 		return
 	}
-	broadcast, phase := s.PlatformBroadcast()
-	if phase != BroadcastPhasePrepared {
-		return
-	}
-	userID := s.UserID
-	go m.broadcastCleanup(userID, broadcast)
+	go m.broadcastCleanup(userID, broadcast, phase)
 }
 
 // streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
@@ -575,8 +600,13 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 		// 계속 동작해야 하므로 egress 종료와 함께 AI 입력 차단을 해제한다.
 		s.setAIInputPaused(false)
 	}
+	// egress가 스스로 끝난 경우에도 플랫폼 방송과 단계를 정리한다. 그러지
+	// 않으면 단계가 live에 남아 설정 변경이 영구히 409로 막히고, 유튜브 쪽
+	// 방송도 다음 송출과 겹친다.
+	broadcast, phase := takeBroadcastLocked(s)
 	s.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
+	m.disposeBroadcast(s.UserID, broadcast, phase)
 
 	if status.StopReason != nil {
 		lastError := ""
@@ -595,17 +625,18 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 // 두 번째 반환값은 호출자가 플랫폼에서 지워야 할 방송이다(없으면 zero value와
 // false). 중지 시점의 단계 판정과 상태 전이가 갈라지면 라이브 전환과 경합하므로
 // 한 번의 잠금 안에서 함께 정한다.
-// 플랫폼 쪽 방송 종료는 enableAutoStop이 담당한다(송출 중단 약 1분 후 반영,
-// 실측 57.6초).
-func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, bool, error) {
+// 플랫폼 방송은 autoStop(송출 중단 약 1분 후 반영, 실측 57.6초)을 기다리지
+// 않고 여기서 끝낸다 — 그 사이에 다음 방송을 시작하면 재사용 스트림 키를 통해
+// 라이브가 둘이 되기 때문이다.
+func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastPhase, error) {
 	s, err := m.Get(id)
 	if err != nil {
-		return nil, PlatformBroadcast{}, false, err
+		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
-		return nil, PlatformBroadcast{}, false, ErrStreamNotActive
+		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, ErrStreamNotActive
 	}
 	s.egressSlot.Clear()
 	s.egress.Stop()
@@ -618,23 +649,16 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, bool, erro
 	s.streamStopReason = &reason
 	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
 	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
-	var discard PlatformBroadcast
-	shouldDiscard := false
 	if s.broadcastPhase == BroadcastPhaseGoingLive {
 		s.goLiveStopRequested = true
-	} else {
-		// 라이브까지 가지 못한 방송만 지운다. 라이브였던 방송의 종료는
-		// 플랫폼의 autoStop이 맡는다.
-		if s.platformBroadcast != nil && s.broadcastPhase == BroadcastPhasePrepared {
-			discard = *s.platformBroadcast
-			shouldDiscard = true
-		}
-		s.platformBroadcast = nil
-		s.broadcastPhase = BroadcastPhaseIdle
+		s.UpdatedAt = time.Now().UTC()
+		m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
+		return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 	}
+	broadcast, phase := takeBroadcastLocked(s)
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
-	return s, discard, shouldDiscard, nil
+	return s, broadcast, phase, nil
 }
 
 // PauseStream은 RTMP 연결을 유지한 채 실행 중인 egress를 일시 중단 상태로

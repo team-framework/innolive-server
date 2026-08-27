@@ -117,6 +117,7 @@ function bindElements() {
     "goLiveBtn",
     "pauseBroadcastBtn",
     "resumeBroadcastBtn",
+    "stopBroadcastBtn",
     "healthBtn",
     "createSessionBtn",
     "refreshSessionsBtn",
@@ -220,6 +221,7 @@ function bindEvents() {
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
+  els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
   els.deleteSessionBtn.addEventListener("click", () => void deleteCurrentSession());
   els.errorProbeBtn.addEventListener("click", () => sendErrorProbe());
@@ -1351,6 +1353,25 @@ async function pauseBroadcast() {
     logEvent("ok", "YouTube broadcast pause requested", {
       session_id: sessionId,
       stream: paused,
+    });
+  });
+}
+
+// stopBroadcast는 YouTube 송출만 끝낸다. 세션과 WebRTC 미리보기는 그대로
+// 남으므로, 설정을 고쳐 곧바로 다음 방송을 준비할 수 있다.
+async function stopBroadcast() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("종료할 방송 세션이 없습니다.");
+  }
+  await runBusy(async () => {
+    const stopped = await apiFetch(`/sessions/${sessionId}/stream/stop`, {
+      method: "POST",
+    });
+    updateCurrentSessionStream(stopped);
+    logEvent("ok", "YouTube broadcast stop requested", {
+      session_id: sessionId,
+      stream: stopped,
     });
   });
 }
@@ -2764,6 +2785,14 @@ function updateButtons() {
     state.busy ||
     !state.session?.session_id ||
     streamStatus !== "paused";
+  // 종료는 egress가 살아 있는 모든 상태에서 열어 둔다 — 재연결·일시 중지
+  // 중에도 방송을 끝낼 수 있어야 한다. 서버가 ErrStreamNotActive로 보는
+  // idle·stopped만 막는다.
+  els.stopBroadcastBtn.disabled =
+    state.busy ||
+    !state.session?.session_id ||
+    !streamStatus ||
+    ["idle", "stopped"].includes(streamStatus);
   els.healthBtn.disabled = state.busy;
   els.createSessionBtn.disabled = state.busy || !signedIn;
   els.refreshSessionsBtn.disabled = state.busy;

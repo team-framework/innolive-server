@@ -131,9 +131,9 @@ func TestResetBroadcastPreparationReopensSettings(t *testing.T) {
 // 명시적 삭제가 모두 Delete로 모이므로 이 경로 하나로 확인한다.
 func TestDeleteCleansUpPreparedBroadcast(t *testing.T) {
 	manager := newTestManager(t, 4)
-	cleaned := make(chan PlatformBroadcast, 1)
-	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast) {
-		cleaned <- broadcast
+	cleaned := make(chan cleanupCall, 1)
+	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) {
+		cleaned <- cleanupCall{broadcast: broadcast, phase: phase}
 	})
 	s, _, err := manager.Create(nil)
 	if err != nil {
@@ -152,21 +152,29 @@ func TestDeleteCleansUpPreparedBroadcast(t *testing.T) {
 	}
 	select {
 	case got := <-cleaned:
-		if got != broadcast {
-			t.Fatalf("cleanup broadcast = %+v, want %+v", got, broadcast)
+		if got.broadcast != broadcast || got.phase != BroadcastPhasePrepared {
+			t.Fatalf("cleanup call = %+v, want %+v at prepared", got, broadcast)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("session end did not clean up the prepared broadcast")
 	}
 }
 
-// TestDeleteDoesNotCleanUpLiveBroadcast: 라이브까지 간 방송의 종료는 플랫폼
-// autoStop이 맡으므로 손대지 않는다.
-func TestDeleteDoesNotCleanUpLiveBroadcast(t *testing.T) {
+// cleanupCall은 정리 훅이 받은 인자다. 방송뿐 아니라 단계도 확인해야 한다 —
+// 준비된 방송은 삭제, 라이브였던 방송은 즉시 종료로 정리 방법이 갈린다.
+type cleanupCall struct {
+	broadcast PlatformBroadcast
+	phase     BroadcastPhase
+}
+
+// TestDeleteEndsLiveBroadcast: 라이브까지 간 방송도 세션이 끝나면 즉시
+// 종료시켜야 한다. autoStop(실측 약 1분)을 기다리면 그 사이 시작한 다음 방송이
+// 같은 재사용 스트림 키를 쓰면서 채널에 라이브가 둘이 된다(#165).
+func TestDeleteEndsLiveBroadcast(t *testing.T) {
 	manager := newTestManager(t, 4)
-	cleaned := make(chan PlatformBroadcast, 1)
-	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast) {
-		cleaned <- broadcast
+	cleaned := make(chan cleanupCall, 1)
+	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) {
+		cleaned <- cleanupCall{broadcast: broadcast, phase: phase}
 	})
 	s, _, err := manager.Create(nil)
 	if err != nil {
@@ -190,8 +198,11 @@ func TestDeleteDoesNotCleanUpLiveBroadcast(t *testing.T) {
 	}
 	select {
 	case got := <-cleaned:
-		t.Fatalf("live broadcast was deleted from the platform: %+v", got)
-	case <-time.After(200 * time.Millisecond):
+		if got.phase != BroadcastPhaseLive || got.broadcast.BroadcastID != "bid" {
+			t.Fatalf("cleanup call = %+v, want bid at live", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session end left the live broadcast running")
 	}
 }
 
@@ -222,14 +233,14 @@ func TestStopDuringGoLiveWins(t *testing.T) {
 	if _, err := manager.StartStream(s.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
 		t.Fatal(err)
 	}
-	_, _, shouldDiscard, err := manager.StopStream(s.ID)
+	_, _, phase, err := manager.StopStream(s.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 전환 왕복 중에는 중지가 방송을 직접 지우지 않는다 — 전환 결과를 받은
+	// 전환 왕복 중에는 중지가 방송을 직접 치우지 않는다 — 전환 결과를 받은
 	// 쪽이 마무리해야 하기 때문이다.
-	if shouldDiscard {
-		t.Fatal("stop tried to delete the broadcast while it was switching to live")
+	if phase != BroadcastPhaseIdle {
+		t.Fatalf("stop returned %q to clean up while the broadcast was switching to live", phase)
 	}
 
 	aborted, got, err := manager.CompleteGoLive(s.ID)
@@ -274,5 +285,106 @@ func TestAbortGoLiveRestoresPrepared(t *testing.T) {
 	}
 	if _, err := manager.BeginGoLive(s.ID); err != nil {
 		t.Fatalf("BeginGoLive() after rollback = %v, want retry to be possible", err)
+	}
+}
+
+// TestStopStreamEndsLiveBroadcast: 송출 중지는 라이브 방송을 즉시 끝내고
+// 단계를 idle로 되돌려야 한다. autoStop에 맡기면 그 사이 재시작한 방송과 겹치고,
+// 단계가 live에 남으면 이후 설정 저장이 계속 409로 막힌다(#165).
+func TestStopStreamEndsLiveBroadcast(t *testing.T) {
+	manager := newTestManager(t, 4)
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginBroadcastPrepare(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := PlatformBroadcast{Provider: "youtube", BroadcastID: "bid", StreamID: "sid"}
+	if _, err := manager.MarkBroadcastPrepared(s.ID, broadcast); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginGoLive(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, _, err := manager.CompleteGoLive(s.ID); aborted || err != nil {
+		t.Fatalf("CompleteGoLive() = (%v, %v)", aborted, err)
+	}
+
+	s.mu.Lock()
+	s.rawTrackID = "video-track"
+	s.mu.Unlock()
+	if _, err := manager.StartStream(s.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, got, phase, err := manager.StopStream(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase != BroadcastPhaseLive || got != broadcast {
+		t.Fatalf("stop returned (%+v, %q), want %+v at live", got, phase, broadcast)
+	}
+	if _, current := s.PlatformBroadcast(); current != BroadcastPhaseIdle {
+		t.Fatalf("phase = %q, want idle after stop", current)
+	}
+	// 중지한 뒤에는 다음 방송 설정을 다시 저장할 수 있어야 한다.
+	if _, err := manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "다음 방송"}); err != nil {
+		t.Fatalf("SetBroadcastSettings() after stop = %v, want success", err)
+	}
+}
+
+// TestEgressSelfStopReleasesLiveBroadcast: egress가 중지 요청 없이 스스로 끝난
+// 경우(재연결 예산 소진 등)에도 단계를 idle로 되돌리고 방송을 끝내야 한다.
+// 그러지 않으면 단계가 live에 갇혀 이후 설정 저장이 영구히 409가 된다(#165).
+func TestEgressSelfStopReleasesLiveBroadcast(t *testing.T) {
+	manager := newTestManager(t, 4)
+	cleaned := make(chan cleanupCall, 1)
+	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) {
+		cleaned <- cleanupCall{broadcast: broadcast, phase: phase}
+	})
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginBroadcastPrepare(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := PlatformBroadcast{Provider: "youtube", BroadcastID: "bid", StreamID: "sid"}
+	if _, err := manager.MarkBroadcastPrepared(s.ID, broadcast); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginGoLive(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, _, err := manager.CompleteGoLive(s.ID); aborted || err != nil {
+		t.Fatalf("CompleteGoLive() = (%v, %v)", aborted, err)
+	}
+	s.mu.Lock()
+	s.rawTrackID = "video-track"
+	s.mu.Unlock()
+	if _, err := manager.StartStream(s.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 중지 요청 없이 egress만 끝낸다 — 재연결 예산을 소진한 egress와 같은 경로다.
+	s.mu.Lock()
+	cancelEgress := s.egressCancel
+	s.mu.Unlock()
+	cancelEgress()
+
+	select {
+	case got := <-cleaned:
+		if got.phase != BroadcastPhaseLive || got.broadcast != broadcast {
+			t.Fatalf("cleanup call = %+v, want %+v at live", got, broadcast)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("egress self-stop left the live broadcast running")
+	}
+	if _, phase := s.PlatformBroadcast(); phase != BroadcastPhaseIdle {
+		t.Fatalf("phase = %q, want idle after the egress stopped on its own", phase)
+	}
+	if _, err := manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "다음 방송"}); err != nil {
+		t.Fatalf("SetBroadcastSettings() after egress self-stop = %v, want success", err)
 	}
 }

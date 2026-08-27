@@ -113,7 +113,7 @@ func New(
 	// 삭제) 라이브까지 가지 못한 방송은 채널에 남으므로 여기서 치운다.
 	// 세션 매니저 없이 조립되는 경로(일부 테스트)도 있어 nil을 확인한다.
 	if sessions != nil {
-		sessions.SetBroadcastCleanup(s.discardBroadcast)
+		sessions.SetBroadcastCleanup(s.disposeBroadcast)
 	}
 	// requestIDMiddleware가 corsMiddleware보다 바깥이어야 CORS 거절 응답에도
 	// request_id가 실린다 — 그래야 사용자가 보여준 에러와 로그를 묶을 수 있다.
@@ -469,6 +469,18 @@ func writeGoLiveBeginError(w http.ResponseWriter, err error, sessionID string) {
 	}
 }
 
+// disposeBroadcast는 세션이 놓아준 방송을 단계에 맞게 치운다. 라이브까지 가지
+// 못한 방송은 삭제하고, 라이브였던 방송은 즉시 종료시킨다 — autoStop을
+// 기다리면 다음 방송과 겹쳐 라이브가 둘이 된다.
+func (s *Server) disposeBroadcast(userID uuid.UUID, broadcast session.PlatformBroadcast, phase session.BroadcastPhase) {
+	switch phase {
+	case session.BroadcastPhaseLive:
+		s.endLiveBroadcast(userID, broadcast)
+	case session.BroadcastPhasePrepared:
+		s.discardBroadcast(userID, broadcast)
+	}
+}
+
 // discardPreparedBroadcast는 준비까지 끝냈지만 쓰이지 못한 방송을 플랫폼에서
 // 정리한다. autoStart를 끈 뒤로는 이런 방송을 아무도 치워주지 않는다.
 // 실패해도 요청 처리에는 영향이 없으므로 로그만 남긴다.
@@ -651,12 +663,11 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 라이브였던
-// 방송의 종료는 autoStop이 담당하므로(송출 중단 약 1분 후 반영) 플랫폼 API
-// 호출이 없다. 다만 라이브 전까지 못 간 방송은 autoStop이 손대지 않으므로
-// 여기서 지운다(#142).
+// handleStopStream은 egress만 종료한다(뷰어 송출·세션은 유지). 플랫폼 방송은
+// 단계에 따라 삭제하거나(준비까지만 간 방송, #142) 즉시 종료한다(라이브였던
+// 방송) — autoStop을 기다리면 다음 방송과 겹친다.
 func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSession *session.Session) {
-	_, discard, shouldDiscard, err := s.sessions.StopStream(liveSession.ID)
+	_, broadcast, phase, err := s.sessions.StopStream(liveSession.ID)
 	if err != nil {
 		if errors.Is(err, session.ErrStreamNotActive) {
 			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
@@ -667,9 +678,7 @@ func (s *Server) handleStopStream(w http.ResponseWriter, _ *http.Request, liveSe
 	}
 	// 라이브 전환 왕복 중이었다면 여기서 지우지 않는다 — 전환 결과를 받은
 	// golive 핸들러가 방송을 종료시킨다.
-	if shouldDiscard {
-		s.discardPreparedBroadcast(liveSession, discard)
-	}
+	s.disposeBroadcast(liveSession.UserID, broadcast, phase)
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
 }
 

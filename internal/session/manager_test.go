@@ -513,13 +513,16 @@ func newReapTestManager(t *testing.T, timeout time.Duration) *Manager {
 	return manager
 }
 
-// waitUntilReaped는 세션이 회수될 때까지 기다린다. 기다린 시간을 돌려준다.
-func waitUntilReaped(t *testing.T, manager *Manager, id string, within time.Duration) time.Duration {
+// waitUntilReaped는 세션이 회수될 때까지 기다리고, since부터 회수까지 걸린
+// 시간을 돌려준다. 회수 기한은 생성·마지막 활동 시점부터 재므로 기준 시각을
+// 호출자가 준다 — 이 함수가 호출된 시점부터 재면 그 사이 간격만큼 늘 짧게
+// 측정되어, -race처럼 느린 환경에서 경계값 비교가 헛되이 실패한다.
+func waitUntilReaped(t *testing.T, manager *Manager, id string, since time.Time, within time.Duration) time.Duration {
 	t.Helper()
 	start := time.Now()
 	for time.Since(start) < within {
 		if _, err := manager.Get(id); errors.Is(err, ErrNotFound) {
-			return time.Since(start)
+			return time.Since(since)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -537,6 +540,8 @@ func TestReapUnnegotiatedStopsExtendingAfterLimit(t *testing.T) {
 
 	manager := newReapTestManager(t, timeout)
 
+	// 연장 상한은 세션 생성 시점부터 잰다.
+	createdAt := time.Now()
 	s, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -556,7 +561,7 @@ func TestReapUnnegotiatedStopsExtendingAfterLimit(t *testing.T) {
 		}
 	}()
 
-	if elapsed := waitUntilReaped(t, manager, s.ID, 2*time.Second); elapsed < maxNegotiationExtension {
+	if elapsed := waitUntilReaped(t, manager, s.ID, createdAt, 2*time.Second); elapsed < maxNegotiationExtension {
 		t.Fatalf("session reaped after %s, want at least the extension limit %s", elapsed, maxNegotiationExtension)
 	}
 }
@@ -573,15 +578,17 @@ func TestReapUnnegotiatedDefersWhileBroadcastSettingsUpdated(t *testing.T) {
 	}
 
 	// 원래 회수 시점을 넘길 때까지 설정을 저장하며 버틴다.
+	lastActivity := time.Now()
 	for i := 0; i < 3; i++ {
 		time.Sleep(timeout / 2)
 		if _, err := manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "작성 중"}); err != nil {
 			t.Fatalf("SetBroadcastSettings after %s: %v", time.Duration(i+1)*timeout/2, err)
 		}
+		lastActivity = time.Now()
 	}
 
 	// 저장을 멈추면 마지막 저장 이후 timeout이 지나 회수된다.
-	if elapsed := waitUntilReaped(t, manager, s.ID, 2*time.Second); elapsed < timeout {
+	if elapsed := waitUntilReaped(t, manager, s.ID, lastActivity, 2*time.Second); elapsed < timeout {
 		t.Fatalf("session reaped after %s, want at least %s since last activity", elapsed, timeout)
 	}
 }

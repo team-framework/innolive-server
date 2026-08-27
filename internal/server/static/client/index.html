@@ -91,6 +91,7 @@
         <button id="goLiveBtn" class="button button-primary" type="button" disabled>라이브 시작</button>
         <button id="pauseBroadcastBtn" class="button" type="button" disabled>방송 일시 중지</button>
         <button id="resumeBroadcastBtn" class="button" type="button" disabled>방송 재개</button>
+        <button id="stopBroadcastBtn" class="button button-danger" type="button" disabled>방송 종료</button>
         <button id="healthBtn" class="button" type="button">Health Check</button>
         <button id="createSessionBtn" class="button" type="button">Create Session</button>
         <button id="refreshSessionsBtn" class="button" type="button">Refresh Sessions</button>
@@ -104,7 +105,7 @@
           <p class="eyebrow">YouTube broadcasting</p>
           <h2 id="broadcastStatusTitle">방송 상태</h2>
           <p>
-            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 표시합니다. 송출 중에는 일시 중지로 취소 화면을 보내고, 재개로 카메라 영상 송출로 돌아갈 수 있습니다.
+            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 표시합니다. 송출 중에는 일시 중지로 취소 화면을 보내고, 재개로 카메라 영상 송출로 돌아갈 수 있습니다. 방송 종료는 YouTube 방송을 즉시 끝내고 세션과 미리보기는 유지합니다.
           </p>
         </div>
         <dl class="broadcast-status-grid">

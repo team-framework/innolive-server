@@ -14,6 +14,7 @@ const buttonKeys = [
   "goLiveBtn",
   "pauseBroadcastBtn",
   "resumeBroadcastBtn",
+  "stopBroadcastBtn",
   "healthBtn",
   "createSessionBtn",
   "refreshSessionsBtn",
@@ -121,7 +122,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons };`,
     context,
     { filename: appPath },
   );
@@ -374,4 +375,55 @@ test("늦게 도착한 이전 세션의 404는 새 세션 연결을 정리하지
   assert.equal(peerConnectionCloseCalls, 0);
   assert.equal(webSocketCloseCalls, 0);
   assert.equal(stoppedTracks, 0);
+});
+
+test("방송 종료 버튼은 /stream/stop을 호출하고 세션은 유지한다", async () => {
+  const calls = [];
+  const { stopBroadcast, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), method: options?.method });
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        async text() {
+          return JSON.stringify({ status: "stopped", stop_reason: "user_requested" });
+        },
+      };
+    },
+  });
+  state.session = { session_id: "session-1", stream: { status: "streaming" } };
+  state.ownerToken = "owner-token";
+  state.accessToken = "access-token";
+
+  await stopBroadcast();
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/sessions\/session-1\/stream\/stop$/);
+  assert.equal(calls[0].method, "POST");
+  // 종료는 egress만 끝낸다 — 세션은 남아 다음 방송을 준비할 수 있어야 한다.
+  assert.equal(state.session.session_id, "session-1");
+});
+
+test("방송 종료 버튼은 송출이 살아 있을 때만 눌린다", async () => {
+  const { updateButtons, state, els } = await loadApp();
+  state.session = { session_id: "session-1", stream: { status: "streaming" } };
+  updateButtons();
+  assert.equal(els.stopBroadcastBtn.disabled, false, "송출 중에는 종료할 수 있어야 한다");
+
+  // 일시 중지·재연결 중에도 방송은 끝낼 수 있어야 한다.
+  state.session.stream.status = "paused";
+  updateButtons();
+  assert.equal(els.stopBroadcastBtn.disabled, false);
+  state.session.stream.status = "reconnecting";
+  updateButtons();
+  assert.equal(els.stopBroadcastBtn.disabled, false);
+
+  // 서버가 ErrStreamNotActive로 보는 상태에서는 막는다.
+  state.session.stream.status = "stopped";
+  updateButtons();
+  assert.equal(els.stopBroadcastBtn.disabled, true);
+  state.session = null;
+  updateButtons();
+  assert.equal(els.stopBroadcastBtn.disabled, true);
 });

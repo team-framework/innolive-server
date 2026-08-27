@@ -333,3 +333,58 @@ func TestStopStreamEndsLiveBroadcast(t *testing.T) {
 		t.Fatalf("SetBroadcastSettings() after stop = %v, want success", err)
 	}
 }
+
+// TestEgressSelfStopReleasesLiveBroadcast: egress가 중지 요청 없이 스스로 끝난
+// 경우(재연결 예산 소진 등)에도 단계를 idle로 되돌리고 방송을 끝내야 한다.
+// 그러지 않으면 단계가 live에 갇혀 이후 설정 저장이 영구히 409가 된다(#165).
+func TestEgressSelfStopReleasesLiveBroadcast(t *testing.T) {
+	manager := newTestManager(t, 4)
+	cleaned := make(chan cleanupCall, 1)
+	manager.SetBroadcastCleanup(func(_ uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) {
+		cleaned <- cleanupCall{broadcast: broadcast, phase: phase}
+	})
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginBroadcastPrepare(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := PlatformBroadcast{Provider: "youtube", BroadcastID: "bid", StreamID: "sid"}
+	if _, err := manager.MarkBroadcastPrepared(s.ID, broadcast); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginGoLive(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, _, err := manager.CompleteGoLive(s.ID); aborted || err != nil {
+		t.Fatalf("CompleteGoLive() = (%v, %v)", aborted, err)
+	}
+	s.mu.Lock()
+	s.rawTrackID = "video-track"
+	s.mu.Unlock()
+	if _, err := manager.StartStream(s.ID, "rtmps://a.rtmps.youtube.com/live2/secret-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 중지 요청 없이 egress만 끝낸다 — 재연결 예산을 소진한 egress와 같은 경로다.
+	s.mu.Lock()
+	cancelEgress := s.egressCancel
+	s.mu.Unlock()
+	cancelEgress()
+
+	select {
+	case got := <-cleaned:
+		if got.phase != BroadcastPhaseLive || got.broadcast != broadcast {
+			t.Fatalf("cleanup call = %+v, want %+v at live", got, broadcast)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("egress self-stop left the live broadcast running")
+	}
+	if _, phase := s.PlatformBroadcast(); phase != BroadcastPhaseIdle {
+		t.Fatalf("phase = %q, want idle after the egress stopped on its own", phase)
+	}
+	if _, err := manager.SetBroadcastSettings(s.ID, YouTubeBroadcastSettings{Title: "다음 방송"}); err != nil {
+		t.Fatalf("SetBroadcastSettings() after egress self-stop = %v, want success", err)
+	}
+}

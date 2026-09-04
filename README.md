@@ -333,6 +333,12 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 
 `main` 브랜치에 머지하면 GitHub Actions가 이미지를 빌드해 레지스트리에 올리고, 프로덕션 서버가 그 이미지를 받아 컨테이너를 재기동합니다. 배포 경로는 이 하나뿐입니다. 서버에 들어가 소스나 바이너리를 고치지 마세요. 자세한 절차와 비상 경로는 [`deploy/README.md`](deploy/README.md)에 있습니다.
 
+## Third-party notices
+
+Go 의존성 18개는 전부 허용형(MIT / BSD / Apache-2.0)입니다. 런타임 컨테이너에
+포함되는 FFmpeg은 Debian이 `--enable-gpl`로 빌드하므로 GPL-2.0+ 조건입니다.
+패키지별 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요.
+
 ## 라이선스
 
 이 프로젝트는 [Apache License 2.0](LICENSE) 하에 배포됩니다.

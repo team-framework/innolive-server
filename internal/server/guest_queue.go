@@ -51,10 +51,23 @@ if not guest then
 end
 redis.call('ZREM', KEYS[1], id)
 redis.call('HSET', ticket, 'status', 'admitted', 'admission', ARGV[1], 'admission_plain', ARGV[2], 'expires_at', ARGV[3])
-redis.call('EXPIRE', ticket, ARGV[4])
-redis.call('EXPIRE', KEYS[4] .. guest, ARGV[4])
+redis.call('PEXPIRE', ticket, ARGV[4])
+redis.call('PEXPIRE', KEYS[4] .. guest, ARGV[4])
 redis.call('ZADD', KEYS[2], ARGV[5], id)
 return id
+`)
+
+var cancelTicketScript = redis.NewScript(`
+local ticket = KEYS[3] .. ARGV[1]
+if redis.call('HGET', ticket, 'guest') ~= ARGV[2] then return '__forbidden__' end
+local status = redis.call('HGET', ticket, 'status')
+if not status then return '__missing__' end
+if status == 'waiting' then redis.call('ZREM', KEYS[1], ARGV[1])
+elseif status == 'admitted' then redis.call('ZREM', KEYS[2], ARGV[1])
+else return '__invalid__' end
+redis.call('HSET', ticket, 'status', 'cancelled')
+if redis.call('GET', KEYS[4] .. ARGV[2]) == ARGV[1] then redis.call('DEL', KEYS[4] .. ARGV[2]) end
+return 'ok'
 `)
 
 type guestTicket struct {
@@ -194,25 +207,20 @@ func (q *GuestQueue) Heartbeat(ctx context.Context, guest, id string) (guestTick
 func (q *GuestQueue) Cancel(ctx context.Context, guest, id string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	result, err := q.statusLocked(ctx, guestHash(guest), id)
-	if err != nil {
-		return err
-	}
-	if result.Status == "waiting" {
-		if err := q.client.ZRem(ctx, guestQueueKey, id).Err(); err != nil {
-			return ErrGuestQueueUnavailable
-		}
-	}
-	if result.Status == "admitted" {
-		if err := q.client.ZRem(ctx, guestReserveKey, id).Err(); err != nil {
-			return ErrGuestQueueUnavailable
-		}
-	}
-	_, err = q.client.HSet(ctx, guestTicketKey+id, "status", "cancelled").Result()
+	result, err := cancelTicketScript.Run(ctx, q.client,
+		[]string{guestQueueKey, guestReserveKey, guestTicketKey, guestByIDKey}, id, guestHash(guest)).Text()
 	if err != nil {
 		return ErrGuestQueueUnavailable
 	}
-	_ = q.client.Del(ctx, guestByIDKey+guestHash(guest)).Err()
+	switch result {
+	case "ok":
+	case "__missing__":
+		return ErrGuestTicketNotFound
+	case "__forbidden__":
+		return ErrGuestForbidden
+	default:
+		return ErrGuestAdmissionInvalid
+	}
 	q.publish(ctx)
 	return nil
 }
@@ -237,15 +245,16 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	if q.sessions.GuestCount() >= q.maxGuests {
 		return nil, "", ErrGuestAdmissionInvalid
 	}
-	restore := func() {
+	restore := func() error {
 		expires := time.Now().Add(q.admissionTTL)
-		_, _ = q.client.TxPipelined(context.Background(), func(pipe redis.Pipeliner) error {
+		_, err := q.client.TxPipelined(context.Background(), func(pipe redis.Pipeliner) error {
 			pipe.HSet(context.Background(), guestTicketKey+id, "status", "admitted", "expires_at", expires.Unix())
-			pipe.Expire(context.Background(), guestTicketKey+id, q.admissionTTL)
-			pipe.Expire(context.Background(), guestByIDKey+guestHash(guest), q.admissionTTL)
+			pipe.PExpire(context.Background(), guestTicketKey+id, q.admissionTTL)
+			pipe.PExpire(context.Background(), guestByIDKey+guestHash(guest), q.admissionTTL)
 			pipe.ZAdd(context.Background(), guestReserveKey, redis.Z{Score: float64(expires.UnixNano()), Member: id})
 			return nil
 		})
+		return err
 	}
 	if _, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HSet(ctx, guestTicketKey+id, "status", "consuming")
@@ -256,7 +265,9 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	}
 	live, owner, err := q.sessions.CreateForGuest(guestHash(guest), metadata)
 	if err != nil {
-		restore()
+		if restore() != nil {
+			return nil, "", ErrGuestQueueUnavailable
+		}
 		return nil, "", err
 	}
 	_, transitionErr := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -269,7 +280,9 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		// Delete invokes the server session-cleanup hook, which wakes this queue.
 		// Consume holds q.mu, so deletion must run after this request releases it.
 		go func(sessionID string) { _ = q.sessions.Delete(sessionID, "guest_queue_transition_failed") }(live.ID)
-		restore()
+		if restore() != nil {
+			return nil, "", ErrGuestQueueUnavailable
+		}
 		return nil, "", ErrGuestQueueUnavailable
 	}
 	time.AfterFunc(q.guestSessionTTL, func() { _ = q.sessions.Delete(live.ID, "guest_session_timeout") })
@@ -338,7 +351,7 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 		expires := now.Add(q.admissionTTL)
 		result, err := admitHeadScript.Run(ctx, q.client,
 			[]string{guestQueueKey, guestReserveKey, guestTicketKey, guestByIDKey},
-			guestHash(token), token, expires.Unix(), int64(q.admissionTTL.Seconds()), expires.UnixNano()).Text()
+			guestHash(token), token, expires.Unix(), q.admissionTTL.Milliseconds(), expires.UnixNano()).Text()
 		if err != nil {
 			return false, ErrGuestQueueUnavailable
 		}

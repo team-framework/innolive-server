@@ -139,6 +139,37 @@ func TestGuestQueueConsumeDoesNotRecreateExpiredAdmissionTicket(t *testing.T) {
 	}
 }
 
+func TestGuestQueueHeartbeatDoesNotRecreateExpiredTicket(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	manager := newGuestQueueTestManager(t, 2)
+	queue := &GuestQueue{client: client, sessions: manager, ttl: time.Minute, admissionTTL: time.Minute, maxGuests: 1}
+	guest, id := "guest", "ticket"
+	ctx := context.Background()
+	if err := client.HSet(ctx, guestTicketKey+id, "guest", guestHash(guest), "status", "waiting").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Expire(ctx, guestTicketKey+id, time.Second).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, guestByIDKey+guestHash(guest), id, time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	redisServer.FastForward(2 * time.Second)
+
+	if _, err := queue.Heartbeat(ctx, guest, id); err != ErrGuestTicketNotFound {
+		t.Fatalf("Heartbeat expired ticket error = %v, want ErrGuestTicketNotFound", err)
+	}
+	if exists, err := client.Exists(ctx, guestTicketKey+id).Result(); err != nil || exists != 0 {
+		t.Fatalf("expired heartbeat ticket recreated: exists=%d err=%v", exists, err)
+	}
+}
+
 func TestGuestSessionCreateReturnsCapacityExceeded(t *testing.T) {
 	redisServer, err := miniredis.Run()
 	if err != nil {

@@ -134,6 +134,22 @@ redis.call('PEXPIRE', KEYS[2], ARGV[4])
 return 'ok'
 `)
 
+// heartbeatTicketScript renews a waiting ticket only while its ticket hash and
+// guest index still exist and agree. HSET is intentionally last: unlike a
+// pipeline it cannot recreate an expired hash after an earlier EXPIRE fails.
+var heartbeatTicketScript = redis.NewScript(`
+local status = redis.call('HGET', KEYS[1], 'status')
+if not status then return '__missing__' end
+if redis.call('HGET', KEYS[1], 'guest') ~= ARGV[1] then return '__forbidden__' end
+if status ~= 'waiting' then return '__invalid__' end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return '__missing__' end
+if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then return '__missing__' end
+redis.call('HSET', KEYS[1], 'expires_at', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
+return 'ok'
+`)
+
 type guestTicket struct {
 	ID             string    `json:"ticket_id"`
 	Status         string    `json:"status"`
@@ -345,14 +361,20 @@ func (q *GuestQueue) Heartbeat(ctx context.Context, guest, id string) (guestTick
 	}
 	if result.Status == "waiting" {
 		expires := time.Now().Add(q.ttl)
-		_, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.Expire(ctx, guestTicketKey+id, q.ttl)
-			pipe.Expire(ctx, guestByIDKey+guestHash(guest), q.ttl)
-			pipe.HSet(ctx, guestTicketKey+id, "expires_at", expires.Unix())
-			return nil
-		})
+		result, err := heartbeatTicketScript.Run(ctx, q.client,
+			[]string{guestTicketKey + id, guestByIDKey + guestHash(guest)},
+			guestHash(guest), id, expires.Unix(), q.ttl.Milliseconds()).Text()
 		if err != nil {
 			return guestTicket{}, ErrGuestQueueUnavailable
+		}
+		switch result {
+		case "ok":
+		case "__missing__":
+			return guestTicket{}, ErrGuestTicketNotFound
+		case "__forbidden__":
+			return guestTicket{}, ErrGuestForbidden
+		default:
+			return guestTicket{}, ErrGuestAdmissionInvalid
 		}
 	}
 	return q.statusLocked(ctx, guestHash(guest), id)

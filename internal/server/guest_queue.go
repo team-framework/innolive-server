@@ -82,6 +82,22 @@ if count == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
 return count
 `)
 
+// pruneWaitingScript removes queue members whose ticket hash has expired or
+// was moved out of waiting. Redis expiry does not remove ZSET members, and
+// this must run even when no guest slot is available for admission.
+var pruneWaitingScript = redis.NewScript(`
+local ids = redis.call('ZRANGE', KEYS[1], 0, -1)
+local removed = 0
+for _, id in ipairs(ids) do
+  local status = redis.call('HGET', KEYS[2] .. id, 'status')
+  if status ~= 'waiting' then
+    redis.call('ZREM', KEYS[1], id)
+    removed = removed + 1
+  end
+end
+return removed
+`)
+
 type guestTicket struct {
 	ID             string    `json:"ticket_id"`
 	Status         string    `json:"status"`
@@ -464,6 +480,16 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 		return false, ErrGuestQueueUnavailable
 	}
 	now := time.Now()
+	staleWaiting, err := pruneWaitingScript.Run(ctx, q.client, []string{guestQueueKey, guestTicketKey}).Int64()
+	if err != nil {
+		return false, ErrGuestQueueUnavailable
+	}
+	changed := staleWaiting > 0
+	if staleWaiting > 0 && q.metrics != nil {
+		for range staleWaiting {
+			q.metrics.IncGuestExpired()
+		}
+	}
 	expired, err := q.client.ZRemRangeByScore(ctx, guestReserveKey, "-inf", fmt.Sprintf("%d", now.UnixNano())).Result()
 	if err != nil {
 		return false, ErrGuestQueueUnavailable
@@ -480,7 +506,6 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, ErrGuestQueueUnavailable
 	}
-	changed := false
 	for _, id := range reservedIDs {
 		status, err := q.client.HGet(ctx, guestTicketKey+id, "status").Result()
 		if err != nil && err != redis.Nil {

@@ -120,7 +120,14 @@ func (s *Server) handleGuestQueueEvents(w http.ResponseWriter, r *http.Request) 
 	send := func() bool {
 		ticket, err := s.guestQueue.Status(r.Context(), guest, id)
 		if err != nil {
-			fmt.Fprintf(w, "event: expired\ndata: {}\n\n")
+			event, code := "error", "queue_unavailable"
+			if errors.Is(err, ErrGuestTicketNotFound) {
+				event, code = "expired", "not_found"
+			}
+			if errors.Is(err, ErrGuestForbidden) {
+				code = "forbidden"
+			}
+			fmt.Fprintf(w, "event: %s\ndata: {\"code\":%q}\n\n", event, code)
 			flusher.Flush()
 			return false
 		}

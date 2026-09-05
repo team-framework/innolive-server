@@ -241,7 +241,9 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		return nil
 	})
 	if transitionErr != nil {
-		_ = q.sessions.Delete(live.ID, "guest_queue_transition_failed")
+		// Delete invokes the server session-cleanup hook, which wakes this queue.
+		// Consume holds q.mu, so deletion must run after this request releases it.
+		go func(sessionID string) { _ = q.sessions.Delete(sessionID, "guest_queue_transition_failed") }(live.ID)
 		restore()
 		return nil, "", ErrGuestQueueUnavailable
 	}

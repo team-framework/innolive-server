@@ -253,14 +253,15 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 }
 
 // SessionClosed wakes waiting guests as soon as a guest slot is released.
-func (q *GuestQueue) SessionClosed() {
+func (q *GuestQueue) SessionClosed(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if changed, err := q.cleanupAndAdmit(context.Background()); err != nil {
-		return
+	if changed, err := q.cleanupAndAdmit(ctx); err != nil {
+		return err
 	} else if changed {
-		q.publish(context.Background())
+		q.publish(ctx)
 	}
+	return nil
 }
 
 func (q *GuestQueue) statusLocked(ctx context.Context, hash, id string) (guestTicket, error) {
@@ -313,11 +314,19 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 			break
 		}
 		id := ids[0]
+		score, err := q.client.ZScore(ctx, guestQueueKey, id).Result()
+		if err != nil {
+			return false, ErrGuestQueueUnavailable
+		}
+		restoreWaiting := func() {
+			_ = q.client.ZAdd(context.Background(), guestQueueKey, redis.Z{Score: score, Member: id}).Err()
+		}
 		if err := q.client.ZRem(ctx, guestQueueKey, id).Err(); err != nil {
 			return false, ErrGuestQueueUnavailable
 		}
 		values, err := q.client.HGetAll(ctx, guestTicketKey+id).Result()
 		if err != nil {
+			restoreWaiting()
 			return false, ErrGuestQueueUnavailable
 		}
 		if len(values) == 0 || values["status"] != "waiting" {
@@ -337,6 +346,7 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 			return nil
 		})
 		if err != nil {
+			restoreWaiting()
 			return false, ErrGuestQueueUnavailable
 		}
 		reserved++

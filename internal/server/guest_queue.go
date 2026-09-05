@@ -59,9 +59,9 @@ return id
 
 var cancelTicketScript = redis.NewScript(`
 local ticket = KEYS[3] .. ARGV[1]
-if redis.call('HGET', ticket, 'guest') ~= ARGV[2] then return '__forbidden__' end
 local status = redis.call('HGET', ticket, 'status')
 if not status then return '__missing__' end
+if redis.call('HGET', ticket, 'guest') ~= ARGV[2] then return '__forbidden__' end
 if status == 'waiting' then redis.call('ZREM', KEYS[1], ARGV[1])
 elseif status == 'admitted' then redis.call('ZREM', KEYS[2], ARGV[1])
 else return '__invalid__' end
@@ -258,7 +258,6 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	}
 	if _, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HSet(ctx, guestTicketKey+id, "status", "consuming")
-		pipe.ZRem(ctx, guestReserveKey, id)
 		return nil
 	}); err != nil {
 		return nil, "", ErrGuestQueueUnavailable
@@ -337,12 +336,31 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 	if err := q.client.ZRemRangeByScore(ctx, guestReserveKey, "-inf", fmt.Sprintf("%d", now.UnixNano())).Err(); err != nil {
 		return false, ErrGuestQueueUnavailable
 	}
+	// A Redis outage after the consuming transition can leave the ticket in
+	// that transient state. Its reservation intentionally remains, so a later
+	// successful queue operation can make the same admission token retryable.
+	reservedIDs, err := q.client.ZRange(ctx, guestReserveKey, 0, -1).Result()
+	if err != nil {
+		return false, ErrGuestQueueUnavailable
+	}
+	changed := false
+	for _, id := range reservedIDs {
+		status, err := q.client.HGet(ctx, guestTicketKey+id, "status").Result()
+		if err != nil && err != redis.Nil {
+			return false, ErrGuestQueueUnavailable
+		}
+		if status == "consuming" {
+			if err := q.client.HSet(ctx, guestTicketKey+id, "status", "admitted").Err(); err != nil {
+				return false, ErrGuestQueueUnavailable
+			}
+			changed = true
+		}
+	}
 	reserved, err := q.client.ZCard(ctx, guestReserveKey).Result()
 	if err != nil {
 		return false, ErrGuestQueueUnavailable
 	}
 	active, limit := q.sessions.Capacity()
-	changed := false
 	for q.sessions.GuestCount()+int(reserved) < q.maxGuests && (limit == 0 || active+int(reserved) < limit) {
 		token, err := newGuestSecret()
 		if err != nil {

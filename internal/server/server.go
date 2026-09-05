@@ -152,6 +152,13 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 			if live.GuestID == "" {
 				return
 			}
+			go func(guestID, sessionID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := queue.GuestSessionClosed(ctx, guestID, sessionID); err != nil {
+					s.logger.Warn("clear guest queue session index failed", "session_id", sessionID, "error", err)
+				}
+			}(live.GuestID, live.ID)
 			s.references.deleteClient(live.AIClientID)
 			if s.ai != nil {
 				go func(clientID string) {

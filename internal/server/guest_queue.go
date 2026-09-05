@@ -271,8 +271,10 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	}
 	_, transitionErr := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.ZRem(ctx, guestReserveKey, id)
-		pipe.HSet(ctx, guestTicketKey+id, "status", "consumed", "session_id", live.ID)
+		expires := time.Now().Add(q.guestSessionTTL)
+		pipe.HSet(ctx, guestTicketKey+id, "status", "consumed", "session_id", live.ID, "expires_at", expires.Unix())
 		pipe.Expire(ctx, guestTicketKey+id, q.guestSessionTTL)
+		pipe.Expire(ctx, guestByIDKey+guestHash(guest), q.guestSessionTTL)
 		return nil
 	})
 	if transitionErr != nil {
@@ -287,6 +289,27 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	time.AfterFunc(q.guestSessionTTL, func() { _ = q.sessions.Delete(live.ID, "guest_session_timeout") })
 	q.publish(ctx)
 	return live, owner, nil
+}
+
+// GuestSessionClosed removes the guest-to-ticket index only when it still
+// refers to the terminated session. This permits a new queue entry after an
+// explicit session close without allowing re-entry while it remains active.
+func (q *GuestQueue) GuestSessionClosed(ctx context.Context, guestHashValue, sessionID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	id, err := q.client.Get(ctx, guestByIDKey+guestHashValue).Result()
+	if err == redis.Nil {
+		return nil
+	}
+	if err != nil {
+		return ErrGuestQueueUnavailable
+	}
+	if current, err := q.client.HGet(ctx, guestTicketKey+id, "session_id").Result(); err == nil && current == sessionID {
+		if err := q.client.Del(ctx, guestByIDKey+guestHashValue).Err(); err != nil {
+			return ErrGuestQueueUnavailable
+		}
+	}
+	return nil
 }
 
 // SessionClosed wakes waiting guests as soon as a guest slot is released.

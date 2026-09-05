@@ -124,6 +124,37 @@ make proto        # protobuf 코드 생성
 | `AUTH_EMAIL_REDIS_ADDR` | — | 가입 대기 정보·인증 코드를 보관하는 Redis 주소 |
 | `AUTH_EMAIL_VERIFICATION_CODE_TTL` | `5m` | 회원가입 인증 코드 만료 시간 |
 
+### 비인증 체험 대기열 운영 계약
+
+`GUEST_QUEUE_ENABLED=true`이면 비인증 사용자는 `POST /guest-queue`를 통해서만
+체험 WebRTC 세션을 만들 수 있습니다. 이 기능은 개발용 인증 우회가 아니므로
+`INNOLIVE_REQUIRE_SESSION_AUTH=true`를 유지합니다.
+
+- `MAX_SESSIONS`는 반드시 `2` 이상이어야 합니다. 게스트의 활성 세션과 60초 입장
+  예약을 합친 수는 `floor(MAX_SESSIONS × 0.5)`를 넘을 수 없고, 로그인 사용자는
+  이 게스트 상한의 영향을 받지 않습니다.
+- `GUEST_QUEUE_REDIS_ADDR`은 활성화 시 필수입니다. 인증 이메일용 Redis와 같은
+  인스턴스를 사용해도 되며 게스트 키는 별도 접두어로 분리됩니다. Redis를 사용할 수
+  없으면 게스트 큐와 게스트 세션 생성은 `503 queue_unavailable`으로 실패합니다.
+- 대기표는 `GUEST_QUEUE_TTL`(기본 10분) 안에 heartbeat가 없으면 만료됩니다. SSE는
+  순번 알림용이며 TTL을 연장하지 않습니다. 대기열은 최대 100명이고, 게스트 생성은
+  IP별 5회/분 및 30회/시간으로 제한됩니다. 초과 응답은 `429`와 `Retry-After`입니다.
+- admission 토큰은 한 번만 쓸 수 있으며 `GUEST_ADMISSION_TTL`(기본 60초) 안에
+  소비하지 않으면 예약이 회수됩니다. 게스트 세션은 `GUEST_SESSION_TTL`(기본 10분)
+  뒤 종료되고, 명시적 삭제·협상 실패·서버 종료를 포함한 모든 종료 경로에서 등록한
+  기준 얼굴과 AI whitelist를 제거합니다.
+- 허용된 특정 CORS origin에는 credential 응답이 적용됩니다. 게스트 대기열을 켠
+  운영 환경에서는 `AUTH_CORS_ALLOW_ALL_ORIGINS=true`를 사용할 수 없고,
+  `AUTH_CORS_ALLOWED_ORIGINS`에 기존 운영 웹 origin(예: `https://innolive.studio`)이
+  포함되어 있어야 합니다.
+- reverse proxy 또는 ingress를 거치면 `GUEST_QUEUE_TRUSTED_PROXY_CIDRS`에 서버로
+  직접 접속하는 proxy CIDR만 설정합니다. 비워 두면 TCP peer IP를 사용합니다.
+
+Prometheus에서는 `innolive_guest_queue_waiting`, `innolive_guest_active_sessions`,
+`innolive_guest_admission_reservations`, `innolive_guest_queue_admitted_total`,
+`innolive_guest_queue_expired_total`, `innolive_guest_rate_limited_total`로 대기열
+상태를 관측합니다.
+
 ### WebRTC 네트워크 복구 계약
 
 `GET /webrtc/config`은 ICE 서버 목록과 함께 아래 `recovery` 값을 반환합니다.
@@ -169,6 +200,14 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `GET` | `/webrtc/config` | 클라이언트용 ICE 서버 설정 |
 | `POST` | `/sessions` | 세션 생성 (소유권 토큰 발급) |
 | `GET`/`DELETE` | `/sessions/{id}` | 세션 조회/삭제 |
+| `POST` | `/guest-queue` | 게스트 대기표 생성 또는 기존 대기·활성 상태 조회 |
+| `GET`/`DELETE` | `/guest-queue/{ticket_id}` | 게스트 대기 상태 조회/취소 |
+| `POST` | `/guest-queue/{ticket_id}/heartbeat` | 게스트 대기표 TTL 연장 |
+| `GET` | `/guest-queue/{ticket_id}/events` | 게스트 순번·입장 SSE 이벤트 |
+| `POST` | `/guest-sessions` | admission 토큰 소비 및 게스트 세션 생성 (owner token·ICE 설정 반환) |
+| `GET`/`DELETE` | `/guest/sessions/{id}` | 게스트 세션 조회/삭제 (쿠키와 owner token 필요) |
+| `PATCH` | `/guest/sessions/{id}/anonymization` | 게스트 비식별화 설정 변경 (쿠키와 owner token 필요) |
+| `GET`/`POST`/`DELETE` | `/guest/sessions/{id}/reference-face` | 게스트 세션별 기준 얼굴 관리 (쿠키와 owner token 필요) |
 | `POST` | `/sessions/{id}/stream/start` | **제거 예정.** 종전 송출 시작 — 방송 생성 + 송출, autoStart로 라이브까지 자동 전환. 클라이언트가 아래 두 경로로 옮겨가면 삭제한다 |
 | `POST` | `/sessions/{id}/stream/prepare` | 방송 준비 — 플랫폼 방송 생성 + RTMP 송출 시작 (시청자에게 노출되지 않음) |
 | `POST` | `/sessions/{id}/stream/golive` | 준비된 방송을 라이브로 전환 |

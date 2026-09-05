@@ -98,6 +98,42 @@ end
 return removed
 `)
 
+// claimAdmissionScript validates the guest index and admission ticket in the
+// same Redis operation that marks it consuming. PEXPIRE preserves both keys
+// throughout session creation, so an expiry cannot turn HSET below into a new
+// ticket without its guest index.
+var claimAdmissionScript = redis.NewScript(`
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return '__invalid__' end
+if redis.call('HGET', KEYS[1], 'status') ~= 'admitted' then return '__invalid__' end
+if redis.call('HGET', KEYS[1], 'guest') ~= ARGV[2] then return '__invalid__' end
+if redis.call('HGET', KEYS[1], 'admission') ~= ARGV[3] then return '__invalid__' end
+if redis.call('PTTL', KEYS[1]) <= 0 or redis.call('PTTL', KEYS[2]) <= 0 then return '__invalid__' end
+redis.call('HSET', KEYS[1], 'status', 'consuming')
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
+return 'ok'
+`)
+
+var restoreAdmissionScript = redis.NewScript(`
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return '__invalid__' end
+if redis.call('HGET', KEYS[1], 'status') ~= 'consuming' then return '__invalid__' end
+redis.call('HSET', KEYS[1], 'status', 'admitted', 'expires_at', ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+redis.call('PEXPIRE', KEYS[2], ARGV[3])
+redis.call('ZADD', KEYS[3], ARGV[4], ARGV[1])
+return 'ok'
+`)
+
+var completeAdmissionScript = redis.NewScript(`
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return '__invalid__' end
+if redis.call('HGET', KEYS[1], 'status') ~= 'consuming' then return '__invalid__' end
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('HSET', KEYS[1], 'status', 'consumed', 'session_id', ARGV[2], 'expires_at', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
+return 'ok'
+`)
+
 type guestTicket struct {
 	ID             string    `json:"ticket_id"`
 	Status         string    `json:"status"`
@@ -354,32 +390,27 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		}
 		return nil, "", ErrGuestQueueUnavailable
 	}
-	values, err := q.client.HGetAll(ctx, guestTicketKey+id).Result()
-	if err != nil {
-		return nil, "", ErrGuestQueueUnavailable
-	}
-	if values["status"] != "admitted" || values["admission"] != guestHash(token) {
-		return nil, "", ErrGuestAdmissionInvalid
-	}
 	if q.sessions.GuestCount() >= q.maxGuests {
 		return nil, "", ErrGuestAdmissionInvalid
 	}
 	restore := func() error {
 		expires := time.Now().Add(q.admissionTTL)
-		_, err := q.client.TxPipelined(context.Background(), func(pipe redis.Pipeliner) error {
-			pipe.HSet(context.Background(), guestTicketKey+id, "status", "admitted", "expires_at", expires.Unix())
-			pipe.PExpire(context.Background(), guestTicketKey+id, q.admissionTTL)
-			pipe.PExpire(context.Background(), guestByIDKey+guestHash(guest), q.admissionTTL)
-			pipe.ZAdd(context.Background(), guestReserveKey, redis.Z{Score: float64(expires.UnixNano()), Member: id})
-			return nil
-		})
-		return err
-	}
-	if _, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSet(ctx, guestTicketKey+id, "status", "consuming")
+		result, err := restoreAdmissionScript.Run(context.Background(), q.client,
+			[]string{guestTicketKey + id, guestByIDKey + guestHash(guest), guestReserveKey},
+			id, expires.Unix(), q.admissionTTL.Milliseconds(), expires.UnixNano()).Text()
+		if err != nil || result != "ok" {
+			return ErrGuestQueueUnavailable
+		}
 		return nil
-	}); err != nil {
+	}
+	result, err := claimAdmissionScript.Run(ctx, q.client,
+		[]string{guestTicketKey + id, guestByIDKey + guestHash(guest)},
+		id, guestHash(guest), guestHash(token), q.admissionTTL.Milliseconds()).Text()
+	if err != nil {
 		return nil, "", ErrGuestQueueUnavailable
+	}
+	if result != "ok" {
+		return nil, "", ErrGuestAdmissionInvalid
 	}
 	live, owner, err := q.sessions.CreateForGuest(guestHash(guest), metadata)
 	if err != nil {
@@ -388,15 +419,11 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		}
 		return nil, "", err
 	}
-	_, transitionErr := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.ZRem(ctx, guestReserveKey, id)
-		expires := time.Now().Add(q.guestSessionTTL)
-		pipe.HSet(ctx, guestTicketKey+id, "status", "consumed", "session_id", live.ID, "expires_at", expires.Unix())
-		pipe.Expire(ctx, guestTicketKey+id, q.guestSessionTTL)
-		pipe.Expire(ctx, guestByIDKey+guestHash(guest), q.guestSessionTTL)
-		return nil
-	})
-	if transitionErr != nil {
+	expires := time.Now().Add(q.guestSessionTTL)
+	result, transitionErr := completeAdmissionScript.Run(ctx, q.client,
+		[]string{guestTicketKey + id, guestByIDKey + guestHash(guest), guestReserveKey},
+		id, live.ID, expires.Unix(), q.guestSessionTTL.Milliseconds()).Text()
+	if transitionErr != nil || result != "ok" {
 		// Delete invokes the server session-cleanup hook, which wakes this queue.
 		// Consume holds q.mu, so deletion must run after this request releases it.
 		go func(sessionID string) { _ = q.sessions.Delete(sessionID, "guest_queue_transition_failed") }(live.ID)

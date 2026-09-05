@@ -46,6 +46,14 @@ func (s *Server) guestQueueError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrGuestRateLimited):
 		w.Header().Set("Retry-After", "60")
 		writeError(w, apiError{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: "Too many guest queue requests."})
+	case errors.Is(err, session.ErrCapacityExceeded):
+		active, limit := s.sessions.Capacity()
+		writeError(w, apiError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "capacity_exceeded",
+			Message: "The server has reached its maximum number of concurrent sessions.",
+			Details: map[string]any{"active_sessions": active, "max_sessions": limit},
+		})
 	default:
 		writeError(w, internalError())
 	}

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -47,6 +48,10 @@ type Server struct {
 	origins          origin.Config
 	streaming        map[auth.StreamingProvider]streaming.Provider
 	authenticateUser func(context.Context, string) (uuid.UUID, error)
+	guestQueue       *GuestQueue
+	guestReference   *guestReferenceGate
+	guestCleanup     sync.WaitGroup
+	mux              *http.ServeMux
 	handler          http.Handler
 }
 
@@ -65,19 +70,21 @@ func New(
 		requireUser = func(next http.Handler) http.Handler { return next }
 	}
 	s := &Server{
-		cfg:        cfg,
-		logger:     logger,
-		metrics:    registry,
-		sessions:   sessions,
-		ai:         aiPool,
-		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
-		origins:    origins,
-		streaming:  streamingProviders,
+		cfg:            cfg,
+		logger:         logger,
+		metrics:        registry,
+		sessions:       sessions,
+		ai:             aiPool,
+		references:     newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
+		origins:        origins,
+		streaming:      streamingProviders,
+		guestReference: newGuestReferenceGate(),
 	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]
 	}
 	mux := http.NewServeMux()
+	s.mux = mux
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -117,8 +124,83 @@ func New(
 	}
 	// requestIDMiddleware가 corsMiddleware보다 바깥이어야 CORS 거절 응답에도
 	// request_id가 실린다 — 그래야 사용자가 보여준 에러와 로그를 묶을 수 있다.
-	s.handler = recoverMiddleware(logger, requestIDMiddleware(corsMiddleware(logger, origins, mux)))
+	s.handler = recoverMiddleware(logger, requestIDMiddleware(corsMiddleware(logger, origins, mux, cfg.GuestQueueEnabled)))
 	return s
+}
+
+// SetGuestQueue는 Handler가 요청을 받기 전 서버 조립 단계에서 호출한다.
+// integration test가 사용하는 기존 New 시그니처를 유지한다.
+func (s *Server) SetGuestQueue(queue *GuestQueue) {
+	if queue == nil || s.mux == nil {
+		return
+	}
+	s.guestQueue = queue
+	s.mux.HandleFunc("POST /guest-queue", s.handleGuestQueueCreate)
+	s.mux.HandleFunc("GET /guest-queue/{ticket_id}", s.handleGuestQueueStatus)
+	s.mux.HandleFunc("POST /guest-queue/{ticket_id}/heartbeat", s.handleGuestQueueHeartbeat)
+	s.mux.HandleFunc("DELETE /guest-queue/{ticket_id}", s.handleGuestQueueCancel)
+	s.mux.HandleFunc("GET /guest-queue/{ticket_id}/events", s.handleGuestQueueEvents)
+	s.mux.HandleFunc("POST /guest-sessions", s.handleGuestSessionCreate)
+	s.mux.HandleFunc("GET /guest/sessions/{session_id}", s.handleGuestGetSession)
+	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}", s.handleGuestDeleteSession)
+	s.mux.HandleFunc("PATCH /guest/sessions/{session_id}/anonymization", s.handleGuestPatchAnonymization)
+	s.mux.HandleFunc("GET /guest/sessions/{session_id}/reference-face", s.handleGuestGetReferenceFace)
+	s.mux.HandleFunc("POST /guest/sessions/{session_id}/reference-face", s.handleGuestPostReferenceFace)
+	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}/reference-face", s.handleGuestDeleteReferenceFace)
+	if s.sessions != nil {
+		s.sessions.SetSessionCleanup(func(live *session.Session) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := queue.SessionClosed(ctx); err != nil {
+					s.logger.Warn("wake guest queue after session close failed", "error", err)
+				}
+			}()
+			if live.GuestID == "" {
+				return
+			}
+			go func(guestID, sessionID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := queue.GuestSessionClosed(ctx, guestID, sessionID); err != nil {
+					s.logger.Warn("clear guest queue session index failed", "session_id", sessionID, "error", err)
+				}
+			}(live.GuestID, live.ID)
+			releaseClosing := s.guestReference.Close(live.ID)
+			s.guestCleanup.Add(1)
+			go func(sessionID, clientID string) {
+				defer s.guestCleanup.Done()
+				defer releaseClosing()
+				unlock, _ := s.guestReference.Lock(sessionID)
+				defer unlock()
+				s.references.deleteClient(clientID)
+				if s.ai != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := s.ai.ClearWhitelist(ctx, clientID); err != nil {
+						s.logger.Warn("clear guest whitelist failed", "client_id", clientID, "error", err)
+					}
+				}
+			}(live.ID, live.AIClientID)
+		})
+	}
+}
+
+// WaitGuestCleanup은 graceful shutdown 중 AI client pool을 닫기 전에 terminal
+// guest 얼굴 정리가 끝날 때까지 기다린다. 세션별 작업에는 자체 10초 제한이 있고,
+// 전달받은 context는 shutdown 대기 시간만 제한한다.
+func (s *Server) WaitGuestCleanup(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.guestCleanup.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
@@ -817,7 +899,8 @@ func truncateOrigin(value string) string {
 	return value
 }
 
-func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handler) http.Handler {
+func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handler, credentialed ...bool) http.Handler {
+	allowCredentials := len(credentialed) > 0 && credentialed[0]
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestOrigin := strings.TrimSpace(r.Header.Get("Origin"))
 		if requestOrigin != "" {
@@ -830,6 +913,9 @@ func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handle
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			if allowCredentials && allowedOrigin != "*" {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 			if allowedOrigin != "*" {
 				w.Header().Add("Vary", "Origin")

@@ -121,6 +121,10 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	guestID := ""
+	if cookie, err := r.Cookie(guestCookieName); err == nil {
+		guestID = cookie.Value
+	}
 	for {
 		_, data, err := connection.ReadMessage()
 		if err != nil {
@@ -130,7 +134,7 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		candidates := newSignalingCandidateBuffer(publish)
-		response, apiErr := s.handleSignalingMessage(data, candidates.Enqueue)
+		response, apiErr := s.handleSignalingMessage(data, candidates.Enqueue, guestID)
 		if apiErr != nil {
 			candidates.Close()
 			if !publish(signalingErrorResponse(*apiErr)) {
@@ -146,7 +150,11 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSignalingMessage(data []byte, onLocalCandidate session.LocalCandidateHandler) (any, *apiError) {
+func (s *Server) handleSignalingMessage(data []byte, onLocalCandidate session.LocalCandidateHandler, guestIDs ...string) (any, *apiError) {
+	guestID := ""
+	if len(guestIDs) > 0 {
+		guestID = guestIDs[0]
+	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(data, &payload); err != nil || payload == nil {
 		result := badRequest("Signaling messages must be valid JSON objects.", nil)
@@ -159,16 +167,20 @@ func (s *Server) handleSignalingMessage(data []byte, onLocalCandidate session.Lo
 	}
 	switch messageType {
 	case "offer":
-		return s.handleOffer(payload, onLocalCandidate)
+		return s.handleOffer(payload, onLocalCandidate, guestID)
 	case "ice_candidate":
-		return s.handleICECandidate(payload)
+		return s.handleICECandidate(payload, guestID)
 	default:
 		result := badRequest("Unsupported signaling message type.", map[string]any{"type": messageType, "supported_types": []string{"offer", "ice_candidate"}})
 		return nil, &result
 	}
 }
 
-func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidate session.LocalCandidateHandler) (any, *apiError) {
+func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidate session.LocalCandidateHandler, guestIDs ...string) (any, *apiError) {
+	guestID := ""
+	if len(guestIDs) > 0 {
+		guestID = guestIDs[0]
+	}
 	var request struct {
 		SessionID     string `json:"session_id"`
 		OwnerToken    string `json:"owner_token"`
@@ -187,7 +199,7 @@ func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidat
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
 	}
-	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
+	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID); apiErr != nil {
 		return nil, apiErr
 	}
 	answer, err := s.sessions.CreateAnswerWithOptions(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP, session.NegotiationOptions{
@@ -215,7 +227,11 @@ func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidat
 	return answer, nil
 }
 
-func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *apiError) {
+func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs ...string) (any, *apiError) {
+	guestID := ""
+	if len(guestIDs) > 0 {
+		guestID = guestIDs[0]
+	}
 	rawCandidate, hasCandidate := payload["candidate"]
 	if !hasCandidate {
 		result := badRequest("Invalid signaling message.", nil)
@@ -252,7 +268,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 		result := badRequest("Invalid ICE candidate.", nil)
 		return nil, &result
 	}
-	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken); apiErr != nil {
+	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID); apiErr != nil {
 		return nil, apiErr
 	}
 	result, err := s.sessions.AddICECandidateWithNegotiation(strings.TrimSpace(request.SessionID), request.OwnerToken, request.NegotiationID, webrtc.ICECandidateInit{
@@ -284,7 +300,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage) (any, *a
 // that created the session, in addition to the session's one-time owner token.
 // access_token is part of the encrypted WebSocket message because browsers
 // cannot attach an Authorization header to WebSocket upgrade requests.
-func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string) *apiError {
+func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) *apiError {
 	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
 	if errors.Is(err, session.ErrNotFound) {
 		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": sessionID}}
@@ -297,6 +313,17 @@ func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerTok
 	if err != nil {
 		result := internalError()
 		return &result
+	}
+	if liveSession.GuestID != "" {
+		guestID := ""
+		if len(guestIDs) > 0 {
+			guestID = guestIDs[0]
+		}
+		if guestID == "" || liveSession.GuestID != guestHash(guestID) {
+			result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Guest session does not belong to this browser."}
+			return &result
+		}
+		return nil
 	}
 	if s.authenticateUser == nil {
 		return nil

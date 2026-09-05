@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -67,6 +68,53 @@ func TestCreateUnlimitedWhenMaxSessionsZero(t *testing.T) {
 		if _, _, err := manager.Create(nil); err != nil {
 			t.Fatalf("Create() #%d error = %v", i, err)
 		}
+	}
+}
+
+func TestCloseAllWaitsForDeleteAlreadyInProgress(t *testing.T) {
+	manager := newTestManager(t, 2)
+	live, _, err := manager.CreateForGuest("guest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupStarted := make(chan struct{})
+	allowCleanup := make(chan struct{})
+	manager.SetSessionCleanup(func(*Session) {
+		close(cleanupStarted)
+		<-allowCleanup
+	})
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- manager.Delete(live.ID, "test") }()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Delete did not reach cleanup hook")
+	}
+
+	manager.CloseAll()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- manager.WaitForDeletes(context.Background()) }()
+	select {
+	case err := <-waitDone:
+		t.Fatalf("WaitForDeletes returned before in-flight Delete finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowCleanup)
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Delete did not finish")
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForDeletes did not finish")
 	}
 }
 

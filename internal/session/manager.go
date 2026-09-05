@@ -129,8 +129,11 @@ type Response struct {
 type Session struct {
 	mu sync.RWMutex
 
-	ID         string
-	UserID     uuid.UUID
+	ID     string
+	UserID uuid.UUID
+	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
+	// 공개 세션 응답에는 절대 포함하지 않는다.
+	GuestID    string
 	AIClientID string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
@@ -203,6 +206,10 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	pending  int
+	// deleting은 sessions에서 제거됐지만 아직 서버 소유 cleanup hook까지 도달하지
+	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
+	// 전에 이 작업들을 기다린다.
+	deleting sync.WaitGroup
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
@@ -214,6 +221,7 @@ type Manager struct {
 	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
 	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
 	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
+	sessionCleanup   func(*Session)
 }
 
 // SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
@@ -222,6 +230,10 @@ type Manager struct {
 func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)) {
 	m.broadcastCleanup = cleanup
 }
+
+// SetSessionCleanup은 모든 종료 경로(명시적 삭제, timeout, peer 실패)에 적용할
+// 서버 소유 cleanup을 등록한다.
+func (m *Manager) SetSessionCleanup(cleanup func(*Session)) { m.sessionCleanup = cleanup }
 
 // cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
 // 방송도 여기서 끝낸다 — autoStop을 기다리면 그 사이(실측 약 1분)에 시작한
@@ -353,6 +365,20 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 // 받지 않고 여기서 계산해, 얼굴 whitelist와 미디어 스트림이 항상 같은 인증 범위를
 // 사용하게 한다.
 func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*Session, string, error) {
+	return m.create(userID, "", metadata)
+}
+
+// CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
+// guest route가 uuid.Nil로 인증 사용자 소유권 검사를 통과하지 못하도록 UserID와
+// identity를 분리한다.
+func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*Session, string, error) {
+	if strings.TrimSpace(guestID) == "" {
+		return nil, "", errors.New("guest ID is required")
+	}
+	return m.create(uuid.Nil, guestID, metadata)
+}
+
+func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]string) (*Session, string, error) {
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
 		if m.capacityInUseLocked() >= limit {
@@ -380,10 +406,15 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	id := uuid.NewString()
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
+	aiClientID := AIClientIDForUser(userID)
+	if guestID != "" {
+		aiClientID = "guest:" + guestID + ":session:" + id
+	}
 	s := &Session{
 		ID:                   id,
 		UserID:               userID,
-		AIClientID:           AIClientIDForUser(userID),
+		GuestID:              guestID,
+		AIClientID:           aiClientID,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 		lastActivityAt:       now,
@@ -420,6 +451,19 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	}
 	m.logger.Info("created live session", "session_id", id, "user_id", userID)
 	return s, ownerToken, nil
+}
+
+// GuestCount는 guest가 소유한 활성 세션 수를 반환한다.
+func (m *Manager) GuestCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, liveSession := range m.sessions {
+		if liveSession.GuestID != "" {
+			count++
+		}
+	}
+	return count
 }
 
 // AIClientIDForUser는 인증된 사용자가 사용하는 유일한 whitelist bucket 식별자다.
@@ -792,14 +836,38 @@ func (m *Manager) Delete(id, reason string) error {
 		m.mu.Unlock()
 		return ErrNotFound
 	}
+	// 세션을 제거하기 전에 등록해 CloseAll 뒤 WaitForDeletes가 이미 진행 중인
+	// teardown을 놓치지 않게 한다.
+	m.deleting.Add(1)
 	delete(m.sessions, id)
 	count := len(m.sessions)
 	m.mu.Unlock()
+	defer m.deleting.Done()
 	m.metrics.SetActiveSessions(count)
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
+	if m.sessionCleanup != nil {
+		m.sessionCleanup(s)
+	}
 	return nil
+}
+
+// WaitForDeletes는 CloseAll이 남은 세션을 제거할 때 이미 진행 중이던 teardown을
+// 기다린다. graceful process shutdown에서 AI whitelist client 같은 서버 소유
+// cleanup 의존성을 닫기 전에 사용한다.
+func (m *Manager) WaitForDeletes(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		m.deleting.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) CloseAll() {
@@ -814,6 +882,9 @@ func (m *Manager) CloseAll() {
 	for _, s := range sessions {
 		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
+		if m.sessionCleanup != nil {
+			m.sessionCleanup(s)
+		}
 	}
 	// 종료 중인 FFmpeg 쌍이 정상적으로 끝날 때까지 기다려, shutdown 중 프로세스가
 	// 자식 프로세스를 고아로 남기지 않게 한다. 대기 시간은 grace period보다 조금

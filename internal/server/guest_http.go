@@ -38,6 +38,12 @@ func (s *Server) guestQueueError(w http.ResponseWriter, err error) {
 		writeError(w, apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Guest queue ticket does not belong to this browser."})
 	case errors.Is(err, ErrGuestAdmissionInvalid):
 		writeError(w, apiError{Status: http.StatusConflict, Code: "admission_invalid", Message: "Guest admission is invalid or expired."})
+	case errors.Is(err, ErrGuestQueueFull):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, apiError{Status: http.StatusTooManyRequests, Code: "queue_full", Message: "Guest queue is full."})
+	case errors.Is(err, ErrGuestRateLimited):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, apiError{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: "Too many guest queue requests."})
 	default:
 		writeError(w, internalError())
 	}
@@ -48,7 +54,7 @@ func (s *Server) handleGuestQueueCreate(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	ticket, err := s.guestQueue.CreateOrGet(r.Context(), guest)
+	ticket, err := s.guestQueue.CreateOrGet(r.Context(), guest, r.RemoteAddr)
 	if err != nil {
 		s.guestQueueError(w, err)
 		return
@@ -184,6 +190,44 @@ func (s *Server) handleGuestSessionCreate(w http.ResponseWriter, r *http.Request
 		OwnerToken string `json:"owner_token"`
 		ICEServers any    `json:"iceServers"`
 	}{Response: live.Response(), OwnerToken: owner, ICEServers: s.sessions.ICEServers()})
+}
+
+func (s *Server) handleGuestGetSession(w http.ResponseWriter, r *http.Request) {
+	live, _, ok := s.guestSessionRequest(w, r)
+	if ok {
+		writeJSON(w, http.StatusOK, live.Response())
+	}
+}
+
+func (s *Server) handleGuestDeleteSession(w http.ResponseWriter, r *http.Request) {
+	live, _, ok := s.guestSessionRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sessions.Delete(live.ID, "delete_guest_session"); err != nil {
+		writeSessionError(w, err, live.ID)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGuestPatchAnonymization(w http.ResponseWriter, r *http.Request) {
+	live, _, ok := s.guestSessionRequest(w, r)
+	if !ok {
+		return
+	}
+	request := struct {
+		Enabled *bool `json:"enabled"`
+	}{}
+	if err := decodeOptionalJSON(http.MaxBytesReader(w, r.Body, maxJSONBody), &request); err != nil || request.Enabled == nil {
+		writeError(w, badRequest("Invalid anonymization request.", nil))
+		return
+	}
+	if _, err := s.sessions.SetAnonymizationEnabled(live.ID, *request.Enabled); err != nil {
+		writeSessionError(w, err, live.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, live.Response())
 }
 
 func (s *Server) guestSessionRequest(w http.ResponseWriter, r *http.Request) (*session.Session, *http.Request, bool) {

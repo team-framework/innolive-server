@@ -419,7 +419,7 @@ func main() {
 		requireUser = nil
 		authenticateUser = nil
 	}
-	guestQueue, err := server.NewGuestQueue(context.Background(), cfg, sessionManager)
+	guestQueue, err := server.NewGuestQueue(context.Background(), cfg, sessionManager, registry)
 	if err != nil {
 		logger.Error("create guest queue failed", "error", err)
 		os.Exit(2)

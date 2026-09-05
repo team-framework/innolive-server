@@ -7,22 +7,25 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/session"
 
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	guestCookieName   = "innolive_guest"
-	guestQueueKey     = "innolive:guest:queue"
-	guestTicketKey    = "innolive:guest:ticket:"
-	guestByIDKey      = "innolive:guest:by-id:"
-	guestReserveKey   = "innolive:guest:reservations"
-	guestQueueChannel = "innolive:guest:queue:changed"
+	guestCookieName      = "innolive_guest"
+	guestQueueKey        = "innolive:guest:queue"
+	guestTicketKey       = "innolive:guest:ticket:"
+	guestByIDKey         = "innolive:guest:by-id:"
+	guestReserveKey      = "innolive:guest:reservations"
+	guestQueueChannel    = "innolive:guest:queue:changed"
+	guestQueueMaxWaiting = 100
 )
 
 var (
@@ -30,6 +33,8 @@ var (
 	ErrGuestTicketNotFound   = errors.New("guest ticket not found")
 	ErrGuestForbidden        = errors.New("guest ticket does not belong to caller")
 	ErrGuestAdmissionInvalid = errors.New("guest admission token is invalid")
+	ErrGuestQueueFull        = errors.New("guest queue is full")
+	ErrGuestRateLimited      = errors.New("guest queue rate limited")
 )
 
 // admitHeadScript atomically claims the current FIFO head and turns it into an
@@ -84,6 +89,7 @@ type guestTicket struct {
 type GuestQueue struct {
 	client          *redis.Client
 	sessions        *session.Manager
+	metrics         *metrics.Registry
 	ttl             time.Duration
 	admissionTTL    time.Duration
 	guestSessionTTL time.Duration
@@ -91,7 +97,7 @@ type GuestQueue struct {
 	mu              sync.Mutex
 }
 
-func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Manager) (*GuestQueue, error) {
+func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Manager, registries ...*metrics.Registry) (*GuestQueue, error) {
 	if !cfg.GuestQueueEnabled {
 		return nil, nil
 	}
@@ -100,7 +106,11 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 		_ = client.Close()
 		return nil, fmt.Errorf("connect guest queue Redis: %w", err)
 	}
-	return &GuestQueue{client: client, sessions: sessions, ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
+	var registry *metrics.Registry
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
+	return &GuestQueue{client: client, sessions: sessions, metrics: registry, ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
 }
 
 func (q *GuestQueue) Close() error {
@@ -123,7 +133,7 @@ func guestHash(value string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func (q *GuestQueue) CreateOrGet(ctx context.Context, guest string) (guestTicket, error) {
+func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr string) (guestTicket, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	changed, err := q.cleanupAndAdmit(ctx)
@@ -138,6 +148,16 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest string) (guestTicket
 		return q.statusLocked(ctx, hash, id)
 	} else if err != redis.Nil {
 		return guestTicket{}, ErrGuestQueueUnavailable
+	}
+	if err := q.allowIP(ctx, remoteAddr); err != nil {
+		return guestTicket{}, err
+	}
+	count, err := q.client.ZCard(ctx, guestQueueKey).Result()
+	if err != nil {
+		return guestTicket{}, ErrGuestQueueUnavailable
+	}
+	if count >= guestQueueMaxWaiting {
+		return guestTicket{}, ErrGuestQueueFull
 	}
 	id, err := newGuestSecret()
 	if err != nil {
@@ -160,6 +180,37 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest string) (guestTicket
 		q.publish(ctx)
 	}
 	return q.statusLocked(ctx, hash, id)
+}
+
+func (q *GuestQueue) allowIP(ctx context.Context, remoteAddr string) error {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	keyPart := guestHash(host)
+	for _, rule := range []struct {
+		suffix string
+		ttl    time.Duration
+		max    int64
+	}{{"minute", time.Minute, 5}, {"hour", time.Hour, 30}} {
+		key := "innolive:guest:rate:" + rule.suffix + ":" + keyPart
+		count, err := q.client.Incr(ctx, key).Result()
+		if err != nil {
+			return ErrGuestQueueUnavailable
+		}
+		if count == 1 {
+			if err := q.client.Expire(ctx, key, rule.ttl).Err(); err != nil {
+				return ErrGuestQueueUnavailable
+			}
+		}
+		if count > rule.max {
+			if q.metrics != nil {
+				q.metrics.IncGuestRateLimited()
+			}
+			return ErrGuestRateLimited
+		}
+	}
+	return nil
 }
 
 func (q *GuestQueue) Status(ctx context.Context, guest, id string) (guestTicket, error) {
@@ -404,8 +455,25 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 		}
 		reserved++
 		changed = true
+		if q.metrics != nil {
+			q.metrics.IncGuestAdmitted()
+		}
 	}
+	q.observe(ctx)
 	return changed, nil
+}
+
+func (q *GuestQueue) observe(ctx context.Context) {
+	if q.metrics == nil {
+		return
+	}
+	if waiting, err := q.client.ZCard(ctx, guestQueueKey).Result(); err == nil {
+		q.metrics.SetGuestQueueWaiting(waiting)
+	}
+	if reserved, err := q.client.ZCard(ctx, guestReserveKey).Result(); err == nil {
+		q.metrics.SetGuestReservations(reserved)
+	}
+	q.metrics.SetGuestActiveSessions(int64(q.sessions.GuestCount()))
 }
 
 func (q *GuestQueue) publish(ctx context.Context) {

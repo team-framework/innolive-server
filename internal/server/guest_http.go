@@ -54,7 +54,7 @@ func (s *Server) handleGuestQueueCreate(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	ticket, err := s.guestQueue.CreateOrGet(r.Context(), guest, r.RemoteAddr)
+	ticket, err := s.guestQueue.CreateOrGet(r.Context(), guest, r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
 	if err != nil {
 		s.guestQueueError(w, err)
 		return

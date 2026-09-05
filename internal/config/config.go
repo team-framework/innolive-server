@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -49,114 +50,116 @@ const (
 )
 
 type Config struct {
-	HTTPAddr                string
-	PrivacyMode             PrivacyMode
-	PrivacyFixedDelay       time.Duration
-	AIAddress               string
-	AITargets               []string
-	AITimeout               time.Duration
-	AIInsecure              bool
-	AIWireFormat            WireFormat
-	AIFailurePolicy         AIFailurePolicy
-	AITimeoutLatchThreshold int
-	AIPreflightTimeout      time.Duration
-	AIPreflightRequired     bool
-	AIPreflightInterval     time.Duration
-	AIMeImagePath           string
-	ReferenceStorePath      string
-	FFmpegPath              string
-	FFmpegSpawnConcurrency  int
-	FFmpegEncoderThreads    int
-	MaxSessions             int
-	NegotiationTimeout      time.Duration
-	STUNURLs                []string
-	TURNURLs                []string
-	TURNUsername            string
-	TURNCredential          string
-	AnnouncedIP             string
-	UDPPortMin              uint16
-	UDPPortMax              uint16
-	UDPMuxPort              int
-	DisconnectedGracePeriod time.Duration
-	WebRTCRecoveryWindow    time.Duration
-	WebRTCRecoveryDebounce  time.Duration
-	WebRTCRecoveryAttempts  int
-	FrameQueueSize          int
-	EnableAudioEgress       bool
-	EgressLatencyLog        bool
-	EgressAudioOffset       time.Duration
-	EgressVideoBitrate      string
-	EgressVideoSize         string
-	DecoderPinLongEdge      int
-	RequireSessionAuth      bool
-	GuestQueueEnabled       bool
-	GuestQueueRedisAddr     string
-	GuestQueueRedisPassword string
-	GuestQueueTTL           time.Duration
-	GuestSessionTTL         time.Duration
-	GuestAdmissionTTL       time.Duration
-	PprofEnabled            bool
-	LogLevel                string
-	DatabaseURL             string
-	DatabaseMaxOpenConns    int
-	DatabaseMaxIdleConns    int
-	DatabaseConnMaxLifetime time.Duration
-	DatabaseConnMaxIdleTime time.Duration
-	DatabaseMigrationMode   DatabaseMigrationMode
+	HTTPAddr                 string
+	PrivacyMode              PrivacyMode
+	PrivacyFixedDelay        time.Duration
+	AIAddress                string
+	AITargets                []string
+	AITimeout                time.Duration
+	AIInsecure               bool
+	AIWireFormat             WireFormat
+	AIFailurePolicy          AIFailurePolicy
+	AITimeoutLatchThreshold  int
+	AIPreflightTimeout       time.Duration
+	AIPreflightRequired      bool
+	AIPreflightInterval      time.Duration
+	AIMeImagePath            string
+	ReferenceStorePath       string
+	FFmpegPath               string
+	FFmpegSpawnConcurrency   int
+	FFmpegEncoderThreads     int
+	MaxSessions              int
+	NegotiationTimeout       time.Duration
+	STUNURLs                 []string
+	TURNURLs                 []string
+	TURNUsername             string
+	TURNCredential           string
+	AnnouncedIP              string
+	UDPPortMin               uint16
+	UDPPortMax               uint16
+	UDPMuxPort               int
+	DisconnectedGracePeriod  time.Duration
+	WebRTCRecoveryWindow     time.Duration
+	WebRTCRecoveryDebounce   time.Duration
+	WebRTCRecoveryAttempts   int
+	FrameQueueSize           int
+	EnableAudioEgress        bool
+	EgressLatencyLog         bool
+	EgressAudioOffset        time.Duration
+	EgressVideoBitrate       string
+	EgressVideoSize          string
+	DecoderPinLongEdge       int
+	RequireSessionAuth       bool
+	GuestQueueEnabled        bool
+	GuestQueueRedisAddr      string
+	GuestQueueRedisPassword  string
+	GuestQueueTTL            time.Duration
+	GuestSessionTTL          time.Duration
+	GuestAdmissionTTL        time.Duration
+	GuestQueueTrustedProxies []string
+	PprofEnabled             bool
+	LogLevel                 string
+	DatabaseURL              string
+	DatabaseMaxOpenConns     int
+	DatabaseMaxIdleConns     int
+	DatabaseConnMaxLifetime  time.Duration
+	DatabaseConnMaxIdleTime  time.Duration
+	DatabaseMigrationMode    DatabaseMigrationMode
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:                env("HTTP_ADDR", ":8000"),
-		PrivacyMode:             PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeReal))),
-		AIAddress:               env("AI_GRPC_ADDR", "localhost:50051"),
-		AIInsecure:              envBool("AI_GRPC_INSECURE", true),
-		AIWireFormat:            WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
-		AIFailurePolicy:         AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
-		AITimeoutLatchThreshold: envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
-		AIPreflightTimeout:      envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
-		AIPreflightRequired:     envBool("AI_PREFLIGHT_REQUIRED", false),
-		AIPreflightInterval:     envDuration("AI_PREFLIGHT_INTERVAL", 5*time.Minute),
-		AIMeImagePath:           strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
-		ReferenceStorePath:      strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
-		FFmpegPath:              env("FFMPEG_PATH", "ffmpeg"),
-		FFmpegSpawnConcurrency:  envInt("FFMPEG_SPAWN_CONCURRENCY", 3),
-		FFmpegEncoderThreads:    envInt("FFMPEG_ENCODER_THREADS", 1),
-		MaxSessions:             envInt("MAX_SESSIONS", 0),
-		NegotiationTimeout:      envDuration("SESSION_NEGOTIATION_TIMEOUT", 30*time.Second),
-		STUNURLs:                splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
-		TURNURLs:                splitURLs(env("WEBRTC_TURN_URLS", "")),
-		TURNUsername:            strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME")),
-		TURNCredential:          strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
-		AnnouncedIP:             strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
-		DisconnectedGracePeriod: envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
-		WebRTCRecoveryWindow:    envDuration("WEBRTC_RECOVERY_WINDOW", 50*time.Second),
-		WebRTCRecoveryDebounce:  envDuration("WEBRTC_RECOVERY_DEBOUNCE", 2*time.Second),
-		WebRTCRecoveryAttempts:  envInt("WEBRTC_RECOVERY_MAX_ATTEMPTS", 10),
-		AITimeout:               envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
-		PrivacyFixedDelay:       envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
-		FrameQueueSize:          envInt("AI_FRAME_QUEUE_SIZE", 2),
-		EnableAudioEgress:       envBool("ENABLE_AUDIO_EGRESS", false),
-		EgressLatencyLog:        envBool("EGRESS_LATENCY_LOG", false),
-		EgressAudioOffset:       time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
-		EgressVideoBitrate:      strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
-		EgressVideoSize:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
-		DecoderPinLongEdge:      envInt("DECODER_PIN_LONG_EDGE", 0),
-		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
-		GuestQueueEnabled:       envBool("GUEST_QUEUE_ENABLED", false),
-		GuestQueueRedisAddr:     strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
-		GuestQueueRedisPassword: os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
-		GuestQueueTTL:           envDuration("GUEST_QUEUE_TTL", 10*time.Minute),
-		GuestSessionTTL:         envDuration("GUEST_SESSION_TTL", 10*time.Minute),
-		GuestAdmissionTTL:       envDuration("GUEST_ADMISSION_TTL", time.Minute),
-		PprofEnabled:            envBool("PPROF_ENABLED", false),
-		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
-		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
-		DatabaseURL:             strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		DatabaseMaxOpenConns:    envInt("DATABASE_MAX_OPEN_CONNS", 10),
-		DatabaseMaxIdleConns:    envInt("DATABASE_MAX_IDLE_CONNS", 5),
-		DatabaseConnMaxLifetime: envDuration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
-		DatabaseConnMaxIdleTime: envDuration("DATABASE_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		HTTPAddr:                 env("HTTP_ADDR", ":8000"),
+		PrivacyMode:              PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeReal))),
+		AIAddress:                env("AI_GRPC_ADDR", "localhost:50051"),
+		AIInsecure:               envBool("AI_GRPC_INSECURE", true),
+		AIWireFormat:             WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
+		AIFailurePolicy:          AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
+		AITimeoutLatchThreshold:  envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
+		AIPreflightTimeout:       envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
+		AIPreflightRequired:      envBool("AI_PREFLIGHT_REQUIRED", false),
+		AIPreflightInterval:      envDuration("AI_PREFLIGHT_INTERVAL", 5*time.Minute),
+		AIMeImagePath:            strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
+		ReferenceStorePath:       strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
+		FFmpegPath:               env("FFMPEG_PATH", "ffmpeg"),
+		FFmpegSpawnConcurrency:   envInt("FFMPEG_SPAWN_CONCURRENCY", 3),
+		FFmpegEncoderThreads:     envInt("FFMPEG_ENCODER_THREADS", 1),
+		MaxSessions:              envInt("MAX_SESSIONS", 0),
+		NegotiationTimeout:       envDuration("SESSION_NEGOTIATION_TIMEOUT", 30*time.Second),
+		STUNURLs:                 splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
+		TURNURLs:                 splitURLs(env("WEBRTC_TURN_URLS", "")),
+		TURNUsername:             strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME")),
+		TURNCredential:           strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
+		AnnouncedIP:              strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
+		DisconnectedGracePeriod:  envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
+		WebRTCRecoveryWindow:     envDuration("WEBRTC_RECOVERY_WINDOW", 50*time.Second),
+		WebRTCRecoveryDebounce:   envDuration("WEBRTC_RECOVERY_DEBOUNCE", 2*time.Second),
+		WebRTCRecoveryAttempts:   envInt("WEBRTC_RECOVERY_MAX_ATTEMPTS", 10),
+		AITimeout:                envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
+		PrivacyFixedDelay:        envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
+		FrameQueueSize:           envInt("AI_FRAME_QUEUE_SIZE", 2),
+		EnableAudioEgress:        envBool("ENABLE_AUDIO_EGRESS", false),
+		EgressLatencyLog:         envBool("EGRESS_LATENCY_LOG", false),
+		EgressAudioOffset:        time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
+		EgressVideoBitrate:       strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
+		EgressVideoSize:          strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
+		DecoderPinLongEdge:       envInt("DECODER_PIN_LONG_EDGE", 0),
+		RequireSessionAuth:       envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
+		GuestQueueEnabled:        envBool("GUEST_QUEUE_ENABLED", false),
+		GuestQueueRedisAddr:      strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
+		GuestQueueRedisPassword:  os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
+		GuestQueueTTL:            envDuration("GUEST_QUEUE_TTL", 10*time.Minute),
+		GuestSessionTTL:          envDuration("GUEST_SESSION_TTL", 10*time.Minute),
+		GuestAdmissionTTL:        envDuration("GUEST_ADMISSION_TTL", time.Minute),
+		GuestQueueTrustedProxies: splitList(env("GUEST_QUEUE_TRUSTED_PROXY_CIDRS", "")),
+		PprofEnabled:             envBool("PPROF_ENABLED", false),
+		UDPMuxPort:               envInt("WEBRTC_UDP_MUX_PORT", 0),
+		LogLevel:                 strings.ToUpper(env("LOG_LEVEL", "INFO")),
+		DatabaseURL:              strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DatabaseMaxOpenConns:     envInt("DATABASE_MAX_OPEN_CONNS", 10),
+		DatabaseMaxIdleConns:     envInt("DATABASE_MAX_IDLE_CONNS", 5),
+		DatabaseConnMaxLifetime:  envDuration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
+		DatabaseConnMaxIdleTime:  envDuration("DATABASE_CONN_MAX_IDLE_TIME", 5*time.Minute),
 		DatabaseMigrationMode: DatabaseMigrationMode(
 			env("DATABASE_MIGRATION_MODE", string(DatabaseMigrationModeAuto)),
 		),
@@ -241,6 +244,11 @@ func (c Config) Validate() error {
 		}
 		if c.GuestAdmissionTTL < time.Millisecond {
 			return errors.New("GUEST_ADMISSION_TTL must be at least 1ms")
+		}
+		for _, cidr := range c.GuestQueueTrustedProxies {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return fmt.Errorf("GUEST_QUEUE_TRUSTED_PROXY_CIDRS contains invalid CIDR %q", cidr)
+			}
 		}
 	}
 	if c.FFmpegSpawnConcurrency < 0 {

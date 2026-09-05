@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,12 @@ if redis.call('GET', KEYS[4] .. ARGV[2]) == ARGV[1] then redis.call('DEL', KEYS[
 return 'ok'
 `)
 
+var rateLimitScript = redis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
+return count
+`)
+
 type guestTicket struct {
 	ID             string    `json:"ticket_id"`
 	Status         string    `json:"status"`
@@ -94,6 +101,7 @@ type GuestQueue struct {
 	admissionTTL    time.Duration
 	guestSessionTTL time.Duration
 	maxGuests       int
+	trustedProxies  []*net.IPNet
 	mu              sync.Mutex
 }
 
@@ -110,7 +118,12 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	return &GuestQueue{client: client, sessions: sessions, metrics: registry, ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
+	trusted := make([]*net.IPNet, 0, len(cfg.GuestQueueTrustedProxies))
+	for _, cidr := range cfg.GuestQueueTrustedProxies {
+		_, block, _ := net.ParseCIDR(cidr)
+		trusted = append(trusted, block)
+	}
+	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: trusted, ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
 }
 
 func (q *GuestQueue) Close() error {
@@ -133,7 +146,7 @@ func guestHash(value string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr string) (guestTicket, error) {
+func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr, forwardedFor string) (guestTicket, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	changed, err := q.cleanupAndAdmit(ctx)
@@ -163,7 +176,7 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr string) 
 	} else if err != redis.Nil {
 		return guestTicket{}, ErrGuestQueueUnavailable
 	}
-	if err := q.allowIP(ctx, remoteAddr); err != nil {
+	if err := q.allowIP(ctx, q.clientIP(remoteAddr, forwardedFor)); err != nil {
 		return guestTicket{}, err
 	}
 	count, err := q.client.ZCard(ctx, guestQueueKey).Result()
@@ -196,26 +209,35 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr string) 
 	return q.statusLocked(ctx, hash, id)
 }
 
-func (q *GuestQueue) allowIP(ctx context.Context, remoteAddr string) error {
+func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
 	}
-	keyPart := guestHash(host)
+	remote := net.ParseIP(host)
+	for _, proxy := range q.trustedProxies {
+		if remote != nil && proxy.Contains(remote) {
+			first, _, _ := strings.Cut(forwardedFor, ",")
+			if candidate := strings.TrimSpace(first); net.ParseIP(candidate) != nil {
+				return candidate
+			}
+			break
+		}
+	}
+	return host
+}
+
+func (q *GuestQueue) allowIP(ctx context.Context, ip string) error {
+	keyPart := guestHash(ip)
 	for _, rule := range []struct {
 		suffix string
 		ttl    time.Duration
 		max    int64
 	}{{"minute", time.Minute, 5}, {"hour", time.Hour, 30}} {
 		key := "innolive:guest:rate:" + rule.suffix + ":" + keyPart
-		count, err := q.client.Incr(ctx, key).Result()
+		count, err := rateLimitScript.Run(ctx, q.client, []string{key}, rule.ttl.Milliseconds()).Int64()
 		if err != nil {
 			return ErrGuestQueueUnavailable
-		}
-		if count == 1 {
-			if err := q.client.Expire(ctx, key, rule.ttl).Err(); err != nil {
-				return ErrGuestQueueUnavailable
-			}
 		}
 		if count > rule.max {
 			if q.metrics != nil {

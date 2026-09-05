@@ -447,6 +447,9 @@ func main() {
 		sessionManager.CloseAll()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
+		if err := sessionManager.WaitForDeletes(cleanupContext); err != nil {
+			logger.Warn("session teardown did not finish before shutdown", "error", err)
+		}
 		if err := application.WaitGuestCleanup(cleanupContext); err != nil {
 			logger.Warn("guest face cleanup did not finish before shutdown", "error", err)
 		}

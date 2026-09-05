@@ -206,6 +206,10 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	pending  int
+	// deleting tracks teardown calls that have removed a session from sessions
+	// but have not yet reached the server-owned cleanup hook. Graceful shutdown
+	// waits for these before closing dependencies used by that hook.
+	deleting sync.WaitGroup
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
@@ -832,9 +836,13 @@ func (m *Manager) Delete(id, reason string) error {
 		m.mu.Unlock()
 		return ErrNotFound
 	}
+	// Register before removing the session so CloseAll followed by
+	// WaitForDeletes cannot miss a teardown already in progress.
+	m.deleting.Add(1)
 	delete(m.sessions, id)
 	count := len(m.sessions)
 	m.mu.Unlock()
+	defer m.deleting.Done()
 	m.metrics.SetActiveSessions(count)
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
@@ -843,6 +851,24 @@ func (m *Manager) Delete(id, reason string) error {
 		m.sessionCleanup(s)
 	}
 	return nil
+}
+
+// WaitForDeletes waits for teardowns that were already in flight when
+// CloseAll removed the remaining sessions. It is used during graceful process
+// shutdown before closing server-owned cleanup dependencies such as the AI
+// whitelist client.
+func (m *Manager) WaitForDeletes(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		m.deleting.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) CloseAll() {

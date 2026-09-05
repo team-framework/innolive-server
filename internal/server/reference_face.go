@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/jpeg"
@@ -88,6 +89,76 @@ type referenceStore struct {
 }
 
 type guestReferenceContextKey struct{}
+
+type guestReferenceGateContextKey struct{}
+
+// guestReferenceGate serializes face mutations and terminal cleanup for one
+// guest session. Closing a session marks it terminal immediately, while the
+// cleanup operation waits for an already-running upload before clearing its
+// worker whitelist and persisted metadata.
+type guestReferenceGate struct {
+	mu      sync.Mutex
+	entries map[string]*guestReferenceGateEntry
+}
+
+type guestReferenceGateEntry struct {
+	mu     sync.Mutex
+	refs   int
+	closed bool
+}
+
+func newGuestReferenceGate() *guestReferenceGate {
+	return &guestReferenceGate{entries: make(map[string]*guestReferenceGateEntry)}
+}
+
+func (g *guestReferenceGate) Lock(sessionID string) (unlock func(), closed bool) {
+	g.mu.Lock()
+	entry := g.entries[sessionID]
+	if entry == nil {
+		entry = &guestReferenceGateEntry{}
+		g.entries[sessionID] = entry
+	}
+	entry.refs++
+	closed = entry.closed
+	g.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		g.release(sessionID, entry)
+	}, closed
+}
+
+// Close marks a session terminal without waiting for an in-flight operation.
+// Its returned release function must run only after terminal cleanup finishes.
+func (g *guestReferenceGate) Close(sessionID string) func() {
+	g.mu.Lock()
+	entry := g.entries[sessionID]
+	if entry == nil {
+		entry = &guestReferenceGateEntry{}
+		g.entries[sessionID] = entry
+	}
+	entry.refs++
+	entry.closed = true
+	g.mu.Unlock()
+	return func() { g.release(sessionID, entry) }
+}
+
+func (g *guestReferenceGate) IsClosed(sessionID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	entry := g.entries[sessionID]
+	return entry != nil && entry.closed
+}
+
+func (g *guestReferenceGate) release(sessionID string, entry *guestReferenceGateEntry) {
+	g.mu.Lock()
+	entry.refs--
+	if entry.refs == 0 && g.entries[sessionID] == entry {
+		delete(g.entries, sessionID)
+	}
+	g.mu.Unlock()
+}
 
 func newReferenceStore(path string, envConfigured bool) *referenceStore {
 	s := &referenceStore{faces: make(map[string][]referenceFace), path: path, envConfigured: envConfigured}
@@ -196,6 +267,18 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		registered = append(registered, referenceFace{FaceID: faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
+	}
+	if gate, sessionID, ok := guestReferenceGateFromContext(r.Context()); ok && gate.IsClosed(sessionID) {
+		// The session ended while this request was registering faces. Do not
+		// persist a result that terminal cleanup may already have performed.
+		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
+			s.logger.Error("clear whitelist after guest session close failed", "client_id", clientID, "error", err)
+			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "Guest session ended while registering a reference face."})
+			return
+		}
+		s.references.deleteClient(clientID)
+		writeError(w, apiError{Status: http.StatusConflict, Code: "session_ended", Message: "Guest session ended while registering a reference face."})
+		return
 	}
 
 	s.references.mu.Lock()
@@ -322,6 +405,17 @@ func referenceClientID(r *http.Request) string {
 	// A deterministic fallback keeps direct handler tests independent from the
 	// authentication package without accepting a caller-controlled bucket.
 	return "default"
+}
+
+func guestReferenceGateFromContext(ctx context.Context) (*guestReferenceGate, string, bool) {
+	value, ok := ctx.Value(guestReferenceGateContextKey{}).(struct {
+		gate      *guestReferenceGate
+		sessionID string
+	})
+	if !ok || value.gate == nil || value.sessionID == "" {
+		return nil, "", false
+	}
+	return value.gate, value.sessionID, true
 }
 
 func (s *referenceStore) deleteClient(clientID string) {

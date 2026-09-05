@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,7 +24,10 @@ import (
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
+	"inno-live-server/internal/session"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -39,11 +43,23 @@ type fakeAIWorker struct {
 	mu      sync.Mutex
 	entries []string
 	next    int
+
+	addStarted     chan struct{}
+	allowAdd       chan struct{}
+	addStartedOnce sync.Once
 }
 
-func (w *fakeAIWorker) AddWhitelist(_ context.Context, request *aiv1.FaceData) (*aiv1.WhitelistResponse, error) {
+func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData) (*aiv1.WhitelistResponse, error) {
 	if request.GetSessionId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session_id must not be empty")
+	}
+	if w.addStarted != nil {
+		w.addStartedOnce.Do(func() { close(w.addStarted) })
+		select {
+		case <-w.allowAdd:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -178,6 +194,197 @@ func deleteReferenceFace(t *testing.T, url string) *http.Response {
 		t.Fatal(err)
 	}
 	return response
+}
+
+func TestGuestReferenceUploadDoesNotRepopulateAfterSessionDelete(t *testing.T) {
+	worker := &fakeAIWorker{name: "worker", addStarted: make(chan struct{}), allowAdd: make(chan struct{})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	aiv1.RegisterAiProcessorServer(grpcServer, worker)
+	go grpcServer.Serve(listener)
+	t.Cleanup(grpcServer.Stop)
+
+	pool, err := ai.NewPool([]string{listener.Addr().String()}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	manager, err := session.NewManager(config.Config{
+		PrivacyMode:    config.PrivacyModeBypass,
+		FFmpegPath:     "ffmpeg",
+		UDPPortMin:     42000,
+		UDPPortMax:     42100,
+		FrameQueueSize: 2,
+		MaxSessions:    2,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	origins, err := origin.NewConfig(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := New(config.Config{ReferenceStorePath: filepath.Join(t.TempDir(), "reference-faces.json")}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), manager, pool, origins, nil, nil)
+	application.SetGuestQueue(&GuestQueue{client: client, sessions: manager, ttl: time.Minute, admissionTTL: time.Minute, maxGuests: 1})
+	httpServer := httptest.NewServer(application.Handler())
+	t.Cleanup(httpServer.Close)
+
+	guest := "guest-cookie"
+	live, owner, err := manager.CreateForGuest(guestHash(guest), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest := guestReferenceUploadRequest(t, httpServer.URL, live.ID, owner, guest)
+	uploadResult := make(chan *http.Response, 1)
+	uploadError := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(uploadRequest)
+		if err != nil {
+			uploadError <- err
+			return
+		}
+		uploadResult <- response
+	}()
+	select {
+	case <-worker.addStarted:
+	case <-time.After(time.Second):
+		t.Fatal("upload did not reach AI worker")
+	}
+
+	deleteRequest, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/guest/sessions/"+live.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteRequest.AddCookie(&http.Cookie{Name: guestCookieName, Value: guest})
+	deleteRequest.Header.Set("X-Session-Owner-Token", owner)
+	deleteResponse, err := http.DefaultClient.Do(deleteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteResponse.StatusCode != http.StatusNoContent {
+		data, _ := io.ReadAll(deleteResponse.Body)
+		deleteResponse.Body.Close()
+		t.Fatalf("DELETE guest session = %d: %s", deleteResponse.StatusCode, data)
+	}
+	deleteResponse.Body.Close()
+	close(worker.allowAdd)
+
+	select {
+	case err := <-uploadError:
+		t.Fatal(err)
+	case response := <-uploadResult:
+		defer response.Body.Close()
+		if response.StatusCode == http.StatusCreated {
+			t.Fatal("upload completed with 201 after its guest session was deleted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upload did not complete")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(worker.snapshot()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if entries := worker.snapshot(); len(entries) != 0 {
+		t.Fatalf("worker retains entries after guest session deletion: %v", entries)
+	}
+	if status := application.references.status(live.AIClientID); status.Count != 0 {
+		t.Fatalf("reference store count = %d, want 0", status.Count)
+	}
+}
+
+func TestGuestQueueSSEReportsExpiredTicketWithoutQueueMutation(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	manager, err := session.NewManager(config.Config{PrivacyMode: config.PrivacyModeBypass, FFmpegPath: "ffmpeg", UDPPortMin: 42000, UDPPortMax: 42100, FrameQueueSize: 2, MaxSessions: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+	queue := &GuestQueue{client: client, sessions: manager, ttl: time.Second, admissionTTL: time.Minute, maxGuests: 0}
+	guest := "guest-cookie"
+	ticket, err := queue.CreateOrGet(context.Background(), guest, "203.0.113.1:443", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origins, err := origin.NewConfig(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := New(config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), manager, nil, origins, nil, nil)
+	application.SetGuestQueue(queue)
+	httpServer := httptest.NewServer(application.Handler())
+	t.Cleanup(httpServer.Close)
+	previousInterval := guestSSEStatusInterval
+	guestSSEStatusInterval = 5 * time.Millisecond
+	t.Cleanup(func() { guestSSEStatusInterval = previousInterval })
+
+	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/guest-queue/"+ticket.ID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: guestCookieName, Value: guest})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	if line, err := reader.ReadString('\n'); err != nil || line != "event: queue\n" {
+		t.Fatalf("initial SSE event = %q, %v", line, err)
+	}
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	redisServer.FastForward(2 * time.Second)
+	if line, err := reader.ReadString('\n'); err != nil || line != "event: expired\n" {
+		t.Fatalf("expiry SSE event = %q, %v", line, err)
+	}
+}
+
+func guestReferenceUploadRequest(t *testing.T, baseURL, sessionID, owner, guest string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="image"; filename="face.jpg"`)
+	header.Set("Content-Type", "image/jpeg")
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("face")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/guest/sessions/"+sessionID+"/reference-face", &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-Session-Owner-Token", owner)
+	request.AddCookie(&http.Cookie{Name: guestCookieName, Value: guest})
+	return request
 }
 
 // Every worker mints its own entry id for the same face, so deleting one face

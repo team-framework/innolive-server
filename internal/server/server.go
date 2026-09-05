@@ -48,6 +48,7 @@ type Server struct {
 	streaming        map[auth.StreamingProvider]streaming.Provider
 	authenticateUser func(context.Context, string) (uuid.UUID, error)
 	guestQueue       *GuestQueue
+	guestReference   *guestReferenceGate
 	mux              *http.ServeMux
 	handler          http.Handler
 }
@@ -67,14 +68,15 @@ func New(
 		requireUser = func(next http.Handler) http.Handler { return next }
 	}
 	s := &Server{
-		cfg:        cfg,
-		logger:     logger,
-		metrics:    registry,
-		sessions:   sessions,
-		ai:         aiPool,
-		references: newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
-		origins:    origins,
-		streaming:  streamingProviders,
+		cfg:            cfg,
+		logger:         logger,
+		metrics:        registry,
+		sessions:       sessions,
+		ai:             aiPool,
+		references:     newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
+		origins:        origins,
+		streaming:      streamingProviders,
+		guestReference: newGuestReferenceGate(),
 	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]
@@ -162,16 +164,20 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 					s.logger.Warn("clear guest queue session index failed", "session_id", sessionID, "error", err)
 				}
 			}(live.GuestID, live.ID)
-			s.references.deleteClient(live.AIClientID)
-			if s.ai != nil {
-				go func(clientID string) {
+			releaseClosing := s.guestReference.Close(live.ID)
+			go func(sessionID, clientID string) {
+				defer releaseClosing()
+				unlock, _ := s.guestReference.Lock(sessionID)
+				defer unlock()
+				s.references.deleteClient(clientID)
+				if s.ai != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
 					if err := s.ai.ClearWhitelist(ctx, clientID); err != nil {
 						s.logger.Warn("clear guest whitelist failed", "client_id", clientID, "error", err)
 					}
-				}(live.AIClientID)
-			}
+				}
+			}(live.ID, live.AIClientID)
 		})
 	}
 }

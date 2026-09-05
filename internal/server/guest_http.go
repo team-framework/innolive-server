@@ -12,6 +12,8 @@ import (
 	"inno-live-server/internal/session"
 )
 
+var guestSSEStatusInterval = 15 * time.Second
+
 func (s *Server) guestID(w http.ResponseWriter, r *http.Request, create bool) (string, bool) {
 	if cookie, err := r.Cookie(guestCookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
 		return cookie.Value, true
@@ -149,13 +151,16 @@ func (s *Server) handleGuestQueueEvents(w http.ResponseWriter, r *http.Request) 
 	if !send() {
 		return
 	}
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(guestSSEStatusInterval)
 	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
+			if !send() {
+				return
+			}
 			fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case <-channel:
@@ -255,14 +260,26 @@ func (s *Server) handleGuestGetReferenceFace(w http.ResponseWriter, r *http.Requ
 	}
 }
 func (s *Server) handleGuestPostReferenceFace(w http.ResponseWriter, r *http.Request) {
-	_, request, ok := s.guestSessionRequest(w, r)
-	if ok {
-		s.handlePostReferenceFace(w, request)
-	}
+	s.withGuestReferenceSession(w, r, s.handlePostReferenceFace)
 }
 func (s *Server) handleGuestDeleteReferenceFace(w http.ResponseWriter, r *http.Request) {
-	_, request, ok := s.guestSessionRequest(w, r)
-	if ok {
-		s.handleDeleteReferenceFace(w, request)
+	s.withGuestReferenceSession(w, r, s.handleDeleteReferenceFace)
+}
+
+func (s *Server) withGuestReferenceSession(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request)) {
+	unlock, closed := s.guestReference.Lock(r.PathValue("session_id"))
+	defer unlock()
+	if closed {
+		writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found."})
+		return
 	}
+	_, request, ok := s.guestSessionRequest(w, r)
+	if !ok {
+		return
+	}
+	request = request.WithContext(context.WithValue(request.Context(), guestReferenceGateContextKey{}, struct {
+		gate      *guestReferenceGate
+		sessionID string
+	}{gate: s.guestReference, sessionID: r.PathValue("session_id")}))
+	next(w, request)
 }

@@ -128,6 +128,19 @@ func TestValidateGuestQueueRequiresBoundedCapacityAndRedis(t *testing.T) {
 	}
 }
 
+func TestValidateGuestQueueRejectsSubMillisecondAdmissionTTL(t *testing.T) {
+	cfg := validConfig()
+	cfg.GuestQueueEnabled = true
+	cfg.MaxSessions = 2
+	cfg.GuestQueueRedisAddr = "redis:6379"
+	cfg.GuestQueueTTL = time.Minute
+	cfg.GuestSessionTTL = time.Minute
+	cfg.GuestAdmissionTTL = 500 * time.Microsecond
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest queue must reject admission TTL below Redis PEXPIRE precision")
+	}
+}
+
 func TestValidateRequiresFFmpegInAllModes(t *testing.T) {
 	for _, mode := range []PrivacyMode{PrivacyModeBypass, PrivacyModeFixedDelay, PrivacyModeReal} {
 		t.Run(string(mode), func(t *testing.T) {

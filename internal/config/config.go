@@ -239,6 +239,9 @@ func (c Config) Validate() error {
 		if c.GuestQueueTTL <= 0 || c.GuestSessionTTL <= 0 || c.GuestAdmissionTTL <= 0 {
 			return errors.New("guest queue TTLs must be positive")
 		}
+		if c.GuestAdmissionTTL < time.Millisecond {
+			return errors.New("GUEST_ADMISSION_TTL must be at least 1ms")
+		}
 	}
 	if c.FFmpegSpawnConcurrency < 0 {
 		return errors.New("FFMPEG_SPAWN_CONCURRENCY must not be negative")

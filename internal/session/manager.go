@@ -131,8 +131,8 @@ type Session struct {
 
 	ID     string
 	UserID uuid.UUID
-	// GuestID is an opaque server-issued identifier for an unauthenticated
-	// experience session. It is never returned in the public session response.
+	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
+	// 공개 세션 응답에는 절대 포함하지 않는다.
 	GuestID    string
 	AIClientID string
 	CreatedAt  time.Time
@@ -206,9 +206,9 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	pending  int
-	// deleting tracks teardown calls that have removed a session from sessions
-	// but have not yet reached the server-owned cleanup hook. Graceful shutdown
-	// waits for these before closing dependencies used by that hook.
+	// deleting은 sessions에서 제거됐지만 아직 서버 소유 cleanup hook까지 도달하지
+	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
+	// 전에 이 작업들을 기다린다.
 	deleting sync.WaitGroup
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
@@ -231,8 +231,8 @@ func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast P
 	m.broadcastCleanup = cleanup
 }
 
-// SetSessionCleanup registers server-owned cleanup that applies to every
-// termination path (explicit deletion, timeouts, and peer failures).
+// SetSessionCleanup은 모든 종료 경로(명시적 삭제, timeout, peer 실패)에 적용할
+// 서버 소유 cleanup을 등록한다.
 func (m *Manager) SetSessionCleanup(cleanup func(*Session)) { m.sessionCleanup = cleanup }
 
 // cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
@@ -368,9 +368,9 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	return m.create(userID, "", metadata)
 }
 
-// CreateForGuest creates a session owned by a server-issued guest identity.
-// The identity is kept separate from UserID so guest routes can never satisfy
-// authenticated-user ownership checks by using uuid.Nil.
+// CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
+// guest route가 uuid.Nil로 인증 사용자 소유권 검사를 통과하지 못하도록 UserID와
+// identity를 분리한다.
 func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*Session, string, error) {
 	if strings.TrimSpace(guestID) == "" {
 		return nil, "", errors.New("guest ID is required")
@@ -453,7 +453,7 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 	return s, ownerToken, nil
 }
 
-// GuestCount returns the number of active sessions owned by guests.
+// GuestCount는 guest가 소유한 활성 세션 수를 반환한다.
 func (m *Manager) GuestCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -836,8 +836,8 @@ func (m *Manager) Delete(id, reason string) error {
 		m.mu.Unlock()
 		return ErrNotFound
 	}
-	// Register before removing the session so CloseAll followed by
-	// WaitForDeletes cannot miss a teardown already in progress.
+	// 세션을 제거하기 전에 등록해 CloseAll 뒤 WaitForDeletes가 이미 진행 중인
+	// teardown을 놓치지 않게 한다.
 	m.deleting.Add(1)
 	delete(m.sessions, id)
 	count := len(m.sessions)
@@ -853,10 +853,9 @@ func (m *Manager) Delete(id, reason string) error {
 	return nil
 }
 
-// WaitForDeletes waits for teardowns that were already in flight when
-// CloseAll removed the remaining sessions. It is used during graceful process
-// shutdown before closing server-owned cleanup dependencies such as the AI
-// whitelist client.
+// WaitForDeletes는 CloseAll이 남은 세션을 제거할 때 이미 진행 중이던 teardown을
+// 기다린다. graceful process shutdown에서 AI whitelist client 같은 서버 소유
+// cleanup 의존성을 닫기 전에 사용한다.
 func (m *Manager) WaitForDeletes(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {

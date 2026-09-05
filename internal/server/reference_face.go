@@ -92,10 +92,9 @@ type guestReferenceContextKey struct{}
 
 type guestReferenceGateContextKey struct{}
 
-// guestReferenceGate serializes face mutations and terminal cleanup for one
-// guest session. Closing a session marks it terminal immediately, while the
-// cleanup operation waits for an already-running upload before clearing its
-// worker whitelist and persisted metadata.
+// guestReferenceGate는 하나의 guest 세션에 대한 얼굴 변경과 종료 정리를 직렬화한다.
+// 세션 종료는 즉시 terminal 상태를 표시하고, 정리는 진행 중인 upload가 끝난 뒤 worker
+// whitelist와 저장된 메타데이터를 비운다.
 type guestReferenceGate struct {
 	mu      sync.Mutex
 	entries map[string]*guestReferenceGateEntry
@@ -129,8 +128,8 @@ func (g *guestReferenceGate) Lock(sessionID string) (unlock func(), closed bool)
 	}, closed
 }
 
-// Close marks a session terminal without waiting for an in-flight operation.
-// Its returned release function must run only after terminal cleanup finishes.
+// Close는 진행 중인 작업을 기다리지 않고 세션을 terminal 상태로 표시한다.
+// 반환된 release 함수는 terminal 정리가 끝난 뒤에만 실행해야 한다.
 func (g *guestReferenceGate) Close(sessionID string) func() {
 	g.mu.Lock()
 	entry := g.entries[sessionID]
@@ -269,8 +268,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		registered = append(registered, referenceFace{FaceID: faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
 	if gate, sessionID, ok := guestReferenceGateFromContext(r.Context()); ok && gate.IsClosed(sessionID) {
-		// The session ended while this request was registering faces. Do not
-		// persist a result that terminal cleanup may already have performed.
+		// 이 요청이 얼굴을 등록하는 동안 세션이 종료됐다. 이미 terminal 정리가 수행한
+		// 결과를 다시 저장하지 않는다.
 		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
 			s.logger.Error("clear whitelist after guest session close failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "Guest session ended while registering a reference face."})

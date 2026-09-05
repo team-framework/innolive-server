@@ -28,14 +28,14 @@ func TestGuestQueueClientIPUsesNearestUntrustedForwardedAddress(t *testing.T) {
 	}
 	queue := &GuestQueue{trustedProxies: []*net.IPNet{proxyNetwork}}
 
-	// The client prepended a spoofed value, then the trusted proxy appended
-	// the real client address it observed. The rightmost untrusted value wins.
+	// 클라이언트가 spoofed 값을 앞에 넣고 신뢰된 proxy가 자신이 관찰한 실제 client
+	// 주소를 뒤에 붙였다. 가장 오른쪽의 신뢰되지 않은 주소를 선택해야 한다.
 	got := queue.clientIP("10.0.0.10:443", "198.51.100.99, 203.0.113.25")
 	if got != "203.0.113.25" {
 		t.Fatalf("client IP = %q, want real nearest address", got)
 	}
 
-	// Intermediate trusted proxies are not considered clients either.
+	// 중간의 신뢰된 proxy 주소도 client로 취급하지 않는다.
 	got = queue.clientIP("10.0.0.10:443", "203.0.113.25, 10.0.0.20")
 	if got != "203.0.113.25" {
 		t.Fatalf("client IP through trusted proxy chain = %q", got)

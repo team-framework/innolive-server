@@ -128,8 +128,8 @@ func New(
 	return s
 }
 
-// SetGuestQueue is called during server assembly, before Handler is served.
-// It preserves the established New signature used by integration tests.
+// SetGuestQueue는 Handler가 요청을 받기 전 서버 조립 단계에서 호출한다.
+// integration test가 사용하는 기존 New 시그니처를 유지한다.
 func (s *Server) SetGuestQueue(queue *GuestQueue) {
 	if queue == nil || s.mux == nil {
 		return
@@ -186,9 +186,9 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 	}
 }
 
-// WaitGuestCleanup waits for terminal guest face cleanup before the AI client
-// pool is closed during graceful shutdown. Per-session work has its own 10s
-// deadline; the supplied context only bounds the shutdown wait.
+// WaitGuestCleanup은 graceful shutdown 중 AI client pool을 닫기 전에 terminal
+// guest 얼굴 정리가 끝날 때까지 기다린다. 세션별 작업에는 자체 10초 제한이 있고,
+// 전달받은 context는 shutdown 대기 시간만 제한한다.
 func (s *Server) WaitGuestCleanup(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {

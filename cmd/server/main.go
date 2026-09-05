@@ -441,8 +441,8 @@ func main() {
 		authenticateUser,
 	)
 	application.SetGuestQueue(guestQueue)
-	// CloseAll triggers guest face cleanup asynchronously. It must finish before
-	// the earlier aiPool.Close defer tears down the gRPC connections.
+	// CloseAll은 게스트 얼굴 정리를 비동기로 시작한다. 먼저 등록된 aiPool.Close
+	// defer가 gRPC 연결을 닫기 전에 정리가 끝나야 한다.
 	defer func() {
 		sessionManager.CloseAll()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 12*time.Second)

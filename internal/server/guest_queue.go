@@ -38,9 +38,9 @@ var (
 	ErrGuestRateLimited      = errors.New("guest queue rate limited")
 )
 
-// admitHeadScript atomically claims the current FIFO head and turns it into an
-// admission. Keeping dequeue and ticket mutation in one Redis script means a
-// connection failure can never strand a waiting ticket outside the ZSET.
+// admitHeadScript는 현재 FIFO 선두를 원자적으로 확보해 입장 허가 상태로 바꾼다.
+// dequeue와 ticket 변경을 하나의 Redis script로 묶어 연결 실패에도 대기 ticket이
+// ZSET 밖에 고립되지 않게 한다.
 var admitHeadScript = redis.NewScript(`
 local ids = redis.call('ZRANGE', KEYS[1], 0, 0)
 if #ids == 0 then return '' end
@@ -82,9 +82,9 @@ if count == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
 return count
 `)
 
-// pruneWaitingScript removes queue members whose ticket hash has expired or
-// was moved out of waiting. Redis expiry does not remove ZSET members, and
-// this must run even when no guest slot is available for admission.
+// pruneWaitingScript는 ticket hash가 만료됐거나 waiting 상태를 벗어난 queue 멤버를
+// 제거한다. Redis key 만료만으로는 ZSET 멤버가 제거되지 않으므로, 입장 가능한
+// guest 슬롯이 없어도 이를 실행해야 한다.
 var pruneWaitingScript = redis.NewScript(`
 local ids = redis.call('ZRANGE', KEYS[1], 0, -1)
 local removed = 0
@@ -98,10 +98,9 @@ end
 return removed
 `)
 
-// claimAdmissionScript validates the guest index and admission ticket in the
-// same Redis operation that marks it consuming. PEXPIRE preserves both keys
-// throughout session creation, so an expiry cannot turn HSET below into a new
-// ticket without its guest index.
+// claimAdmissionScript는 guest index와 입장 ticket을 검증하면서 consuming 상태로
+// 바꾼다. 세션 생성 중 PEXPIRE로 두 key를 유지해, 만료 뒤 HSET이 guest index 없는
+// 새 ticket을 만드는 일을 막는다.
 var claimAdmissionScript = redis.NewScript(`
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return '__invalid__' end
 if redis.call('HGET', KEYS[1], 'status') ~= 'admitted' then return '__invalid__' end
@@ -134,9 +133,9 @@ redis.call('PEXPIRE', KEYS[2], ARGV[4])
 return 'ok'
 `)
 
-// heartbeatTicketScript renews a waiting ticket only while its ticket hash and
-// guest index still exist and agree. HSET is intentionally last: unlike a
-// pipeline it cannot recreate an expired hash after an earlier EXPIRE fails.
+// heartbeatTicketScript는 ticket hash와 guest index가 모두 존재하고 일치할 때만
+// waiting ticket을 연장한다. HSET을 마지막에 실행해 pipeline과 달리 앞선 EXPIRE가
+// 실패했을 때 만료된 hash를 다시 만들지 않는다.
 var heartbeatTicketScript = redis.NewScript(`
 local status = redis.call('HGET', KEYS[1], 'status')
 if not status then return '__missing__' end
@@ -158,9 +157,9 @@ type guestTicket struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
-// GuestQueue owns only short-lived admission state. WebRTC sessions remain in
-// session.Manager, which is already process-local, so the queue intentionally
-// fails closed when Redis is unavailable.
+// GuestQueue는 짧은 수명의 입장 상태만 관리한다. WebRTC 세션은 process-local인
+// session.Manager에 남으므로 Redis를 사용할 수 없을 때 queue는 의도적으로
+// fail-closed 처리한다.
 type GuestQueue struct {
 	client          *redis.Client
 	sessions        *session.Manager
@@ -287,10 +286,9 @@ func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
 		return host
 	}
 
-	// A trusted proxy appends the address it observed to any existing XFF
-	// chain. Walk from that closest address towards the client, discarding only
-	// addresses that belong to trusted proxy networks. Reading the leftmost
-	// value would let a client prepend an arbitrary spoofed address.
+	// 신뢰된 proxy는 기존 XFF 체인 뒤에 자신이 관찰한 주소를 붙인다. 가장 가까운
+	// 주소부터 클라이언트 방향으로 순회하며 신뢰된 proxy 대역만 건너뛴다. 왼쪽 첫
+	// 값을 읽으면 클라이언트가 임의의 spoofed 주소를 앞에 넣어 우회할 수 있다.
 	parts := strings.Split(forwardedFor, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
@@ -446,8 +444,8 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		[]string{guestTicketKey + id, guestByIDKey + guestHash(guest), guestReserveKey},
 		id, live.ID, expires.Unix(), q.guestSessionTTL.Milliseconds()).Text()
 	if transitionErr != nil || result != "ok" {
-		// Delete invokes the server session-cleanup hook, which wakes this queue.
-		// Consume holds q.mu, so deletion must run after this request releases it.
+		// Delete는 이 queue를 깨우는 서버 session-cleanup hook을 동기 호출한다.
+		// Consume이 q.mu를 잡고 있으므로 요청이 잠금을 해제한 뒤 삭제해야 한다.
 		go func(sessionID string) { _ = q.sessions.Delete(sessionID, "guest_queue_transition_failed") }(live.ID)
 		if restore() != nil {
 			return nil, "", ErrGuestQueueUnavailable
@@ -460,9 +458,8 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	return live, owner, nil
 }
 
-// GuestSessionClosed removes the guest-to-ticket index only when it still
-// refers to the terminated session. This permits a new queue entry after an
-// explicit session close without allowing re-entry while it remains active.
+// GuestSessionClosed는 guest-to-ticket index가 종료된 세션을 여전히 가리킬 때만
+// 제거한다. 활성 세션 중 재입장은 막으면서 명시적 종료 뒤 새 queue 등록은 허용한다.
 func (q *GuestQueue) GuestSessionClosed(ctx context.Context, guestHashValue, sessionID string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -485,7 +482,7 @@ func (q *GuestQueue) GuestSessionClosed(ctx context.Context, guestHashValue, ses
 	return nil
 }
 
-// SessionClosed wakes waiting guests as soon as a guest slot is released.
+// SessionClosed는 guest 슬롯이 해제되는 즉시 대기 guest를 깨운다.
 func (q *GuestQueue) SessionClosed(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -548,9 +545,9 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 			q.metrics.IncGuestExpired()
 		}
 	}
-	// A Redis outage after the consuming transition can leave the ticket in
-	// that transient state. Its reservation intentionally remains, so a later
-	// successful queue operation can make the same admission token retryable.
+	// consuming 전이 뒤 Redis 장애가 나면 ticket이 그 임시 상태에 남을 수 있다.
+	// reservation은 의도적으로 유지하므로 이후 성공한 queue 작업에서 같은 admission
+	// token을 다시 시도 가능한 상태로 복구할 수 있다.
 	reservedIDs, err := q.client.ZRange(ctx, guestReserveKey, 0, -1).Result()
 	if err != nil {
 		return false, ErrGuestQueueUnavailable

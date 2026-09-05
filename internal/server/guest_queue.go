@@ -32,6 +32,31 @@ var (
 	ErrGuestAdmissionInvalid = errors.New("guest admission token is invalid")
 )
 
+// admitHeadScript atomically claims the current FIFO head and turns it into an
+// admission. Keeping dequeue and ticket mutation in one Redis script means a
+// connection failure can never strand a waiting ticket outside the ZSET.
+var admitHeadScript = redis.NewScript(`
+local ids = redis.call('ZRANGE', KEYS[1], 0, 0)
+if #ids == 0 then return '' end
+local id = ids[1]
+local ticket = KEYS[3] .. id
+if redis.call('HGET', ticket, 'status') ~= 'waiting' then
+  redis.call('ZREM', KEYS[1], id)
+  return '__stale__'
+end
+local guest = redis.call('HGET', ticket, 'guest')
+if not guest then
+  redis.call('ZREM', KEYS[1], id)
+  return '__stale__'
+end
+redis.call('ZREM', KEYS[1], id)
+redis.call('HSET', ticket, 'status', 'admitted', 'admission', ARGV[1], 'admission_plain', ARGV[2], 'expires_at', ARGV[3])
+redis.call('EXPIRE', ticket, ARGV[4])
+redis.call('EXPIRE', KEYS[4] .. guest, ARGV[4])
+redis.call('ZADD', KEYS[2], ARGV[5], id)
+return id
+`)
+
 type guestTicket struct {
 	ID             string    `json:"ticket_id"`
 	Status         string    `json:"status"`
@@ -306,48 +331,22 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 	active, limit := q.sessions.Capacity()
 	changed := false
 	for q.sessions.GuestCount()+int(reserved) < q.maxGuests && (limit == 0 || active+int(reserved) < limit) {
-		ids, err := q.client.ZRange(ctx, guestQueueKey, 0, 0).Result()
-		if err != nil {
-			return false, ErrGuestQueueUnavailable
-		}
-		if len(ids) == 0 {
-			break
-		}
-		id := ids[0]
-		score, err := q.client.ZScore(ctx, guestQueueKey, id).Result()
-		if err != nil {
-			return false, ErrGuestQueueUnavailable
-		}
-		restoreWaiting := func() {
-			_ = q.client.ZAdd(context.Background(), guestQueueKey, redis.Z{Score: score, Member: id}).Err()
-		}
-		if err := q.client.ZRem(ctx, guestQueueKey, id).Err(); err != nil {
-			return false, ErrGuestQueueUnavailable
-		}
-		values, err := q.client.HGetAll(ctx, guestTicketKey+id).Result()
-		if err != nil {
-			restoreWaiting()
-			return false, ErrGuestQueueUnavailable
-		}
-		if len(values) == 0 || values["status"] != "waiting" {
-			continue
-		}
 		token, err := newGuestSecret()
 		if err != nil {
 			return false, err
 		}
 		expires := now.Add(q.admissionTTL)
-		_, err = q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.HSet(ctx, guestTicketKey+id, "status", "admitted", "admission", guestHash(token), "admission_plain", token)
-			pipe.Expire(ctx, guestTicketKey+id, q.admissionTTL)
-			pipe.Expire(ctx, guestByIDKey+values["guest"], q.admissionTTL)
-			pipe.HSet(ctx, guestTicketKey+id, "expires_at", expires.Unix())
-			pipe.ZAdd(ctx, guestReserveKey, redis.Z{Score: float64(expires.UnixNano()), Member: id})
-			return nil
-		})
+		result, err := admitHeadScript.Run(ctx, q.client,
+			[]string{guestQueueKey, guestReserveKey, guestTicketKey, guestByIDKey},
+			guestHash(token), token, expires.Unix(), int64(q.admissionTTL.Seconds()), expires.UnixNano()).Text()
 		if err != nil {
-			restoreWaiting()
 			return false, ErrGuestQueueUnavailable
+		}
+		if result == "" {
+			break
+		}
+		if result == "__stale__" {
+			continue
 		}
 		reserved++
 		changed = true

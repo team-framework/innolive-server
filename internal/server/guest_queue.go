@@ -145,7 +145,21 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr string) 
 	}
 	hash := guestHash(guest)
 	if id, err := q.client.Get(ctx, guestByIDKey+hash).Result(); err == nil {
-		return q.statusLocked(ctx, hash, id)
+		values, lookupErr := q.client.HGetAll(ctx, guestTicketKey+id).Result()
+		if lookupErr != nil {
+			return guestTicket{}, ErrGuestQueueUnavailable
+		}
+		if values["status"] == "consumed" && values["session_id"] != "" {
+			if _, sessionErr := q.sessions.Get(values["session_id"]); errors.Is(sessionErr, session.ErrNotFound) {
+				if err := q.client.Del(ctx, guestByIDKey+hash).Err(); err != nil {
+					return guestTicket{}, ErrGuestQueueUnavailable
+				}
+			} else {
+				return q.statusLocked(ctx, hash, id)
+			}
+		} else {
+			return q.statusLocked(ctx, hash, id)
+		}
 	} else if err != redis.Nil {
 		return guestTicket{}, ErrGuestQueueUnavailable
 	}
@@ -272,6 +286,7 @@ func (q *GuestQueue) Cancel(ctx context.Context, guest, id string) error {
 	default:
 		return ErrGuestAdmissionInvalid
 	}
+	q.observe(ctx)
 	q.publish(ctx)
 	return nil
 }
@@ -338,6 +353,7 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 		return nil, "", ErrGuestQueueUnavailable
 	}
 	time.AfterFunc(q.guestSessionTTL, func() { _ = q.sessions.Delete(live.ID, "guest_session_timeout") })
+	q.observe(ctx)
 	q.publish(ctx)
 	return live, owner, nil
 }
@@ -407,8 +423,14 @@ func (q *GuestQueue) cleanupAndAdmit(ctx context.Context) (bool, error) {
 		return false, ErrGuestQueueUnavailable
 	}
 	now := time.Now()
-	if err := q.client.ZRemRangeByScore(ctx, guestReserveKey, "-inf", fmt.Sprintf("%d", now.UnixNano())).Err(); err != nil {
+	expired, err := q.client.ZRemRangeByScore(ctx, guestReserveKey, "-inf", fmt.Sprintf("%d", now.UnixNano())).Result()
+	if err != nil {
 		return false, ErrGuestQueueUnavailable
+	}
+	if expired > 0 && q.metrics != nil {
+		for range expired {
+			q.metrics.IncGuestExpired()
+		}
 	}
 	// A Redis outage after the consuming transition can leave the ticket in
 	// that transient state. Its reservation intentionally remains, so a later

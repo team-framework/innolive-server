@@ -142,6 +142,7 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}/reference-face", s.handleGuestDeleteReferenceFace)
 	if s.sessions != nil {
 		s.sessions.SetSessionCleanup(func(live *session.Session) {
+			defer queue.SessionClosed()
 			if live.GuestID == "" {
 				return
 			}

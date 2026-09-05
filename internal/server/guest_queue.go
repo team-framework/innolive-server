@@ -140,15 +140,26 @@ func (q *GuestQueue) Status(ctx context.Context, guest, id string) (guestTicket,
 func (q *GuestQueue) Heartbeat(ctx context.Context, guest, id string) (guestTicket, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	changed, err := q.cleanupAndAdmit(ctx)
+	if err != nil {
+		return guestTicket{}, err
+	}
+	if changed {
+		q.publish(ctx)
+	}
 	result, err := q.statusLocked(ctx, guestHash(guest), id)
 	if err != nil {
 		return guestTicket{}, err
 	}
 	if result.Status == "waiting" {
-		if err := q.client.Expire(ctx, guestTicketKey+id, q.ttl).Err(); err != nil {
-			return guestTicket{}, ErrGuestQueueUnavailable
-		}
-		if err := q.client.Expire(ctx, guestByIDKey+guestHash(guest), q.ttl).Err(); err != nil {
+		expires := time.Now().Add(q.ttl)
+		_, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.Expire(ctx, guestTicketKey+id, q.ttl)
+			pipe.Expire(ctx, guestByIDKey+guestHash(guest), q.ttl)
+			pipe.HSet(ctx, guestTicketKey+id, "expires_at", expires.Unix())
+			return nil
+		})
+		if err != nil {
 			return guestTicket{}, ErrGuestQueueUnavailable
 		}
 	}
@@ -201,6 +212,16 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	if q.sessions.GuestCount() >= q.maxGuests {
 		return nil, "", ErrGuestAdmissionInvalid
 	}
+	restore := func() {
+		expires := time.Now().Add(q.admissionTTL)
+		_, _ = q.client.TxPipelined(context.Background(), func(pipe redis.Pipeliner) error {
+			pipe.HSet(context.Background(), guestTicketKey+id, "status", "admitted", "expires_at", expires.Unix())
+			pipe.Expire(context.Background(), guestTicketKey+id, q.admissionTTL)
+			pipe.Expire(context.Background(), guestByIDKey+guestHash(guest), q.admissionTTL)
+			pipe.ZAdd(context.Background(), guestReserveKey, redis.Z{Score: float64(expires.UnixNano()), Member: id})
+			return nil
+		})
+	}
 	if _, err := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HSet(ctx, guestTicketKey+id, "status", "consuming")
 		pipe.ZRem(ctx, guestReserveKey, id)
@@ -210,6 +231,7 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	}
 	live, owner, err := q.sessions.CreateForGuest(guestHash(guest), metadata)
 	if err != nil {
+		restore()
 		return nil, "", err
 	}
 	_, transitionErr := q.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -220,11 +242,23 @@ func (q *GuestQueue) Consume(ctx context.Context, guest, token string, metadata 
 	})
 	if transitionErr != nil {
 		_ = q.sessions.Delete(live.ID, "guest_queue_transition_failed")
+		restore()
 		return nil, "", ErrGuestQueueUnavailable
 	}
 	time.AfterFunc(q.guestSessionTTL, func() { _ = q.sessions.Delete(live.ID, "guest_session_timeout") })
 	q.publish(ctx)
 	return live, owner, nil
+}
+
+// SessionClosed wakes waiting guests as soon as a guest slot is released.
+func (q *GuestQueue) SessionClosed() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if changed, err := q.cleanupAndAdmit(context.Background()); err != nil {
+		return
+	} else if changed {
+		q.publish(context.Background())
+	}
 }
 
 func (q *GuestQueue) statusLocked(ctx context.Context, hash, id string) (guestTicket, error) {

@@ -74,6 +74,24 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
   `docker compose config` 출력 중계, `ssh -v`.
 - 상세 진단은 서버 로컬 `/opt/innolive/deploy/logs/`(root 600)에만 남긴다.
 
+## 비인증 체험 대기열의 프록시 설정
+
+`GUEST_QUEUE_ENABLED=true`로 비인증 체험 대기열을 운영하고 reverse proxy 또는 ingress를
+거치는 경우, `/etc/innolive/server.env`에 proxy가 서버로 연결할 때 사용하는 CIDR만
+`GUEST_QUEUE_TRUSTED_PROXY_CIDRS`로 지정한다. 여러 CIDR은 쉼표로 구분한다.
+
+```
+GUEST_QUEUE_TRUSTED_PROXY_CIDRS=10.42.0.0/16,fd00:42::/64
+```
+
+서버는 직접 연결한 peer가 위 CIDR에 속할 때만 `X-Forwarded-For`를 사용한다. 이때 체인을
+오른쪽부터 읽으며 trusted proxy 주소를 건너뛰고, 가장 가까운 untrusted 주소를 rate-limit
+키로 삼는다. 따라서 클라이언트가 왼쪽에 임의 주소를 덧붙여도 제한을 우회할 수 없다.
+
+이 값이 비어 있으면 `X-Forwarded-For`를 신뢰하지 않고 TCP peer 주소로 제한한다. proxy
+뒤에서 이 값을 비워 두면 proxy 주소 하나를 모든 사용자로 간주하므로, 정상 사용자도 같은
+IP별 제한을 공유한다. public CIDR이나 클라이언트 대역을 신뢰 목록에 넣지 않는다.
+
 ## 후속 과제
 
 - Docker Hub 계정을 머신 유저 구조로 유지하되 비밀번호 강화 + 2FA 적용.

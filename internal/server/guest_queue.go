@@ -215,16 +215,31 @@ func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
 		host = remoteAddr
 	}
 	remote := net.ParseIP(host)
-	for _, proxy := range q.trustedProxies {
-		if remote != nil && proxy.Contains(remote) {
-			first, _, _ := strings.Cut(forwardedFor, ",")
-			if candidate := strings.TrimSpace(first); net.ParseIP(candidate) != nil {
-				return candidate
-			}
-			break
+	if remote == nil || !q.isTrustedProxy(remote) {
+		return host
+	}
+
+	// A trusted proxy appends the address it observed to any existing XFF
+	// chain. Walk from that closest address towards the client, discarding only
+	// addresses that belong to trusted proxy networks. Reading the leftmost
+	// value would let a client prepend an arbitrary spoofed address.
+	parts := strings.Split(forwardedFor, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
+		if candidate != nil && !q.isTrustedProxy(candidate) {
+			return candidate.String()
 		}
 	}
 	return host
+}
+
+func (q *GuestQueue) isTrustedProxy(ip net.IP) bool {
+	for _, proxy := range q.trustedProxies {
+		if proxy.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *GuestQueue) allowIP(ctx context.Context, ip string) error {
@@ -393,7 +408,11 @@ func (q *GuestQueue) GuestSessionClosed(ctx context.Context, guestHashValue, ses
 	if err != nil {
 		return ErrGuestQueueUnavailable
 	}
-	if current, err := q.client.HGet(ctx, guestTicketKey+id, "session_id").Result(); err == nil && current == sessionID {
+	current, err := q.client.HGet(ctx, guestTicketKey+id, "session_id").Result()
+	if err != nil && err != redis.Nil {
+		return ErrGuestQueueUnavailable
+	}
+	if current == sessionID {
 		if err := q.client.Del(ctx, guestByIDKey+guestHashValue).Err(); err != nil {
 			return ErrGuestQueueUnavailable
 		}

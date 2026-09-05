@@ -89,6 +89,12 @@ type Config struct {
 	EgressVideoSize         string
 	DecoderPinLongEdge      int
 	RequireSessionAuth      bool
+	GuestQueueEnabled       bool
+	GuestQueueRedisAddr     string
+	GuestQueueRedisPassword string
+	GuestQueueTTL           time.Duration
+	GuestSessionTTL         time.Duration
+	GuestAdmissionTTL       time.Duration
 	PprofEnabled            bool
 	LogLevel                string
 	DatabaseURL             string
@@ -137,6 +143,12 @@ func Load() (Config, error) {
 		EgressVideoSize:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
 		DecoderPinLongEdge:      envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:      envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
+		GuestQueueEnabled:       envBool("GUEST_QUEUE_ENABLED", false),
+		GuestQueueRedisAddr:     strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
+		GuestQueueRedisPassword: os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
+		GuestQueueTTL:           envDuration("GUEST_QUEUE_TTL", 10*time.Minute),
+		GuestSessionTTL:         envDuration("GUEST_SESSION_TTL", 10*time.Minute),
+		GuestAdmissionTTL:       envDuration("GUEST_ADMISSION_TTL", time.Minute),
 		PprofEnabled:            envBool("PPROF_ENABLED", false),
 		UDPMuxPort:              envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                strings.ToUpper(env("LOG_LEVEL", "INFO")),
@@ -216,6 +228,17 @@ func (c Config) Validate() error {
 	}
 	if c.MaxSessions < 0 {
 		return errors.New("MAX_SESSIONS must not be negative")
+	}
+	if c.GuestQueueEnabled {
+		if c.MaxSessions < 2 {
+			return errors.New("MAX_SESSIONS must be at least 2 when GUEST_QUEUE_ENABLED=true")
+		}
+		if c.GuestQueueRedisAddr == "" {
+			return errors.New("GUEST_QUEUE_REDIS_ADDR must not be empty when GUEST_QUEUE_ENABLED=true")
+		}
+		if c.GuestQueueTTL <= 0 || c.GuestSessionTTL <= 0 || c.GuestAdmissionTTL <= 0 {
+			return errors.New("guest queue TTLs must be positive")
+		}
 	}
 	if c.FFmpegSpawnConcurrency < 0 {
 		return errors.New("FFMPEG_SPAWN_CONCURRENCY must not be negative")

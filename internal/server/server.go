@@ -47,6 +47,8 @@ type Server struct {
 	origins          origin.Config
 	streaming        map[auth.StreamingProvider]streaming.Provider
 	authenticateUser func(context.Context, string) (uuid.UUID, error)
+	guestQueue       *GuestQueue
+	mux              *http.ServeMux
 	handler          http.Handler
 }
 
@@ -78,6 +80,7 @@ func New(
 		s.authenticateUser = userAuthenticators[0]
 	}
 	mux := http.NewServeMux()
+	s.mux = mux
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -117,8 +120,43 @@ func New(
 	}
 	// requestIDMiddleware가 corsMiddleware보다 바깥이어야 CORS 거절 응답에도
 	// request_id가 실린다 — 그래야 사용자가 보여준 에러와 로그를 묶을 수 있다.
-	s.handler = recoverMiddleware(logger, requestIDMiddleware(corsMiddleware(logger, origins, mux)))
+	s.handler = recoverMiddleware(logger, requestIDMiddleware(corsMiddleware(logger, origins, mux, cfg.GuestQueueEnabled)))
 	return s
+}
+
+// SetGuestQueue is called during server assembly, before Handler is served.
+// It preserves the established New signature used by integration tests.
+func (s *Server) SetGuestQueue(queue *GuestQueue) {
+	if queue == nil || s.mux == nil {
+		return
+	}
+	s.guestQueue = queue
+	s.mux.HandleFunc("POST /guest-queue", s.handleGuestQueueCreate)
+	s.mux.HandleFunc("GET /guest-queue/{ticket_id}", s.handleGuestQueueStatus)
+	s.mux.HandleFunc("POST /guest-queue/{ticket_id}/heartbeat", s.handleGuestQueueHeartbeat)
+	s.mux.HandleFunc("DELETE /guest-queue/{ticket_id}", s.handleGuestQueueCancel)
+	s.mux.HandleFunc("GET /guest-queue/{ticket_id}/events", s.handleGuestQueueEvents)
+	s.mux.HandleFunc("POST /guest-sessions", s.handleGuestSessionCreate)
+	s.mux.HandleFunc("GET /guest/sessions/{session_id}/reference-face", s.handleGuestGetReferenceFace)
+	s.mux.HandleFunc("POST /guest/sessions/{session_id}/reference-face", s.handleGuestPostReferenceFace)
+	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}/reference-face", s.handleGuestDeleteReferenceFace)
+	if s.sessions != nil {
+		s.sessions.SetSessionCleanup(func(live *session.Session) {
+			if live.GuestID == "" {
+				return
+			}
+			s.references.deleteClient(live.AIClientID)
+			if s.ai != nil {
+				go func(clientID string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := s.ai.ClearWhitelist(ctx, clientID); err != nil {
+						s.logger.Warn("clear guest whitelist failed", "client_id", clientID, "error", err)
+					}
+				}(live.AIClientID)
+			}
+		})
+	}
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
@@ -817,7 +855,8 @@ func truncateOrigin(value string) string {
 	return value
 }
 
-func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handler) http.Handler {
+func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handler, credentialed ...bool) http.Handler {
+	allowCredentials := len(credentialed) > 0 && credentialed[0]
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestOrigin := strings.TrimSpace(r.Header.Get("Origin"))
 		if requestOrigin != "" {
@@ -830,6 +869,9 @@ func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handle
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			if allowCredentials && allowedOrigin != "*" {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 			if allowedOrigin != "*" {
 				w.Header().Add("Vary", "Origin")

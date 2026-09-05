@@ -230,6 +230,10 @@ func main() {
 		logger.Error("invalid token HTTP configuration", "error", err)
 		os.Exit(2)
 	}
+	if cfg.GuestQueueEnabled && originConfig.AllowAllOrigins {
+		logger.Error("guest queue cannot use wildcard CORS origins")
+		os.Exit(2)
+	}
 	tokenService := auth.NewTokenService(databaseConnection.DB, tokenConfig)
 	googleOAuthConfig, err := auth.LoadGoogleOAuthConfigFromEnv()
 	if err != nil {
@@ -415,6 +419,18 @@ func main() {
 		requireUser = nil
 		authenticateUser = nil
 	}
+	guestQueue, err := server.NewGuestQueue(context.Background(), cfg, sessionManager)
+	if err != nil {
+		logger.Error("create guest queue failed", "error", err)
+		os.Exit(2)
+	}
+	if guestQueue != nil {
+		defer func() {
+			if err := guestQueue.Close(); err != nil {
+				logger.Warn("close guest queue failed", "error", err)
+			}
+		}()
+	}
 	application := server.New(
 		cfg,
 		logger,
@@ -426,6 +442,7 @@ func main() {
 		streamingProviders,
 		authenticateUser,
 	)
+	application.SetGuestQueue(guestQueue)
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
 	// 등록 시간이 HTTP 서버 시작을 막지 않도록 비동기로 실행한다.

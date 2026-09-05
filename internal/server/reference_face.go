@@ -87,6 +87,8 @@ type referenceStore struct {
 	envConfigured bool   // AI_PRIVACY_ME_IMAGE_PATH set → env default reference
 }
 
+type guestReferenceContextKey struct{}
+
 func newReferenceStore(path string, envConfigured bool) *referenceStore {
 	s := &referenceStore{faces: make(map[string][]referenceFace), path: path, envConfigured: envConfigured}
 	s.load()
@@ -310,6 +312,9 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 }
 
 func referenceClientID(r *http.Request) string {
+	if guestID, ok := r.Context().Value(guestReferenceContextKey{}).(string); ok && guestID != "" {
+		return guestID
+	}
 	if userID, ok := auth.UserIDFromContext(r.Context()); ok {
 		return session.AIClientIDForUser(userID)
 	}
@@ -317,4 +322,11 @@ func referenceClientID(r *http.Request) string {
 	// A deterministic fallback keeps direct handler tests independent from the
 	// authentication package without accepting a caller-controlled bucket.
 	return "default"
+}
+
+func (s *referenceStore) deleteClient(clientID string) {
+	s.mu.Lock()
+	delete(s.faces, clientID)
+	s.save()
+	s.mu.Unlock()
 }

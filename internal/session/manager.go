@@ -129,8 +129,11 @@ type Response struct {
 type Session struct {
 	mu sync.RWMutex
 
-	ID         string
-	UserID     uuid.UUID
+	ID     string
+	UserID uuid.UUID
+	// GuestID is an opaque server-issued identifier for an unauthenticated
+	// experience session. It is never returned in the public session response.
+	GuestID    string
 	AIClientID string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
@@ -214,6 +217,7 @@ type Manager struct {
 	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
 	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
 	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
+	sessionCleanup   func(*Session)
 }
 
 // SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
@@ -222,6 +226,10 @@ type Manager struct {
 func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)) {
 	m.broadcastCleanup = cleanup
 }
+
+// SetSessionCleanup registers server-owned cleanup that applies to every
+// termination path (explicit deletion, timeouts, and peer failures).
+func (m *Manager) SetSessionCleanup(cleanup func(*Session)) { m.sessionCleanup = cleanup }
 
 // cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
 // 방송도 여기서 끝낸다 — autoStop을 기다리면 그 사이(실측 약 1분)에 시작한
@@ -353,6 +361,20 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 // 받지 않고 여기서 계산해, 얼굴 whitelist와 미디어 스트림이 항상 같은 인증 범위를
 // 사용하게 한다.
 func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*Session, string, error) {
+	return m.create(userID, "", metadata)
+}
+
+// CreateForGuest creates a session owned by a server-issued guest identity.
+// The identity is kept separate from UserID so guest routes can never satisfy
+// authenticated-user ownership checks by using uuid.Nil.
+func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*Session, string, error) {
+	if strings.TrimSpace(guestID) == "" {
+		return nil, "", errors.New("guest ID is required")
+	}
+	return m.create(uuid.Nil, guestID, metadata)
+}
+
+func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]string) (*Session, string, error) {
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
 		if m.capacityInUseLocked() >= limit {
@@ -380,10 +402,15 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	id := uuid.NewString()
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
+	aiClientID := AIClientIDForUser(userID)
+	if guestID != "" {
+		aiClientID = "guest:" + guestID + ":session:" + id
+	}
 	s := &Session{
 		ID:                   id,
 		UserID:               userID,
-		AIClientID:           AIClientIDForUser(userID),
+		GuestID:              guestID,
+		AIClientID:           aiClientID,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 		lastActivityAt:       now,
@@ -420,6 +447,19 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 	}
 	m.logger.Info("created live session", "session_id", id, "user_id", userID)
 	return s, ownerToken, nil
+}
+
+// GuestCount returns the number of active sessions owned by guests.
+func (m *Manager) GuestCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, liveSession := range m.sessions {
+		if liveSession.GuestID != "" {
+			count++
+		}
+	}
+	return count
 }
 
 // AIClientIDForUser는 인증된 사용자가 사용하는 유일한 whitelist bucket 식별자다.
@@ -799,6 +839,9 @@ func (m *Manager) Delete(id, reason string) error {
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
+	if m.sessionCleanup != nil {
+		m.sessionCleanup(s)
+	}
 	return nil
 }
 
@@ -814,6 +857,9 @@ func (m *Manager) CloseAll() {
 	for _, s := range sessions {
 		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
+		if m.sessionCleanup != nil {
+			m.sessionCleanup(s)
+		}
 	}
 	// 종료 중인 FFmpeg 쌍이 정상적으로 끝날 때까지 기다려, shutdown 중 프로세스가
 	// 자식 프로세스를 고아로 남기지 않게 한다. 대기 시간은 grace period보다 조금

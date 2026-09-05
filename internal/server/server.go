@@ -13,6 +13,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -49,6 +50,7 @@ type Server struct {
 	authenticateUser func(context.Context, string) (uuid.UUID, error)
 	guestQueue       *GuestQueue
 	guestReference   *guestReferenceGate
+	guestCleanup     sync.WaitGroup
 	mux              *http.ServeMux
 	handler          http.Handler
 }
@@ -165,7 +167,9 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 				}
 			}(live.GuestID, live.ID)
 			releaseClosing := s.guestReference.Close(live.ID)
+			s.guestCleanup.Add(1)
 			go func(sessionID, clientID string) {
+				defer s.guestCleanup.Done()
 				defer releaseClosing()
 				unlock, _ := s.guestReference.Lock(sessionID)
 				defer unlock()
@@ -179,6 +183,23 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 				}
 			}(live.ID, live.AIClientID)
 		})
+	}
+}
+
+// WaitGuestCleanup waits for terminal guest face cleanup before the AI client
+// pool is closed during graceful shutdown. Per-session work has its own 10s
+// deadline; the supplied context only bounds the shutdown wait.
+func (s *Server) WaitGuestCleanup(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.guestCleanup.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

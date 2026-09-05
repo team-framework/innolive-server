@@ -44,9 +44,12 @@ type fakeAIWorker struct {
 	entries []string
 	next    int
 
-	addStarted     chan struct{}
-	allowAdd       chan struct{}
-	addStartedOnce sync.Once
+	addStarted       chan struct{}
+	allowAdd         chan struct{}
+	addStartedOnce   sync.Once
+	clearStarted     chan struct{}
+	allowClear       chan struct{}
+	clearStartedOnce sync.Once
 }
 
 func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData) (*aiv1.WhitelistResponse, error) {
@@ -88,7 +91,15 @@ func (w *fakeAIWorker) DeleteWhitelist(_ context.Context, request *aiv1.DeleteWh
 	return &aiv1.WhitelistResponse{StatusMessage: "success", EntryId: request.GetEntryId()}, nil
 }
 
-func (w *fakeAIWorker) GetWhitelistStatus(context.Context, *aiv1.GetWhitelistStatusRequest) (*aiv1.GetWhitelistStatusResponse, error) {
+func (w *fakeAIWorker) GetWhitelistStatus(ctx context.Context, _ *aiv1.GetWhitelistStatusRequest) (*aiv1.GetWhitelistStatusResponse, error) {
+	if w.clearStarted != nil {
+		w.clearStartedOnce.Do(func() { close(w.clearStarted) })
+		select {
+		case <-w.allowClear:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return &aiv1.GetWhitelistStatusResponse{EntryIds: w.snapshot()}, nil
 }
 
@@ -300,6 +311,66 @@ func TestGuestReferenceUploadDoesNotRepopulateAfterSessionDelete(t *testing.T) {
 	}
 	if status := application.references.status(live.AIClientID); status.Count != 0 {
 		t.Fatalf("reference store count = %d, want 0", status.Count)
+	}
+}
+
+func TestGuestFaceCleanupCompletesBeforeServerShutdownContinues(t *testing.T) {
+	worker := &fakeAIWorker{name: "worker", clearStarted: make(chan struct{}), allowClear: make(chan struct{})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	aiv1.RegisterAiProcessorServer(grpcServer, worker)
+	go grpcServer.Serve(listener)
+	t.Cleanup(grpcServer.Stop)
+	pool, err := ai.NewPool([]string{listener.Addr().String()}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	manager, err := session.NewManager(config.Config{PrivacyMode: config.PrivacyModeBypass, FFmpegPath: "ffmpeg", UDPPortMin: 42000, UDPPortMax: 42100, FrameQueueSize: 2, MaxSessions: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	origins, err := origin.NewConfig(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := New(config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), manager, pool, origins, nil, nil)
+	application.SetGuestQueue(&GuestQueue{client: client, sessions: manager, ttl: time.Minute, admissionTTL: time.Minute, maxGuests: 1})
+	if _, _, err := manager.CreateForGuest(guestHash("guest"), nil); err != nil {
+		t.Fatal(err)
+	}
+	manager.CloseAll()
+	select {
+	case <-worker.clearStarted:
+	case <-time.After(time.Second):
+		t.Fatal("guest whitelist cleanup did not start")
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- application.WaitGuestCleanup(context.Background()) }()
+	select {
+	case err := <-finished:
+		t.Fatalf("cleanup wait returned before worker cleanup finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(worker.allowClear)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup wait did not finish")
 	}
 }
 

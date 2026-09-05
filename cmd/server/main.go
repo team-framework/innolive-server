@@ -218,8 +218,6 @@ func main() {
 		)
 		os.Exit(1)
 	}
-	defer sessionManager.CloseAll()
-
 	tokenConfig, err := auth.LoadTokenConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid token configuration", "error", err)
@@ -443,6 +441,16 @@ func main() {
 		authenticateUser,
 	)
 	application.SetGuestQueue(guestQueue)
+	// CloseAll triggers guest face cleanup asynchronously. It must finish before
+	// the earlier aiPool.Close defer tears down the gRPC connections.
+	defer func() {
+		sessionManager.CloseAll()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if err := application.WaitGuestCleanup(cleanupContext); err != nil {
+			logger.Warn("guest face cleanup did not finish before shutdown", "error", err)
+		}
+	}()
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
 	// 등록 시간이 HTTP 서버 시작을 막지 않도록 비동기로 실행한다.

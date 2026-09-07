@@ -12,6 +12,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 65532 --create-home innolive
 COPY --from=build /out/inno-live-server /inno-live-server
+COPY THIRD_PARTY_NOTICES.md LICENSE /usr/share/doc/innolive-server/
+COPY third_party/licenses /usr/share/doc/innolive-server/licenses
 USER 65532
 EXPOSE 8000/udp
 EXPOSE 8000/tcp

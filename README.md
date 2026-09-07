@@ -335,9 +335,11 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 
 ## Third-party notices
 
-Go 의존성 18개는 전부 허용형(MIT / BSD / Apache-2.0)입니다. 런타임 컨테이너에
-포함되는 FFmpeg은 Debian이 `--enable-gpl`로 빌드하므로 GPL-2.0+ 조건입니다.
-패키지별 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요.
+`./cmd/server` 바이너리에 링크되는 Go 모듈 59개는 전부 허용형(MIT / BSD /
+Apache-2.0)입니다. 런타임 컨테이너의 FFmpeg은 Debian이 `--enable-gpl`로
+빌드하므로 GPL-2.0-or-later 조건입니다. 패키지별 라이선스와 본문은
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)와 `third_party/licenses/`를
+참고하세요. 배포 이미지에서는 `/usr/share/doc/innolive-server/`에도 들어 있습니다.
 
 ## 라이선스
 

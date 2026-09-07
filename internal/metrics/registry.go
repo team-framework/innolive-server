@@ -20,24 +20,30 @@ type histogram struct {
 }
 
 type Registry struct {
-	activeSessions    atomic.Int64
-	connections       atomic.Uint64
-	connectionFailure atomic.Uint64
-	reconnects        atomic.Uint64
-	peerRecoveryStart atomic.Uint64
-	peerRecoveryOK    atomic.Uint64
-	peerRecoveryEnd   atomic.Uint64
-	sessionsRejected  atomic.Uint64
-	queueSize         atomic.Int64
-	egressReconnects  atomic.Uint64
-	egressExhausted   atomic.Uint64
-	egressInputTimed  atomic.Uint64
-	egressDropped     atomic.Uint64
-	egressDupFrames   atomic.Int64
-	egressDropFrames  atomic.Int64
-	audioSamplesOut   atomic.Uint64
-	audioSamplesDrop  atomic.Uint64
-	processTree       processTreeTracker
+	activeSessions      atomic.Int64
+	connections         atomic.Uint64
+	connectionFailure   atomic.Uint64
+	reconnects          atomic.Uint64
+	peerRecoveryStart   atomic.Uint64
+	peerRecoveryOK      atomic.Uint64
+	peerRecoveryEnd     atomic.Uint64
+	sessionsRejected    atomic.Uint64
+	guestQueueWaiting   atomic.Int64
+	guestActiveSessions atomic.Int64
+	guestReservations   atomic.Int64
+	guestAdmitted       atomic.Uint64
+	guestExpired        atomic.Uint64
+	guestRateLimited    atomic.Uint64
+	queueSize           atomic.Int64
+	egressReconnects    atomic.Uint64
+	egressExhausted     atomic.Uint64
+	egressInputTimed    atomic.Uint64
+	egressDropped       atomic.Uint64
+	egressDupFrames     atomic.Int64
+	egressDropFrames    atomic.Int64
+	audioSamplesOut     atomic.Uint64
+	audioSamplesDrop    atomic.Uint64
+	processTree         processTreeTracker
 
 	mu                  sync.RWMutex
 	aiFallbackLatched   map[string]uint64
@@ -86,15 +92,21 @@ func New() *Registry {
 	}
 }
 
-func (r *Registry) SetActiveSessions(value int) { r.activeSessions.Store(int64(value)) }
-func (r *Registry) IncConnections()             { r.connections.Add(1) }
-func (r *Registry) IncConnectionFailures()      { r.connectionFailure.Add(1) }
-func (r *Registry) IncReconnects()              { r.reconnects.Add(1) }
-func (r *Registry) IncPeerRecoveryStarted()     { r.peerRecoveryStart.Add(1) }
-func (r *Registry) IncPeerRecoverySucceeded()   { r.peerRecoveryOK.Add(1) }
-func (r *Registry) IncPeerRecoveryExhausted()   { r.peerRecoveryEnd.Add(1) }
-func (r *Registry) IncSessionsRejected()        { r.sessionsRejected.Add(1) }
-func (r *Registry) AddQueue(delta int64)        { r.queueSize.Add(delta) }
+func (r *Registry) SetActiveSessions(value int)    { r.activeSessions.Store(int64(value)) }
+func (r *Registry) IncConnections()                { r.connections.Add(1) }
+func (r *Registry) IncConnectionFailures()         { r.connectionFailure.Add(1) }
+func (r *Registry) IncReconnects()                 { r.reconnects.Add(1) }
+func (r *Registry) IncPeerRecoveryStarted()        { r.peerRecoveryStart.Add(1) }
+func (r *Registry) IncPeerRecoverySucceeded()      { r.peerRecoveryOK.Add(1) }
+func (r *Registry) IncPeerRecoveryExhausted()      { r.peerRecoveryEnd.Add(1) }
+func (r *Registry) IncSessionsRejected()           { r.sessionsRejected.Add(1) }
+func (r *Registry) SetGuestQueueWaiting(v int64)   { r.guestQueueWaiting.Store(v) }
+func (r *Registry) SetGuestActiveSessions(v int64) { r.guestActiveSessions.Store(v) }
+func (r *Registry) SetGuestReservations(v int64)   { r.guestReservations.Store(v) }
+func (r *Registry) IncGuestAdmitted()              { r.guestAdmitted.Add(1) }
+func (r *Registry) IncGuestExpired()               { r.guestExpired.Add(1) }
+func (r *Registry) IncGuestRateLimited()           { r.guestRateLimited.Add(1) }
+func (r *Registry) AddQueue(delta int64)           { r.queueSize.Add(delta) }
 
 func (r *Registry) IncEgressReconnect()             { r.egressReconnects.Add(1) }
 func (r *Registry) IncEgressReconnectExhausted()    { r.egressExhausted.Add(1) }
@@ -237,6 +249,12 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "innolive_peer_recovery_succeeded_total", "Number of WebRTC peer recovery windows completed after a processed camera frame returned.", r.peerRecoveryOK.Load())
 	writeCounter(w, "innolive_peer_recovery_exhausted_total", "Number of WebRTC sessions ended after their network recovery window expired.", r.peerRecoveryEnd.Load())
 	writeCounter(w, "innolive_sessions_rejected_total", "Number of session creations rejected by the MAX_SESSIONS admission control.", r.sessionsRejected.Load())
+	writeGauge(w, "innolive_guest_queue_waiting", "Number of guests waiting for admission.", r.guestQueueWaiting.Load())
+	writeGauge(w, "innolive_guest_active_sessions", "Number of active guest sessions.", r.guestActiveSessions.Load())
+	writeGauge(w, "innolive_guest_admission_reservations", "Number of guest admission reservations.", r.guestReservations.Load())
+	writeCounter(w, "innolive_guest_queue_admitted_total", "Number of guests admitted from the queue.", r.guestAdmitted.Load())
+	writeCounter(w, "innolive_guest_queue_expired_total", "Number of expired guest reservations.", r.guestExpired.Load())
+	writeCounter(w, "innolive_guest_rate_limited_total", "Number of guest queue requests rate limited.", r.guestRateLimited.Load())
 	writeGauge(w, "innolive_processing_queue_size", "Number of complete video frames waiting for processing.", r.queueSize.Load())
 	writeCounter(w, "innolive_egress_reconnect_total", "Number of times the RTMP egress FFmpeg process was restarted.", r.egressReconnects.Load())
 	writeCounter(w, "innolive_egress_reconnect_exhausted_total", "Number of RTMP egresses stopped after their reconnect retry budget was exhausted.", r.egressExhausted.Load())

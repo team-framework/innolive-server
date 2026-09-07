@@ -108,6 +108,39 @@ func TestValidateAllowsAllTestPlanModes(t *testing.T) {
 	}
 }
 
+func TestValidateGuestQueueRequiresBoundedCapacityAndRedis(t *testing.T) {
+	cfg := validConfig()
+	cfg.GuestQueueEnabled = true
+	cfg.MaxSessions = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest queue must reject unlimited session capacity")
+	}
+	cfg.MaxSessions = 2
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest queue must require Redis")
+	}
+	cfg.GuestQueueRedisAddr = "redis:6379"
+	cfg.GuestQueueTTL = 10 * time.Minute
+	cfg.GuestSessionTTL = 10 * time.Minute
+	cfg.GuestAdmissionTTL = time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid guest queue configuration rejected: %v", err)
+	}
+}
+
+func TestValidateGuestQueueRejectsSubMillisecondAdmissionTTL(t *testing.T) {
+	cfg := validConfig()
+	cfg.GuestQueueEnabled = true
+	cfg.MaxSessions = 2
+	cfg.GuestQueueRedisAddr = "redis:6379"
+	cfg.GuestQueueTTL = time.Minute
+	cfg.GuestSessionTTL = time.Minute
+	cfg.GuestAdmissionTTL = 500 * time.Microsecond
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest queue must reject admission TTL below Redis PEXPIRE precision")
+	}
+}
+
 func TestValidateRequiresFFmpegInAllModes(t *testing.T) {
 	for _, mode := range []PrivacyMode{PrivacyModeBypass, PrivacyModeFixedDelay, PrivacyModeReal} {
 		t.Run(string(mode), func(t *testing.T) {

@@ -74,6 +74,59 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
   `docker compose config` 출력 중계, `ssh -v`.
 - 상세 진단은 서버 로컬 `/opt/innolive/deploy/logs/`(root 600)에만 남긴다.
 
+## 비인증 체험 대기열 운영 설정
+
+비인증 체험을 운영하려면 `/etc/innolive/server.env`에 아래 값을 설정한다. 기존
+`AUTH_CORS_ALLOWED_ORIGINS`의 `https://innolive.studio` 값은 유지하고, wildcard CORS는
+사용하지 않는다.
+
+```
+INNOLIVE_REQUIRE_SESSION_AUTH=true
+MAX_SESSIONS=2
+GUEST_QUEUE_ENABLED=true
+GUEST_QUEUE_REDIS_ADDR=redis:6379
+GUEST_QUEUE_REDIS_PASSWORD=<Redis 비밀번호>
+GUEST_QUEUE_TTL=10m
+GUEST_SESSION_TTL=10m
+GUEST_ADMISSION_TTL=60s
+AUTH_CORS_ALLOW_ALL_ORIGINS=false
+AUTH_CORS_ALLOWED_ORIGINS=https://innolive.studio
+GUEST_QUEUE_TRUSTED_PROXY_CIDRS=
+```
+
+`MAX_SESSIONS`는 반드시 2 이상이다. 게스트의 활성 세션과 60초 admission 예약을 합친
+수는 `floor(MAX_SESSIONS × 0.5)`로 제한되므로, 예를 들어 `MAX_SESSIONS=12`라면 게스트는
+최대 6개를 점유하고 로그인 사용자는 전체 정원 안에서 그 이상 세션을 만들 수 있다.
+
+대기표는 heartbeat가 없으면 10분 뒤 만료되며, SSE 연결만으로는 연장되지 않는다. admission
+토큰은 60초 안에 한 번만 소비할 수 있고 게스트 세션은 10분 뒤 종료된다. 큐는 최대
+100명, IP별 생성은 5회/분·30회/시간으로 제한하며 초과 시 `429`와 `Retry-After`를
+반환한다. Redis 장애 시 게스트 큐와 게스트 세션 생성은 `503 queue_unavailable`으로
+fail-closed 처리한다.
+
+게스트가 등록한 기준 얼굴과 AI whitelist는 명시적 삭제·협상 실패·체험 만료·서버 종료를
+포함한 모든 게스트 세션 종료 경로에서 삭제된다. 운영 관측에는
+`innolive_guest_queue_waiting`, `innolive_guest_active_sessions`,
+`innolive_guest_admission_reservations`, `innolive_guest_queue_admitted_total`,
+`innolive_guest_queue_expired_total`, `innolive_guest_rate_limited_total`를 사용한다.
+
+### Proxy 뒤의 client IP 제한
+
+reverse proxy 또는 ingress를 거치는 경우, proxy가 서버로 연결할 때 사용하는 CIDR만
+`GUEST_QUEUE_TRUSTED_PROXY_CIDRS`로 지정한다. 여러 CIDR은 쉼표로 구분한다.
+
+```
+GUEST_QUEUE_TRUSTED_PROXY_CIDRS=10.42.0.0/16,fd00:42::/64
+```
+
+서버는 직접 연결한 peer가 위 CIDR에 속할 때만 `X-Forwarded-For`를 사용한다. 이때 체인을
+오른쪽부터 읽으며 trusted proxy 주소를 건너뛰고, 가장 가까운 untrusted 주소를 rate-limit
+키로 삼는다. 따라서 클라이언트가 왼쪽에 임의 주소를 덧붙여도 제한을 우회할 수 없다.
+
+이 값이 비어 있으면 `X-Forwarded-For`를 신뢰하지 않고 TCP peer 주소로 제한한다. proxy
+뒤에서 이 값을 비워 두면 proxy 주소 하나를 모든 사용자로 간주하므로, 정상 사용자도 같은
+IP별 제한을 공유한다. public CIDR이나 클라이언트 대역을 신뢰 목록에 넣지 않는다.
+
 ## 후속 과제
 
 - Docker Hub 계정을 머신 유저 구조로 유지하되 비밀번호 강화 + 2FA 적용.

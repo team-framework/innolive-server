@@ -218,8 +218,6 @@ func main() {
 		)
 		os.Exit(1)
 	}
-	defer sessionManager.CloseAll()
-
 	tokenConfig, err := auth.LoadTokenConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid token configuration", "error", err)
@@ -228,6 +226,10 @@ func main() {
 	originConfig, err := origin.LoadFromEnv()
 	if err != nil {
 		logger.Error("invalid token HTTP configuration", "error", err)
+		os.Exit(2)
+	}
+	if cfg.GuestQueueEnabled && originConfig.AllowAllOrigins {
+		logger.Error("guest queue cannot use wildcard CORS origins")
 		os.Exit(2)
 	}
 	tokenService := auth.NewTokenService(databaseConnection.DB, tokenConfig)
@@ -415,6 +417,18 @@ func main() {
 		requireUser = nil
 		authenticateUser = nil
 	}
+	guestQueue, err := server.NewGuestQueue(context.Background(), cfg, sessionManager, registry)
+	if err != nil {
+		logger.Error("create guest queue failed", "error", err)
+		os.Exit(2)
+	}
+	if guestQueue != nil {
+		defer func() {
+			if err := guestQueue.Close(); err != nil {
+				logger.Warn("close guest queue failed", "error", err)
+			}
+		}()
+	}
 	application := server.New(
 		cfg,
 		logger,
@@ -426,6 +440,20 @@ func main() {
 		streamingProviders,
 		authenticateUser,
 	)
+	application.SetGuestQueue(guestQueue)
+	// CloseAll은 게스트 얼굴 정리를 비동기로 시작한다. 먼저 등록된 aiPool.Close
+	// defer가 gRPC 연결을 닫기 전에 정리가 끝나야 한다.
+	defer func() {
+		sessionManager.CloseAll()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if err := sessionManager.WaitForDeletes(cleanupContext); err != nil {
+			logger.Warn("session teardown did not finish before shutdown", "error", err)
+		}
+		if err := application.WaitGuestCleanup(cleanupContext); err != nil {
+			logger.Warn("guest face cleanup did not finish before shutdown", "error", err)
+		}
+	}()
 
 	// AI_PRIVACY_ME_IMAGE_PATH에 지정된 기본 참조 얼굴을 등록한다.
 	// 등록 시간이 HTTP 서버 시작을 막지 않도록 비동기로 실행한다.

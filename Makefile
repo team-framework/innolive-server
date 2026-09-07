@@ -22,5 +22,17 @@ proto:
 		api/proto/ai_processor.proto
 
 licenses:
-	go run github.com/google/go-licenses@v1.6.0 save ./cmd/server \
-		--save_path=third_party/licenses --force --ignore inno-live-server
+	@set -e; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	GOBIN="$$tmp" go install github.com/google/go-licenses/v2@v2.0.1; \
+	GOROOT=$$(go env GOROOT) "$$tmp/go-licenses" save ./cmd/server \
+		--save_path="$$tmp/out" --ignore inno-live-server; \
+	count=$$(find "$$tmp/out" -type f | wc -l | tr -d '[:space:]'); \
+	if [ "$$count" -eq 0 ]; then \
+		echo "licenses: generated 0 files" >&2; \
+		exit 1; \
+	fi; \
+	rm -rf third_party/licenses; \
+	mkdir -p third_party; \
+	cp -R "$$tmp/out" third_party/licenses

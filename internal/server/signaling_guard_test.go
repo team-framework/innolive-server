@@ -247,6 +247,15 @@ func TestSignalingTrustedProxySplitsPerIP(t *testing.T) {
 	}
 }
 
+func TestSignalingPingFitsInsidePongWait(t *testing.T) {
+	if signalingPingPeriod+signalingWriteWait >= signalingPongWait {
+		t.Fatalf("ping %s + write %s must be < pong %s", signalingPingPeriod, signalingWriteWait, signalingPongWait)
+	}
+	if signalingPingPeriod != 40*time.Second || signalingWriteWait != 10*time.Second || signalingPongWait != 60*time.Second {
+		t.Fatalf("production ping/write/pong = %s/%s/%s, want 40s/10s/60s", signalingPingPeriod, signalingWriteWait, signalingPongWait)
+	}
+}
+
 func TestSignalingAuthenticatedIdleClosesWithoutPong(t *testing.T) {
 	restoreSignalingGuards(t)
 	signalingPongWait = 200 * time.Millisecond

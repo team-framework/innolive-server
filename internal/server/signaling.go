@@ -24,7 +24,7 @@ var (
 	signalingMaxMessageBytes int64 = 256 << 10
 	signalingAuthTimeout           = 30 * time.Second
 	signalingPongWait              = 60 * time.Second
-	signalingPingPeriod            = 54 * time.Second
+	signalingPingPeriod            = 40 * time.Second // pingPeriod+writeWait < pongWait
 	signalingWriteWait             = 10 * time.Second
 	signalingMaxConns              = 64
 	signalingMaxConnsPerIP         = 8

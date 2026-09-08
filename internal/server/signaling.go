@@ -22,7 +22,7 @@ const signalingOutboundBuffer = 64
 // 테스트에서 생산 시계를 재지 않도록 패키지 변수로 둔다.
 var (
 	signalingMaxMessageBytes int64 = 256 << 10
-	signalingAuthTimeout           = 5 * time.Second
+	signalingAuthTimeout           = 30 * time.Second
 	signalingPongWait              = 60 * time.Second
 	signalingPingPeriod            = 54 * time.Second
 	signalingWriteWait             = 10 * time.Second

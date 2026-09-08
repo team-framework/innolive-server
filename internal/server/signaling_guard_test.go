@@ -95,6 +95,12 @@ func TestSignalingRejectsOversizedMessageBeforeParse(t *testing.T) {
 	}
 }
 
+func TestSignalingAuthTimeoutDefaultIsNegotiationWindow(t *testing.T) {
+	if signalingAuthTimeout != 30*time.Second {
+		t.Fatalf("production first-auth wait = %s, want 30s", signalingAuthTimeout)
+	}
+}
+
 func TestSignalingClosesUnauthenticatedIdleConnection(t *testing.T) {
 	restoreSignalingGuards(t)
 	signalingAuthTimeout = 50 * time.Millisecond

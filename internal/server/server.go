@@ -39,20 +39,22 @@ const maxBroadcastBody = 4 << 20
 const platformCleanupTimeout = 10 * time.Second
 
 type Server struct {
-	cfg              config.Config
-	logger           *slog.Logger
-	metrics          *metrics.Registry
-	sessions         *session.Manager
-	ai               *ai.Pool
-	references       *referenceStore
-	origins          origin.Config
-	streaming        map[auth.StreamingProvider]streaming.Provider
-	authenticateUser func(context.Context, string) (uuid.UUID, error)
-	guestQueue       *GuestQueue
-	guestReference   *guestReferenceGate
-	guestCleanup     sync.WaitGroup
-	mux              *http.ServeMux
-	handler          http.Handler
+	cfg                     config.Config
+	logger                  *slog.Logger
+	metrics                 *metrics.Registry
+	sessions                *session.Manager
+	ai                      *ai.Pool
+	references              *referenceStore
+	origins                 origin.Config
+	streaming               map[auth.StreamingProvider]streaming.Provider
+	authenticateUser        func(context.Context, string) (uuid.UUID, error)
+	guestQueue              *GuestQueue
+	guestReference          *guestReferenceGate
+	guestCleanup            sync.WaitGroup
+	signalingTrustedProxies []*net.IPNet
+	signalingConns          signalingConnLimiter
+	mux                     *http.ServeMux
+	handler                 http.Handler
 }
 
 func New(
@@ -70,15 +72,16 @@ func New(
 		requireUser = func(next http.Handler) http.Handler { return next }
 	}
 	s := &Server{
-		cfg:            cfg,
-		logger:         logger,
-		metrics:        registry,
-		sessions:       sessions,
-		ai:             aiPool,
-		references:     newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
-		origins:        origins,
-		streaming:      streamingProviders,
-		guestReference: newGuestReferenceGate(),
+		cfg:                     cfg,
+		logger:                  logger,
+		metrics:                 registry,
+		sessions:                sessions,
+		ai:                      aiPool,
+		references:              newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
+		origins:                 origins,
+		streaming:               streamingProviders,
+		guestReference:          newGuestReferenceGate(),
+		signalingTrustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies),
 	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]

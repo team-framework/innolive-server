@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"inno-live-server/internal/session"
 
@@ -16,6 +18,56 @@ import (
 )
 
 const signalingOutboundBuffer = 64
+
+// 테스트에서 생산 시계를 재지 않도록 패키지 변수로 둔다.
+var (
+	signalingMaxMessageBytes int64 = 256 << 10
+	signalingAuthTimeout           = 5 * time.Second
+	signalingPongWait              = 60 * time.Second
+	signalingPingPeriod            = 54 * time.Second
+	signalingWriteWait             = 10 * time.Second
+	signalingMaxConns              = 64
+	signalingMaxConnsPerIP         = 8
+)
+
+type signalingConnLimiter struct {
+	mu    sync.Mutex
+	total int
+	byIP  map[string]int
+}
+
+func (l *signalingConnLimiter) tryAcquire(ip string, maxTotal, maxPerIP int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.byIP == nil {
+		l.byIP = map[string]int{}
+	}
+	if maxTotal > 0 && l.total >= maxTotal {
+		return false
+	}
+	if maxPerIP > 0 && l.byIP[ip] >= maxPerIP {
+		return false
+	}
+	l.total++
+	l.byIP[ip]++
+	return true
+}
+
+func (l *signalingConnLimiter) release(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.byIP == nil {
+		return
+	}
+	if l.total > 0 {
+		l.total--
+	}
+	if l.byIP[ip] <= 1 {
+		delete(l.byIP, ip)
+		return
+	}
+	l.byIP[ip]--
+}
 
 // signalingCandidateBuffer는 answer가 WebSocket에 먼저 기록된 뒤에만 같은
 // negotiation 세대의 서버 후보를 전달한다. 후보가 answer보다 먼저 도착해도
@@ -76,11 +128,31 @@ func (b *signalingCandidateBuffer) Close() {
 }
 
 func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
+	maxBytes := signalingMaxMessageBytes
+	authTimeout := signalingAuthTimeout
+	pongWait := signalingPongWait
+	pingPeriod := signalingPingPeriod
+	writeWait := signalingWriteWait
+	maxConns := signalingMaxConns
+	maxPerIP := signalingMaxConnsPerIP
+
+	ip := clientIPFromForwarded(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), s.signalingTrustedProxies)
+	if !s.signalingConns.tryAcquire(ip, maxConns, maxPerIP) {
+		writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "capacity_exceeded", Message: "Too many signaling connections."})
+		return
+	}
+	defer s.signalingConns.release(ip)
+
 	upgrader := websocket.Upgrader{CheckOrigin: func(request *http.Request) bool {
 		return s.origins.Allows(request.Header.Get("Origin"))
 	}}
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		return
+	}
+	connection.SetReadLimit(maxBytes)
+	if err := connection.SetReadDeadline(time.Now().Add(authTimeout)); err != nil {
+		_ = connection.Close()
 		return
 	}
 
@@ -92,16 +164,35 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 			_ = connection.Close()
 		})
 	}
+	var authed atomic.Bool
+	connection.SetPongHandler(func(string) error {
+		if !authed.Load() {
+			return nil
+		}
+		return connection.SetReadDeadline(time.Now().Add(pongWait))
+	})
 	outbound := make(chan any, signalingOutboundBuffer)
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case response := <-outbound:
+				_ = connection.SetWriteDeadline(time.Now().Add(writeWait))
 				if err := connection.WriteJSON(response); err != nil {
+					closeConnection()
+					return
+				}
+			case <-ticker.C:
+				if !authed.Load() {
+					continue
+				}
+				_ = connection.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
 					closeConnection()
 					return
 				}
@@ -141,6 +232,12 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			continue
+		}
+		if authed.CompareAndSwap(false, true) {
+			if err := connection.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+				candidates.Close()
+				return
+			}
 		}
 		if !publish(response) {
 			candidates.Close()

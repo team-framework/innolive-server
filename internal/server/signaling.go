@@ -135,6 +135,9 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 	writeWait := signalingWriteWait
 	maxConns := signalingMaxConns
 	maxPerIP := signalingMaxConnsPerIP
+	if len(s.signalingTrustedProxies) == 0 {
+		maxPerIP = 0
+	}
 
 	ip := clientIPFromForwarded(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), s.signalingTrustedProxies)
 	if !s.signalingConns.tryAcquire(ip, maxConns, maxPerIP) {

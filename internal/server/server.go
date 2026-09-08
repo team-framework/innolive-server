@@ -83,6 +83,9 @@ func New(
 		guestReference:          newGuestReferenceGate(),
 		signalingTrustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies),
 	}
+	if len(s.signalingTrustedProxies) == 0 && s.logger != nil {
+		s.logger.Warn("signaling per-IP connection cap is disabled because GUEST_QUEUE_TRUSTED_PROXY_CIDRS is empty")
+	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]
 	}

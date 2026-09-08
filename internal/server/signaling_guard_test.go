@@ -164,12 +164,31 @@ func TestSignalingGlobalConnectionCap(t *testing.T) {
 	}
 }
 
-func TestSignalingPerIPConnectionCap(t *testing.T) {
+func TestSignalingEmptyTrustedProxySkipsPerIPCap(t *testing.T) {
 	restoreSignalingGuards(t)
 	signalingMaxConns = 64
 	signalingMaxConnsPerIP = 1
 
 	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	first := dialSignaling(t, httpServer.URL, nil)
+	second := dialSignaling(t, httpServer.URL, nil)
+	if first == nil || second == nil {
+		t.Fatal("empty trusted-proxy CIDRs should not apply the per-IP cap")
+	}
+}
+
+func TestSignalingPerIPConnectionCap(t *testing.T) {
+	restoreSignalingGuards(t)
+	signalingMaxConns = 64
+	signalingMaxConnsPerIP = 1
+
+	cfg := testServerConfig()
+	cfg.GuestQueueTrustedProxies = []string{"127.0.0.1/32", "::1/128"}
+	application, manager := newTestApplicationWithConfig(t, cfg, nil)
 	defer manager.CloseAll()
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()

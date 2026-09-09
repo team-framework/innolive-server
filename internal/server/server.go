@@ -286,6 +286,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if errors.Is(err, session.ErrUserSignedOut) {
+		s.logger.Info("session creation aborted: owner signed out", "user_id", userID)
+		writeError(w, apiError{
+			Status:  http.StatusUnauthorized,
+			Code:    "unauthorized",
+			Message: "The account was signed out while the session was being created.",
+		})
+		return
+	}
 	if err != nil {
 		s.logger.Error("create session failed", "error", err)
 		writeError(w, internalError())

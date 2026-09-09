@@ -27,6 +27,7 @@ var (
 	ErrNotFound                  = errors.New("session not found")
 	ErrCapacityExceeded          = errors.New("session capacity exceeded")
 	ErrUserSessionExists         = errors.New("user already has an active session")
+	ErrUserSignedOut             = errors.New("the account was signed out while the session was being created")
 	ErrNoVideoTrack              = errors.New("no video track is available")
 	ErrStreamActive              = errors.New("stream egress is already active")
 	ErrStreamNotActive           = errors.New("stream egress is not active")
@@ -195,6 +196,14 @@ type Session struct {
 	lastActivityAt time.Time
 }
 
+// pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
+// closeUserSessions는 sessions만 훑으므로 등록 전인 세션을 볼 수 없다(#180).
+// 그 사이에 소유자가 로그아웃·탈퇴하면 여기에 표시를 남기고, 생성하는 쪽이
+// 등록을 포기한다. revoked는 Manager.mu가 보호한다.
+type pendingCreate struct {
+	revoked bool
+}
+
 type Manager struct {
 	cfg       config.Config
 	logger    *slog.Logger
@@ -210,8 +219,8 @@ type Manager struct {
 	// pendingUsers는 아직 sessions에 등록되지 않은 생성 중인 세션의 소유자다.
 	// 사용자별 상한은 세션을 map에 넣기 한참 전에 검사하므로, 예약 없이는 같은
 	// 사용자의 동시 요청이 모두 검사를 통과한다. 상한이 1이라 한 사용자의 예약은
-	// 최대 하나이므로 개수가 아니라 유무만 담는다.
-	pendingUsers map[uuid.UUID]struct{}
+	// 최대 하나다.
+	pendingUsers map[uuid.UUID]*pendingCreate
 	// deleting은 sessions에서 제거됐지만 아직 서버 소유 cleanup hook까지 도달하지
 	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
 	// 전에 이 작업들을 기다린다.
@@ -321,7 +330,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		api:          webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		ice:          iceServers,
 		sessions:     make(map[string]*Session),
-		pendingUsers: make(map[uuid.UUID]struct{}),
+		pendingUsers: make(map[uuid.UUID]*pendingCreate),
 		pipelines:    make(map[string]struct{}),
 	}, nil
 }
@@ -404,13 +413,15 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 	// 상한이 없으면 사용자 한 명이 세션 생성을 반복하는 것만으로 다른 모든
 	// 사용자의 세션 생성을 막을 수 있다. 게스트는 uuid.Nil이며 guest queue가
 	// 따로 상한을 건다.
+	var pending *pendingCreate
 	if userID != uuid.Nil {
 		m.mu.Lock()
 		if m.userHasSessionLocked(userID) {
 			m.mu.Unlock()
 			return nil, "", fmt.Errorf("%w: user_id=%s", ErrUserSessionExists, userID)
 		}
-		m.pendingUsers[userID] = struct{}{}
+		pending = &pendingCreate{}
+		m.pendingUsers[userID] = pending
 		m.mu.Unlock()
 		defer func() {
 			m.mu.Lock()
@@ -480,6 +491,14 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 	}
 	m.installHandlers(ctx, s)
 	m.mu.Lock()
+	// 등록 직전에 소유자가 로그아웃·탈퇴했다면 그 정리는 이 세션을 보지 못했다(#180).
+	// 같은 m.mu 아래에서 표시와 등록의 순서가 정해지므로, 표시를 봤다면 정리가
+	// 지나간 뒤다. 만들어둔 것을 여기서 되돌린다.
+	if pending != nil && pending.revoked {
+		m.mu.Unlock()
+		s.close("user_signed_out", m.logger)
+		return nil, "", fmt.Errorf("%w: user_id=%s", ErrUserSignedOut, userID)
+	}
 	m.sessions[id] = s
 	count := len(m.sessions)
 	m.mu.Unlock()
@@ -604,14 +623,19 @@ func (m *Manager) CloseUserSessionsForLogout(userID uuid.UUID) {
 }
 
 func (m *Manager) closeUserSessions(userID uuid.UUID, reason string) {
-	m.mu.RLock()
+	m.mu.Lock()
+	// 생성 중인 세션은 아직 sessions에 없어 아래 스캔에 잡히지 않는다(#180).
+	// 표시를 남겨 생성하는 쪽이 등록을 포기하게 한다.
+	if pending := m.pendingUsers[userID]; pending != nil {
+		pending.revoked = true
+	}
 	ids := make([]string, 0)
 	for id, liveSession := range m.sessions {
 		if liveSession.UserID == userID {
 			ids = append(ids, id)
 		}
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	for _, id := range ids {
 		if err := m.Delete(id, reason); err != nil && !errors.Is(err, ErrNotFound) {
 			m.logger.Warn("close user session failed", "session_id", id, "user_id", userID, "reason", reason, "error", err)

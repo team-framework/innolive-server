@@ -815,3 +815,102 @@ func TestCreateForGuestIgnoresUserSessionLimit(t *testing.T) {
 		t.Fatalf("GuestCount() = %d, want 3", count)
 	}
 }
+
+// waitForInFlightCreate는 userID의 세션 생성이 예약을 잡을 때까지 기다린다.
+// 등록 전 구간이 로그아웃 정리가 놓치던 창이므로(#180), 테스트가 그 창을
+// 결정적으로 겨냥하게 한다.
+func waitForInFlightCreate(t *testing.T, manager *Manager, userID uuid.UUID) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		manager.mu.RLock()
+		_, inFlight := manager.pendingUsers[userID]
+		manager.mu.RUnlock()
+		if inFlight {
+			return
+		}
+	}
+	t.Fatal("session creation never registered a reservation")
+}
+
+// 로그아웃 정리는 아직 sessions에 등록되지 않은 생성 중인 세션도 없애야 한다(#180).
+// closeUserSessions는 sessions만 훑으므로, 표시를 남기지 않으면 이 세션이 정리를
+// 지나쳐 살아남는다.
+func TestCloseUserSessionsRevokesInFlightCreate(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.CreateForUser(userID, nil)
+		createDone <- err
+	}()
+	waitForInFlightCreate(t, manager, userID)
+
+	manager.CloseUserSessionsForLogout(userID)
+
+	if err := <-createDone; !errors.Is(err, ErrUserSignedOut) {
+		t.Fatalf("CreateForUser() error = %v, want ErrUserSignedOut", err)
+	}
+	for _, liveSession := range manager.List() {
+		if liveSession.UserID == userID {
+			t.Fatal("session survived the owner logout")
+		}
+	}
+}
+
+// 취소 표시는 사용자별이다. 다른 사용자의 로그아웃이 진행 중인 생성을 죽이면 안 된다.
+func TestCloseUserSessionsDoesNotRevokeOtherUsers(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.CreateForUser(userID, nil)
+		createDone <- err
+	}()
+	waitForInFlightCreate(t, manager, userID)
+
+	manager.CloseUserSessionsForLogout(uuid.New())
+
+	if err := <-createDone; err != nil {
+		t.Fatalf("CreateForUser() error = %v, want the session to survive another user's logout", err)
+	}
+	found := false
+	for _, liveSession := range manager.List() {
+		if liveSession.UserID == userID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("session was removed by another user's logout")
+	}
+}
+
+// 취소된 생성은 예약을 남기지 않는다. 다시 로그인한 사용자가 곧바로 세션을 만들 수
+// 있어야 한다.
+func TestRevokedCreateReleasesUserSlot(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.CreateForUser(userID, nil)
+		createDone <- err
+	}()
+	waitForInFlightCreate(t, manager, userID)
+	manager.CloseUserSessionsForLogout(userID)
+	if err := <-createDone; !errors.Is(err, ErrUserSignedOut) {
+		t.Fatalf("CreateForUser() error = %v, want ErrUserSignedOut", err)
+	}
+
+	manager.mu.RLock()
+	leaked := len(manager.pendingUsers)
+	manager.mu.RUnlock()
+	if leaked != 0 {
+		t.Fatalf("pendingUsers leaked %d entries", leaked)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
+		t.Fatalf("CreateForUser() after revocation error = %v", err)
+	}
+}

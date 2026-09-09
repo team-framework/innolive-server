@@ -101,7 +101,6 @@ func New(
 	// leaked every active session_id, defeating the token model.
 	mux.Handle("GET /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleGetSession)))
 	mux.Handle("DELETE /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleDeleteSession)))
-	mux.Handle("POST /sessions/{session_id}/stream/start", requireUser(s.requireSessionOwner(s.handleStartStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/prepare", requireUser(s.requireSessionOwner(s.handlePrepareStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/golive", requireUser(s.requireSessionOwner(s.handleGoLive)))
 	mux.Handle("POST /sessions/{session_id}/stream/pause", requireUser(s.requireSessionOwner(s.handlePauseStream)))
@@ -302,84 +301,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleStartStream은 제거 예정인 종전 송출 시작(#83)이다. 클라이언트가
-// prepare/golive로 옮겨갈 때까지만 남기고 별도 PR에서 지운다(PR #146 리뷰).
-//
-// 동작은 종전 그대로다 — 저장 설정 위에 요청 바디가 덮어쓰고, autoStart를 켜
-// 송출이 감지되면 플랫폼이 알아서 라이브로 넘긴다. 새 경로와 달리 방송 단계를
-// 기록하지 않는다: autoStart로 이미 라이브가 된 방송을 서버가 "준비됨"으로 보고
-// 지워버리면 안 되기 때문이다.
-func (s *Server) handleStartStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	request := struct {
-		Provider    string `json:"provider"`
-		Title       string `json:"title"`
-		Privacy     string `json:"privacy"`
-		MadeForKids *bool  `json:"made_for_kids"`
-	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-	if err := decodeOptionalJSON(r.Body, &request); err != nil {
-		writeError(w, badRequest("Invalid stream start request.", map[string]any{"error": err.Error()}))
-		return
-	}
-	// 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 기본이고, 요청 바디에
-	// 실린 값이 이번 방송에 한해 덮어쓴다.
-	options := prepareOptionsFrom(liveSession.BroadcastSettings())
-	options.AutoStart = true
-	if strings.TrimSpace(request.Title) != "" {
-		options.Title = request.Title
-	}
-	if strings.TrimSpace(request.Privacy) != "" {
-		options.Privacy = request.Privacy
-	}
-	if request.MadeForKids != nil {
-		options.MadeForKids = request.MadeForKids
-	}
-	if options.MadeForKids == nil {
-		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
-		// 서버가 기본값으로 대신 신고하지 않는다.
-		writeError(w, badRequest("made_for_kids must be specified.", map[string]any{"field": "made_for_kids"}))
-		return
-	}
-	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
-	if providerName == "" {
-		providerName = auth.StreamingProviderYouTube
-	}
-	provider := s.streaming[providerName]
-	if provider == nil {
-		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
-		// 계약(501)을 유지한다.
-		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
-		return
-	}
-	// 새 경로가 선점한 방송이 있는 세션에서는 종전 경로를 열어두지 않는다 —
-	// 방송이 둘 생기고 어느 쪽이 라이브가 되는지 알 수 없어진다.
-	if _, phase := liveSession.PlatformBroadcast(); phase != session.BroadcastPhaseIdle {
-		writeBroadcastPhaseError(w, phase, liveSession.ID)
-		return
-	}
-	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
-	if err != nil {
-		s.writePrepareError(w, err, liveSession.ID, providerName)
-		return
-	}
-	if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
-		// egress를 못 붙였으면 방금 만든 방송은 쓸 데가 없다. autoStart가 켜져
-		// 있어도 프레임이 가지 않으므로 라이브가 되지 않는다.
-		s.discardBroadcast(liveSession.UserID, session.PlatformBroadcast{
-			Provider:    string(prepared.Provider),
-			BroadcastID: prepared.BroadcastID,
-			StreamID:    prepared.StreamID,
-		})
-		s.writeStartStreamError(w, err, liveSession.ID)
-		return
-	}
-	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
-	writeJSON(w, http.StatusOK, struct {
-		session.Response
-		Warnings []streaming.Warning `json:"warnings,omitempty"`
-	}{Response: liveSession.Response(), Warnings: prepared.Warnings})
 }
 
 // handlePrepareStream은 송출 준비다(#142): 요청 사용자의 연결된 플랫폼 계정으로
@@ -621,8 +542,7 @@ func writeBroadcastPhaseError(w http.ResponseWriter, phase session.BroadcastPhas
 	}
 }
 
-// writePrepareError는 플랫폼 준비 실패를 응답으로 옮긴다. 종전 start와 새
-// prepare가 같은 계약을 유지하도록 한 곳에 둔다.
+// writePrepareError는 플랫폼 준비 실패를 응답으로 옮긴다.
 func (s *Server) writePrepareError(w http.ResponseWriter, err error, sessionID string, providerName auth.StreamingProvider) {
 	switch {
 	case errors.Is(err, auth.ErrStreamingNotConnected):

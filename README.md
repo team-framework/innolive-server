@@ -287,7 +287,6 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 4. **라이브 전환**: `POST /sessions/{id}/stream/golive`로 시청자에게 공개합니다.
 5. **제어와 종료**: 진행 중에는 `stream/pause`와 `stream/resume`으로 송출을 멈췄다 재개합니다. `stream/stop`은 송출을 끊고 플랫폼 방송까지 정리하며, 뷰어 WebRTC와 세션은 그대로 둡니다.
 
-`POST /sessions/{id}/stream/start`는 방송 생성과 송출을 한 번에 하고 autoStart로 라이브까지 넘기던 종전 경로입니다. **제거 예정**이며, 클라이언트가 준비·전환 두 경로로 옮겨가면 삭제합니다.
 
 세션이 어떤 이유로 끝나든(WebRTC 실패, 복구 시간 초과, 로그아웃, 명시적 삭제) 서버가 플랫폼 방송을 단계에 맞춰 정리합니다. 준비까지만 간 방송은 삭제하고, 라이브였던 방송은 종료시킵니다. 플랫폼의 autoStop을 기다리면 다음 방송과 라이브가 겹치기 때문입니다.
 
@@ -332,7 +331,6 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `POST` | `/sessions/{id}/stream/golive` | 준비된 방송을 라이브로 전환 |
 | `POST` | `/sessions/{id}/stream/pause`\|`/resume` | RTMP 송출 일시 중지/재개 |
 | `POST` | `/sessions/{id}/stream/stop` | 송출 종료. 플랫폼 방송도 단계에 맞춰 정리(뷰어 WebRTC·세션은 유지) |
-| `POST` | `/sessions/{id}/stream/start` | **제거 예정.** 종전 송출 시작. 방송 생성 + 송출, autoStart로 라이브까지 자동 전환 |
 | `PATCH` | `/sessions/{id}/anonymization` | `{ "enabled": true\|false }`로 비식별화 AI 처리만 켜거나 끔(WebRTC·RTMP 송출 유지) |
 
 ### 참조 얼굴

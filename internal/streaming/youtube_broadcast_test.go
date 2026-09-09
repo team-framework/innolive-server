@@ -210,28 +210,6 @@ func TestStopWithoutBroadcastIsNoOp(t *testing.T) {
 	}
 }
 
-// TestPrepareAutoStartOptIn: 제거 예정인 stream/start 경로만 autoStart를 켠다.
-func TestPrepareAutoStartOptIn(t *testing.T) {
-	stub := &youtubeAPIStub{}
-	store := newMemoryStore()
-	userID := uuid.New()
-	connectedAccount(t, store, userID)
-	provider := testProviderWith(t, stub, store)
-
-	if _, err := provider.Prepare(context.Background(), userID, PrepareOptions{
-		MadeForKids: boolPtr(false),
-		AutoStart:   true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	contentDetails := stub.lastBroadcast["contentDetails"].(map[string]any)
-	if contentDetails["enableAutoStart"] != true {
-		t.Fatalf("enableAutoStart = %v, want true for the legacy path", contentDetails["enableAutoStart"])
-	}
-}
-
 // TestDefaultsReturnsLatestCompletedBroadcast: 직전 방송의 제목·설명·공개
 // 범위·아동용 여부와 videos.list의 카테고리가 그대로 나와야 한다. 응답 정렬은
 // 문서로 보장되지 않으므로 시각이 가장 늦은 방송을 골라야 한다.

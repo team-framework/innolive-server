@@ -764,3 +764,54 @@ func TestConcurrentCreateForUserNeverExceedsOneSession(t *testing.T) {
 		t.Fatalf("created %d sessions concurrently, want 1", count)
 	}
 }
+
+// 회수 판정을 answerCreatedAt으로 옮겨도 타이밍 메트릭은 offerReceivedAt을 계속
+// 쓴다(#178). offer 수신 시각을 answer 시점으로 미뤄 고치면 OfferToAnswerMS가
+// 0에 붙으므로, 그 회귀를 여기서 막는다.
+func TestCreateAnswerKeepsOfferTiming(t *testing.T) {
+	manager := newTestManager(t, 0)
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
+		t.Fatal(err)
+	}
+
+	timing := s.Response().Timing
+	if timing.SessionToOfferMS == nil {
+		t.Fatal("SessionToOfferMS is nil")
+	}
+	if timing.OfferToAnswerMS == nil {
+		t.Fatal("OfferToAnswerMS is nil")
+	}
+}
+
+// 게스트 세션은 uuid.Nil이라 사용자별 상한을 받지 않는다(#178). guest queue가
+// MAX_SESSIONS / 2로 따로 제한한다.
+func TestCreateForGuestIgnoresUserSessionLimit(t *testing.T) {
+	manager := newTestManager(t, 0)
+	for i := 0; i < 3; i++ {
+		if _, _, err := manager.CreateForGuest("guest-a", nil); err != nil {
+			t.Fatalf("guest session %d: %v", i, err)
+		}
+	}
+	if count := manager.GuestCount(); count != 3 {
+		t.Fatalf("GuestCount() = %d, want 3", count)
+	}
+}

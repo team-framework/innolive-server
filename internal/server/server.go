@@ -278,6 +278,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, session.ErrUserSessionExists) {
+		s.logger.Info("session rejected: user already has an active session", "user_id", userID)
 		writeError(w, apiError{
 			Status:  http.StatusConflict,
 			Code:    "session_already_exists",

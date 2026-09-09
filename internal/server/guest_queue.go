@@ -185,12 +185,7 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	trusted := make([]*net.IPNet, 0, len(cfg.GuestQueueTrustedProxies))
-	for _, cidr := range cfg.GuestQueueTrustedProxies {
-		_, block, _ := net.ParseCIDR(cidr)
-		trusted = append(trusted, block)
-	}
-	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: trusted, ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
+	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
 }
 
 func (q *GuestQueue) Close() error {
@@ -277,12 +272,32 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr, forward
 }
 
 func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
+	return clientIPFromForwarded(remoteAddr, forwardedFor, q.trustedProxies)
+}
+
+func (q *GuestQueue) isTrustedProxy(ip net.IP) bool {
+	return isTrustedProxy(ip, q.trustedProxies)
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
+	trusted := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, block, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		trusted = append(trusted, block)
+	}
+	return trusted
+}
+
+func clientIPFromForwarded(remoteAddr, forwardedFor string, trusted []*net.IPNet) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
 	}
 	remote := net.ParseIP(host)
-	if remote == nil || !q.isTrustedProxy(remote) {
+	if remote == nil || !isTrustedProxy(remote, trusted) {
 		return host
 	}
 
@@ -292,16 +307,16 @@ func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
 	parts := strings.Split(forwardedFor, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
-		if candidate != nil && !q.isTrustedProxy(candidate) {
+		if candidate != nil && !isTrustedProxy(candidate, trusted) {
 			return candidate.String()
 		}
 	}
 	return host
 }
 
-func (q *GuestQueue) isTrustedProxy(ip net.IP) bool {
-	for _, proxy := range q.trustedProxies {
-		if proxy.Contains(ip) {
+func isTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
+	for _, proxy := range trusted {
+		if proxy != nil && proxy.Contains(ip) {
 			return true
 		}
 	}

@@ -170,7 +170,8 @@ func TestSignalingGlobalConnectionCap(t *testing.T) {
 	}
 }
 
-func TestSignalingEmptyTrustedProxySkipsPerIPCap(t *testing.T) {
+func TestSignalingAppliesPerIPCapWithoutTrustedProxy(t *testing.T) {
+	// 신뢰 프록시가 없으면 RemoteAddr가 곧 클라이언트 IP이므로 IP당 상한을 그대로 적용한다.
 	restoreSignalingGuards(t)
 	signalingMaxConns = 64
 	signalingMaxConnsPerIP = 1
@@ -180,11 +181,18 @@ func TestSignalingEmptyTrustedProxySkipsPerIPCap(t *testing.T) {
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()
 
-	first := dialSignaling(t, httpServer.URL, nil)
-	second := dialSignaling(t, httpServer.URL, nil)
-	if first == nil || second == nil {
-		t.Fatal("empty trusted-proxy CIDRs should not apply the per-IP cap")
+	_ = dialSignaling(t, httpServer.URL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(signalingWSURL(httpServer.URL), nil)
+	if conn != nil {
+		_ = conn.Close()
 	}
+	if err == nil {
+		t.Fatal("second connection from same IP succeeded without trusted proxies, want 503")
+	}
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("same-IP status without trusted proxies = %v, want 503", resp)
+	}
+	resp.Body.Close()
 }
 
 func TestSignalingPerIPConnectionCap(t *testing.T) {

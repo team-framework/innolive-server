@@ -15,6 +15,7 @@ import (
 	"inno-live-server/internal/metrics"
 
 	"github.com/google/uuid"
+	"github.com/pion/webrtc/v4"
 )
 
 func newTestManager(t *testing.T, maxSessions int) *Manager {
@@ -638,5 +639,63 @@ func TestReapUnnegotiatedDefersWhileBroadcastSettingsUpdated(t *testing.T) {
 	// 저장을 멈추면 마지막 저장 이후 timeout이 지나 회수된다.
 	if elapsed := waitUntilReaped(t, manager, s.ID, lastActivity, 2*time.Second); elapsed < timeout {
 		t.Fatalf("session reaped after %s, want at least %s since last activity", elapsed, timeout)
+	}
+}
+
+// 협상에 실패한 세션도 회수된다(#178). offer 수신 시각은 SDP를 적용하기 전에
+// 기록하므로, 그 값으로 회수 여부를 판정하면 SetRemoteDescription이 실패한 세션이
+// 대상에서 빠진다. 그런 세션은 ICE agent가 시작되지 않아 PeerConnection failed
+// 정리 경로에도 걸리지 않고, 슬롯을 영구 점유한다.
+func TestReapUnnegotiatedAfterFailedOffer(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	manager := newReapTestManager(t, timeout)
+
+	createdAt := time.Now()
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 서버 계층의 validSDP를 통과하지만 Pion이 거절하는 offer다.
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"); err == nil {
+		t.Fatal("CreateAnswer() error = nil, want a rejected offer")
+	}
+
+	waitUntilReaped(t, manager, s.ID, createdAt, 2*time.Second)
+}
+
+// 정상적으로 answer를 받은 세션은 회수되지 않는다. 협상 이후의 수명은 ICE 연결
+// 실패 경로가 책임진다.
+func TestReapUnnegotiatedKeepsNegotiatedSession(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	manager := newReapTestManager(t, timeout)
+
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
+		t.Fatalf("CreateAnswer() error = %v", err)
+	}
+
+	time.Sleep(10 * timeout)
+	if _, err := manager.Get(s.ID); err != nil {
+		t.Fatalf("negotiated session was reaped: %v", err)
 	}
 }

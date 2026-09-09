@@ -489,7 +489,11 @@ func (m *Manager) reapUnnegotiated(id string) {
 		return
 	}
 	s.mu.RLock()
-	bare := s.offerReceivedAt.IsZero() && !s.wasConnected && !s.closed
+	// answer를 끝까지 만들어낸 세션만 협상을 시작한 것으로 본다(#178). offer 수신
+	// 시각은 SDP를 적용하기 전에 기록하므로, 그 값으로 판정하면 SetRemoteDescription이
+	// 실패한 세션까지 회수 대상에서 빠진다. 협상에 실패한 세션은 ICE agent가 시작되지
+	// 않아 PeerConnection failed 정리 경로에도 걸리지 않아, 슬롯을 영구 점유한다.
+	bare := s.answerCreatedAt.IsZero() && !s.wasConnected && !s.closed
 	idleFor := time.Since(s.lastActivityAt)
 	s.mu.RUnlock()
 	if !bare {

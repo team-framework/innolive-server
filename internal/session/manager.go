@@ -207,10 +207,11 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	pending  int
-	// pendingUsers는 아직 sessions에 등록되지 않은 생성 중인 세션의 소유자를 센다.
+	// pendingUsers는 아직 sessions에 등록되지 않은 생성 중인 세션의 소유자다.
 	// 사용자별 상한은 세션을 map에 넣기 한참 전에 검사하므로, 예약 없이는 같은
-	// 사용자의 동시 요청이 모두 검사를 통과한다.
-	pendingUsers map[uuid.UUID]int
+	// 사용자의 동시 요청이 모두 검사를 통과한다. 상한이 1이라 한 사용자의 예약은
+	// 최대 하나이므로 개수가 아니라 유무만 담는다.
+	pendingUsers map[uuid.UUID]struct{}
 	// deleting은 sessions에서 제거됐지만 아직 서버 소유 cleanup hook까지 도달하지
 	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
 	// 전에 이 작업들을 기다린다.
@@ -320,7 +321,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		api:          webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		ice:          iceServers,
 		sessions:     make(map[string]*Session),
-		pendingUsers: make(map[uuid.UUID]int),
+		pendingUsers: make(map[uuid.UUID]struct{}),
 		pipelines:    make(map[string]struct{}),
 	}, nil
 }
@@ -360,16 +361,18 @@ func (m *Manager) capacityInUseLocked() int {
 	return inUse
 }
 
-// userInUseLocked는 userID가 이미 쓰고 있는 세션 수를 실행 중인 것과 생성 중인
-// 것을 합쳐 센다. 호출자는 m.mu를 잡고 있어야 한다.
-func (m *Manager) userInUseLocked(userID uuid.UUID) int {
-	inUse := m.pendingUsers[userID]
+// userHasSessionLocked는 userID가 이미 세션을 쓰고 있는지 본다. 실행 중인 세션과
+// 생성 중인 세션을 모두 본다. 호출자는 m.mu를 잡고 있어야 한다.
+func (m *Manager) userHasSessionLocked(userID uuid.UUID) bool {
+	if _, creating := m.pendingUsers[userID]; creating {
+		return true
+	}
 	for _, liveSession := range m.sessions {
 		if liveSession.UserID == userID {
-			inUse++
+			return true
 		}
 	}
-	return inUse
+	return false
 }
 
 // Create는 새 세션을 만들고 평문 owner token과 함께 반환한다. token은 여기서
@@ -403,17 +406,15 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 	// 따로 상한을 건다.
 	if userID != uuid.Nil {
 		m.mu.Lock()
-		if m.userInUseLocked(userID) > 0 {
+		if m.userHasSessionLocked(userID) {
 			m.mu.Unlock()
 			return nil, "", fmt.Errorf("%w: user_id=%s", ErrUserSessionExists, userID)
 		}
-		m.pendingUsers[userID]++
+		m.pendingUsers[userID] = struct{}{}
 		m.mu.Unlock()
 		defer func() {
 			m.mu.Lock()
-			if m.pendingUsers[userID]--; m.pendingUsers[userID] <= 0 {
-				delete(m.pendingUsers, userID)
-			}
+			delete(m.pendingUsers, userID)
 			m.mu.Unlock()
 		}()
 	}

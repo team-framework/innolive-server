@@ -202,6 +202,14 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 			t.Fatalf("authenticated %s %s status = %d, want %d", protected.method, protected.path, response.StatusCode, protected.want)
 		}
 	}
+	// 위 라우트 점검이 남긴 세션을 정리한다. 회원은 동시에 한 세션만 가질 수
+	// 있어(#178), 남겨두면 아래 생성이 409로 막힌다.
+	for _, existing := range manager.List() {
+		if err := manager.Delete(existing.ID, "test_cleanup"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Session-scoped routes require both an access token and the separate
 	// capability token. Keeping the latter out of Authorization prevents one
 	// credential from replacing the other.

@@ -127,20 +127,14 @@ func TestCloseUserSessionsForLogoutClosesOnlyLoggedOutUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := manager.CreateForUser(loggedOutUserID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	other, _, err := manager.CreateForUser(otherUserID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	manager.CloseUserSessionsForLogout(loggedOutUserID)
-	for _, id := range []string{first.ID, second.ID} {
-		if _, err := manager.Get(id); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("logged-out session %s still exists: %v", id, err)
-		}
+	if _, err := manager.Get(first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("logged-out session %s still exists: %v", first.ID, err)
 	}
 	if _, err := manager.Get(other.ID); err != nil {
 		t.Fatalf("other user's session must remain: %v", err)
@@ -697,5 +691,76 @@ func TestReapUnnegotiatedKeepsNegotiatedSession(t *testing.T) {
 	time.Sleep(10 * timeout)
 	if _, err := manager.Get(s.ID); err != nil {
 		t.Fatalf("negotiated session was reaped: %v", err)
+	}
+}
+
+// 회원은 동시에 한 세션만 가진다(#178). 전역 MAX_SESSIONS는 프로덕션에서 2라,
+// 상한이 없으면 사용자 한 명이 세션 생성을 반복하는 것만으로 다른 사용자의
+// 세션 생성을 전부 막을 수 있다.
+func TestCreateForUserRejectsSecondSession(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); !errors.Is(err, ErrUserSessionExists) {
+		t.Fatalf("second session error = %v, want ErrUserSessionExists", err)
+	}
+	// 상한은 사용자별이므로 다른 사용자는 영향을 받지 않는다.
+	if _, _, err := manager.CreateForUser(uuid.New(), nil); err != nil {
+		t.Fatalf("other user was blocked: %v", err)
+	}
+	// 게스트와 비인증 세션은 uuid.Nil이라 상한 대상이 아니다.
+	for i := 0; i < 2; i++ {
+		if _, _, err := manager.Create(nil); err != nil {
+			t.Fatalf("anonymous session %d was blocked: %v", i, err)
+		}
+	}
+}
+
+// 세션을 정리하면 같은 사용자가 곧바로 새 세션을 만들 수 있다.
+func TestCreateForUserAllowsSessionAfterDelete(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	first, _, err := manager.CreateForUser(userID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Delete(first.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
+		t.Fatalf("CreateForUser() after delete error = %v", err)
+	}
+}
+
+// 사용자별 상한 검사와 sessions 등록 사이에는 PeerConnection 생성만큼의 간격이
+// 있다. pendingUsers 예약이 없으면 같은 사용자의 동시 요청이 모두 검사를 통과한다.
+func TestConcurrentCreateForUserNeverExceedsOneSession(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+
+	const attempts = 8
+	var wg sync.WaitGroup
+	created := make(chan struct{}, attempts)
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, _, err := manager.CreateForUser(userID, nil); err == nil {
+				created <- struct{}{}
+			} else if !errors.Is(err, ErrUserSessionExists) {
+				t.Errorf("CreateForUser() error = %v, want ErrUserSessionExists", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(created)
+
+	if count := len(created); count != 1 {
+		t.Fatalf("created %d sessions concurrently, want 1", count)
 	}
 }

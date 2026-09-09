@@ -221,6 +221,11 @@ type Manager struct {
 	// 사용자의 동시 요청이 모두 검사를 통과한다. 상한이 1이라 한 사용자의 예약은
 	// 최대 하나다.
 	pendingUsers map[uuid.UUID]*pendingCreate
+	// beforeSessionRegister는 예약과 sessions 등록 사이에 끼어들 자리다. 그 구간이
+	// 로그아웃 정리가 놓치던 창인데(#180), 경합으로 재현하면 스케줄러에 좌우돼
+	// GOMAXPROCS=1에서는 한 번도 그 창에 들어가지 못한다. 테스트가 그 순간을
+	// 결정적으로 재현하는 데만 쓰며 운영에서는 nil이다.
+	beforeSessionRegister func()
 	// deleting은 sessions에서 제거됐지만 아직 서버 소유 cleanup hook까지 도달하지
 	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
 	// 전에 이 작업들을 기다린다.
@@ -490,6 +495,9 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 		go s.audioPipe.Run(ctx)
 	}
 	m.installHandlers(ctx, s)
+	if m.beforeSessionRegister != nil {
+		m.beforeSessionRegister()
+	}
 	m.mu.Lock()
 	// 등록 직전에 소유자가 로그아웃·탈퇴했다면 그 정리는 이 세션을 보지 못했다(#180).
 	// 같은 m.mu 아래에서 표시와 등록의 순서가 정해지므로, 표시를 봤다면 정리가

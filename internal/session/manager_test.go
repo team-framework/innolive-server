@@ -816,40 +816,18 @@ func TestCreateForGuestIgnoresUserSessionLimit(t *testing.T) {
 	}
 }
 
-// waitForInFlightCreate는 userID의 세션 생성이 예약을 잡을 때까지 기다린다.
-// 등록 전 구간이 로그아웃 정리가 놓치던 창이므로(#180), 테스트가 그 창을
-// 결정적으로 겨냥하게 한다.
-func waitForInFlightCreate(t *testing.T, manager *Manager, userID uuid.UUID) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		manager.mu.RLock()
-		_, inFlight := manager.pendingUsers[userID]
-		manager.mu.RUnlock()
-		if inFlight {
-			return
-		}
-	}
-	t.Fatal("session creation never registered a reservation")
-}
-
 // 로그아웃 정리는 아직 sessions에 등록되지 않은 생성 중인 세션도 없애야 한다(#180).
 // closeUserSessions는 sessions만 훑으므로, 표시를 남기지 않으면 이 세션이 정리를
-// 지나쳐 살아남는다.
+// 지나쳐 살아남는다. 경합으로 재현하면 스케줄러에 좌우되므로 등록 직전 훅으로
+// 그 창을 결정적으로 만든다.
 func TestCloseUserSessionsRevokesInFlightCreate(t *testing.T) {
 	manager := newTestManager(t, 0)
 	userID := uuid.New()
+	manager.beforeSessionRegister = func() {
+		manager.CloseUserSessionsForLogout(userID)
+	}
 
-	createDone := make(chan error, 1)
-	go func() {
-		_, _, err := manager.CreateForUser(userID, nil)
-		createDone <- err
-	}()
-	waitForInFlightCreate(t, manager, userID)
-
-	manager.CloseUserSessionsForLogout(userID)
-
-	if err := <-createDone; !errors.Is(err, ErrUserSignedOut) {
+	if _, _, err := manager.CreateForUser(userID, nil); !errors.Is(err, ErrUserSignedOut) {
 		t.Fatalf("CreateForUser() error = %v, want ErrUserSignedOut", err)
 	}
 	for _, liveSession := range manager.List() {
@@ -863,17 +841,11 @@ func TestCloseUserSessionsRevokesInFlightCreate(t *testing.T) {
 func TestCloseUserSessionsDoesNotRevokeOtherUsers(t *testing.T) {
 	manager := newTestManager(t, 0)
 	userID := uuid.New()
+	manager.beforeSessionRegister = func() {
+		manager.CloseUserSessionsForLogout(uuid.New())
+	}
 
-	createDone := make(chan error, 1)
-	go func() {
-		_, _, err := manager.CreateForUser(userID, nil)
-		createDone <- err
-	}()
-	waitForInFlightCreate(t, manager, userID)
-
-	manager.CloseUserSessionsForLogout(uuid.New())
-
-	if err := <-createDone; err != nil {
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
 		t.Fatalf("CreateForUser() error = %v, want the session to survive another user's logout", err)
 	}
 	found := false
@@ -892,15 +864,10 @@ func TestCloseUserSessionsDoesNotRevokeOtherUsers(t *testing.T) {
 func TestRevokedCreateReleasesUserSlot(t *testing.T) {
 	manager := newTestManager(t, 0)
 	userID := uuid.New()
-
-	createDone := make(chan error, 1)
-	go func() {
-		_, _, err := manager.CreateForUser(userID, nil)
-		createDone <- err
-	}()
-	waitForInFlightCreate(t, manager, userID)
-	manager.CloseUserSessionsForLogout(userID)
-	if err := <-createDone; !errors.Is(err, ErrUserSignedOut) {
+	manager.beforeSessionRegister = func() {
+		manager.CloseUserSessionsForLogout(userID)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); !errors.Is(err, ErrUserSignedOut) {
 		t.Fatalf("CreateForUser() error = %v, want ErrUserSignedOut", err)
 	}
 
@@ -910,6 +877,8 @@ func TestRevokedCreateReleasesUserSlot(t *testing.T) {
 	if leaked != 0 {
 		t.Fatalf("pendingUsers leaked %d entries", leaked)
 	}
+
+	manager.beforeSessionRegister = nil
 	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
 		t.Fatalf("CreateForUser() after revocation error = %v", err)
 	}

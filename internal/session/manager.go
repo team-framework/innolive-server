@@ -28,6 +28,7 @@ var (
 	ErrCapacityExceeded          = errors.New("session capacity exceeded")
 	ErrUserSessionExists         = errors.New("user already has an active session")
 	ErrUserSignedOut             = errors.New("the account was signed out while the session was being created")
+	ErrUserWithdrawalInProgress  = errors.New("the account is being withdrawn")
 	ErrNoVideoTrack              = errors.New("no video track is available")
 	ErrStreamActive              = errors.New("stream egress is already active")
 	ErrStreamNotActive           = errors.New("stream egress is not active")
@@ -161,6 +162,7 @@ type Session struct {
 	egressSlot       *media.EgressSlot
 	egress           *media.RTMPEgress
 	egressCancel     context.CancelFunc
+	egressDone       chan struct{}
 	streamStopReason *string
 	processor        *media.Processor
 	// aiInputPaused는 방송 pause 의도를 보존한다. egress가 재구성·재연결 중인
@@ -204,6 +206,18 @@ type pendingCreate struct {
 	revoked bool
 }
 
+// UserOperationGate is implemented by auth.AccountWithdrawalService. The
+// manager uses it to stop a new member session from entering while withdrawal
+// owns the user's cleanup sequence.
+type UserOperationGate interface {
+	BeginOperation(uuid.UUID) (func(), bool)
+}
+
+type pendingBroadcastCleanup struct {
+	broadcast PlatformBroadcast
+	phase     BroadcastPhase
+}
+
 type Manager struct {
 	cfg       config.Config
 	logger    *slog.Logger
@@ -241,7 +255,19 @@ type Manager struct {
 	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
 	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
 	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
-	sessionCleanup   func(*Session)
+	// broadcastCleanupWithContext is the synchronous variant used by account
+	// withdrawal. Its errors must reach DELETE /auth/me before the DB tombstone
+	// is committed.
+	broadcastCleanupWithContext func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error
+	sessionCleanup              func(*Session)
+	userOperationGate           UserOperationGate
+	// A broadcast is removed from a session before its provider call. Keep a
+	// failed cleanup here so the next withdrawal request can retry by id.
+	pendingWithdrawalBroadcasts map[uuid.UUID][]pendingBroadcastCleanup
+	// A closed session whose egress did not drain before the withdrawal context
+	// expired must also be waited on by the next retry. Keeping the pointer here
+	// prevents final account deletion while that egress is still running.
+	pendingWithdrawalSessions map[uuid.UUID][]*Session
 }
 
 // SetBroadcastCleanup은 세션 종료 시 준비된 플랫폼 방송을 치우는 훅을 등록한다.
@@ -251,9 +277,20 @@ func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast P
 	m.broadcastCleanup = cleanup
 }
 
+// SetBroadcastCleanupWithContext registers the error-returning cleanup used by
+// account withdrawal. Regular session teardown continues to use the existing
+// asynchronous callback and behavior.
+func (m *Manager) SetBroadcastCleanupWithContext(cleanup func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error) {
+	m.broadcastCleanupWithContext = cleanup
+}
+
 // SetSessionCleanup은 모든 종료 경로(명시적 삭제, timeout, peer 실패)에 적용할
 // 서버 소유 cleanup을 등록한다.
 func (m *Manager) SetSessionCleanup(cleanup func(*Session)) { m.sessionCleanup = cleanup }
+
+func (m *Manager) SetUserOperationGate(gate UserOperationGate) {
+	m.userOperationGate = gate
+}
 
 // cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
 // 방송도 여기서 끝낸다 — autoStop을 기다리면 그 사이(실측 약 1분)에 시작한
@@ -327,16 +364,18 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 	}
 	iceServers := buildICEServers(cfg)
 	return &Manager{
-		cfg:          cfg,
-		logger:       logger,
-		metrics:      registry,
-		ai:           aiPool,
-		spawnGate:    spawnGate,
-		api:          webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
-		ice:          iceServers,
-		sessions:     make(map[string]*Session),
-		pendingUsers: make(map[uuid.UUID]*pendingCreate),
-		pipelines:    make(map[string]struct{}),
+		cfg:                         cfg,
+		logger:                      logger,
+		metrics:                     registry,
+		ai:                          aiPool,
+		spawnGate:                   spawnGate,
+		api:                         webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
+		ice:                         iceServers,
+		sessions:                    make(map[string]*Session),
+		pendingUsers:                make(map[uuid.UUID]*pendingCreate),
+		pipelines:                   make(map[string]struct{}),
+		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
+		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
 	}, nil
 }
 
@@ -414,6 +453,16 @@ func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*S
 }
 
 func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]string) (*Session, string, error) {
+	var releaseOperation func()
+	if userID != uuid.Nil && m.userOperationGate != nil {
+		var admitted bool
+		releaseOperation, admitted = m.userOperationGate.BeginOperation(userID)
+		if !admitted {
+			return nil, "", ErrUserWithdrawalInProgress
+		}
+		defer releaseOperation()
+	}
+
 	// 회원은 동시에 한 세션만 가진다(#178). 전역 MAX_SESSIONS는 프로덕션에서 2라,
 	// 상한이 없으면 사용자 한 명이 세션 생성을 반복하는 것만으로 다른 모든
 	// 사용자의 세션 생성을 막을 수 있다. 게스트는 uuid.Nil이며 guest queue가
@@ -623,6 +672,141 @@ func (m *Manager) CloseUserSessions(userID uuid.UUID) {
 	m.closeUserSessions(userID, "user_withdrawal")
 }
 
+// CloseUserSessionsForWithdrawal closes the user's sessions and waits for
+// provider cleanup to finish. A failed broadcast cleanup is retained in memory
+// so the next withdrawal request can retry it by the same platform id.
+func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uuid.UUID) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	m.mu.Lock()
+	if pending := m.pendingUsers[userID]; pending != nil {
+		pending.revoked = true
+	}
+	pendingSessions := append([]*Session(nil), m.pendingWithdrawalSessions[userID]...)
+	delete(m.pendingWithdrawalSessions, userID)
+	sessions := make([]*Session, 0)
+	for id, liveSession := range m.sessions {
+		if liveSession.UserID != userID {
+			continue
+		}
+		sessions = append(sessions, liveSession)
+		m.deleting.Add(1)
+		delete(m.sessions, id)
+	}
+	count := len(m.sessions)
+	pending := append([]pendingBroadcastCleanup(nil), m.pendingWithdrawalBroadcasts[userID]...)
+	m.mu.Unlock()
+	m.metrics.SetActiveSessions(count)
+
+	failed := make([]pendingBroadcastCleanup, 0, len(pending)+len(sessions))
+	failedSessions := make([]*Session, 0, len(pendingSessions))
+	var errs []error
+	for index, item := range pending {
+		if err := m.cleanupWithdrawalBroadcast(ctx, userID, item.broadcast, item.phase); err != nil {
+			errs = append(errs, fmt.Errorf("retry platform broadcast cleanup: %w", err))
+			failed = append(failed, pending[index:]...)
+			break
+		}
+	}
+	for _, liveSession := range pendingSessions {
+		if err := m.waitForEgress(ctx, liveSession); err != nil {
+			errs = append(errs, fmt.Errorf("wait for pending session egress: %w", err))
+			failedSessions = append(failedSessions, liveSession)
+		}
+	}
+
+	for _, liveSession := range sessions {
+		broadcast, phase := takeWithdrawalBroadcast(liveSession)
+		liveSession.close("user_withdrawal", m.logger)
+		if err := m.waitForEgress(ctx, liveSession); err != nil {
+			errs = append(errs, fmt.Errorf("wait for session egress: %w", err))
+			failedSessions = append(failedSessions, liveSession)
+		}
+		if err := m.cleanupWithdrawalBroadcast(ctx, userID, broadcast, phase); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup platform broadcast: %w", err))
+			if phase != BroadcastPhaseIdle && broadcast.BroadcastID != "" {
+				failed = append(failed, pendingBroadcastCleanup{broadcast: broadcast, phase: phase})
+			}
+		}
+		if m.sessionCleanup != nil {
+			m.sessionCleanup(liveSession)
+		}
+		m.deleting.Done()
+	}
+
+	m.mu.Lock()
+	if len(failed) == 0 {
+		delete(m.pendingWithdrawalBroadcasts, userID)
+	} else {
+		if m.pendingWithdrawalBroadcasts == nil {
+			m.pendingWithdrawalBroadcasts = make(map[uuid.UUID][]pendingBroadcastCleanup)
+		}
+		m.pendingWithdrawalBroadcasts[userID] = failed
+	}
+	if len(failedSessions) == 0 {
+		delete(m.pendingWithdrawalSessions, userID)
+	} else {
+		if m.pendingWithdrawalSessions == nil {
+			m.pendingWithdrawalSessions = make(map[uuid.UUID][]*Session)
+		}
+		m.pendingWithdrawalSessions[userID] = failedSessions
+	}
+	m.mu.Unlock()
+	return errors.Join(errs...)
+}
+
+func (m *Manager) cleanupWithdrawalBroadcast(ctx context.Context, userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) error {
+	if phase == BroadcastPhaseIdle || broadcast.BroadcastID == "" {
+		return nil
+	}
+	if m.broadcastCleanupWithContext == nil {
+		return errors.New("platform broadcast cleanup is unavailable")
+	}
+	return m.broadcastCleanupWithContext(ctx, userID, broadcast, phase)
+}
+
+func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.platformBroadcast == nil {
+		s.broadcastPhase = BroadcastPhaseIdle
+		s.goLiveStopRequested = false
+		return PlatformBroadcast{}, BroadcastPhaseIdle
+	}
+	broadcast := *s.platformBroadcast
+	phase := s.broadcastPhase
+	if phase == BroadcastPhaseGoingLive {
+		// Session HTTP operations are gated during withdrawal, so an in-flight
+		// transition has completed by this point. Treat a leftover marker as live
+		// to ensure it is explicitly ended rather than left to auto-stop.
+		phase = BroadcastPhaseLive
+	}
+	if phase != BroadcastPhasePrepared && phase != BroadcastPhaseLive {
+		phase = BroadcastPhaseIdle
+	}
+	s.platformBroadcast = nil
+	s.broadcastPhase = BroadcastPhaseIdle
+	s.goLiveStopRequested = false
+	return broadcast, phase
+}
+
+func (m *Manager) waitForEgress(ctx context.Context, s *Session) error {
+	s.mu.RLock()
+	done := s.egressDone
+	s.mu.RUnlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // CloseUserSessionsForLogout는 로그아웃한 사용자의 모든 활성 세션을 즉시
 // 종료한다. Session.close가 egress context를 취소하면 RTMPEgress.Run은 stop
 // 이벤트를 거쳐 stopped로 전이한다.
@@ -688,8 +872,13 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 	s.egressCancel = egressCancel
 	s.streamStopReason = nil
 	s.egressSlot.Set(egress)
+	egressDone := make(chan struct{})
+	s.egressDone = egressDone
 	s.UpdatedAt = time.Now().UTC()
-	go m.runEgress(s, egress, egressCtx)
+	go func() {
+		defer close(egressDone)
+		m.runEgress(s, egress, egressCtx)
+	}()
 	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL)
 	return s, nil
 }
@@ -939,10 +1128,22 @@ func (m *Manager) WaitForDeletes(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+
+	m.mu.RLock()
+	pending := make([]*Session, 0)
+	for _, sessions := range m.pendingWithdrawalSessions {
+		pending = append(pending, sessions...)
+	}
+	m.mu.RUnlock()
+	for _, s := range pending {
+		if err := m.waitForEgress(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) CloseAll() {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -41,6 +42,10 @@ func (h *tokenHTTPHandler) handleListStreamingAccounts(w http.ResponseWriter, r 
 	}
 	summaries, err := h.streamingAccounts.List(r.Context(), userID)
 	if err != nil {
+		if errors.Is(err, ErrWithdrawalInProgress) {
+			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
+			return
+		}
 		if isUnauthorizedStreamingError(err) {
 			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 			return
@@ -63,6 +68,8 @@ func (h *tokenHTTPHandler) handleDisconnectStreamingAccount(w http.ResponseWrite
 	err := h.streamingAccounts.Disconnect(r.Context(), userID, provider)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrWithdrawalInProgress):
+			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case isUnauthorizedStreamingError(err):
 			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		case errorsIsStreamingNotFound(err):
@@ -79,9 +86,9 @@ func (h *tokenHTTPHandler) handleDisconnectStreamingAccount(w http.ResponseWrite
 }
 
 func isUnauthorizedStreamingError(err error) bool {
-	return err == ErrUserInactive
+	return errors.Is(err, ErrUserInactive)
 }
 
 func errorsIsStreamingNotFound(err error) bool {
-	return err == ErrStreamingAccountNotFound
+	return errors.Is(err, ErrStreamingAccountNotFound)
 }

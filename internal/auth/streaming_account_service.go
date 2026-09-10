@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -40,6 +41,9 @@ type StreamingAccountService struct {
 	hooks  map[StreamingProvider]StreamingDisconnectHooks
 	logger *slog.Logger
 	now    func() time.Time
+	gate   interface {
+		BeginOperation(uuid.UUID) (func(), bool)
+	}
 }
 
 // NewStreamingAccountService를 만든다. cipher와 hooks는 해제 시 플랫폼 정리
@@ -61,11 +65,28 @@ func NewStreamingAccountService(store StreamingAccountStore, users UserStatusChe
 	}, nil
 }
 
+// SetUserOperationGate prevents a new connect/disconnect request from racing
+// with account withdrawal. The withdrawal cleanup method intentionally bypasses
+// this gate because it already owns the user's exclusive slot.
+func (s *StreamingAccountService) SetUserOperationGate(gate interface {
+	BeginOperation(uuid.UUID) (func(), bool)
+}) {
+	if s != nil {
+		s.gate = gate
+	}
+}
+
 // Disconnect는 연결을 해제한다. 세 단계를 순서대로 수행한다(#88):
 // ①플랫폼 리소스 삭제 → ②플랫폼 권한 취소 → ③DB 행 삭제. 토큰을 먼저
 // 폐기하면 ①을 못 하므로 순서를 바꾸면 안 되고, ①·②가 실패해도 ③은
 // 수행한다 — 이미 토큰이 무효화된 연결을 해제하는 것이 정상 시나리오다.
 func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UUID, provider StreamingProvider) error {
+	release, admitted := s.beginOperation(userID)
+	if !admitted {
+		return ErrWithdrawalInProgress
+	}
+	defer release()
+
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return err
 	}
@@ -93,9 +114,70 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 	return s.store.Delete(ctx, account.ID)
 }
 
+// CleanupForWithdrawal performs platform cleanup while retaining the database
+// rows. The final account transaction removes those rows only after every
+// external operation succeeds, so a failed request can safely retry.
+func (s *StreamingAccountService) CleanupForWithdrawal(ctx context.Context, userID uuid.UUID) error {
+	if err := s.ensureActive(ctx, userID); err != nil {
+		return err
+	}
+	accounts, err := s.store.ListByUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for _, account := range accounts {
+		hooks := s.hooks[account.Provider]
+		if hooks.CleanupResources != nil && account.StreamID != nil && *account.StreamID != "" {
+			if err := hooks.CleanupResources(ctx, account); err != nil {
+				if !errors.Is(err, ErrStreamingReconnectRequired) {
+					return fmt.Errorf("cleanup %s resources: %w", account.Provider, err)
+				}
+				// A revoked refresh token cannot authenticate the provider's
+				// delete call. Keep account deletion retryable by treating this
+				// external state as permanently inaccessible and clearing the
+				// server-side resource marker below. Token revocation remains
+				// idempotent and is attempted with the same refresh token.
+				if s.logger != nil {
+					s.logger.Warn("streaming resource cleanup skipped because provider token is invalid",
+						"provider", account.Provider, "user_id", userID, "stream_id", *account.StreamID)
+				}
+			}
+			// Persist that no further provider cleanup is possible before
+			// revoking the token. If a later withdrawal stage fails, the next
+			// attempt can skip the already-deleted (or inaccessible) resource
+			// and use the refresh token only for idempotent revocation.
+			if account.StreamID != nil && *account.StreamID != "" {
+				if err := s.store.UpdateStreamInfo(ctx, account.ID, StreamInfo{}); err != nil {
+					return fmt.Errorf("clear %s stream resource metadata: %w", account.Provider, err)
+				}
+			}
+		}
+		if hooks.RevokeToken == nil || len(account.RefreshTokenCiphertext) == 0 {
+			continue
+		}
+		if s.cipher == nil {
+			return ErrWithdrawalUnavailable
+		}
+		refreshToken, err := s.cipher.Decrypt(account.RefreshTokenCiphertext, account.TokenKeyVersion)
+		if err != nil {
+			return fmt.Errorf("decrypt %s refresh token: %w", account.Provider, err)
+		}
+		if err := hooks.RevokeToken(ctx, refreshToken); err != nil {
+			return fmt.Errorf("revoke %s refresh token: %w", account.Provider, err)
+		}
+	}
+	return nil
+}
+
 // List는 사용자의 플랫폼 연결 목록을 돌려준다. 연결이 없으면 빈 슬라이스다
 // (404가 아니라 빈 배열 — 이슈 #88 계약).
 func (s *StreamingAccountService) List(ctx context.Context, userID uuid.UUID) ([]StreamingAccountSummary, error) {
+	release, admitted := s.beginOperation(userID)
+	if !admitted {
+		return nil, ErrWithdrawalInProgress
+	}
+	defer release()
+
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -141,4 +223,11 @@ func (s *StreamingAccountService) ensureActive(ctx context.Context, userID uuid.
 		return ErrUserInactive
 	}
 	return nil
+}
+
+func (s *StreamingAccountService) beginOperation(userID uuid.UUID) (func(), bool) {
+	if s == nil || s.gate == nil {
+		return func() {}, true
+	}
+	return s.gate.BeginOperation(userID)
 }

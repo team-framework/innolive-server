@@ -35,8 +35,10 @@ type stubStreamingProvider struct {
 	lastGoLive   streaming.PreparedBroadcast
 	stopCalls    int
 	lastStopped  streaming.PreparedBroadcast
+	stopErr      error
 	endLiveCalls int
 	lastEndLive  streaming.PreparedBroadcast
+	endLiveErr   error
 	defaults     streaming.BroadcastDefaults
 	defaultsErr  error
 	// 플랫폼 왕복 중간을 붙잡기 위한 동기화 채널(설정하지 않으면 무시된다).
@@ -84,7 +86,7 @@ func (s *stubStreamingProvider) EndLive(_ context.Context, _ uuid.UUID, prepared
 	defer s.mu.Unlock()
 	s.endLiveCalls++
 	s.lastEndLive = prepared
-	return nil
+	return s.endLiveErr
 }
 
 // ended는 비동기 없이도 잠금을 지켜 읽는 통로다.
@@ -104,7 +106,7 @@ func (s *stubStreamingProvider) Stop(_ context.Context, _ uuid.UUID, prepared st
 	defer s.mu.Unlock()
 	s.stopCalls++
 	s.lastStopped = prepared
-	return nil
+	return s.stopErr
 }
 
 // stopped는 비동기 정리(세션 종료 훅)를 기다리는 테스트가 안전하게 읽는 통로다.

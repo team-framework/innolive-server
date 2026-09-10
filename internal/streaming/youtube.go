@@ -297,9 +297,9 @@ func firstNonEmpty(values ...string) string {
 }
 
 // CleanupStreamingResources는 연결 해제 전에 프리로딩된 재사용 스트림을
-// 플랫폼에서 삭제한다(#88 — DB 행만 지우면 사용자 채널에 고아 리소스가
-// 남고 재연결마다 누적된다). 토큰이 이미 무효면 실패하는데, 호출자
-// (StreamingAccountService)가 로그만 남기고 해제를 계속하는 계약이다.
+// 플랫폼에서 삭제한다(#88). DB 행만 지우면 사용자 채널에 고아 리소스가
+// 남고 재연결마다 누적된다. 토큰이나 API 오류는 호출자가 처리한다.
+// 계정 탈퇴는 일시적 오류를 재시도하고, 이미 취소된 권한은 건너뛴다.
 func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account auth.StreamingAccount) error {
 	if account.StreamID == nil || *account.StreamID == "" {
 		return nil

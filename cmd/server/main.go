@@ -325,7 +325,7 @@ func main() {
 		auth.NewGormWithdrawalAccountStore(databaseConnection.DB),
 		providerTokenCipher,
 		appleRevoker,
-		sessionManager.CloseUserSessions,
+		nil,
 	)
 	if err != nil {
 		logger.Error("create account withdrawal service failed", "error", err)
@@ -354,6 +354,7 @@ func main() {
 	// 생성됐을 수 있으므로 없을 때만 만든다 — Apple 없이 YouTube만 켠
 	// 배포에서도 refresh token 암호화가 성립해야 한다.
 	var youtubeConnect *auth.YouTubeConnectService
+	var youtubeTokens *auth.YouTubeAccessTokenProvider
 	streamingProviders := map[auth.StreamingProvider]streaming.Provider{}
 	// 송출 계정 저장소·조회 서비스는 플랫폼 중립이라 YouTube 설정 여부와
 	// 무관하게 조립한다 — 연결이 없으면 조회가 빈 배열을 돌려줄 뿐이다.
@@ -382,7 +383,7 @@ func main() {
 			logger.Error("create YouTube connect service failed", "error", err)
 			os.Exit(2)
 		}
-		youtubeTokens, err := auth.NewYouTubeAccessTokenProvider(youtubeOAuthClient, streamingAccountStore, providerTokenCipher)
+		youtubeTokens, err = auth.NewYouTubeAccessTokenProvider(youtubeOAuthClient, streamingAccountStore, providerTokenCipher)
 		if err != nil {
 			logger.Error("create YouTube access token provider failed", "error", err)
 			os.Exit(2)
@@ -440,6 +441,24 @@ func main() {
 		streamingProviders,
 		authenticateUser,
 	)
+	// Withdrawal owns the user's operation gate. Wire all user-scoped writers
+	// before serving requests so a session creation, YouTube callback, or face
+	// upload cannot race the final account transaction.
+	application.SetUserOperationGate(withdrawal)
+	if youtubeConnect != nil {
+		youtubeConnect.SetUserOperationGate(withdrawal)
+	}
+	streamingAccounts.SetUserOperationGate(withdrawal)
+	withdrawal.SetCleanup(auth.WithdrawalCleanup{
+		CloseUserSessions:           sessionManager.CloseUserSessionsForWithdrawal,
+		DisconnectStreamingAccounts: streamingAccounts.CleanupForWithdrawal,
+		ClearReferenceData:          application.ClearUserReferenceData,
+		ClearStreamingTokenCache: func(userID uuid.UUID) {
+			if youtubeTokens != nil {
+				youtubeTokens.ClearCachedToken(userID)
+			}
+		},
+	})
 	application.SetGuestQueue(guestQueue)
 	// CloseAll은 게스트 얼굴 정리를 비동기로 시작한다. 먼저 등록된 aiPool.Close
 	// defer가 gRPC 연결을 닫기 전에 정리가 끝나야 한다.

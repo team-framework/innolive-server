@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
@@ -138,6 +139,111 @@ func TestCloseUserSessionsForLogoutClosesOnlyLoggedOutUser(t *testing.T) {
 	}
 	if _, err := manager.Get(other.ID); err != nil {
 		t.Fatalf("other user's session must remain: %v", err)
+	}
+}
+
+func TestCloseUserSessionsForWithdrawalRetriesFailedBroadcastByID(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	liveSession, _, err := manager.CreateForUser(userID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broadcast := PlatformBroadcast{Provider: "youtube", BroadcastID: "withdrawal-broadcast", StreamID: "withdrawal-stream"}
+	if _, err := manager.BeginBroadcastPrepare(liveSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkBroadcastPrepared(liveSession.ID, broadcast); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []PlatformBroadcast
+	providerErr := errors.New("provider temporarily unavailable")
+	manager.SetBroadcastCleanupWithContext(func(_ context.Context, _ uuid.UUID, got PlatformBroadcast, _ BroadcastPhase) error {
+		calls = append(calls, got)
+		if len(calls) == 1 {
+			return providerErr
+		}
+		return nil
+	})
+
+	if err := manager.CloseUserSessionsForWithdrawal(context.Background(), userID); !errors.Is(err, providerErr) {
+		t.Fatalf("first withdrawal cleanup error = %v, want provider error", err)
+	}
+	if len(calls) != 1 || calls[0] != broadcast {
+		t.Fatalf("first cleanup calls = %+v, want one call for %+v", calls, broadcast)
+	}
+	if _, err := manager.Get(liveSession.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("withdrawal session lookup error = %v, want ErrNotFound", err)
+	}
+
+	if err := manager.CloseUserSessionsForWithdrawal(context.Background(), userID); err != nil {
+		t.Fatalf("retry withdrawal cleanup failed: %v", err)
+	}
+	if len(calls) != 2 || calls[1] != broadcast {
+		t.Fatalf("retry cleanup calls = %+v, want the same broadcast id retried", calls)
+	}
+}
+
+func TestCloseUserSessionsForWithdrawalRetriesAfterEgressWaitCancellation(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	liveSession, _, err := manager.CreateForUser(userID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	egressDone := make(chan struct{})
+	liveSession.mu.Lock()
+	liveSession.egressDone = egressDone
+	liveSession.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.CloseUserSessionsForWithdrawal(ctx, userID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first withdrawal cleanup error = %v, want context.Canceled", err)
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		retryDone <- manager.CloseUserSessionsForWithdrawal(context.Background(), userID)
+	}()
+	select {
+	case err := <-retryDone:
+		t.Fatalf("retry returned before egress completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(egressDone)
+	select {
+	case err := <-retryDone:
+		if err != nil {
+			t.Fatalf("retry after egress completion failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retry did not finish after egress completion")
+	}
+}
+
+func TestCloseUserSessionsForWithdrawalPreservesOtherUserSession(t *testing.T) {
+	manager := newTestManager(t, 0)
+	targetUserID := uuid.New()
+	otherUserID := uuid.New()
+	target, _, err := manager.CreateForUser(targetUserID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := manager.CreateForUser(otherUserID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.CloseUserSessionsForWithdrawal(context.Background(), targetUserID); err != nil {
+		t.Fatalf("withdrawal cleanup failed: %v", err)
+	}
+	if _, err := manager.Get(target.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("target session lookup error = %v, want ErrNotFound", err)
+	}
+	if _, err := manager.Get(other.ID); err != nil {
+		t.Fatalf("other user's session was removed: %v", err)
 	}
 }
 
@@ -731,6 +837,18 @@ func TestCreateForUserAllowsSessionAfterDelete(t *testing.T) {
 	}
 	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
 		t.Fatalf("CreateForUser() after delete error = %v", err)
+	}
+}
+
+func TestCreateForUserRejectsCompletedWithdrawal(t *testing.T) {
+	manager := newTestManager(t, 0)
+	gate := auth.NewUserOperationGate()
+	manager.SetUserOperationGate(gate)
+	userID := uuid.New()
+	gate.MarkDeleted(userID)
+
+	if _, _, err := manager.CreateForUser(userID, nil); !errors.Is(err, ErrUserWithdrawalInProgress) {
+		t.Fatalf("CreateForUser() error = %v, want ErrUserWithdrawalInProgress", err)
 	}
 }
 

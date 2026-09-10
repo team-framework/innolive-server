@@ -353,11 +353,42 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `POST` | `/auth/apple` | Apple authorization code를 교환·검증하고 토큰 발급 |
 | `POST` | `/auth/refresh` | 리프레시 토큰으로 액세스 토큰 재발급 |
 | `POST` | `/auth/logout` | 로그아웃. 해당 사용자의 활성 세션도 정리 |
-| `DELETE` | `/auth/me` | 계정 탈퇴 |
+| `DELETE` | `/auth/me` | 계정 탈퇴. 세션·플랫폼 리소스·연결 자격증명·AI 기준 얼굴·계정 데이터를 정리한 뒤 `204 No Content`를 반환합니다 |
 | `POST` | `/auth/youtube/connect` | 인가 코드를 받아 YouTube 송출 계정 연결 |
 | `GET` | `/auth/youtube/config` | 웹 클라이언트가 OAuth 팝업을 초기화할 공개 설정 |
 | `GET` | `/auth/streaming/accounts` | 연결된 송출 계정 목록 |
 | `DELETE` | `/auth/streaming/accounts/{provider}` | 송출 계정 연결 해제 |
+
+### 계정 탈퇴 정리 범위와 응답 계약
+
+`DELETE /auth/me`는 현재 액세스 토큰의 사용자를 대상으로 실행합니다. 서버는 다음
+순서로 정리한 뒤 마지막 데이터베이스 트랜잭션에서 계정 행을 삭제합니다.
+
+| 대상 | 정리 내용 |
+|------|----------|
+| 활성 세션과 준비·라이브 방송 | 세션을 닫고 egress를 중지합니다. 준비 방송은 삭제하고 라이브 방송은 종료합니다 |
+| `streaming_accounts` | YouTube 재사용 스트림을 삭제하고 Google 송출 권한을 취소한 뒤 연결 행을 삭제합니다. 스트림 삭제가 끝나면 그 식별자를 먼저 저장소에서 비워 후속 재시도에서 같은 외부 리소스를 다시 호출하지 않습니다 |
+| Apple OAuth | 저장된 암호화 refresh token을 복호화해 Apple revoke API를 호출한 뒤 OAuth 행을 삭제합니다 |
+| `email_accounts` | 이메일과 비밀번호 hash를 포함한 행을 삭제합니다 |
+| `oauth_accounts` | provider subject, provider 이메일, 암호화 refresh token을 포함한 행을 삭제합니다 |
+| `refresh_sessions` | token hash, IP 주소, User-Agent와 세션 메타데이터를 포함한 행을 삭제합니다 |
+| AI·referenceStore | 사용자 AI bucket의 whitelist를 비우고 서버의 사용자별 얼굴 ID·worker entry ID·등록 시각 메타데이터를 삭제합니다. 업로드 원본은 계정별 영구 저장소에 보관하지 않으며, multipart 처리 중 생긴 요청 임시 파일은 요청이 끝날 때 제거합니다 |
+| `users` | 사용자 행을 삭제합니다. 별도의 탈퇴 tombstone이나 법적 보관 예외를 두지 않습니다 |
+
+Apple·YouTube·AI worker·파일 저장소 또는 데이터베이스 단계에서 오류가 나면 서버는
+`204`를 반환하지 않습니다. YouTube 재사용 스트림을 삭제한 뒤 비운 식별자는
+`streaming_accounts`에 저장하므로, 같은 인증 정보로 요청을 재시도할 때 완료한 외부
+단계를 건너뜁니다. 세션 방송 정리 실패 목록은 프로세스 메모리에 보관해 같은 프로세스
+안에서 재시도합니다. 같은 사용자의 탈퇴 요청이 진행 중이면
+`409 withdrawal_in_progress`를, 탈퇴 중인 사용자의 세션 생성·세션 제어·시그널링·기준
+얼굴 변경·송출 계정 연결/조회 요청도 같은 code를 반환합니다. 기존 `DELETE /auth/me`의
+성공 응답은 계속 본문 없는 `204 No Content`입니다.
+
+송출 플랫폼 refresh token이 이미 무효해 스트림 삭제에 인증할 수 없는 경우에는
+현재 권한으로 외부 삭제를 수행할 수 없는 상태로 분류합니다. 서버의 스트림 식별자를
+비우고 권한 취소를 멱등적으로 시도한 뒤 계정 데이터 삭제를 진행합니다. 이 처리는
+서버가 관리하는 현재 연결과 재사용 스트림을 대상으로 하며, 이미 생성된 과거 YouTube
+동영상 삭제까지 보장하지 않습니다.
 
 ## 관측성
 

@@ -202,6 +202,14 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 			t.Fatalf("authenticated %s %s status = %d, want %d", protected.method, protected.path, response.StatusCode, protected.want)
 		}
 	}
+	// 위 라우트 점검이 남긴 세션을 정리한다. 회원은 동시에 한 세션만 가질 수
+	// 있어(#178), 남겨두면 아래 생성이 409로 막힌다.
+	for _, existing := range manager.List() {
+		if err := manager.Delete(existing.ID, "test_cleanup"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Session-scoped routes require both an access token and the separate
 	// capability token. Keeping the latter out of Authorization prevents one
 	// credential from replacing the other.
@@ -936,5 +944,52 @@ func TestApplicationCORSRejectionCarriesRequestID(t *testing.T) {
 	mustDecode(t, response.Body, &payload)
 	if payload.RequestID != response.Header.Get("X-Request-ID") {
 		t.Fatalf("body request_id = %q, header = %q", payload.RequestID, response.Header.Get("X-Request-ID"))
+	}
+}
+
+// 같은 회원의 두 번째 세션 생성은 409로 거부되고, owner token으로 기존 세션을
+// 지우면 곧바로 다시 만들 수 있다(#178). 409를 받은 클라이언트의 복구 경로다.
+func TestCreateSessionConflictsAndRecoversAfterDelete(t *testing.T) {
+	requireUser, authenticateUser, accessHeader, _, _ := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser, authenticateUser)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	createResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
+	var created struct {
+		SessionID  string `json:"session_id"`
+		OwnerToken string `json:"owner_token"`
+	}
+	mustDecode(t, createResponse.Body, &created)
+	createResponse.Body.Close()
+
+	conflictResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
+	var conflict struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	mustDecode(t, conflictResponse.Body, &conflict)
+	conflictResponse.Body.Close()
+	if conflictResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("second create status = %d, want %d", conflictResponse.StatusCode, http.StatusConflict)
+	}
+	if conflict.Error.Code != "session_already_exists" {
+		t.Fatalf("error code = %q, want session_already_exists", conflict.Error.Code)
+	}
+
+	ownerHeaders := accessHeader.Clone()
+	ownerHeaders.Set("X-Session-Owner-Token", created.OwnerToken)
+	deleteResponse := mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+created.SessionID, nil, ownerHeaders)
+	deleteResponse.Body.Close()
+	if deleteResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want %d", deleteResponse.StatusCode, http.StatusNoContent)
+	}
+
+	retryResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
+	retryResponse.Body.Close()
+	if retryResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create after delete status = %d, want %d", retryResponse.StatusCode, http.StatusCreated)
 	}
 }

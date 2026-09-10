@@ -15,6 +15,7 @@ import (
 	"inno-live-server/internal/metrics"
 
 	"github.com/google/uuid"
+	"github.com/pion/webrtc/v4"
 )
 
 func newTestManager(t *testing.T, maxSessions int) *Manager {
@@ -126,20 +127,14 @@ func TestCloseUserSessionsForLogoutClosesOnlyLoggedOutUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := manager.CreateForUser(loggedOutUserID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	other, _, err := manager.CreateForUser(otherUserID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	manager.CloseUserSessionsForLogout(loggedOutUserID)
-	for _, id := range []string{first.ID, second.ID} {
-		if _, err := manager.Get(id); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("logged-out session %s still exists: %v", id, err)
-		}
+	if _, err := manager.Get(first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("logged-out session %s still exists: %v", first.ID, err)
 	}
 	if _, err := manager.Get(other.ID); err != nil {
 		t.Fatalf("other user's session must remain: %v", err)
@@ -638,5 +633,185 @@ func TestReapUnnegotiatedDefersWhileBroadcastSettingsUpdated(t *testing.T) {
 	// 저장을 멈추면 마지막 저장 이후 timeout이 지나 회수된다.
 	if elapsed := waitUntilReaped(t, manager, s.ID, lastActivity, 2*time.Second); elapsed < timeout {
 		t.Fatalf("session reaped after %s, want at least %s since last activity", elapsed, timeout)
+	}
+}
+
+// 협상에 실패한 세션도 회수된다(#178). offer 수신 시각은 SDP를 적용하기 전에
+// 기록하므로, 그 값으로 회수 여부를 판정하면 SetRemoteDescription이 실패한 세션이
+// 대상에서 빠진다. 그런 세션은 ICE agent가 시작되지 않아 PeerConnection failed
+// 정리 경로에도 걸리지 않고, 슬롯을 영구 점유한다.
+func TestReapUnnegotiatedAfterFailedOffer(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	manager := newReapTestManager(t, timeout)
+
+	createdAt := time.Now()
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 서버 계층의 validSDP를 통과하지만 Pion이 거절하는 offer다.
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"); err == nil {
+		t.Fatal("CreateAnswer() error = nil, want a rejected offer")
+	}
+
+	waitUntilReaped(t, manager, s.ID, createdAt, 2*time.Second)
+}
+
+// 정상적으로 answer를 받은 세션은 회수되지 않는다. 협상 이후의 수명은 ICE 연결
+// 실패 경로가 책임진다.
+func TestReapUnnegotiatedKeepsNegotiatedSession(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+	manager := newReapTestManager(t, timeout)
+
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
+		t.Fatalf("CreateAnswer() error = %v", err)
+	}
+
+	time.Sleep(10 * timeout)
+	if _, err := manager.Get(s.ID); err != nil {
+		t.Fatalf("negotiated session was reaped: %v", err)
+	}
+}
+
+// 회원은 동시에 한 세션만 가진다(#178). 전역 MAX_SESSIONS는 프로덕션에서 2라,
+// 상한이 없으면 사용자 한 명이 세션 생성을 반복하는 것만으로 다른 사용자의
+// 세션 생성을 전부 막을 수 있다.
+func TestCreateForUserRejectsSecondSession(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); !errors.Is(err, ErrUserSessionExists) {
+		t.Fatalf("second session error = %v, want ErrUserSessionExists", err)
+	}
+	// 상한은 사용자별이므로 다른 사용자는 영향을 받지 않는다.
+	if _, _, err := manager.CreateForUser(uuid.New(), nil); err != nil {
+		t.Fatalf("other user was blocked: %v", err)
+	}
+	// 게스트와 비인증 세션은 uuid.Nil이라 상한 대상이 아니다.
+	for i := 0; i < 2; i++ {
+		if _, _, err := manager.Create(nil); err != nil {
+			t.Fatalf("anonymous session %d was blocked: %v", i, err)
+		}
+	}
+}
+
+// 세션을 정리하면 같은 사용자가 곧바로 새 세션을 만들 수 있다.
+func TestCreateForUserAllowsSessionAfterDelete(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+	first, _, err := manager.CreateForUser(userID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Delete(first.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
+		t.Fatalf("CreateForUser() after delete error = %v", err)
+	}
+}
+
+// 사용자별 상한 검사와 sessions 등록 사이에는 PeerConnection 생성만큼의 간격이
+// 있다. pendingUsers 예약이 없으면 같은 사용자의 동시 요청이 모두 검사를 통과한다.
+func TestConcurrentCreateForUserNeverExceedsOneSession(t *testing.T) {
+	manager := newTestManager(t, 0)
+	userID := uuid.New()
+
+	const attempts = 8
+	var wg sync.WaitGroup
+	created := make(chan struct{}, attempts)
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, _, err := manager.CreateForUser(userID, nil); err == nil {
+				created <- struct{}{}
+			} else if !errors.Is(err, ErrUserSessionExists) {
+				t.Errorf("CreateForUser() error = %v, want ErrUserSessionExists", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(created)
+
+	if count := len(created); count != 1 {
+		t.Fatalf("created %d sessions concurrently, want 1", count)
+	}
+}
+
+// 회수 판정을 answerCreatedAt으로 옮겨도 타이밍 메트릭은 offerReceivedAt을 계속
+// 쓴다(#178). offer 수신 시각을 answer 시점으로 미뤄 고치면 OfferToAnswerMS가
+// 0에 붙으므로, 그 회귀를 여기서 막는다.
+func TestCreateAnswerKeepsOfferTiming(t *testing.T) {
+	manager := newTestManager(t, 0)
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
+		t.Fatal(err)
+	}
+
+	timing := s.Response().Timing
+	if timing.SessionToOfferMS == nil {
+		t.Fatal("SessionToOfferMS is nil")
+	}
+	if timing.OfferToAnswerMS == nil {
+		t.Fatal("OfferToAnswerMS is nil")
+	}
+}
+
+// 게스트 세션은 uuid.Nil이라 사용자별 상한을 받지 않는다(#178). guest queue가
+// MAX_SESSIONS / 2로 따로 제한한다.
+func TestCreateForGuestIgnoresUserSessionLimit(t *testing.T) {
+	manager := newTestManager(t, 0)
+	for i := 0; i < 3; i++ {
+		if _, _, err := manager.CreateForGuest("guest-a", nil); err != nil {
+			t.Fatalf("guest session %d: %v", i, err)
+		}
+	}
+	if count := manager.GuestCount(); count != 3 {
+		t.Fatalf("GuestCount() = %d, want 3", count)
 	}
 }

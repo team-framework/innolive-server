@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -154,6 +155,135 @@ func TestDisconnectNotConnected(t *testing.T) {
 	service, _, _, _ := disconnectFixture(t, nil, nil)
 	if err := service.Disconnect(context.Background(), uuid.New(), StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
 		t.Fatalf("error = %v, want ErrStreamingAccountNotFound", err)
+	}
+}
+
+func TestCleanupForWithdrawalPersistsResourceCompletionForRetry(t *testing.T) {
+	t.Helper()
+	cipher := testProviderTokenCipher(t)
+	ciphertext, version, err := cipher.Encrypt("rt-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamID := "stream-1"
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	if err := store.Upsert(context.Background(), StreamingAccount{
+		UserID:                 userID,
+		Provider:               StreamingProviderYouTube,
+		ChannelID:              "UCabc",
+		RefreshTokenCiphertext: ciphertext,
+		TokenKeyVersion:        version,
+		StreamID:               &streamID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupCalls := 0
+	revokeCalls := 0
+	hooks := map[StreamingProvider]StreamingDisconnectHooks{
+		StreamingProviderYouTube: {
+			CleanupResources: func(context.Context, StreamingAccount) error {
+				cleanupCalls++
+				return nil
+			},
+			RevokeToken: func(context.Context, string) error {
+				revokeCalls++
+				if revokeCalls == 1 {
+					return errors.New("provider temporarily unavailable")
+				}
+				return nil
+			},
+		},
+	}
+	service, err := NewStreamingAccountService(
+		store,
+		testUserStatusChecker{status: UserStatusActive},
+		cipher,
+		hooks,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.CleanupForWithdrawal(context.Background(), userID); err == nil {
+		t.Fatal("first cleanup unexpectedly succeeded")
+	}
+	account, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamID == nil || *account.StreamID != "" {
+		t.Fatalf("stream metadata = %#v, want cleared after provider deletion", account.StreamID)
+	}
+	if cleanupCalls != 1 || revokeCalls != 1 {
+		t.Fatalf("first cleanup calls = (%d, %d), want (1, 1)", cleanupCalls, revokeCalls)
+	}
+
+	if err := service.CleanupForWithdrawal(context.Background(), userID); err != nil {
+		t.Fatalf("retry cleanup failed: %v", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("resource cleanup calls = %d, want 1 after retry", cleanupCalls)
+	}
+	if revokeCalls != 2 {
+		t.Fatalf("token revoke calls = %d, want 2 after retry", revokeCalls)
+	}
+}
+
+func TestCleanupForWithdrawalContinuesWhenProviderTokenIsRevoked(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	ciphertext, version, err := cipher.Encrypt("rt-revoked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamID := "stream-revoked"
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	if err := store.Upsert(context.Background(), StreamingAccount{
+		UserID:                 userID,
+		Provider:               StreamingProviderYouTube,
+		ChannelID:              "UCabc",
+		RefreshTokenCiphertext: ciphertext,
+		TokenKeyVersion:        version,
+		StreamID:               &streamID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	revokeCalls := 0
+	service, err := NewStreamingAccountService(
+		store,
+		testUserStatusChecker{status: UserStatusActive},
+		cipher,
+		map[StreamingProvider]StreamingDisconnectHooks{
+			StreamingProviderYouTube: {
+				CleanupResources: func(context.Context, StreamingAccount) error {
+					return fmt.Errorf("refresh token rejected: %w", ErrStreamingReconnectRequired)
+				},
+				RevokeToken: func(context.Context, string) error {
+					revokeCalls++
+					return nil
+				},
+			},
+		},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CleanupForWithdrawal(context.Background(), userID); err != nil {
+		t.Fatalf("cleanup with revoked provider token failed: %v", err)
+	}
+	account, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamID == nil || *account.StreamID != "" {
+		t.Fatalf("stream metadata = %#v, want cleared", account.StreamID)
+	}
+	if revokeCalls != 1 {
+		t.Fatalf("revoke calls = %d, want 1", revokeCalls)
 	}
 }
 

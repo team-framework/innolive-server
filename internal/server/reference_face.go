@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/jpeg"
 	_ "image/png"
@@ -180,18 +181,47 @@ func (s *referenceStore) load() {
 }
 
 // save persists the client→faces map. The caller must hold s.mu for writing.
-func (s *referenceStore) save() {
+func (s *referenceStore) save() error {
 	if s.path == "" {
-		return
+		return nil
 	}
 	data, err := json.Marshal(s.faces)
 	if err != nil {
-		return
+		return fmt.Errorf("marshal reference metadata: %w", err)
 	}
-	if dir := filepath.Dir(s.path); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create reference metadata directory: %w", err)
 	}
-	_ = os.WriteFile(s.path, data, 0o644)
+	// Write and rename in the same directory. A direct WriteFile can truncate
+	// the only copy before an I/O error, leaving metadata for every other user
+	// unreadable. Rename publishes the complete snapshot in one filesystem
+	// operation.
+	temporary, err := os.CreateTemp(dir, ".reference-faces-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary reference metadata: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("set reference metadata permissions: %w", err)
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary reference metadata: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync temporary reference metadata: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary reference metadata: %w", err)
+	}
+	if err := os.Rename(temporaryName, s.path); err != nil {
+		return fmt.Errorf("publish reference metadata: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +233,15 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	if err := r.ParseMultipartForm(maxReferenceUpload); err != nil {
 		writeError(w, badRequest("Invalid multipart image upload.", nil))
 		return
+	}
+	// ParseMultipartForm may spill files above its memory budget to disk. Remove
+	// those request-scoped copies after every upload path returns.
+	if r.MultipartForm != nil {
+		defer func() {
+			if err := r.MultipartForm.RemoveAll(); err != nil && s.logger != nil {
+				s.logger.Warn("remove temporary reference upload failed", "error", err)
+			}
+		}()
 	}
 	clientID := referenceClientID(r)
 	files := append([]*multipart.FileHeader(nil), r.MultipartForm.File["image"]...)
@@ -286,7 +325,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	} else {
 		s.references.faces[clientID] = append(s.references.faces[clientID], registered...)
 	}
-	s.references.save()
+	_ = s.references.save()
 	s.references.mu.Unlock()
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
@@ -308,7 +347,7 @@ func (s *Server) handleDeleteReferenceFace(w http.ResponseWriter, r *http.Reques
 	}
 	s.references.mu.Lock()
 	delete(s.references.faces, clientID)
-	s.references.save()
+	_ = s.references.save()
 	s.references.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -362,7 +401,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	} else {
 		s.references.faces[clientID] = remaining
 	}
-	s.references.save()
+	_ = s.references.save()
 	s.references.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -417,9 +456,14 @@ func guestReferenceGateFromContext(ctx context.Context) (*guestReferenceGate, st
 	return value.gate, value.sessionID, true
 }
 
-func (s *referenceStore) deleteClient(clientID string) {
+func (s *referenceStore) deleteClient(clientID string) error {
 	s.mu.Lock()
+	previous, hadPrevious := s.faces[clientID]
 	delete(s.faces, clientID)
-	s.save()
+	err := s.save()
+	if err != nil && hadPrevious {
+		s.faces[clientID] = previous
+	}
 	s.mu.Unlock()
+	return err
 }

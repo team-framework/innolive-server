@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,6 +15,8 @@ import (
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
 	"inno-live-server/internal/streaming"
+
+	"github.com/google/uuid"
 )
 
 func putBroadcast(t *testing.T, baseURL, sessionID, ownerToken, body string) (*http.Response, map[string]any) {
@@ -330,6 +334,138 @@ func TestSessionEndDiscardsPreparedBroadcast(t *testing.T) {
 	}
 	if calls != 1 || stopped.BroadcastID != "bid-1" {
 		t.Fatalf("stop calls = %d, stopped = %+v, want the prepared broadcast discarded", calls, stopped)
+	}
+}
+
+func TestWithdrawalBroadcastCleanupAllowsReconnectRequired(t *testing.T) {
+	tests := []struct {
+		name      string
+		phase     session.BroadcastPhase
+		setError  func(*stubStreamingProvider, error)
+		wantStop  bool
+		wantEnded bool
+	}{
+		{
+			name:  "prepared",
+			phase: session.BroadcastPhasePrepared,
+			setError: func(provider *stubStreamingProvider, err error) {
+				provider.stopErr = err
+			},
+			wantStop: true,
+		},
+		{
+			name:  "live",
+			phase: session.BroadcastPhaseLive,
+			setError: func(provider *stubStreamingProvider, err error) {
+				provider.endLiveErr = err
+			},
+			wantEnded: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &stubStreamingProvider{}
+			tc.setError(provider, errors.Join(errors.New("refresh token rejected"), auth.ErrStreamingReconnectRequired))
+			_, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+				auth.StreamingProviderYouTube: provider,
+			})
+			userID := uuid.New()
+			liveSession, _, err := manager.CreateForUser(userID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			broadcast := session.PlatformBroadcast{
+				Provider:    string(auth.StreamingProviderYouTube),
+				BroadcastID: "withdrawal-" + tc.name,
+				StreamID:    "stream-" + tc.name,
+			}
+			if _, err := manager.BeginBroadcastPrepare(liveSession.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.MarkBroadcastPrepared(liveSession.ID, broadcast); err != nil {
+				t.Fatal(err)
+			}
+			if tc.phase == session.BroadcastPhaseLive {
+				if _, err := manager.BeginGoLive(liveSession.ID); err != nil {
+					t.Fatal(err)
+				}
+				if aborted, _, err := manager.CompleteGoLive(liveSession.ID); aborted || err != nil {
+					t.Fatalf("CompleteGoLive() = (%v, %v)", aborted, err)
+				}
+			}
+
+			if err := manager.CloseUserSessionsForWithdrawal(context.Background(), userID); err != nil {
+				t.Fatalf("withdrawal cleanup returned error for an inaccessible provider resource: %v", err)
+			}
+			stops, stopped := provider.stopped()
+			ends, ended := provider.ended()
+			if tc.wantStop && (stops != 1 || stopped.BroadcastID != broadcast.BroadcastID) {
+				t.Fatalf("Stop() = (%d, %+v), want one call for %q", stops, stopped, broadcast.BroadcastID)
+			}
+			if tc.wantEnded && (ends != 1 || ended.BroadcastID != broadcast.BroadcastID) {
+				t.Fatalf("EndLive() = (%d, %+v), want one call for %q", ends, ended, broadcast.BroadcastID)
+			}
+		})
+	}
+}
+
+func TestWithdrawalBroadcastCleanupReturnsTransientProviderError(t *testing.T) {
+	tests := []struct {
+		name     string
+		phase    session.BroadcastPhase
+		setError func(*stubStreamingProvider, error)
+	}{
+		{
+			name:  "prepared",
+			phase: session.BroadcastPhasePrepared,
+			setError: func(provider *stubStreamingProvider, err error) {
+				provider.stopErr = err
+			},
+		},
+		{
+			name:  "live",
+			phase: session.BroadcastPhaseLive,
+			setError: func(provider *stubStreamingProvider, err error) {
+				provider.endLiveErr = err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &stubStreamingProvider{}
+			providerError := errors.New("provider temporarily unavailable")
+			tc.setError(provider, providerError)
+			_, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+				auth.StreamingProviderYouTube: provider,
+			})
+			userID := uuid.New()
+			liveSession, _, err := manager.CreateForUser(userID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			broadcast := session.PlatformBroadcast{
+				Provider:    string(auth.StreamingProviderYouTube),
+				BroadcastID: "transient-" + tc.name,
+			}
+			if _, err := manager.BeginBroadcastPrepare(liveSession.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.MarkBroadcastPrepared(liveSession.ID, broadcast); err != nil {
+				t.Fatal(err)
+			}
+			if tc.phase == session.BroadcastPhaseLive {
+				if _, err := manager.BeginGoLive(liveSession.ID); err != nil {
+					t.Fatal(err)
+				}
+				if aborted, _, err := manager.CompleteGoLive(liveSession.ID); aborted || err != nil {
+					t.Fatalf("CompleteGoLive() = (%v, %v)", aborted, err)
+				}
+			}
+
+			if err := manager.CloseUserSessionsForWithdrawal(context.Background(), userID); !errors.Is(err, providerError) {
+				t.Fatalf("withdrawal cleanup error = %v, want provider error", err)
+			}
+		})
 	}
 }
 

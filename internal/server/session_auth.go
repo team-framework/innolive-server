@@ -63,6 +63,14 @@ func (s *Server) requireSessionOwner(next sessionHandler) http.HandlerFunc {
 			writeError(w, apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session does not belong to the authenticated user.", Details: map[string]any{"session_id": id}})
 			return
 		}
+		if userID, authenticated := auth.UserIDFromContext(r.Context()); authenticated && s.userOperationGate != nil {
+			release, admitted := s.userOperationGate.BeginOperation(userID)
+			if !admitted {
+				writeError(w, apiError{Status: http.StatusConflict, Code: "withdrawal_in_progress", Message: "Account deletion is already in progress. Retry shortly."})
+				return
+			}
+			defer release()
+		}
 		next(w, r, sess)
 	}
 }

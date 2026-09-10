@@ -48,6 +48,9 @@ func (h *tokenHTTPHandler) handleYouTubeConnect(w http.ResponseWriter, r *http.R
 	channel, err := h.youtube.ConnectWithAuthCode(r.Context(), userID, code, source)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrWithdrawalInProgress):
+			h.logYouTubeConnectFailure(r, "withdrawal_in_progress", err, "code_source", source)
+			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case errors.Is(err, ErrUserInactive):
 			h.logYouTubeConnectFailure(r, "user_inactive", err, "code_source", source)
 			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")

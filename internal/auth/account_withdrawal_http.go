@@ -34,6 +34,8 @@ func (h *tokenHTTPHandler) handleWithdrawal(w http.ResponseWriter, r *http.Reque
 	}
 	if err := h.withdrawal.Withdraw(r.Context(), userID); err != nil {
 		switch {
+		case errors.Is(err, ErrWithdrawalInProgress):
+			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		case errors.Is(err, ErrWithdrawalUnavailable):

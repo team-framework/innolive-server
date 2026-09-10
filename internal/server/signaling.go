@@ -296,9 +296,11 @@ func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidat
 		result := badRequest("Invalid signaling message.", nil)
 		return nil, &result
 	}
-	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID); apiErr != nil {
+	releaseOperation, apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID)
+	if apiErr != nil {
 		return nil, apiErr
 	}
+	defer releaseOperation()
 	answer, err := s.sessions.CreateAnswerWithOptions(strings.TrimSpace(request.SessionID), request.OwnerToken, request.SDP, session.NegotiationOptions{
 		NegotiationID:       request.NegotiationID,
 		ICERestart:          request.ICERestart,
@@ -365,9 +367,11 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs
 		result := badRequest("Invalid ICE candidate.", nil)
 		return nil, &result
 	}
-	if apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID); apiErr != nil {
+	releaseOperation, apiErr := s.verifySignalingSession(context.Background(), strings.TrimSpace(request.SessionID), request.OwnerToken, request.AccessToken, guestID)
+	if apiErr != nil {
 		return nil, apiErr
 	}
+	defer releaseOperation()
 	result, err := s.sessions.AddICECandidateWithNegotiation(strings.TrimSpace(request.SessionID), request.OwnerToken, request.NegotiationID, webrtc.ICECandidateInit{
 		Candidate:     candidateValue,
 		SDPMid:        request.SDPMid,
@@ -397,19 +401,19 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs
 // that created the session, in addition to the session's one-time owner token.
 // access_token is part of the encrypted WebSocket message because browsers
 // cannot attach an Authorization header to WebSocket upgrade requests.
-func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) *apiError {
+func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) (func(), *apiError) {
 	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
 	if errors.Is(err, session.ErrNotFound) {
 		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": sessionID}}
-		return &result
+		return nil, &result
 	}
 	if errors.Is(err, session.ErrUnauthorized) {
 		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session owner token is invalid.", Details: map[string]any{"session_id": sessionID}}
-		return &result
+		return nil, &result
 	}
 	if err != nil {
 		result := internalError()
-		return &result
+		return nil, &result
 	}
 	if liveSession.GuestID != "" {
 		guestID := ""
@@ -418,23 +422,31 @@ func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerTok
 		}
 		if guestID == "" || liveSession.GuestID != guestHash(guestID) {
 			result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Guest session does not belong to this browser."}
-			return &result
+			return nil, &result
 		}
-		return nil
+		return func() {}, nil
 	}
 	if s.authenticateUser == nil {
-		return nil
+		return func() {}, nil
 	}
 	userID, err := s.authenticateUser(ctx, strings.TrimSpace(accessToken))
 	if err != nil {
 		result := apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "Authentication is required."}
-		return &result
+		return nil, &result
 	}
 	if !sameSessionUser(liveSession.UserID, userID) {
 		result := apiError{Status: http.StatusForbidden, Code: "forbidden", Message: "Session does not belong to the authenticated user.", Details: map[string]any{"session_id": sessionID}}
-		return &result
+		return nil, &result
 	}
-	return nil
+	if s.userOperationGate == nil {
+		return func() {}, nil
+	}
+	release, admitted := s.userOperationGate.BeginOperation(userID)
+	if !admitted {
+		result := apiError{Status: http.StatusConflict, Code: "withdrawal_in_progress", Message: "Account deletion is already in progress. Retry shortly."}
+		return nil, &result
+	}
+	return release, nil
 }
 
 func sameSessionUser(owner, caller uuid.UUID) bool {

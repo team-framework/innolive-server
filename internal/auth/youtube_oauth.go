@@ -311,6 +311,9 @@ type YouTubeConnectService struct {
 	users  UserStatusChecker
 	cipher *ProviderTokenCipher
 	now    func() time.Time
+	gate   interface {
+		BeginOperation(uuid.UUID) (func(), bool)
+	}
 }
 
 func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountStore, users UserStatusChecker, cipher *ProviderTokenCipher) (*YouTubeConnectService, error) {
@@ -326,10 +329,26 @@ func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountSto
 	}, nil
 }
 
+// SetUserOperationGate prevents an OAuth callback from persisting a new
+// streaming account after withdrawal cleanup has started.
+func (s *YouTubeConnectService) SetUserOperationGate(gate interface {
+	BeginOperation(uuid.UUID) (func(), bool)
+}) {
+	if s != nil {
+		s.gate = gate
+	}
+}
+
 // ConnectWithAuthCode는 인가 코드를 토큰으로 교환하고 채널을 식별해
 // 연결을 저장한다. connect 엔드포인트의 인라인 Bearer 인증은 사용자 상태를
 // 확인하지 않으므로 여기서 active를 확인한다.
 func (s *YouTubeConnectService) ConnectWithAuthCode(ctx context.Context, userID uuid.UUID, code string, source CodeSource) (YouTubeChannel, error) {
+	release, admitted := s.beginOperation(userID)
+	if !admitted {
+		return YouTubeChannel{}, ErrWithdrawalInProgress
+	}
+	defer release()
+
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return YouTubeChannel{}, err
 	}
@@ -363,6 +382,13 @@ func (s *YouTubeConnectService) ConnectWithAuthCode(ctx context.Context, userID 
 		return YouTubeChannel{}, fmt.Errorf("persist streaming account: %w", err)
 	}
 	return channel, nil
+}
+
+func (s *YouTubeConnectService) beginOperation(userID uuid.UUID) (func(), bool) {
+	if s == nil || s.gate == nil {
+		return func() {}, true
+	}
+	return s.gate.BeginOperation(userID)
 }
 
 // WebClientID는 웹(GIS) 클라이언트가 initCodeClient에 쓸 공개 클라이언트
@@ -476,6 +502,27 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	state.token = response.AccessToken
 	state.expiresAt = p.now().Add(time.Duration(response.ExpiresIn) * time.Second)
 	return state.token, nil
+}
+
+// ClearCachedToken forgets the in-memory access token after account deletion.
+// The refresh token is removed by the withdrawal transaction; dropping this
+// cache as well prevents a removed account from retaining a usable provider
+// credential in the running process.
+func (p *YouTubeAccessTokenProvider) ClearCachedToken(userID uuid.UUID) {
+	if p == nil || userID == uuid.Nil {
+		return
+	}
+	p.mu.Lock()
+	state := p.users[userID]
+	delete(p.users, userID)
+	p.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.token = ""
+	state.expiresAt = time.Time{}
+	state.mu.Unlock()
 }
 
 func (p *YouTubeAccessTokenProvider) userState(userID uuid.UUID) *userAccessToken {

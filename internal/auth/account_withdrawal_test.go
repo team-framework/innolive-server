@@ -95,6 +95,64 @@ func TestAccountWithdrawalSupportsNonAppleUser(t *testing.T) {
 	}
 }
 
+func TestAccountWithdrawalClosesOperationGateAfterCommit(t *testing.T) {
+	store := &stubWithdrawalStore{}
+	service, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID := uuid.New()
+	if err := service.Withdraw(context.Background(), userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, admitted := service.BeginOperation(userID); admitted {
+		t.Fatal("operation admitted after withdrawal committed")
+	}
+}
+
+func TestAccountWithdrawalRetriesAfterPostRevokeFailure(t *testing.T) {
+	cipher := &ProviderTokenCipher{key: []byte("0123456789abcdef0123456789abcdef")}
+	ciphertext, version, err := cipher.Encrypt("apple-refresh-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stubWithdrawalStore{credential: &appleRevocationCredential{Ciphertext: ciphertext, Version: version}}
+	revoker := &stubAppleRevoker{}
+	clearCalls := 0
+	service, err := NewAccountWithdrawalService(store, cipher, revoker, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetCleanup(WithdrawalCleanup{
+		ClearReferenceData: func(context.Context, uuid.UUID) error {
+			clearCalls++
+			if clearCalls == 1 {
+				return errors.New("AI worker unavailable")
+			}
+			return nil
+		},
+	})
+	userID := uuid.New()
+	if err := service.Withdraw(context.Background(), userID); err == nil {
+		t.Fatal("first withdrawal unexpectedly succeeded")
+	}
+	if store.marked != uuid.Nil {
+		t.Fatal("user was marked deleted after post-revoke cleanup failure")
+	}
+	if revoker.seen != "apple-refresh-token" {
+		t.Fatalf("Apple revoke token = %q", revoker.seen)
+	}
+	if err := service.Withdraw(context.Background(), userID); err != nil {
+		t.Fatalf("retry withdrawal failed: %v", err)
+	}
+	if clearCalls != 2 {
+		t.Fatalf("reference cleanup calls = %d, want 2", clearCalls)
+	}
+	if store.marked != userID {
+		t.Fatalf("marked user = %s, want %s", store.marked, userID)
+	}
+}
+
 func TestAccountWithdrawalHTTPDeletesAuthenticatedUser(t *testing.T) {
 	store := &stubWithdrawalStore{}
 	withdrawal, err := NewAccountWithdrawalService(store, nil, nil, nil)

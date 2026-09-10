@@ -517,6 +517,65 @@ func TestYouTubeAccessTokenProviderSerializesRefresh(t *testing.T) {
 	}
 }
 
+func TestYouTubeAccessTokenProviderClearsDeletedUserCache(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	for _, id := range []uuid.UUID{userID, otherUserID} {
+		ciphertext, version, err := cipher.Encrypt("rt-" + id.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Upsert(context.Background(), StreamingAccount{
+			UserID:                 id,
+			Provider:               StreamingProviderYouTube,
+			ChannelID:              "UCabc",
+			RefreshTokenCiphertext: ciphertext,
+			TokenKeyVersion:        version,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oauth := &stubYouTubeAuthorizer{refreshToken: YouTubeTokenResponse{AccessToken: "fresh-at-1", ExpiresIn: 3600}}
+	provider, err := NewYouTubeAccessTokenProvider(oauth, store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, err := provider.AccessToken(context.Background(), userID); err != nil || token != "fresh-at-1" {
+		t.Fatalf("initial user token = %q, %v", token, err)
+	}
+	if token, err := provider.AccessToken(context.Background(), otherUserID); err != nil || token != "fresh-at-1" {
+		t.Fatalf("initial other user token = %q, %v", token, err)
+	}
+	if calls := oauth.refreshCalls.Load(); calls != 2 {
+		t.Fatalf("initial refresh calls = %d, want 2", calls)
+	}
+
+	provider.ClearCachedToken(userID)
+	// The other user's cache remains valid and does not trigger a refresh.
+	if token, err := provider.AccessToken(context.Background(), otherUserID); err != nil || token != "fresh-at-1" {
+		t.Fatalf("other user token after clear = %q, %v", token, err)
+	}
+	if calls := oauth.refreshCalls.Load(); calls != 2 {
+		t.Fatalf("refresh calls after other user lookup = %d, want 2", calls)
+	}
+
+	userAccount, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(context.Background(), userAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := provider.AccessToken(context.Background(), userID); token != "" || !errors.Is(err, ErrStreamingNotConnected) {
+		t.Fatalf("deleted user token after clear = %q, %v, want no cached token", token, err)
+	}
+	if calls := oauth.refreshCalls.Load(); calls != 2 {
+		t.Fatalf("refresh calls after deleted user lookup = %d, want 2", calls)
+	}
+}
+
 // TestYouTubeAccessTokenProviderMarksReconnectRequired: refresh token이 토큰
 // 엔드포인트에서 4xx로 거절되면(권한 취소·만료) 전용 에러로 구분되고 계정에
 // 재연결 필요 표식이 남아야 한다 — 조회 API가 API 호출 없이 판별하는 근거.

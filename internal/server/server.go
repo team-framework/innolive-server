@@ -39,18 +39,21 @@ const maxBroadcastBody = 4 << 20
 const platformCleanupTimeout = 10 * time.Second
 
 type Server struct {
-	cfg                     config.Config
-	logger                  *slog.Logger
-	metrics                 *metrics.Registry
-	sessions                *session.Manager
-	ai                      *ai.Pool
-	references              *referenceStore
-	origins                 origin.Config
-	streaming               map[auth.StreamingProvider]streaming.Provider
-	authenticateUser        func(context.Context, string) (uuid.UUID, error)
-	guestQueue              *GuestQueue
-	guestReference          *guestReferenceGate
-	guestCleanup            sync.WaitGroup
+	cfg               config.Config
+	logger            *slog.Logger
+	metrics           *metrics.Registry
+	sessions          *session.Manager
+	ai                *ai.Pool
+	references        *referenceStore
+	origins           origin.Config
+	streaming         map[auth.StreamingProvider]streaming.Provider
+	authenticateUser  func(context.Context, string) (uuid.UUID, error)
+	guestQueue        *GuestQueue
+	guestReference    *guestReferenceGate
+	guestCleanup      sync.WaitGroup
+	userOperationGate interface {
+		BeginOperation(uuid.UUID) (func(), bool)
+	}
 	signalingTrustedProxies []*net.IPNet
 	signalingConns          signalingConnLimiter
 	mux                     *http.ServeMux
@@ -109,10 +112,10 @@ func New(
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
 	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
-	mux.Handle("GET /reference-face", requireUser(http.HandlerFunc(s.handleGetReferenceFace)))
-	mux.Handle("POST /reference-face", requireUser(http.HandlerFunc(s.handlePostReferenceFace)))
-	mux.Handle("DELETE /reference-face", requireUser(http.HandlerFunc(s.handleDeleteReferenceFace)))
-	mux.Handle("DELETE /reference-face/{face_id}", requireUser(http.HandlerFunc(s.handleDeleteReferenceFaceByID)))
+	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
+	mux.Handle("POST /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handlePostReferenceFace))))
+	mux.Handle("DELETE /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleDeleteReferenceFace))))
+	mux.Handle("DELETE /reference-face/{face_id}", requireUser(s.withUserOperation(http.HandlerFunc(s.handleDeleteReferenceFaceByID))))
 	mux.HandleFunc("GET /signaling", s.handleSignaling)
 	mux.Handle("/client/", s.clientHandler())
 	// pprof는 힙·고루틴 덤프와 프로세스 argv를 그대로 노출하므로 기본값은 꺼짐이다.
@@ -126,6 +129,7 @@ func New(
 	// 세션 매니저 없이 조립되는 경로(일부 테스트)도 있어 nil을 확인한다.
 	if sessions != nil {
 		sessions.SetBroadcastCleanup(s.disposeBroadcast)
+		sessions.SetBroadcastCleanupWithContext(s.disposeBroadcastWithContext)
 	}
 	// requestIDMiddleware가 corsMiddleware보다 바깥이어야 CORS 거절 응답에도
 	// request_id가 실린다 — 그래야 사용자가 보여준 에러와 로그를 묶을 수 있다.
@@ -210,6 +214,57 @@ func (s *Server) WaitGuestCleanup(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
+// SetUserOperationGate serializes user-scoped HTTP work with account
+// withdrawal. It is called during startup after auth services are assembled.
+func (s *Server) SetUserOperationGate(gate interface {
+	BeginOperation(uuid.UUID) (func(), bool)
+}) {
+	if s == nil {
+		return
+	}
+	s.userOperationGate = gate
+	if s.sessions != nil {
+		s.sessions.SetUserOperationGate(gate)
+	}
+}
+
+func (s *Server) withUserOperation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions || s.userOperationGate == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		userID, authenticated := auth.UserIDFromContext(r.Context())
+		if !authenticated {
+			next.ServeHTTP(w, r)
+			return
+		}
+		release, admitted := s.userOperationGate.BeginOperation(userID)
+		if !admitted {
+			writeError(w, apiError{Status: http.StatusConflict, Code: "withdrawal_in_progress", Message: "Account deletion is already in progress. Retry shortly."})
+			return
+		}
+		defer release()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ClearUserReferenceData removes the authenticated user's worker whitelist and
+// persisted face metadata. The worker cleanup runs first so an error does not
+// report success while its in-memory embeddings remain active.
+func (s *Server) ClearUserReferenceData(ctx context.Context, userID uuid.UUID) error {
+	clientID := session.AIClientIDForUser(userID)
+	if s.ai != nil {
+		if err := s.ai.ClearWhitelist(ctx, clientID); err != nil {
+			return fmt.Errorf("clear AI whitelist: %w", err)
+		}
+	}
+	if err := s.references.deleteClient(clientID); err != nil {
+		return fmt.Errorf("delete reference metadata: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"service": "inno-live-server", "status": "running"})
 }
@@ -293,6 +348,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Code:    "unauthorized",
 			Message: "The account was signed out while the session was being created.",
 		})
+		return
+	}
+	if errors.Is(err, session.ErrUserWithdrawalInProgress) {
+		writeError(w, apiError{Status: http.StatusConflict, Code: "withdrawal_in_progress", Message: "Account deletion is already in progress. Retry shortly."})
 		return
 	}
 	if err != nil {
@@ -506,6 +565,51 @@ func (s *Server) disposeBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 	case session.BroadcastPhasePrepared:
 		s.discardBroadcast(userID, broadcast)
 	}
+}
+
+// disposeBroadcastWithContext waits for provider cleanup during withdrawal.
+// Transient failures require a retry. Revoked credentials prevent remote
+// cleanup but do not block deletion of the user's local account data.
+func (s *Server) disposeBroadcastWithContext(parent context.Context, userID uuid.UUID, broadcast session.PlatformBroadcast, phase session.BroadcastPhase) error {
+	if phase == session.BroadcastPhaseIdle || broadcast.BroadcastID == "" {
+		return nil
+	}
+	providerName := auth.StreamingProvider(broadcast.Provider)
+	provider := s.streaming[providerName]
+	if provider == nil {
+		return fmt.Errorf("streaming provider %q is not configured", providerName)
+	}
+	ctx, cancel := context.WithTimeout(parent, platformCleanupTimeout)
+	defer cancel()
+	prepared := streaming.PreparedBroadcast{
+		Provider:    providerName,
+		BroadcastID: broadcast.BroadcastID,
+		StreamID:    broadcast.StreamID,
+	}
+	var err error
+	switch phase {
+	case session.BroadcastPhaseLive:
+		err = provider.EndLive(ctx, userID, prepared)
+	case session.BroadcastPhasePrepared:
+		err = provider.Stop(ctx, userID, prepared)
+	default:
+		return nil
+	}
+	if err != nil {
+		if errors.Is(err, auth.ErrStreamingReconnectRequired) {
+			// The provider can no longer authenticate the resource with the
+			// stored refresh token. There is no authorized delete call left for
+			// this server to make, so withdrawal may continue and remove the
+			// local account data. Transient provider failures remain errors so a
+			// later withdrawal can retry the external cleanup.
+			s.logger.Warn("broadcast cleanup skipped because provider token is invalid",
+				"user_id", userID, "provider", providerName, "broadcast_id", broadcast.BroadcastID,
+				"phase", phase)
+			return nil
+		}
+		return fmt.Errorf("provider %s broadcast %s cleanup: %w", providerName, broadcast.BroadcastID, err)
+	}
+	return nil
 }
 
 // discardPreparedBroadcast는 준비까지 끝냈지만 쓰이지 못한 방송을 플랫폼에서

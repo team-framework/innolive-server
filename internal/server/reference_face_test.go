@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -573,6 +574,52 @@ func TestReferenceStorePersistsWorkerEntryIDsWithoutExposingThem(t *testing.T) {
 	}
 	if len(faces[0].EntryIDs) != 2 {
 		t.Fatalf("reloaded entry ids = %v, want one per worker", faces[0].EntryIDs)
+	}
+}
+
+func TestReferenceStoreDeleteClientRestoresDataWhenSaveFails(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "reference-faces.json")
+	store := newReferenceStore(path, false)
+	store.faces = map[string][]referenceFace{
+		"target": {{FaceID: "target-face"}},
+		"other":  {{FaceID: "other-face"}},
+	}
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Point persistence below a regular file. MkdirAll fails before any write,
+	// while the previously published metadata file remains available for the
+	// preservation check.
+	store.path = filepath.Join(path, "cannot-create-child")
+	if err := store.deleteClient("target"); err == nil {
+		t.Fatal("deleteClient unexpectedly succeeded when saving was unavailable")
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("original metadata after failed save = (%q, %v), want unchanged file", got, err)
+	}
+	if faces := store.faces["target"]; len(faces) != 1 || faces[0].FaceID != "target-face" {
+		t.Fatalf("target faces after failed save = %+v, want restored data", faces)
+	}
+	if faces := store.faces["other"]; len(faces) != 1 || faces[0].FaceID != "other-face" {
+		t.Fatalf("other user's faces after failed save = %+v, want preserved data", faces)
+	}
+
+	store.path = path
+	if err := store.deleteClient("target"); err != nil {
+		t.Fatalf("retry deleteClient failed: %v", err)
+	}
+	reloaded := newReferenceStore(path, false)
+	if _, ok := reloaded.faces["target"]; ok {
+		t.Fatal("target faces remained after successful retry")
+	}
+	if faces := reloaded.faces["other"]; len(faces) != 1 || faces[0].FaceID != "other-face" {
+		t.Fatalf("other user's faces after retry = %+v, want preserved data", faces)
 	}
 }
 

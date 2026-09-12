@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -31,18 +32,40 @@ const maxReferenceUpload = 10 << 20
 // this are rejected by AddWhitelist, so we downscale before registering.
 const maxAIFaceEdge = 640
 
+// maxDecodeEdge/maxDecodePixels bound the dimensions we are willing to decode.
+// DecodeConfig reads them from the header, so an oversized image is rejected
+// before its full bitmap is allocated — a small but highly compressible file
+// can otherwise decode into hundreds of MiB. The result is downscaled to
+// maxAIFaceEdge, so a reference photo never needs to exceed these.
+const (
+	maxDecodeEdge   = 4096
+	maxDecodePixels = 16 << 20 // 16,777,216 px (~16MP)
+)
+
+// errImageTooLarge is returned by downscaleForAI when an image's header reports
+// dimensions past the decode limits.
+var errImageTooLarge = errors.New("image exceeds decode limits")
+
 // downscaleForAI shrinks an uploaded face image so its long edge is at most
 // maxAIFaceEdge, re-encoding as JPEG. Images already within the limit (or that
 // fail to decode here) are returned unchanged so the AI worker still applies its
-// own validation and error reporting.
-func downscaleForAI(data []byte) []byte {
+// own validation and error reporting. Images whose header reports dimensions
+// past maxDecodeEdge/maxDecodePixels are rejected with errImageTooLarge before
+// the full bitmap is decoded.
+func downscaleForAI(data []byte) ([]byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || (cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge) {
-		return data
+	if err != nil {
+		return data, nil
+	}
+	if cfg.Width > maxDecodeEdge || cfg.Height > maxDecodeEdge || cfg.Width*cfg.Height > maxDecodePixels {
+		return nil, errImageTooLarge
+	}
+	if cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge {
+		return data, nil
 	}
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return data
+		return data, nil
 	}
 	b := src.Bounds()
 	scale := float64(maxAIFaceEdge) / float64(max(b.Dx(), b.Dy()))
@@ -50,9 +73,9 @@ func downscaleForAI(data []byte) []byte {
 	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, b, xdraw.Over, nil)
 	var out bytes.Buffer
 	if err := jpeg.Encode(&out, dst, &jpeg.Options{Quality: 90}); err != nil {
-		return data
+		return data, nil
 	}
-	return out.Bytes()
+	return out.Bytes(), nil
 }
 
 // referenceFace is the stored form of one registered face. It is persisted to
@@ -286,7 +309,12 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		faceID := uuid.NewString()
-		result, err := s.ai.AddWhitelist(r.Context(), clientID, downscaleForAI(data))
+		scaled, err := downscaleForAI(data)
+		if err != nil {
+			writeError(w, badRequest("이미지 크기가 너무 큽니다.", map[string]any{"reason": "image_too_large", "max_edge": maxDecodeEdge, "max_pixels": maxDecodePixels}))
+			return
+		}
+		result, err := s.ai.AddWhitelist(r.Context(), clientID, scaled)
 		if err != nil {
 			s.logger.Error("AI AddWhitelist failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist registration failed."})

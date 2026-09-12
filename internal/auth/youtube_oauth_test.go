@@ -443,6 +443,42 @@ func TestYouTubeConnectWithAuthCodeProductionTokenHasNoExpiry(t *testing.T) {
 	}
 }
 
+func TestYouTubeConnectWithAuthCodeInvalidatesTokenCache(t *testing.T) {
+	// 재연결 성공 시 이전 채널의 캐시된 access token이 버려져야 한다.
+	oauth := &stubYouTubeAuthorizer{
+		token:   YouTubeTokenResponse{AccessToken: "at", RefreshToken: "rt", ExpiresIn: 3599},
+		channel: YouTubeChannel{ID: "UCsecond"},
+	}
+	service := testYouTubeConnectService(t, oauth, newMemoryStreamingAccountStore(), UserStatusActive)
+	userID := uuid.New()
+	var cleared []uuid.UUID
+	service.SetTokenCacheInvalidator(func(id uuid.UUID) { cleared = append(cleared, id) })
+
+	if _, err := service.ConnectWithAuthCode(context.Background(), userID, "code", CodeSourceNative); err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) != 1 || cleared[0] != userID {
+		t.Fatalf("token cache invalidations = %v, want [%s]", cleared, userID)
+	}
+}
+
+func TestYouTubeConnectWithAuthCodeDoesNotInvalidateCacheOnFailure(t *testing.T) {
+	// 연결 저장이 실패하면(예: 사용자 비활성) 캐시를 건드리지 않는다 —
+	// 이전 채널의 유효한 캐시를 근거 없이 버리지 않도록.
+	oauth := &stubYouTubeAuthorizer{token: YouTubeTokenResponse{AccessToken: "at-only"}}
+	service := testYouTubeConnectService(t, oauth, newMemoryStreamingAccountStore(), UserStatusActive)
+	invalidated := false
+	service.SetTokenCacheInvalidator(func(uuid.UUID) { invalidated = true })
+
+	// refresh token 부재로 저장 전에 실패한다.
+	if _, err := service.ConnectWithAuthCode(context.Background(), uuid.New(), "code", CodeSourceNative); !errors.Is(err, ErrYouTubeTokenExchange) {
+		t.Fatalf("error = %v, want ErrYouTubeTokenExchange", err)
+	}
+	if invalidated {
+		t.Fatal("token cache invalidated despite connect failure")
+	}
+}
+
 func TestYouTubeConnectWithAuthCodeRejectsInactiveUser(t *testing.T) {
 	service := testYouTubeConnectService(t, &stubYouTubeAuthorizer{}, newMemoryStreamingAccountStore(), UserStatusDisabled)
 	if _, err := service.ConnectWithAuthCode(context.Background(), uuid.New(), "code", CodeSourceNative); !errors.Is(err, ErrUserInactive) {

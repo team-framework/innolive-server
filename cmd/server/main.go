@@ -388,6 +388,8 @@ func main() {
 			logger.Error("create YouTube access token provider failed", "error", err)
 			os.Exit(2)
 		}
+		// 재연결 시 이전 채널의 캐시된 access token을 버리도록 무효화 훅을 건다.
+		youtubeConnect.SetTokenCacheInvalidator(youtubeTokens.ClearCachedToken)
 		youtubeProvider, err := streaming.NewYouTubeProvider(youtubeTokens, streamingAccountStore, providerTokenCipher)
 		if err != nil {
 			logger.Error("create YouTube streaming provider failed", "error", err)

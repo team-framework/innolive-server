@@ -139,10 +139,18 @@ func (s *gormStreamingAccountStore) Upsert(ctx context.Context, account Streamin
 		return tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "user_id"}, {Name: "provider"}},
 			// reconnect_required_at 포함: 재연결이 곧 재연결 필요 상태의 해소다.
+			// 재사용 스트림 컬럼도 포함해 초기화한다: 재연결은 채널이 바뀔 수
+			// 있으므로 이전 채널에 만든 재사용 스트림을 그대로 두면 다음 Prepare가
+			// 남의 채널 스트림을 재사용한다. Upsert는 이 컬럼들을 항상 빈 값으로
+			// 넘기므로(연결 서비스가 채우지 않음) 재연결마다 리셋되고, 다음
+			// Prepare가 새 채널에 스트림을 새로 만든다.
 			DoUpdates: clause.AssignmentColumns([]string{
 				"channel_id", "channel_title",
 				"refresh_token_ciphertext", "token_key_version", "refresh_token_expires_at",
 				"reconnect_required_at",
+				"stream_id", "ingestion_address", "backup_ingestion_address",
+				"rtmps_ingestion_address", "rtmps_backup_ingestion_address",
+				"stream_name_ciphertext", "stream_name_key_version",
 				"connected_at", "updated_at",
 			}),
 		}).Create(&account).Error

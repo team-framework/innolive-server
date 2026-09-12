@@ -316,6 +316,10 @@ type YouTubeConnectService struct {
 	gate   interface {
 		BeginOperation(uuid.UUID) (func(), bool)
 	}
+	// clearTokenCache는 재연결 성공 후 해당 사용자의 인메모리 access token
+	// 캐시를 버린다. 캐시하지 않으면 이전 채널의 refresh token으로 발급된
+	// access token이 만료(최대 1시간) 전까지 계속 반환된다.
+	clearTokenCache func(uuid.UUID)
 }
 
 func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountStore, users UserStatusChecker, cipher *ProviderTokenCipher) (*YouTubeConnectService, error) {
@@ -338,6 +342,14 @@ func (s *YouTubeConnectService) SetUserOperationGate(gate interface {
 }) {
 	if s != nil {
 		s.gate = gate
+	}
+}
+
+// SetTokenCacheInvalidator wires the access-token provider's cache eviction so
+// a re-connect discards the previous channel's cached access token.
+func (s *YouTubeConnectService) SetTokenCacheInvalidator(clear func(uuid.UUID)) {
+	if s != nil {
+		s.clearTokenCache = clear
 	}
 }
 
@@ -382,6 +394,10 @@ func (s *YouTubeConnectService) ConnectWithAuthCode(ctx context.Context, userID 
 	}
 	if err := s.store.Upsert(ctx, account); err != nil {
 		return YouTubeChannel{}, fmt.Errorf("persist streaming account: %w", err)
+	}
+	// 저장된 자격 증명이 바뀌었으므로 이전 채널의 캐시된 access token을 버린다.
+	if s.clearTokenCache != nil {
+		s.clearTokenCache(userID)
 	}
 	return channel, nil
 }

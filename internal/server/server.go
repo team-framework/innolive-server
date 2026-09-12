@@ -45,6 +45,7 @@ type Server struct {
 	sessions          *session.Manager
 	ai                *ai.Pool
 	references        *referenceStore
+	referenceDecode   *decodeGate
 	origins           origin.Config
 	streaming         map[auth.StreamingProvider]streaming.Provider
 	authenticateUser  func(context.Context, string) (uuid.UUID, error)
@@ -81,6 +82,7 @@ func New(
 		sessions:                sessions,
 		ai:                      aiPool,
 		references:              newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
+		referenceDecode:         newDecodeGate(cfg.ReferenceDecodeConcurrency),
 		origins:                 origins,
 		streaming:               streamingProviders,
 		guestReference:          newGuestReferenceGate(),

@@ -9,16 +9,17 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/logging v0.2.3
+	github.com/pion/rtcp v1.2.15
 	github.com/pion/rtp v1.8.22
 	github.com/pion/sdp/v3 v3.0.13
 	github.com/pion/webrtc/v4 v4.1.2
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/crypto v0.54.0
-	golang.org/x/image v0.44.0
+	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/api v0.247.0
 	google.golang.org/grpc v1.82.0
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.2
 )
@@ -48,7 +49,6 @@ require (
 	github.com/pion/interceptor v0.1.40 // indirect
 	github.com/pion/mdns/v2 v2.0.7 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.15 // indirect
 	github.com/pion/sctp v1.8.39 // indirect
 	github.com/pion/srtp/v3 v3.0.5 // indirect
 	github.com/pion/stun/v3 v3.0.0 // indirect
@@ -65,6 +65,6 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )

@@ -71,8 +71,10 @@ func (s CodeSource) exchangeRedirectURI() string {
 	return ""
 }
 
-// YouTubeOAuthConfig는 송출 연동 전용 Google OAuth 클라이언트 설정이다.
-// 로그인용(GOOGLE_OAUTH_WEB_CLIENT_ID)과는 별도 GCP 프로젝트·클라이언트다.
+// YouTubeOAuthConfig는 송출 연동에 쓰는 Google OAuth 클라이언트 설정이다.
+// 로그인용(GOOGLE_OAUTH_WEB_CLIENT_ID)과 별개의 클라이언트일 수 있으나, 프로덕션은
+// 두 값이 같은 클라이언트 하나다(2026-09-11 실측). 서버는 어느 쪽이든 동작하므로
+// 이 코드가 분리를 전제하지는 않는다.
 type YouTubeOAuthConfig struct {
 	ClientID     string
 	ClientSecret string

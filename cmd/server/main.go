@@ -309,11 +309,17 @@ func main() {
 			logger.Error("create email verification sender failed", "error", err)
 			os.Exit(2)
 		}
+		emailRateLimiter, ok := pendingEmailSignupStore.(auth.EmailRateLimiter)
+		if !ok {
+			logger.Error("email signup store does not support rate limiting")
+			os.Exit(2)
+		}
 		emailLogin, err = auth.NewEmailAuthService(
 			pendingEmailSignupStore,
 			auth.NewGormEmailAccountStore(databaseConnection.DB),
 			emailSender,
 			tokenService,
+			emailRateLimiter,
 			emailAuthConfig,
 		)
 		if err != nil {

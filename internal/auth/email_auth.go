@@ -27,13 +27,31 @@ const (
 	emailVerificationCodeDigits = 6
 	pendingUserKeyPrefix        = "pending_user:"
 	verificationCodeKeyPrefix   = "token:"
+
+	signupIPRateKeyPrefix    = "rl:signup:ip:"
+	signupEmailRateKeyPrefix = "rl:signup:email:"
+	signupResendKeyPrefix    = "rl:signup:resend:"
+	codeAttemptKeyPrefix     = "rl:code:attempt:"
+	loginFailureKeyPrefix    = "rl:login:fail:"
+
+	emailSignupIPLimitDefault        = 10
+	emailSignupEmailLimitDefault     = 5
+	emailSignupWindowDefault         = time.Hour
+	emailSignupResendIntervalDefault = time.Minute
+	emailCodeMaxAttemptsDefault      = 5
+	emailLoginMaxFailuresDefault     = 15
+	emailLoginFailureWindowDefault   = 15 * time.Minute
+	emailLoginFailureDelayDefault    = 100 * time.Millisecond
+	emailLoginMaxDelay               = 2 * time.Second
 )
 
 var (
 	ErrEmailAlreadyRegistered   = errors.New("email already registered")
 	ErrEmailSignupInvalid       = errors.New("email signup is invalid")
+	ErrEmailSignupThrottled     = errors.New("email signup is throttled")
 	ErrEmailVerificationInvalid = errors.New("email verification is invalid")
 	ErrEmailCredentialsInvalid  = errors.New("email credentials are invalid")
+	ErrEmailLoginThrottled      = errors.New("email login is throttled")
 	ErrEmailDeliveryUnavailable = errors.New("email delivery is unavailable")
 )
 
@@ -56,6 +74,15 @@ type EmailAuthConfig struct {
 	CodeTTL        time.Duration
 	PendingUserTTL time.Duration
 	BcryptCost     int
+
+	SignupIPLimit        int
+	SignupEmailLimit     int
+	SignupWindow         time.Duration
+	SignupResendInterval time.Duration
+	CodeMaxAttempts      int
+	LoginMaxFailures     int
+	LoginFailureWindow   time.Duration
+	LoginFailureDelay    time.Duration
 }
 
 func LoadEmailAuthConfigFromEnv() (EmailAuthConfig, error) {
@@ -71,6 +98,15 @@ func LoadEmailAuthConfigFromEnv() (EmailAuthConfig, error) {
 		CodeTTL:        5 * time.Minute,
 		PendingUserTTL: 30 * time.Minute,
 		BcryptCost:     bcrypt.DefaultCost,
+
+		SignupIPLimit:        emailSignupIPLimitDefault,
+		SignupEmailLimit:     emailSignupEmailLimitDefault,
+		SignupWindow:         emailSignupWindowDefault,
+		SignupResendInterval: emailSignupResendIntervalDefault,
+		CodeMaxAttempts:      emailCodeMaxAttemptsDefault,
+		LoginMaxFailures:     emailLoginMaxFailuresDefault,
+		LoginFailureWindow:   emailLoginFailureWindowDefault,
+		LoginFailureDelay:    emailLoginFailureDelayDefault,
 	}
 	if config.SMTPHost == "" {
 		return config, nil
@@ -103,6 +139,30 @@ func LoadEmailAuthConfigFromEnv() (EmailAuthConfig, error) {
 	}
 	if config.ImplicitTLS && config.StartTLS {
 		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_SMTP_STARTTLS and AUTH_EMAIL_SMTP_IMPLICIT_TLS cannot both be true")
+	}
+	if config.SignupIPLimit, err = emailIntEnv("AUTH_EMAIL_SIGNUP_IP_LIMIT", config.SignupIPLimit); err != nil || config.SignupIPLimit < 1 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_SIGNUP_IP_LIMIT must be a positive integer")
+	}
+	if config.SignupEmailLimit, err = emailIntEnv("AUTH_EMAIL_SIGNUP_EMAIL_LIMIT", config.SignupEmailLimit); err != nil || config.SignupEmailLimit < 1 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_SIGNUP_EMAIL_LIMIT must be a positive integer")
+	}
+	if config.SignupWindow, err = tokenEnvDuration("AUTH_EMAIL_SIGNUP_WINDOW", config.SignupWindow); err != nil || config.SignupWindow <= 0 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_SIGNUP_WINDOW must be positive")
+	}
+	if config.SignupResendInterval, err = tokenEnvDuration("AUTH_EMAIL_SIGNUP_RESEND_INTERVAL", config.SignupResendInterval); err != nil || config.SignupResendInterval <= 0 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_SIGNUP_RESEND_INTERVAL must be positive")
+	}
+	if config.CodeMaxAttempts, err = emailIntEnv("AUTH_EMAIL_CODE_MAX_ATTEMPTS", config.CodeMaxAttempts); err != nil || config.CodeMaxAttempts < 1 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_CODE_MAX_ATTEMPTS must be a positive integer")
+	}
+	if config.LoginMaxFailures, err = emailIntEnv("AUTH_EMAIL_LOGIN_MAX_FAILURES", config.LoginMaxFailures); err != nil || config.LoginMaxFailures < 1 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_LOGIN_MAX_FAILURES must be a positive integer")
+	}
+	if config.LoginFailureWindow, err = tokenEnvDuration("AUTH_EMAIL_LOGIN_FAILURE_WINDOW", config.LoginFailureWindow); err != nil || config.LoginFailureWindow <= 0 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_LOGIN_FAILURE_WINDOW must be positive")
+	}
+	if config.LoginFailureDelay, err = tokenEnvDuration("AUTH_EMAIL_LOGIN_FAILURE_DELAY", config.LoginFailureDelay); err != nil || config.LoginFailureDelay < 0 {
+		return EmailAuthConfig{}, errors.New("AUTH_EMAIL_LOGIN_FAILURE_DELAY must not be negative")
 	}
 	return config, nil
 }
@@ -299,6 +359,56 @@ func (s *redisPendingEmailSignupStore) Close() error { return s.client.Close() }
 func pendingUserKey(token string) string      { return pendingUserKeyPrefix + token }
 func verificationCodeKey(token string) string { return verificationCodeKeyPrefix + token }
 
+// EmailRateLimiter provides the atomic counters that gate email authentication
+// against abuse. Keys carry a TTL so limits reset without a background sweeper.
+type EmailRateLimiter interface {
+	// Increment adds one to a counter, sets its TTL on first creation, and
+	// returns the new value.
+	Increment(ctx context.Context, key string, ttl time.Duration) (int64, error)
+	// Count returns the current counter value, or zero when the key is absent.
+	Count(ctx context.Context, key string) (int64, error)
+	// SetIfAbsent creates the key with the given TTL only when it does not
+	// already exist, reporting whether it was created.
+	SetIfAbsent(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// ClearKey removes a counter.
+	ClearKey(ctx context.Context, key string) error
+}
+
+func (s *redisPendingEmailSignupStore) Increment(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	value, err := s.client.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	if value == 1 {
+		if err := s.client.Expire(ctx, key, ttl).Err(); err != nil {
+			return 0, err
+		}
+	}
+	return value, nil
+}
+
+func (s *redisPendingEmailSignupStore) Count(ctx context.Context, key string) (int64, error) {
+	value, err := s.client.Get(ctx, key).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	return value, err
+}
+
+func (s *redisPendingEmailSignupStore) SetIfAbsent(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return s.client.SetNX(ctx, key, 1, ttl).Result()
+}
+
+func (s *redisPendingEmailSignupStore) ClearKey(ctx context.Context, key string) error {
+	return s.client.Del(ctx, key).Err()
+}
+
+func signupIPRateKey(ip string) string       { return signupIPRateKeyPrefix + ip }
+func signupEmailRateKey(email string) string { return signupEmailRateKeyPrefix + email }
+func signupResendKey(email string) string    { return signupResendKeyPrefix + email }
+func codeAttemptKey(token string) string     { return codeAttemptKeyPrefix + token }
+func loginFailureKey(email string) string    { return loginFailureKeyPrefix + email }
+
 type EmailAccountStore interface {
 	EmailAlreadyRegistered(context.Context, string) (bool, error)
 	CreateEmailUser(context.Context, PendingEmailSignup, time.Time) (uuid.UUID, error)
@@ -373,20 +483,21 @@ type EmailAuthService struct {
 	accounts EmailAccountStore
 	sender   VerificationEmailSender
 	tokens   *TokenService
+	limiter  EmailRateLimiter
 	config   EmailAuthConfig
 	now      func() time.Time
 }
 
-func NewEmailAuthService(pending PendingEmailSignupStore, accounts EmailAccountStore, sender VerificationEmailSender, tokens *TokenService, config EmailAuthConfig) (*EmailAuthService, error) {
-	if pending == nil || accounts == nil || sender == nil || tokens == nil || !config.Enabled() {
+func NewEmailAuthService(pending PendingEmailSignupStore, accounts EmailAccountStore, sender VerificationEmailSender, tokens *TokenService, limiter EmailRateLimiter, config EmailAuthConfig) (*EmailAuthService, error) {
+	if pending == nil || accounts == nil || sender == nil || tokens == nil || limiter == nil || !config.Enabled() {
 		return nil, errors.New("email authentication dependencies must be configured")
 	}
-	return &EmailAuthService{pending: pending, accounts: accounts, sender: sender, tokens: tokens, config: config, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &EmailAuthService{pending: pending, accounts: accounts, sender: sender, tokens: tokens, limiter: limiter, config: config, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // StartSignup matches Clash's signup contract: generate a signup token, cache
 // the pending user for 30 minutes and code for 5 minutes, then send the code.
-func (s *EmailAuthService) StartSignup(ctx context.Context, email, password string) (string, error) {
+func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, clientIP string) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
@@ -400,6 +511,11 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password stri
 	}
 	if alreadyRegistered {
 		return "", ErrEmailAlreadyRegistered
+	}
+	// Throttle before the expensive bcrypt hashing and SMTP delivery so a caller
+	// cannot bomb an address or burn CPU with repeated requests.
+	if err := s.throttleSignup(ctx, clientIP, email); err != nil {
+		return "", err
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), s.config.BcryptCost)
 	if err != nil {
@@ -428,10 +544,50 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password stri
 	return token, nil
 }
 
+// throttleSignup applies the resend interval and the per-email and per-IP
+// request caps. Non-fresh resend or an exceeded cap returns ErrEmailSignupThrottled.
+func (s *EmailAuthService) throttleSignup(ctx context.Context, clientIP, email string) error {
+	fresh, err := s.limiter.SetIfAbsent(ctx, signupResendKey(email), s.config.SignupResendInterval)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return ErrEmailSignupThrottled
+	}
+	emailCount, err := s.limiter.Increment(ctx, signupEmailRateKey(email), s.config.SignupWindow)
+	if err != nil {
+		return err
+	}
+	if emailCount > int64(s.config.SignupEmailLimit) {
+		return ErrEmailSignupThrottled
+	}
+	if clientIP != "" {
+		ipCount, err := s.limiter.Increment(ctx, signupIPRateKey(clientIP), s.config.SignupWindow)
+		if err != nil {
+			return err
+		}
+		if ipCount > int64(s.config.SignupIPLimit) {
+			return ErrEmailSignupThrottled
+		}
+	}
+	return nil
+}
+
 // CompleteSignup validates but does not issue a token. Like Clash, the client
 // signs in through the separate sign-in endpoint after email verification.
 func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code string) error {
 	if !validEmailVerificationCode(code) || strings.TrimSpace(signupToken) == "" {
+		return ErrEmailVerificationInvalid
+	}
+	// Count the attempt before comparing so a caller cannot brute-force the
+	// six-digit code. Once the cap is exceeded the code is discarded, so even a
+	// correct guess afterwards fails.
+	attempts, err := s.limiter.Increment(ctx, codeAttemptKey(signupToken), s.config.CodeTTL)
+	if err != nil {
+		return err
+	}
+	if attempts > int64(s.config.CodeMaxAttempts) {
+		_ = s.pending.Delete(ctx, signupToken)
 		return ErrEmailVerificationInvalid
 	}
 	codeHash, err := s.pending.VerificationCodeHash(ctx, signupToken)
@@ -453,6 +609,7 @@ func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code
 	if _, err := s.accounts.CreateEmailUser(ctx, pending, s.now().UTC()); err != nil {
 		return err
 	}
+	_ = s.limiter.ClearKey(ctx, codeAttemptKey(signupToken))
 	return s.pending.Delete(ctx, signupToken)
 }
 
@@ -461,14 +618,47 @@ func (s *EmailAuthService) Login(ctx context.Context, email, password string, cl
 	if err != nil {
 		return TokenPair{}, ErrEmailCredentialsInvalid
 	}
-	account, user, err := s.accounts.FindEmailAccount(ctx, email)
+	failureKey := loginFailureKey(email)
+	failures, err := s.limiter.Count(ctx, failureKey)
 	if err != nil {
 		return TokenPair{}, err
 	}
+	if failures >= int64(s.config.LoginMaxFailures) {
+		return TokenPair{}, ErrEmailLoginThrottled
+	}
+	// Progressive delay grows with recent failures so brute forcing a password
+	// becomes slower with every miss, without locking the account outright.
+	if delay := loginFailureDelay(failures, s.config.LoginFailureDelay); delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return TokenPair{}, ctx.Err()
+		}
+	}
+	account, user, err := s.accounts.FindEmailAccount(ctx, email)
+	if err != nil {
+		if errors.Is(err, ErrEmailCredentialsInvalid) {
+			_, _ = s.limiter.Increment(ctx, failureKey, s.config.LoginFailureWindow)
+		}
+		return TokenPair{}, err
+	}
 	if bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)) != nil || user.Status != UserStatusActive {
+		_, _ = s.limiter.Increment(ctx, failureKey, s.config.LoginFailureWindow)
 		return TokenPair{}, ErrEmailCredentialsInvalid
 	}
+	_ = s.limiter.ClearKey(ctx, failureKey)
 	return s.tokens.IssuePair(ctx, user.ID, client)
+}
+
+func loginFailureDelay(failures int64, base time.Duration) time.Duration {
+	if base <= 0 || failures <= 0 {
+		return 0
+	}
+	delay := base * time.Duration(failures)
+	if delay > emailLoginMaxDelay {
+		return emailLoginMaxDelay
+	}
+	return delay
 }
 
 func (s *EmailAuthService) Close() error { return s.pending.Close() }

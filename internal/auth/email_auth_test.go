@@ -99,7 +99,7 @@ func TestEmailSignupVerificationCodeIsConsumedOnce(t *testing.T) {
 	accounts := &memoryEmailAccountStore{}
 	sender := &recordingVerificationEmailSender{}
 	service := newTestEmailAuthService(t, pending, accounts, sender, testTokenService(newMemoryRefreshStore()))
-	token, err := service.StartSignup(context.Background(), "member@example.com", "correct horse battery staple")
+	token, err := service.StartSignup(context.Background(), "member@example.com", "correct horse battery staple", "203.0.113.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,130 @@ func TestEmailSignupVerificationCodeIsConsumedOnce(t *testing.T) {
 	}
 	if err := service.CompleteSignup(context.Background(), token, sender.code); !errors.Is(err, ErrEmailVerificationInvalid) {
 		t.Fatalf("second verification = %v", err)
+	}
+}
+
+func TestStartSignupThrottlesResendAndPerEmailCap(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	sender := &recordingVerificationEmailSender{}
+	service := newTestEmailAuthService(t, pending, &memoryEmailAccountStore{}, sender, testTokenService(newMemoryRefreshStore()))
+
+	if _, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9"); err != nil {
+		t.Fatalf("first signup = %v", err)
+	}
+	// A second request within the resend interval must be rejected before bcrypt/SMTP.
+	if _, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9"); !errors.Is(err, ErrEmailSignupThrottled) {
+		t.Fatalf("resend signup = %v, want throttled", err)
+	}
+
+	// Clearing the resend flag lets the per-email window cap be reached instead.
+	for i := 0; i < emailSignupEmailLimitDefault+2; i++ {
+		_ = pending.ClearKey(context.Background(), signupResendKey("victim@example.com"))
+		_, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9")
+		if i < emailSignupEmailLimitDefault-1 && err != nil {
+			t.Fatalf("signup %d within cap = %v", i, err)
+		}
+		if i >= emailSignupEmailLimitDefault && !errors.Is(err, ErrEmailSignupThrottled) {
+			t.Fatalf("signup %d beyond cap = %v, want throttled", i, err)
+		}
+	}
+}
+
+func TestCompleteSignupCapsCodeAttemptsThenRejectsCorrectCode(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	sender := &recordingVerificationEmailSender{}
+	service := newTestEmailAuthService(t, pending, &memoryEmailAccountStore{}, sender, testTokenService(newMemoryRefreshStore()))
+	token, err := service.StartSignup(context.Background(), "member@example.com", "correct horse battery staple", "203.0.113.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := "000000"
+	if wrong == sender.code {
+		wrong = "000001"
+	}
+	for i := 0; i < emailCodeMaxAttemptsDefault; i++ {
+		if err := service.CompleteSignup(context.Background(), token, wrong); !errors.Is(err, ErrEmailVerificationInvalid) {
+			t.Fatalf("wrong attempt %d = %v", i, err)
+		}
+	}
+	// The cap is now exceeded: even the correct code must be rejected and the pending user discarded.
+	if err := service.CompleteSignup(context.Background(), token, sender.code); !errors.Is(err, ErrEmailVerificationInvalid) {
+		t.Fatalf("correct code after cap = %v, want invalid", err)
+	}
+	if pending.has(token) {
+		t.Fatal("pending signup was not discarded after exceeding the attempt cap")
+	}
+}
+
+func TestLoginHardLimitAndFailureReset(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	accounts := &memoryEmailAccountStore{}
+	sender := &recordingVerificationEmailSender{}
+	service := newTestEmailAuthService(t, pending, accounts, sender, testTokenService(newMemoryRefreshStore()))
+	token, err := service.StartSignup(context.Background(), "member@example.com", "correct horse battery staple", "203.0.113.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CompleteSignup(context.Background(), token, sender.code); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < emailLoginMaxFailuresDefault; i++ {
+		if _, err := service.Login(context.Background(), "member@example.com", "wrong-password", ClientInfo{}); !errors.Is(err, ErrEmailCredentialsInvalid) {
+			t.Fatalf("failed login %d = %v", i, err)
+		}
+	}
+	// After the hard cap the correct password is refused with a throttle error.
+	if _, err := service.Login(context.Background(), "member@example.com", "correct horse battery staple", ClientInfo{}); !errors.Is(err, ErrEmailLoginThrottled) {
+		t.Fatalf("login at cap = %v, want throttled", err)
+	}
+
+	// A successful login below the cap clears the counter.
+	_ = pending.ClearKey(context.Background(), loginFailureKey("member@example.com"))
+	if _, err := service.Login(context.Background(), "member@example.com", "correct horse battery staple", ClientInfo{}); err != nil {
+		t.Fatalf("successful login = %v", err)
+	}
+	if got, _ := pending.Count(context.Background(), loginFailureKey("member@example.com")); got != 0 {
+		t.Fatalf("failure counter after success = %d, want 0", got)
+	}
+}
+
+func TestRedisEmailRateLimiterCountsAndExpires(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	store, err := NewRedisPendingEmailSignupStore(context.Background(), EmailAuthConfig{SMTPHost: "smtp.example.com", RedisAddr: server.Addr()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	limiter := store.(EmailRateLimiter)
+
+	if value, err := limiter.Increment(context.Background(), "rl:test", time.Minute); err != nil || value != 1 {
+		t.Fatalf("first increment = %d, %v", value, err)
+	}
+	if ttl := server.TTL("rl:test"); ttl != time.Minute {
+		t.Fatalf("increment TTL = %s, want 1m", ttl)
+	}
+	if value, err := limiter.Increment(context.Background(), "rl:test", time.Hour); err != nil || value != 2 {
+		t.Fatalf("second increment = %d, %v", value, err)
+	}
+	if ttl := server.TTL("rl:test"); ttl != time.Minute {
+		t.Fatalf("TTL reset on later increment = %s, want unchanged 1m", ttl)
+	}
+	if fresh, err := limiter.SetIfAbsent(context.Background(), "rl:flag", time.Minute); err != nil || !fresh {
+		t.Fatalf("first SetIfAbsent = %v, %v", fresh, err)
+	}
+	if fresh, err := limiter.SetIfAbsent(context.Background(), "rl:flag", time.Minute); err != nil || fresh {
+		t.Fatalf("second SetIfAbsent = %v, %v, want not fresh", fresh, err)
+	}
+	if err := limiter.ClearKey(context.Background(), "rl:test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := limiter.Count(context.Background(), "rl:test"); err != nil || got != 0 {
+		t.Fatalf("count after clear = %d, %v", got, err)
 	}
 }
 
@@ -161,7 +285,15 @@ func TestLoadEmailAuthConfigFromEnv(t *testing.T) {
 
 func newTestEmailAuthService(t *testing.T, pending PendingEmailSignupStore, accounts EmailAccountStore, sender VerificationEmailSender, tokens *TokenService) *EmailAuthService {
 	t.Helper()
-	service, err := NewEmailAuthService(pending, accounts, sender, tokens, EmailAuthConfig{SMTPHost: "smtp.example.com", RedisAddr: "redis:6379", CodeTTL: 5 * time.Minute, PendingUserTTL: 30 * time.Minute, BcryptCost: bcrypt.MinCost})
+	limiter, ok := pending.(EmailRateLimiter)
+	if !ok {
+		t.Fatalf("pending store %T does not implement EmailRateLimiter", pending)
+	}
+	service, err := NewEmailAuthService(pending, accounts, sender, tokens, limiter, EmailAuthConfig{
+		SMTPHost: "smtp.example.com", RedisAddr: "redis:6379", CodeTTL: 5 * time.Minute, PendingUserTTL: 30 * time.Minute, BcryptCost: bcrypt.MinCost,
+		SignupIPLimit: emailSignupIPLimitDefault, SignupEmailLimit: emailSignupEmailLimitDefault, SignupWindow: emailSignupWindowDefault, SignupResendInterval: emailSignupResendIntervalDefault,
+		CodeMaxAttempts: emailCodeMaxAttemptsDefault, LoginMaxFailures: emailLoginMaxFailuresDefault, LoginFailureWindow: emailLoginFailureWindowDefault, LoginFailureDelay: 0,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,12 +324,34 @@ func (s *recordingVerificationEmailSender) SendVerificationCode(_ context.Contex
 }
 
 type memoryPendingEmailSignupStore struct {
-	pending map[string]PendingEmailSignup
-	codes   map[string]string
+	pending  map[string]PendingEmailSignup
+	codes    map[string]string
+	counters map[string]int64
+	flags    map[string]bool
 }
 
 func newMemoryPendingEmailSignupStore() *memoryPendingEmailSignupStore {
-	return &memoryPendingEmailSignupStore{pending: map[string]PendingEmailSignup{}, codes: map[string]string{}}
+	return &memoryPendingEmailSignupStore{pending: map[string]PendingEmailSignup{}, codes: map[string]string{}, counters: map[string]int64{}, flags: map[string]bool{}}
+}
+
+func (s *memoryPendingEmailSignupStore) Increment(_ context.Context, key string, _ time.Duration) (int64, error) {
+	s.counters[key]++
+	return s.counters[key], nil
+}
+func (s *memoryPendingEmailSignupStore) Count(_ context.Context, key string) (int64, error) {
+	return s.counters[key], nil
+}
+func (s *memoryPendingEmailSignupStore) SetIfAbsent(_ context.Context, key string, _ time.Duration) (bool, error) {
+	if s.flags[key] {
+		return false, nil
+	}
+	s.flags[key] = true
+	return true, nil
+}
+func (s *memoryPendingEmailSignupStore) ClearKey(_ context.Context, key string) error {
+	delete(s.counters, key)
+	delete(s.flags, key)
+	return nil
 }
 func (s *memoryPendingEmailSignupStore) Save(_ context.Context, token string, pending PendingEmailSignup, code string, _ time.Duration, _ time.Duration) error {
 	s.pending[token] = pending

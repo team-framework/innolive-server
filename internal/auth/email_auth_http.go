@@ -39,11 +39,13 @@ func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
 		return
 	}
-	token, err := h.email.StartSignup(r.Context(), request.Email, request.Password)
+	token, err := h.email.StartSignup(r.Context(), request.Email, request.Password, requestClientInfo(r).IPAddress)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrEmailSignupInvalid):
 			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
+		case errors.Is(err, ErrEmailSignupThrottled):
+			h.writeError(w, r, http.StatusTooManyRequests, "too_many_requests", "Too many signup requests. Please try again later.")
 		case errors.Is(err, ErrEmailAlreadyRegistered):
 			h.writeError(w, r, http.StatusConflict, "email_already_registered", "Email is already registered.")
 		case errors.Is(err, ErrEmailDeliveryUnavailable):
@@ -150,6 +152,8 @@ func (h *tokenHTTPHandler) handleEmailLogin(w http.ResponseWriter, r *http.Reque
 	pair, err := h.email.Login(r.Context(), request.Email, request.Password, requestClientInfo(r))
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrEmailLoginThrottled):
+			h.writeError(w, r, http.StatusTooManyRequests, "too_many_requests", "Too many login attempts. Please try again later.")
 		case errors.Is(err, ErrEmailCredentialsInvalid), errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_email_credentials", "Email or password is invalid.")
 		case errors.Is(err, ErrEmailDeliveryUnavailable):

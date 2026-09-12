@@ -46,6 +46,43 @@ const (
 // dimensions past the decode limits.
 var errImageTooLarge = errors.New("image exceeds decode limits")
 
+// decodeGate bounds how many uploaded images are decoded at the same moment
+// across the whole process. Each decode transiently allocates the full bitmap
+// (bounded by maxDecodePixels), so unbounded concurrency lets simultaneous
+// uploads stack that memory and starve the real-time media path. The token is
+// held only across the decode, never across the AI worker call.
+//
+// A nil *decodeGate is valid and means unlimited.
+type decodeGate struct {
+	tokens chan struct{}
+}
+
+func newDecodeGate(size int) *decodeGate {
+	if size <= 0 {
+		return nil
+	}
+	return &decodeGate{tokens: make(chan struct{}, size)}
+}
+
+func (g *decodeGate) acquire(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	select {
+	case g.tokens <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *decodeGate) release() {
+	if g == nil {
+		return
+	}
+	<-g.tokens
+}
+
 // downscaleForAI shrinks an uploaded face image so its long edge is at most
 // maxAIFaceEdge, re-encoding as JPEG. Images already within the limit (or that
 // fail to decode here) are returned unchanged so the AI worker still applies its
@@ -309,7 +346,12 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		faceID := uuid.NewString()
+		if err := s.referenceDecode.acquire(r.Context()); err != nil {
+			writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "server_busy", Message: "이미지 처리 대기 중 요청이 취소되었습니다."})
+			return
+		}
 		scaled, err := downscaleForAI(data)
+		s.referenceDecode.release()
 		if err != nil {
 			writeError(w, badRequest("이미지 크기가 너무 큽니다.", map[string]any{"reason": "image_too_large", "max_edge": maxDecodeEdge, "max_pixels": maxDecodePixels}))
 			return

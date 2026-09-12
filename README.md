@@ -151,6 +151,7 @@ make proto        # protobuf 코드 생성
 | `AI_PREFLIGHT_INTERVAL` | `5m` | 상시 감시 프로브 주기. `0`은 비활성이며 `AI_PREFLIGHT_TIMEOUT`보다 길어야 합니다 |
 | `AI_FRAME_WIRE_FORMAT` | `jpeg` | `jpeg` / `raw` |
 | `AI_PRIVACY_FIXED_DELAY` | `20ms` | `fixed_delay` 모드에서 넣는 지연 |
+| `REFERENCE_DECODE_CONCURRENCY` | `4` | 기준 얼굴 업로드 이미지의 프로세스 전역 동시 디코딩 상한. 동시 업로드가 메모리를 쌓아 실시간 경로를 침범하는 것을 막습니다. `0`은 무제한 |
 
 ### 세션 · WebRTC
 

@@ -69,6 +69,31 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if updated.ChannelID != "UCsecond" || string(updated.RefreshTokenCiphertext) != string([]byte{4, 5, 6}) {
 		t.Fatalf("re-connect did not replace channel/token: %+v", updated)
 	}
+
+	// 재연결은 이전 채널에 만든 재사용 스트림을 초기화해야 한다 — 안 그러면
+	// 다음 Prepare가 남의 채널 스트림 키를 재사용한다.
+	if err := store.UpdateStreamInfo(ctx, updated.ID, StreamInfo{
+		StreamID:              "stream-of-first-channel",
+		RtmpsIngestionAddress: "rtmps://a.example/live2",
+		StreamNameCiphertext:  []byte{9, 9, 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(ctx, StreamingAccount{
+		UserID:                 user.ID,
+		Provider:               StreamingProviderYouTube,
+		ChannelID:              "UCthird",
+		RefreshTokenCiphertext: []byte{1, 1, 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reconnected, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconnected.StreamID != nil || reconnected.RtmpsIngestionAddress != nil || reconnected.StreamNameCiphertext != nil {
+		t.Fatalf("re-connect did not reset reusable stream: %+v", reconnected)
+	}
 	var count int64
 	if err := db.Model(&StreamingAccount{}).Where("user_id = ?", user.ID).Count(&count).Error; err != nil {
 		t.Fatal(err)

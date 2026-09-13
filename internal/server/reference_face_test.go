@@ -65,6 +65,9 @@ func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData)
 			return nil, ctx.Err()
 		}
 	}
+	if bytes.Contains(request.GetData(), []byte("REJECT")) {
+		return &aiv1.WhitelistResponse{StatusMessage: "failed: No face detected"}, nil
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.next++
@@ -620,6 +623,94 @@ func TestReferenceStoreDeleteClientRestoresDataWhenSaveFails(t *testing.T) {
 	}
 	if faces := reloaded.faces["other"]; len(faces) != 1 || faces[0].FaceID != "other-face" {
 		t.Fatalf("other user's faces after retry = %+v, want preserved data", faces)
+	}
+}
+
+// referenceUploadPart describes one multipart file for postReferenceFaces.
+type referenceUploadPart struct {
+	field       string
+	filename    string
+	contentType string
+	content     string
+}
+
+// postReferenceFaces uploads arbitrary parts and returns the raw response.
+func postReferenceFaces(t *testing.T, baseURL string, parts []referenceUploadPart) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, p := range parts {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, p.field, p.filename))
+		header.Set("Content-Type", p.contentType)
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte(p.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Post(baseURL+"/reference-face", writer.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+// A later file failing the format check must not leave an earlier file — already
+// registered on the workers in the same request — excluded from blur.
+func TestPartialUploadFormatFailureLeavesNoWorkerEntries(t *testing.T) {
+	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
+
+	response := postReferenceFaces(t, httpServer.URL, []referenceUploadPart{
+		{field: "images", filename: "ok.jpg", contentType: "image/jpeg", content: "ok"},
+		{field: "images", filename: "bad.txt", contentType: "text/plain", content: "nope"},
+	})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want 400; body = %s", response.StatusCode, data)
+	}
+
+	for index, worker := range workers {
+		if entries := worker.snapshot(); len(entries) != 0 {
+			t.Fatalf("worker %d entries = %v, want empty after format failure", index, entries)
+		}
+	}
+	if status := getReferenceStatus(t, httpServer.URL); status.Count != 0 {
+		t.Fatalf("status after failure = %+v, want count 0", status)
+	}
+}
+
+// A later file rejected by the worker must roll back this request's earlier
+// registrations while leaving faces from previous requests intact.
+func TestPartialUploadWorkerRejectionRollsBackThisRequestOnly(t *testing.T) {
+	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
+	uploadReferenceFaces(t, httpServer.URL, 1) // pre-existing face from an earlier request
+
+	response := postReferenceFaces(t, httpServer.URL, []referenceUploadPart{
+		{field: "images", filename: "ok.jpg", contentType: "image/jpeg", content: "ok"},
+		{field: "images", filename: "reject.jpg", contentType: "image/jpeg", content: "REJECT"},
+	})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want 400; body = %s", response.StatusCode, data)
+	}
+
+	for index, worker := range workers {
+		entries := worker.snapshot()
+		want := fmt.Sprintf("worker%d-1", index)
+		if len(entries) != 1 || entries[0] != want {
+			t.Fatalf("worker %d entries = %v, want only the pre-existing %q", index, entries, want)
+		}
+	}
+	if status := getReferenceStatus(t, httpServer.URL); status.Count != 1 {
+		t.Fatalf("status after rejection = %+v, want count 1 (pre-existing face kept)", status)
 	}
 }
 

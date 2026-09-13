@@ -327,7 +327,14 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	registered := make([]referenceFace, 0, len(files))
+	// Validate and decode every file before touching the AI workers. A bad file
+	// then aborts the request with nothing registered, so a later file's format
+	// or size error can never leave an earlier file's face on a worker.
+	type preparedFace struct {
+		faceID string
+		data   []byte
+	}
+	prepared := make([]preparedFace, 0, len(files))
 	for _, header := range files {
 		contentType := header.Header.Get("Content-Type")
 		if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/webp" {
@@ -345,7 +352,6 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			writeError(w, badRequest("유효하지 않은 이미지입니다.", map[string]any{"reason": "empty_or_oversized_file"}))
 			return
 		}
-		faceID := uuid.NewString()
 		if err := s.referenceDecode.acquire(r.Context()); err != nil {
 			writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "server_busy", Message: "이미지 처리 대기 중 요청이 취소되었습니다."})
 			return
@@ -356,9 +362,19 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			writeError(w, badRequest("이미지 크기가 너무 큽니다.", map[string]any{"reason": "image_too_large", "max_edge": maxDecodeEdge, "max_pixels": maxDecodePixels}))
 			return
 		}
-		result, err := s.ai.AddWhitelist(r.Context(), clientID, scaled)
+		prepared = append(prepared, preparedFace{faceID: uuid.NewString(), data: scaled})
+	}
+
+	// Register each prepared face on the workers. If any registration fails, roll
+	// back this request's already-registered entries so the workers never keep a
+	// face the API reports as unregistered. Faces registered by earlier requests
+	// (append mode) are untouched.
+	registered := make([]referenceFace, 0, len(prepared))
+	for _, face := range prepared {
+		result, err := s.ai.AddWhitelist(r.Context(), clientID, face.data)
 		if err != nil {
 			s.logger.Error("AI AddWhitelist failed", "client_id", clientID, "error", err)
+			s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist registration failed."})
 			return
 		}
@@ -371,10 +387,11 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			case strings.Contains(msg, "read"), strings.Contains(msg, "decode"), strings.Contains(msg, "image"):
 				code = "invalid_image"
 			}
+			s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
 			writeError(w, apiError{Status: http.StatusBadRequest, Code: code, Message: "AI 서버가 기준 얼굴 등록을 거부했습니다.", Details: map[string]any{"reason": msg}})
 			return
 		}
-		registered = append(registered, referenceFace{FaceID: faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
+		registered = append(registered, referenceFace{FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
 	if gate, sessionID, ok := guestReferenceGateFromContext(r.Context()); ok && gate.IsClosed(sessionID) {
 		// 이 요청이 얼굴을 등록하는 동안 세션이 종료됐다. 이미 terminal 정리가 수행한
@@ -398,6 +415,18 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	_ = s.references.save()
 	s.references.mu.Unlock()
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
+}
+
+// rollbackReferenceRegistrations removes the worker whitelist entries created by
+// the faces registered so far in the current request, addressing each worker
+// with its own minted id. Best-effort: a delete failure is logged, not returned,
+// because the caller is already reporting the registration failure to the client.
+func (s *Server) rollbackReferenceRegistrations(ctx context.Context, clientID string, registered []referenceFace) {
+	for _, face := range registered {
+		if err := s.ai.DeleteWhitelistEntries(ctx, clientID, face.EntryIDs); err != nil {
+			s.logger.Error("rollback reference whitelist entries failed", "client_id", clientID, "face_id", face.FaceID, "error", err)
+		}
+	}
 }
 
 func (s *Server) handleGetReferenceFace(w http.ResponseWriter, r *http.Request) {

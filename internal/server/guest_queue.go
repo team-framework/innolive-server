@@ -27,6 +27,7 @@ const (
 	guestReserveKey      = "innolive:guest:reservations"
 	guestQueueChannel    = "innolive:guest:queue:changed"
 	guestQueueMaxWaiting = 100
+	guestSSEMaxPerTicket = 4
 )
 
 var (
@@ -170,6 +171,20 @@ type GuestQueue struct {
 	maxGuests       int
 	trustedProxies  []*net.IPNet
 	mu              sync.Mutex
+
+	sseMu    sync.Mutex
+	sseConns map[string]int
+	bcast    guestBroadcast
+}
+
+// guestBroadcast는 queue 변경 알림을 프로세스당 하나의 Redis 구독으로 받아
+// 등록된 SSE 연결에 fan-out한다. 마지막 구독자가 나가면 Redis 구독을 닫아
+// SSE 연결 수가 Redis 구독 수를 늘리지 않게 한다.
+type guestBroadcast struct {
+	mu     sync.Mutex
+	subs   map[chan struct{}]struct{}
+	pubsub *redis.PubSub
+	cancel context.CancelFunc
 }
 
 func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Manager, registries ...*metrics.Registry) (*GuestQueue, error) {
@@ -192,6 +207,9 @@ func (q *GuestQueue) Close() error {
 	if q == nil || q.client == nil {
 		return nil
 	}
+	q.bcast.mu.Lock()
+	q.bcast.stopLocked()
+	q.bcast.mu.Unlock()
 	return q.client.Close()
 }
 
@@ -629,8 +647,99 @@ func (q *GuestQueue) publish(ctx context.Context) {
 	_ = q.client.Publish(ctx, guestQueueChannel, "changed").Err()
 }
 
-func (q *GuestQueue) Subscribe(ctx context.Context) *redis.PubSub {
-	return q.client.Subscribe(ctx, guestQueueChannel)
+// SubscribeEvents는 티켓별 동시 SSE 연결 상한을 적용하고, 공유 Redis 구독에서
+// 변경 알림을 받는 채널과 해제 함수를 반환한다. 상한을 넘으면 ok=false를 준다.
+// release는 여러 번 호출해도 안전하다.
+func (q *GuestQueue) SubscribeEvents(id string) (<-chan struct{}, func(), bool) {
+	q.sseMu.Lock()
+	if q.sseConns == nil {
+		q.sseConns = make(map[string]int)
+	}
+	if q.sseConns[id] >= guestSSEMaxPerTicket {
+		q.sseMu.Unlock()
+		return nil, nil, false
+	}
+	q.sseConns[id]++
+	q.sseMu.Unlock()
+
+	ch := q.bcast.add(q.client)
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			q.bcast.remove(ch)
+			q.sseMu.Lock()
+			if q.sseConns[id]--; q.sseConns[id] <= 0 {
+				delete(q.sseConns, id)
+			}
+			q.sseMu.Unlock()
+		})
+	}
+	return ch, release, true
+}
+
+func (b *guestBroadcast) add(client *redis.Client) chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.subs == nil {
+		b.subs = make(map[chan struct{}]struct{})
+	}
+	if b.pubsub == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		b.cancel = cancel
+		b.pubsub = client.Subscribe(ctx, guestQueueChannel)
+		go b.loop(ctx, b.pubsub)
+	}
+	ch := make(chan struct{}, 1)
+	b.subs[ch] = struct{}{}
+	return ch
+}
+
+func (b *guestBroadcast) remove(ch chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.subs[ch]; !ok {
+		return
+	}
+	delete(b.subs, ch)
+	if len(b.subs) == 0 {
+		b.stopLocked()
+	}
+}
+
+// stopLocked는 b.mu를 잡은 채 호출한다.
+func (b *guestBroadcast) stopLocked() {
+	if b.cancel != nil {
+		b.cancel()
+		b.cancel = nil
+	}
+	if b.pubsub != nil {
+		_ = b.pubsub.Close()
+		b.pubsub = nil
+	}
+}
+
+func (b *guestBroadcast) loop(ctx context.Context, pubsub *redis.PubSub) {
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+			b.mu.Lock()
+			for sub := range b.subs {
+				// 버퍼 1 채널에 논블로킹 전달 — 느린 수신자가 fan-out을
+				// 막지 않고, 알림은 병합돼도 handler가 최신 상태를 다시 조회한다.
+				select {
+				case sub <- struct{}{}:
+				default:
+				}
+			}
+			b.mu.Unlock()
+		}
+	}
 }
 
 func parseInt64(value string) (int64, bool) {

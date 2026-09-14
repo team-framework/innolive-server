@@ -28,6 +28,12 @@ type AIStream interface {
 
 var errAIInputPaused = errors.New("AI input is paused")
 
+// defaultRecoveryProbeInterval is how often a latched session re-tries the AI
+// boundary to detect recovery. Short enough that a recovered worker resumes a
+// session within about a second, long enough that many latched sessions do not
+// re-flood an overloaded worker with every frame.
+const defaultRecoveryProbeInterval = time.Second
+
 type Processor struct {
 	mode                 config.PrivacyMode
 	fixedDelay           time.Duration
@@ -49,12 +55,22 @@ type Processor struct {
 	timeoutLatchThreshold int
 	consecutiveTimeouts   atomic.Int64
 
-	// fallback latches permanently once the AI boundary fails: the session
-	// emits black frames from then on instead of raw or frozen video,
-	// matching the Python server's fail-closed blackout semantics.
-	fallback     atomic.Bool
-	blackoutMu   sync.Mutex
-	blackoutData []byte
+	// fallback latches the session into fail-closed blackout once the AI
+	// boundary fails: black frames instead of raw or frozen video. The latch is
+	// no longer permanent — while latched the AI is re-probed at most once per
+	// recoveryProbeInterval, and the first frame that succeeds clears the latch
+	// and resumes normal processing. This recovers a session after a transient
+	// AI outage (e.g. a worker restart) without a client re-negotiation, while
+	// the per-frame default between probes stays fail-closed.
+	fallback atomic.Bool
+	// recoveryProbeInterval bounds how often a latched session re-tries the AI,
+	// so many latched sessions cannot re-flood an already-overloaded worker with
+	// every frame. lastProbeAt is only touched from the single per-session
+	// processing goroutine.
+	recoveryProbeInterval time.Duration
+	lastProbeAt           time.Time
+	blackoutMu            sync.Mutex
+	blackoutData          []byte
 }
 
 func NewProcessor(
@@ -91,6 +107,7 @@ func NewProcessor(
 		wireFormat:            wireFormat,
 		failurePolicy:         failurePolicy,
 		timeoutLatchThreshold: timeoutLatchThreshold,
+		recoveryProbeInterval: defaultRecoveryProbeInterval,
 		anonymizationEnabled:  mode == config.PrivacyModeReal,
 	}, nil
 }
@@ -214,7 +231,25 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 		}
 	case config.PrivacyModeReal:
 		if p.fallback.Load() {
-			return p.serveBlackout(frame, width, height, nil)
+			// Latched: re-probe the AI at most once per recoveryProbeInterval so
+			// a recovering worker is picked up without every latched session
+			// re-flooding an overloaded one. Between probes, serve blackout
+			// without touching the AI.
+			if time.Since(p.lastProbeAt) < p.recoveryProbeInterval {
+				return p.serveBlackout(frame, width, height, nil)
+			}
+			p.lastProbeAt = time.Now()
+			output, err := p.processImage(frame, timestamp)
+			if err != nil {
+				return p.serveBlackout(frame, width, height, err)
+			}
+			// The AI boundary works again: clear the latch and resume normal
+			// processing for this frame onward.
+			p.fallback.Store(false)
+			p.consecutiveTimeouts.Store(0)
+			p.metrics.IncAIFallbackRecovered(string(p.mode))
+			p.logger.Info("AI processing recovered; clearing fail-closed blackout latch for this session")
+			return output, nil
 		}
 		output, err := p.processImage(frame, timestamp)
 		if err == nil {
@@ -236,6 +271,7 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 			p.consecutiveTimeouts.Store(0)
 		}
 		if p.fallback.CompareAndSwap(false, true) {
+			p.lastProbeAt = time.Now()
 			p.metrics.IncAIFallbackLatched(string(p.mode))
 			p.logger.Warn("AI processing failed; latching fail-closed blackout for this session",
 				"error", err,

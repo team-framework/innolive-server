@@ -177,6 +177,10 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 				return err
 			}
 			index++
+			// The frame has now cleared the compressed queue and the decoder
+			// stdin backpressure; mark the boundary so the read loop can split
+			// the merged "decode" stage into wait vs. FFmpeg round-trip (#177).
+			item.decodeInAt = time.Now()
 			select {
 			case metadata <- item:
 				return nil
@@ -218,6 +222,12 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 			return fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 		}
 		item.data = decoded
+		// Split the merged "decode" stage: pre_decode_wait is the compressed
+		// queue plus stdin backpressure, ffmpeg_decode is the decoder
+		// round-trip. The remainder up to the "decode" observation downstream
+		// is the decoderOutput queue wait (#177).
+		t.metrics.ObserveStage("pre_decode_wait", item.decodeInAt.Sub(item.stageAt))
+		t.metrics.ObserveStage("ffmpeg_decode", time.Since(item.decodeInAt))
 		select {
 		case output <- item:
 		case <-ctx.Done():

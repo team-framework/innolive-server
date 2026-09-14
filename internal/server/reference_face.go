@@ -417,11 +417,22 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
 
+// referenceRollbackTimeout bounds the detached rollback so a wedged worker
+// cannot hold the handler open after the response is already decided.
+const referenceRollbackTimeout = 5 * time.Second
+
 // rollbackReferenceRegistrations removes the worker whitelist entries created by
 // the faces registered so far in the current request, addressing each worker
 // with its own minted id. Best-effort: a delete failure is logged, not returned,
 // because the caller is already reporting the registration failure to the client.
+//
+// The request context is detached first. A client that disconnects mid-upload
+// cancels it, which is itself one of the ways AddWhitelist fails — rolling back
+// on the cancelled context would fail immediately and leave exactly the stale
+// whitelist entry this rollback exists to remove (#201).
 func (s *Server) rollbackReferenceRegistrations(ctx context.Context, clientID string, registered []referenceFace) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), referenceRollbackTimeout)
+	defer cancel()
 	for _, face := range registered {
 		if err := s.ai.DeleteWhitelistEntries(ctx, clientID, face.EntryIDs); err != nil {
 			s.logger.Error("rollback reference whitelist entries failed", "client_id", clientID, "face_id", face.FaceID, "error", err)

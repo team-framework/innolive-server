@@ -146,6 +146,7 @@ func main() {
 			)
 			os.Exit(1)
 		}
+		aiPool.SetLogger(logger)
 		defer aiPool.Close()
 
 		err = aiPool.Preflight(

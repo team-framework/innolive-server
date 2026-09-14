@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"inno-live-server/internal/ai"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
 
@@ -446,8 +447,12 @@ func (s *Server) rollbackReferenceRegistrations(ctx context.Context, clientID st
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), referenceRollbackTimeout)
 	defer cancel()
 	for _, face := range registered {
-		if err := s.ai.DeleteWhitelistEntries(ctx, clientID, face.EntryIDs); err != nil {
-			s.logger.Error("rollback reference whitelist entries failed", "client_id", clientID, "face_id", face.FaceID, "error", err)
+		err := ai.RetryWhitelistDelete(ctx, func(c context.Context) error {
+			return s.ai.DeleteWhitelistEntries(c, clientID, face.EntryIDs)
+		})
+		if err != nil {
+			s.logger.Error("rollback reference whitelist entries failed after retries; stale worker entries may remain",
+				"client_id", clientID, "face_id", face.FaceID, "error", err)
 		}
 	}
 }

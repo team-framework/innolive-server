@@ -53,6 +53,10 @@ type countingAIServer struct {
 	name           string
 	whitelistCalls atomic.Int32
 
+	// deleteFailsLeft: >0이면 그만큼의 DeleteWhitelist 호출을 Unavailable로
+	// 떨어뜨린 뒤 정상 동작한다. 재시도가 일시적 실패를 넘기는지 검증용.
+	deleteFailsLeft atomic.Int32
+
 	mu      sync.Mutex
 	entries []string
 	nextID  int
@@ -71,6 +75,10 @@ func (s *countingAIServer) AddWhitelist(context.Context, *aiv1.FaceData) (*aiv1.
 func (s *countingAIServer) DeleteWhitelist(_ context.Context, request *aiv1.DeleteWhitelistRequest) (*aiv1.WhitelistResponse, error) {
 	if strings.TrimSpace(request.GetEntryId()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "entry_id must not be empty or whitespace-only")
+	}
+	if s.deleteFailsLeft.Load() > 0 {
+		s.deleteFailsLeft.Add(-1)
+		return nil, status.Error(codes.Unavailable, "worker temporarily down")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,5 +283,77 @@ func TestPoolRollbackPartialAddIgnoresCancelledContext(t *testing.T) {
 
 	if entries := healthy.snapshot(); len(entries) != 0 {
 		t.Fatalf("worker entries = %v, want empty — rollback must not ride the cancelled context", entries)
+	}
+}
+
+func TestRetryWhitelistDeleteSucceedsAfterTransientFailures(t *testing.T) {
+	calls := 0
+	err := RetryWhitelistDelete(context.Background(), func(context.Context) error {
+		calls++
+		if calls < 3 {
+			return status.Error(codes.Unavailable, "down")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryWhitelistDelete() = %v, want nil after recovery", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3 (two failures then success)", calls)
+	}
+}
+
+func TestRetryWhitelistDeleteReturnsLastErrorWhenAllFail(t *testing.T) {
+	calls := 0
+	sentinel := status.Error(codes.Unavailable, "still down")
+	err := RetryWhitelistDelete(context.Background(), func(context.Context) error {
+		calls++
+		return sentinel
+	})
+	if err == nil {
+		t.Fatal("RetryWhitelistDelete() = nil, want the last error after exhausting retries")
+	}
+	if calls != whitelistDeleteAttempts {
+		t.Fatalf("calls = %d, want %d", calls, whitelistDeleteAttempts)
+	}
+}
+
+func TestRetryWhitelistDeleteStopsOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := RetryWhitelistDelete(ctx, func(context.Context) error {
+		calls++
+		return status.Error(codes.Unavailable, "down")
+	})
+	if err == nil {
+		t.Fatal("want context error")
+	}
+	// First attempt runs, then the cancelled context stops the backoff wait.
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 before the cancelled backoff", calls)
+	}
+}
+
+// A partial AddWhitelist whose compensating delete first fails must still clear
+// the entry once the worker recovers, thanks to the rollback retry (#215).
+func TestPoolRollbackPartialAddRetriesTransientDeleteFailure(t *testing.T) {
+	healthy := &countingAIServer{name: "a"}
+	healthy.deleteFailsLeft.Store(2) // first two rollback deletes fail, third succeeds
+	unreachable, err := New("127.0.0.1:1", 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := &Pool{clients: []*Client{
+		newBufconnClient(t, "worker-a", healthy),
+		unreachable,
+	}}
+	defer unreachable.Close()
+
+	if _, err := pool.AddWhitelist(context.Background(), "session", []byte("face")); err == nil {
+		t.Fatal("AddWhitelist() with an unreachable worker should fail")
+	}
+	if entries := healthy.snapshot(); len(entries) != 0 {
+		t.Fatalf("healthy worker entries = %v, want empty after retried rollback", entries)
 	}
 }

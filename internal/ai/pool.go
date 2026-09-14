@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,51 @@ import (
 type Pool struct {
 	clients []*Client
 	next    atomic.Uint64
+	logger  *slog.Logger
+}
+
+// SetLogger wires a logger so best-effort paths (like whitelist rollback) can
+// report a failure that survives every retry. A nil logger is valid and silent.
+func (p *Pool) SetLogger(logger *slog.Logger) {
+	if p != nil {
+		p.logger = logger
+	}
+}
+
+// RetryWhitelistDelete is the exported form of retryWhitelistDelete, so callers
+// outside this package (a handler rolling back its own registrations) apply the
+// same retry policy to a compensating whitelist delete.
+func RetryWhitelistDelete(ctx context.Context, del func(context.Context) error) error {
+	return retryWhitelistDelete(ctx, del)
+}
+
+// whitelistDeleteAttempts is how many times a compensating whitelist delete is
+// tried before giving up. A worker that is briefly down or wedged usually
+// recovers within these, so a stale entry is not left behind for a transient
+// failure.
+const whitelistDeleteAttempts = 3
+
+// retryWhitelistDelete runs a compensating whitelist delete a few times with a
+// short growing backoff, stopping on the first success. It exists because a
+// rollback that fails silently leaves exactly the stale entry the rollback was
+// meant to remove. A cancelled context ends the retries early.
+func retryWhitelistDelete(ctx context.Context, del func(context.Context) error) error {
+	backoff := 100 * time.Millisecond
+	var err error
+	for attempt := 0; attempt < whitelistDeleteAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			backoff *= 2
+		}
+		if err = del(ctx); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
@@ -105,7 +151,13 @@ func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) 
 func (p *Pool) rollbackPartialAdd(ctx context.Context, sessionID string, entryIDs map[string]string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partialAddRollbackTimeout)
 	defer cancel()
-	_ = p.DeleteWhitelistEntries(ctx, sessionID, entryIDs)
+	err := retryWhitelistDelete(ctx, func(c context.Context) error {
+		return p.DeleteWhitelistEntries(c, sessionID, entryIDs)
+	})
+	if err != nil && p.logger != nil {
+		p.logger.Error("partial whitelist add rollback failed after retries; stale worker entries may remain",
+			"session_id", sessionID, "error", err)
+	}
 }
 
 // DeleteWhitelistEntries removes one registered face from every worker holding

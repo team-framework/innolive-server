@@ -332,6 +332,17 @@ func clientIPFromForwarded(remoteAddr, forwardedFor string, trusted []*net.IPNet
 	return host
 }
 
+// remoteIsTrustedProxy는 요청의 RemoteAddr(직접 연결한 상대)가 신뢰 프록시
+// 대역에 속하는지 판단한다. per-IP 상한을 적용해도 되는지 가리는 데 쓴다.
+func remoteIsTrustedProxy(remoteAddr string, trusted []*net.IPNet) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && isTrustedProxy(ip, trusted)
+}
+
 func isTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
 	for _, proxy := range trusted {
 		if proxy != nil && proxy.Contains(ip) {

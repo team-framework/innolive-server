@@ -37,6 +37,12 @@ type frame struct {
 	data      []byte
 	timestamp uint32
 	stageAt   time.Time
+	// decodeInAt is when this frame finished being written to the FFmpeg
+	// decoder's stdin, splitting the merged "decode" stage into the wait
+	// before decode (compressed queue + stdin backpressure) and the FFmpeg
+	// round-trip itself. Set only on the VP8 decode path; the zero value
+	// elsewhere carries no observation (#177).
+	decodeInAt time.Time
 	// ingestAt is when this frame was first assembled from RTP, preserved
 	// unchanged through decode/blur/encode so the egress can measure the full
 	// ingest→pipe-write latency (the blur pipeline delay that A/V sync must

@@ -233,3 +233,47 @@ func TestPoolAddWhitelistReportsFailedTarget(t *testing.T) {
 		t.Fatalf("healthy worker calls = %d, want 1 (broadcast must still attempt all)", healthy.whitelistCalls.Load())
 	}
 }
+
+// A broadcast that fails on one worker must not leave the face registered on the
+// workers that accepted it. Only the broadcast ever sees those entry ids, so a
+// caller told "registration failed" has no way to remove them later (#205).
+func TestPoolAddWhitelistRollsBackPartialRegistration(t *testing.T) {
+	healthy := &countingAIServer{name: "a"}
+	unreachable, err := New("127.0.0.1:1", 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := &Pool{clients: []*Client{
+		newBufconnClient(t, "worker-a", healthy),
+		unreachable,
+	}}
+	defer unreachable.Close()
+
+	if _, err := pool.AddWhitelist(context.Background(), "session", []byte("face")); err == nil {
+		t.Fatal("AddWhitelist() with an unreachable worker should fail")
+	}
+	if entries := healthy.snapshot(); len(entries) != 0 {
+		t.Fatalf("healthy worker entries = %v, want empty — a failed add must register nowhere", entries)
+	}
+}
+
+// The rollback must survive a cancelled request context: a client that
+// disconnects mid-upload cancels it, and that cancellation is itself one of the
+// ways the broadcast fails.
+func TestPoolRollbackPartialAddIgnoresCancelledContext(t *testing.T) {
+	healthy := &countingAIServer{name: "a"}
+	pool := &Pool{clients: []*Client{newBufconnClient(t, "worker-a", healthy)}}
+
+	result, err := pool.AddWhitelist(context.Background(), "session", []byte("face"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pool.rollbackPartialAdd(ctx, "session", result.EntryIDs)
+
+	if entries := healthy.snapshot(); len(entries) != 0 {
+		t.Fatalf("worker entries = %v, want empty — rollback must not ride the cancelled context", entries)
+	}
+}

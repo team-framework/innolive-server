@@ -14,6 +14,8 @@ import (
 
 var guestSSEStatusInterval = 15 * time.Second
 
+var guestSSEWriteTimeout = 10 * time.Second
+
 func (s *Server) guestID(w http.ResponseWriter, r *http.Request, create bool) (string, bool) {
 	if cookie, err := r.Cookie(guestCookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
 		return cookie.Value, true
@@ -122,6 +124,19 @@ func (s *Server) handleGuestQueueEvents(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// 구독·연결 슬롯을 만들기 전에 티켓 소유권과 존재를 확인해, 무효한 티켓이
+	// 자원을 점유하지 못하게 한다.
+	if _, err := s.guestQueue.Status(r.Context(), guest, id); err != nil {
+		s.guestQueueError(w, err)
+		return
+	}
+	events, release, ok := s.guestQueue.SubscribeEvents(id)
+	if !ok {
+		w.Header().Set("Retry-After", "30")
+		writeError(w, apiError{Status: http.StatusTooManyRequests, Code: "too_many_connections", Message: "Too many concurrent event streams for this ticket."})
+		return
+	}
+	defer release()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -130,10 +145,10 @@ func (s *Server) handleGuestQueueEvents(w http.ResponseWriter, r *http.Request) 
 		writeError(w, internalError())
 		return
 	}
-	pubsub := s.guestQueue.Subscribe(r.Context())
-	defer pubsub.Close()
-	channel := pubsub.Channel()
+	rc := http.NewResponseController(w)
 	send := func() bool {
+		// 느린 수신자가 handler 고루틴을 무기한 잡지 않도록 쓰기 시간을 제한한다.
+		_ = rc.SetWriteDeadline(time.Now().Add(guestSSEWriteTimeout))
 		ticket, err := s.guestQueue.Status(r.Context(), guest, id)
 		if err != nil {
 			event, code := "error", "queue_unavailable"
@@ -169,9 +184,10 @@ func (s *Server) handleGuestQueueEvents(w http.ResponseWriter, r *http.Request) 
 			if !send() {
 				return
 			}
+			_ = rc.SetWriteDeadline(time.Now().Add(guestSSEWriteTimeout))
 			fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
-		case <-channel:
+		case <-events:
 			if !send() {
 				return
 			}

@@ -249,3 +249,104 @@ func newGuestQueueTestManager(t *testing.T, maxSessions int) *session.Manager {
 	t.Cleanup(manager.CloseAll)
 	return manager
 }
+
+func TestGuestQueueSubscribeEventsEnforcesPerTicketLimit(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	queue := &GuestQueue{client: client}
+	t.Cleanup(func() { _ = queue.Close() })
+
+	releases := make([]func(), 0, guestSSEMaxPerTicket)
+	for i := 0; i < guestSSEMaxPerTicket; i++ {
+		_, release, ok := queue.SubscribeEvents("ticket-a")
+		if !ok {
+			t.Fatalf("connection %d rejected below limit", i)
+		}
+		releases = append(releases, release)
+	}
+	if _, _, ok := queue.SubscribeEvents("ticket-a"); ok {
+		t.Fatal("connection over limit accepted, want rejected")
+	}
+	// 다른 티켓은 독립적으로 상한을 가진다.
+	if _, release, ok := queue.SubscribeEvents("ticket-b"); !ok {
+		t.Fatal("independent ticket rejected")
+	} else {
+		release()
+	}
+	// 슬롯 해제 후에는 다시 받아들인다.
+	releases[0]()
+	if _, release, ok := queue.SubscribeEvents("ticket-a"); !ok {
+		t.Fatal("connection rejected after release, want accepted")
+	} else {
+		release()
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestGuestQueueSubscribeEventsSharesOneRedisSubscription(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	queue := &GuestQueue{client: client}
+	t.Cleanup(func() { _ = queue.Close() })
+
+	const conns = 3
+	channels := make([]<-chan struct{}, 0, conns)
+	releases := make([]func(), 0, conns)
+	for i := 0; i < conns; i++ {
+		ch, release, ok := queue.SubscribeEvents("ticket-a")
+		if !ok {
+			t.Fatalf("SubscribeEvents %d rejected", i)
+		}
+		channels = append(channels, ch)
+		releases = append(releases, release)
+	}
+
+	// SSE 연결이 여러 개라도 Redis 구독은 정확히 하나여야 한다.
+	waitFor(t, func() bool {
+		return redisServer.PubSubNumSub(guestQueueChannel)[guestQueueChannel] == 1
+	}, "want exactly one Redis subscription for many SSE connections")
+
+	if _, err := queue.client.Publish(context.Background(), guestQueueChannel, "changed").Result(); err != nil {
+		t.Fatal(err)
+	}
+	// 한 번의 발행이 모든 연결에 fan-out돼야 한다.
+	for i, ch := range channels {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("connection %d did not receive fan-out event", i)
+		}
+	}
+
+	for _, release := range releases {
+		release()
+	}
+	// 마지막 구독자가 나가면 Redis 구독을 닫는다.
+	waitFor(t, func() bool {
+		return redisServer.PubSubNumSub(guestQueueChannel)[guestQueueChannel] == 0
+	}, "want Redis subscription closed after last connection releases")
+}
+
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}

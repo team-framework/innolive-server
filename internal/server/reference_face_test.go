@@ -806,3 +806,57 @@ func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
 		t.Fatalf("status after cancelled upload = %+v, want count 0", status)
 	}
 }
+
+// A body that never finishes arriving must hit the upload read deadline instead
+// of holding the handler and its connection open (#207). Driven over a raw
+// connection so the assertion is about the server, not about when a client
+// stops writing.
+func TestUploadStalledBodyHitsReadDeadline(t *testing.T) {
+	previous := referenceUploadReadTimeout
+	referenceUploadReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { referenceUploadReadTimeout = previous })
+
+	httpServer, _, _ := newReferenceFaceTestServer(t, 1)
+
+	var head bytes.Buffer
+	writer := multipart.NewWriter(&head)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="images"; filename="slow.jpg"`)
+	header.Set("Content-Type", "image/jpeg")
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	// The writer is deliberately left open: the multipart terminator never
+	// arrives, so the handler keeps reading until the deadline fires.
+
+	address := strings.TrimPrefix(httpServer.URL, "http://")
+	connection, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+
+	// A large Content-Length with only the first chunk actually sent is the
+	// trickling client: the server must not wait for the rest forever.
+	request := fmt.Sprintf("POST /reference-face HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n",
+		address, writer.FormDataContentType(), head.Len()+1<<20)
+	if _, err := connection.Write(append([]byte(request), head.Bytes()...)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("stalled upload was not cut off by the read deadline: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a body that never finished arriving", response.StatusCode)
+	}
+}

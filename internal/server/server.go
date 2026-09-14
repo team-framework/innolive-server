@@ -902,6 +902,15 @@ type reqWriter struct {
 	requestID string
 }
 
+// Unwrap exposes the writer underneath so http.ResponseController reaches the
+// real connection. Without it every SetReadDeadline/SetWriteDeadline call on a
+// wrapped writer fails with ErrNotSupported — silently, because those calls are
+// best-effort — which disabled the guest SSE write timeout and the reference
+// upload's body read deadline.
+func (w *reqWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // Hijack forwards to the underlying writer so WebSocket upgrades (the /signaling
 // endpoint) keep working — gorilla/websocket requires http.Hijacker, which the
 // wrapper would otherwise hide.

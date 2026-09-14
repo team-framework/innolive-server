@@ -28,6 +28,11 @@ import (
 
 const maxReferenceUpload = 10 << 20
 
+// referenceUploadReadTimeout bounds how long the whole request body may take to
+// arrive. Generous enough for a multi-megabyte upload on a mobile connection,
+// short enough that a stalled sender gives the slot back.
+var referenceUploadReadTimeout = 60 * time.Second
+
 // maxAIFaceEdge is the AI worker's B1-640 long-edge limit. Uploads larger than
 // this are rejected by AddWhitelist, so we downscale before registering.
 const maxAIFaceEdge = 640
@@ -288,6 +293,13 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	if s.ai == nil {
 		writeError(w, apiError{Status: http.StatusBadRequest, Code: "bad_request", Message: "AI privacy mode is not enabled.", Details: map[string]any{"reason": "ai_disabled"}})
 		return
+	}
+	// The server sets no body read timeout (a global one would also cut off the
+	// signaling websocket and the guest SSE stream), so bound this upload here:
+	// the body may be up to maxReferenceUpload*20, and a connection trickling
+	// those bytes would otherwise hold the handler open indefinitely (#207).
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(referenceUploadReadTimeout)); err != nil {
+		s.logger.Warn("set reference upload read deadline failed", "error", err)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxReferenceUpload*20)
 	if err := r.ParseMultipartForm(maxReferenceUpload); err != nil {

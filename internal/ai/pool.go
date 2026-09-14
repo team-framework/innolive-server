@@ -73,12 +73,39 @@ type WhitelistResult struct {
 	EntryIDs map[string]string
 }
 
+// partialAddRollbackTimeout bounds the compensating delete below. The request
+// context is often already cancelled when the broadcast fails, so the rollback
+// runs detached and needs a deadline of its own.
+const partialAddRollbackTimeout = 5 * time.Second
+
 // AddWhitelist registers a client's reference face on every AI worker (sessions
 // spread round-robin across targets, so the whitelist must exist on all of them).
+//
+// An error means the face is registered nowhere: workers that did accept it are
+// rolled back here. Callers cannot do that themselves — the entry ids are minted
+// per worker and only this broadcast ever sees the ones from a partial success,
+// so returning an error while leaving those workers excluding the face from blur
+// would strand it permanently.
 func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*WhitelistResult, error) {
-	return p.broadcast("add", func(c *Client) (*aiv1.WhitelistResponse, error) {
+	result, err := p.broadcast("add", func(c *Client) (*aiv1.WhitelistResponse, error) {
 		return c.AddWhitelist(ctx, sessionID, data)
 	})
+	if err != nil {
+		if result != nil && len(result.EntryIDs) > 0 {
+			p.rollbackPartialAdd(ctx, sessionID, result.EntryIDs)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+// rollbackPartialAdd removes the entries a failed AddWhitelist did manage to
+// register. Best-effort: the caller is already reporting the failure, so a
+// delete that also fails is only logged by the worker side and dropped here.
+func (p *Pool) rollbackPartialAdd(ctx context.Context, sessionID string, entryIDs map[string]string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partialAddRollbackTimeout)
+	defer cancel()
+	_ = p.DeleteWhitelistEntries(ctx, sessionID, entryIDs)
 }
 
 // DeleteWhitelistEntries removes one registered face from every worker holding
@@ -132,7 +159,8 @@ func ignoreNotFound(err error) error {
 // broadcast runs op on every worker concurrently. A partial failure is reported
 // naming the failed targets (the caller may retry — workers treat re-application
 // as idempotent), and a worker-side rejection ("failed" status) is surfaced
-// through the returned response.
+// through the returned response. On a partial failure both the result and the
+// error are returned, so the caller can act on what did succeed.
 func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse, error)) (*WhitelistResult, error) {
 	type outcome struct {
 		address  string
@@ -163,7 +191,10 @@ func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse,
 		}
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
+		// The partial result travels with the error: the entry ids from the
+		// workers that succeeded exist nowhere else, and AddWhitelist needs them
+		// to undo the partial registration.
+		return result, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
 	}
 	return result, nil
 }

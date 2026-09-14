@@ -224,3 +224,78 @@ func TestRealProcessorRawBlackoutFrame(t *testing.T) {
 		}
 	}
 }
+
+func TestRealProcessorSelfHealsAfterAIRecovers(t *testing.T) {
+	calls := 0
+	failing := true
+	ai := &fakeAIStream{process: func(_ []byte, ts int64) (*aiv1.ProcessedVideoChunk, error) {
+		calls++
+		if failing {
+			return nil, errors.New("ai unavailable")
+		}
+		return &aiv1.ProcessedVideoChunk{Data: []byte("ok"), Timestamp: ts, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Probe every frame so recovery is observable without waiting the interval.
+	processor.recoveryProbeInterval = 0
+
+	// First failure latches.
+	if _, err := processor.Process(context.Background(), []byte("f"), 1, 64, 48); err != nil {
+		t.Fatalf("Process() at latch = %v", err)
+	}
+	if !processor.FallbackActive() {
+		t.Fatal("session did not latch after AI failure")
+	}
+
+	// While still failing, the session stays latched but keeps probing.
+	if _, err := processor.Process(context.Background(), []byte("f"), 2, 64, 48); err != nil {
+		t.Fatal(err)
+	}
+	if !processor.FallbackActive() {
+		t.Fatal("session unlatched while AI still failing")
+	}
+
+	// AI recovers: the next probe must clear the latch and return real output.
+	failing = false
+	out, err := processor.Process(context.Background(), []byte("f"), 3, 64, 48)
+	if err != nil {
+		t.Fatalf("recovery Process() error = %v", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("recovery output = %q, want %q", out, "ok")
+	}
+	if processor.FallbackActive() {
+		t.Fatal("session still latched after the AI recovered")
+	}
+}
+
+func TestRealProcessorLatchedProbeIntervalThrottlesAI(t *testing.T) {
+	calls := 0
+	ai := &fakeAIStream{process: func([]byte, int64) (*aiv1.ProcessedVideoChunk, error) {
+		calls++
+		return nil, errors.New("ai unavailable")
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the default 1s interval: frames arriving back-to-back after the latch
+	// must not each hit the AI.
+	if _, err := processor.Process(context.Background(), []byte("f"), 1, 64, 48); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("AI calls at latch = %d, want 1", calls)
+	}
+	for i := 2; i <= 10; i++ {
+		if _, err := processor.Process(context.Background(), []byte("f"), int64(i), 64, 48); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("AI calls during sub-interval latched frames = %d, want still 1", calls)
+	}
+}

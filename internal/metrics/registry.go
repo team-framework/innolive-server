@@ -47,6 +47,7 @@ type Registry struct {
 
 	mu                  sync.RWMutex
 	aiFallbackLatched   map[string]uint64
+	aiFallbackRecovered map[string]uint64
 	aiFallbackFrames    map[string]uint64
 	aiInputPausedFrames map[string]uint64
 	aiTargetSessions    map[string]uint64
@@ -70,6 +71,7 @@ type Registry struct {
 func New() *Registry {
 	return &Registry{
 		aiFallbackLatched:   make(map[string]uint64),
+		aiFallbackRecovered: make(map[string]uint64),
 		aiFallbackFrames:    make(map[string]uint64),
 		aiInputPausedFrames: make(map[string]uint64),
 		aiTargetSessions:    make(map[string]uint64),
@@ -124,6 +126,10 @@ func (r *Registry) IncAIFallbackLatched(mode string) {
 
 func (r *Registry) IncAIFallbackFrame(mode string) {
 	r.increment(r.aiFallbackFrames, mode)
+}
+
+func (r *Registry) IncAIFallbackRecovered(mode string) {
+	r.increment(r.aiFallbackRecovered, mode)
 }
 
 // IncAIInputPausedFrame은 방송 일시 중지 중 AI worker로 보내지 않고 버린
@@ -268,6 +274,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_latched_total", "Number of sessions that latched the fail-closed blackout after an AI failure.", "mode", r.aiFallbackLatched)
+	writeLabeledCountersWithKey(w, "innolive_ai_fallback_recovered_total", "Number of times a latched session recovered when the AI boundary succeeded again.", "mode", r.aiFallbackRecovered)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_input_paused_frames_total", "Number of camera frames discarded before AI processing while a broadcast is paused.", "mode", r.aiInputPausedFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)

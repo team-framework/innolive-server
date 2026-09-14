@@ -51,6 +51,11 @@ type fakeAIWorker struct {
 	clearStarted     chan struct{}
 	allowClear       chan struct{}
 	clearStartedOnce sync.Once
+
+	// onAdd, when set, runs at the start of every AddWhitelist with the number
+	// of entries already registered and the call's context, so a test can drive
+	// what happens between two files of the same upload.
+	onAdd func(ctx context.Context, registered int)
 }
 
 func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData) (*aiv1.WhitelistResponse, error) {
@@ -67,6 +72,15 @@ func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData)
 	}
 	if bytes.Contains(request.GetData(), []byte("REJECT")) {
 		return &aiv1.WhitelistResponse{StatusMessage: "failed: No face detected"}, nil
+	}
+	if w.onAdd != nil {
+		w.mu.Lock()
+		registered := len(w.entries)
+		w.mu.Unlock()
+		w.onAdd(ctx, registered)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -726,4 +740,69 @@ func getReferenceStatus(t *testing.T, baseURL string) referenceStatus {
 		t.Fatal(err)
 	}
 	return status
+}
+
+// A client that disconnects mid-upload cancels the request context, which is
+// itself one of the ways a later AddWhitelist fails. The rollback must still
+// remove the entry the earlier file registered (#201) — running it on the
+// cancelled context would leave the worker excluding that face from blur.
+func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
+	httpServer, workers, _ := newReferenceFaceTestServer(t, 1)
+	worker := workers[0]
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	// Drop the client once the first file is registered and the second file's
+	// call has started. Waiting for the server side to observe the cancellation
+	// keeps that second call's failure deterministic.
+	worker.onAdd = func(ctx context.Context, registered int) {
+		if registered != 1 {
+			return
+		}
+		cancelRequest()
+		<-ctx.Done()
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, name := range []string{"first.jpg", "second.jpg"} {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="images"; filename=%q`, name))
+		header.Set("Content-Type", "image/jpeg")
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte("ok")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, httpServer.URL+"/reference-face", &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if response, err := http.DefaultClient.Do(request); err == nil {
+		response.Body.Close()
+		t.Fatal("request succeeded, want client cancellation")
+	}
+
+	// The handler outlives the cancelled client, so wait for the rollback.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries := worker.snapshot()
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker entries = %v, want empty after rollback", entries)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status := getReferenceStatus(t, httpServer.URL); status.Count != 0 {
+		t.Fatalf("status after cancelled upload = %+v, want count 0", status)
+	}
 }

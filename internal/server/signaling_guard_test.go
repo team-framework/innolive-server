@@ -195,6 +195,32 @@ func TestSignalingAppliesPerIPCapWithoutTrustedProxy(t *testing.T) {
 	resp.Body.Close()
 }
 
+// 리버스 프록시가 X-Forwarded-For를 붙이지만 신뢰 프록시로 등록돼 있지 않으면
+// (운영에서 GUEST_QUEUE_TRUSTED_PROXY_CIDRS 미설정 시 그렇다) 모든 요청이 프록시의
+// 소켓 주소 하나로 모인다. 그때 per-IP 상한을 적용하면 정상 사용자끼리 버킷을
+// 공유해 세션 슬롯보다 먼저 막히므로, per-IP를 생략하고 전역 상한에만 맡긴다.
+func TestSignalingSkipsPerIPWhenForwardedButProxyUntrusted(t *testing.T) {
+	restoreSignalingGuards(t)
+	signalingMaxConns = 64
+	signalingMaxConnsPerIP = 1
+
+	// 신뢰 프록시를 설정하지 않는다. httptest는 127.0.0.1에서 접속하므로 XFF가
+	// 있어도 그 앞단은 미신뢰다 — 프록시 뒤 공유 소켓 주소 상황과 같다.
+	application, manager := newTestApplication(t)
+	defer manager.CloseAll()
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	first := dialSignaling(t, httpServer.URL, http.Header{"X-Forwarded-For": []string{"198.51.100.10"}})
+	defer first.Close()
+	// per-IP=1이지만 같은 프록시 소켓 주소로 온 두 번째 연결도 통과해야 한다.
+	second := dialSignaling(t, httpServer.URL, http.Header{"X-Forwarded-For": []string{"198.51.100.11"}})
+	if second == nil {
+		t.Fatal("per-IP cap wrongly rejected a second forwarded client behind an untrusted proxy")
+	}
+	second.Close()
+}
+
 func TestSignalingPerIPConnectionCap(t *testing.T) {
 	restoreSignalingGuards(t)
 	signalingMaxConns = 64

@@ -136,7 +136,17 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 	maxConns := signalingMaxConns
 	maxPerIP := signalingMaxConnsPerIP
 
+	// per-IP 상한은 클라이언트 IP를 신뢰할 수 있을 때만 의미가 있다. 요청에
+	// X-Forwarded-For가 붙었는데 그 앞단(RemoteAddr)이 신뢰 프록시로 등록돼
+	// 있지 않으면, clientIPFromForwarded는 spoof 가능한 헤더를 버리고 프록시의
+	// 소켓 주소를 쓴다. 그러면 모든 사용자가 같은 IP 버킷을 공유해, 상한이
+	// 정상 사용자를 세션 슬롯보다 먼저 막는다(리버스 프록시 뒤 공유 버킷).
+	// 그런 경우 per-IP를 생략하고 전역 상한에만 맡긴다. 프록시가 없는 직결
+	// 환경(XFF 없음)이나 신뢰 프록시가 설정된 환경에서는 그대로 적용된다.
 	ip := clientIPFromForwarded(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), s.signalingTrustedProxies)
+	if r.Header.Get("X-Forwarded-For") != "" && !remoteIsTrustedProxy(r.RemoteAddr, s.signalingTrustedProxies) {
+		maxPerIP = 0
+	}
 	if !s.signalingConns.tryAcquire(ip, maxConns, maxPerIP) {
 		writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "capacity_exceeded", Message: "Too many signaling connections."})
 		return

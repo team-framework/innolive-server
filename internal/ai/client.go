@@ -109,7 +109,10 @@ type Stream struct {
 	streamCancel context.CancelFunc
 }
 
-func (s *Stream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+// Process는 한 프레임을 AI로 보내고 응답을 받는다. pixFmt가 비어 있지 않으면
+// data는 raw 픽셀(예: "yuv420p")이며, AI가 해석할 수 있도록 width/height를 함께
+// 싣는다. pixFmt가 비면 data는 자기서술적 JPEG이라 width/height는 무시된다.
+func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -124,6 +127,9 @@ func (s *Stream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChun
 		Timestamp:  timestamp,
 		SessionId:  s.sessionID,
 		OutputMode: aiv1.VideoOutputMode_VIDEO_OUTPUT_MODE_MOSAIC_JPEG,
+		Width:      uint32(width),
+		Height:     uint32(height),
+		PixFmt:     pixFmt,
 	}
 	if err := runWithContext(callCtx, func() error { return s.stream.Send(request) }); err != nil {
 		s.reset()

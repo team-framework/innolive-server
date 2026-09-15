@@ -60,7 +60,7 @@ func TestClientUsesStreamingAndWhitelistContracts(t *testing.T) {
 
 	stream := client.NewStream(ctx, "")
 	defer stream.Close()
-	response, err := stream.Process([]byte("frame"), 123)
+	response, err := stream.Process([]byte("frame"), 123, 0, 0, "")
 	if err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}

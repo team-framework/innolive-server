@@ -22,7 +22,7 @@ import (
 )
 
 type AIStream interface {
-	Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error)
+	Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error)
 	Close()
 }
 
@@ -239,7 +239,7 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 				return p.serveBlackout(frame, width, height, nil)
 			}
 			p.lastProbeAt = time.Now()
-			output, err := p.processImage(frame, timestamp)
+			output, err := p.processImage(frame, timestamp, width, height)
 			if err != nil {
 				return p.serveBlackout(frame, width, height, err)
 			}
@@ -251,7 +251,7 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 			p.logger.Info("AI processing recovered; clearing fail-closed blackout latch for this session")
 			return output, nil
 		}
-		output, err := p.processImage(frame, timestamp)
+		output, err := p.processImage(frame, timestamp, width, height)
 		if err == nil {
 			p.consecutiveTimeouts.Store(0)
 			return output, nil
@@ -284,16 +284,25 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 	}
 }
 
-func (p *Processor) ProcessImage(frame []byte, timestamp int64) ([]byte, error) {
+func (p *Processor) ProcessImage(frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
 	p.aiMu.RLock()
 	defer p.aiMu.RUnlock()
 	if p.aiInputPaused {
 		return nil, errAIInputPaused
 	}
-	return p.processImage(frame, timestamp)
+	return p.processImage(frame, timestamp, width, height)
 }
 
-func (p *Processor) processImage(frame []byte, timestamp int64) ([]byte, error) {
+// aiPixFmt는 raw wire 포맷일 때 AI가 data를 해석할 픽셀 포맷을 돌려준다.
+// JPEG는 자기서술적이라 빈 문자열이다.
+func (p *Processor) aiPixFmt() string {
+	if p.wireFormat == config.WireFormatRaw {
+		return "yuv420p"
+	}
+	return ""
+}
+
+func (p *Processor) processImage(frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
 	startedAt := time.Now()
 	defer func() { p.metrics.ObserveProcessing(string(p.mode), time.Since(startedAt)) }()
 	if p.mode != config.PrivacyModeReal {
@@ -301,7 +310,7 @@ func (p *Processor) processImage(frame []byte, timestamp int64) ([]byte, error) 
 	}
 
 	aiStartedAt := time.Now()
-	response, err := p.ai.Process(frame, timestamp)
+	response, err := p.ai.Process(frame, timestamp, width, height, p.aiPixFmt())
 	p.metrics.ObserveAI(string(p.mode), time.Since(aiStartedAt))
 	p.metrics.ObserveStage("grpc", time.Since(aiStartedAt))
 	if err != nil {

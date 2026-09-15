@@ -35,6 +35,14 @@ message VideoChunk {
   string session_id = 5;
   // Response payload requested for this stream. Unspecified returns a server-processed JPEG.
   VideoOutputMode output_mode = 6;
+  // 7 is reserved to stay aligned with the AI proto, where it is mosaic_config.
+  reserved 7;
+  // Frame width in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
+  uint32 width = 8;
+  // Frame height in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
+  uint32 height = 9;
+  // Pixel format of data when it is raw (e.g. "yuv420p"). Empty means data is a self-describing JPEG.
+  string pix_fmt = 10;
 }
 
 enum VideoOutputMode {

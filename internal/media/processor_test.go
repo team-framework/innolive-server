@@ -13,11 +13,15 @@ import (
 )
 
 type fakeAIStream struct {
-	process func([]byte, int64) (*aiv1.ProcessedVideoChunk, error)
-	close   func()
+	process    func([]byte, int64) (*aiv1.ProcessedVideoChunk, error)
+	close      func()
+	lastWidth  uint16
+	lastHeight uint16
+	lastPixFmt string
 }
 
-func (f *fakeAIStream) Process(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+func (f *fakeAIStream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
+	f.lastWidth, f.lastHeight, f.lastPixFmt = width, height, pixFmt
 	return f.process(data, timestamp)
 }
 func (f *fakeAIStream) Close() {
@@ -44,6 +48,28 @@ func TestRealProcessorCallsAIWithImage(t *testing.T) {
 	}
 	if string(output) != "jpeg-output" {
 		t.Fatalf("output = %q", output)
+	}
+	if ai.lastPixFmt != "" {
+		t.Fatalf("jpeg wire sent pix_fmt = %q, want empty", ai.lastPixFmt)
+	}
+}
+
+// TestRealProcessorRawWireSendsDimensions는 raw wire 포맷에서 프레임을 보낼 때
+// AI가 raw 바이트를 해석할 수 있도록 pix_fmt=yuv420p와 width/height를 함께
+// 싣는지 검증한다.
+func TestRealProcessorRawWireSendsDimensions(t *testing.T) {
+	ai := &fakeAIStream{process: func(_ []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+		return &aiv1.ProcessedVideoChunk{Data: []byte("out"), Timestamp: timestamp, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatRaw, config.FailurePolicyFreeze, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := processor.Process(context.Background(), []byte("raw-bytes"), 7, 640, 480); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if ai.lastPixFmt != "yuv420p" || ai.lastWidth != 640 || ai.lastHeight != 480 {
+		t.Fatalf("raw wire sent pix_fmt=%q %dx%d, want yuv420p 640x480", ai.lastPixFmt, ai.lastWidth, ai.lastHeight)
 	}
 }
 
@@ -193,7 +219,7 @@ func TestProcessImageRejectsNonEmptyErrorCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processor.ProcessImage([]byte("in"), 1); err == nil {
+	if _, err := processor.ProcessImage([]byte("in"), 1, 64, 48); err == nil {
 		t.Fatal("ProcessImage() error = nil, want a failure for non-empty error_code")
 	}
 }

@@ -62,22 +62,28 @@ func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Du
 // Preflight는 이 worker를 상대로 합성 ProcessVideo 왕복을 한 번 수행한다.
 // deadline은 호출자가 ctx로 정한다.
 func (c *Client) Preflight(ctx context.Context, wireFormat string, pinLongEdge int) error {
-	if wireFormat == "raw" {
-		return errors.New("AI_FRAME_WIRE_FORMAT=raw is not supported by this AI server's proto (no width/height/pix_fmt fields) — use jpeg")
+	dim := probeDimension(pinLongEdge)
+	const timestamp int64 = 1
+	request := &aiv1.VideoChunk{
+		Timestamp: timestamp,
+		SessionId: "preflight",
 	}
-	data, err := syntheticFrame(probeDimension(pinLongEdge))
-	if err != nil {
-		return err
+	switch wireFormat {
+	case "raw":
+		request.Data = syntheticRawFrame(dim)
+		request.Width = uint32(dim)
+		request.Height = uint32(dim)
+		request.PixFmt = "yuv420p"
+	default:
+		data, err := syntheticFrame(dim)
+		if err != nil {
+			return err
+		}
+		request.Data = data
 	}
 	stream, err := c.client.ProcessVideo(ctx)
 	if err != nil {
 		return fmt.Errorf("open preflight stream: %w", err)
-	}
-	const timestamp int64 = 1
-	request := &aiv1.VideoChunk{
-		Data:      data,
-		Timestamp: timestamp,
-		SessionId: "preflight",
 	}
 	if err := stream.Send(request); err != nil {
 		return fmt.Errorf("send preflight frame: %w", err)
@@ -102,14 +108,27 @@ func (c *Client) Preflight(ctx context.Context, wireFormat string, pinLongEdge i
 	return nil
 }
 
-// syntheticFrame은 최소한의 회색조 JPEG 프로브 프레임을 만든다. jpeg만
-// 지원한다 — 이 AI 서버의 proto에는 width/height/pix_fmt 필드가 없어서 raw
-// yuv420p 와이어 포맷은 전달 자체가 불가능하다(Client.Preflight가 이 함수를
-// 부르기 전에 wireFormat=="raw"를 거부한다).
+// syntheticFrame은 최소한의 회색조 JPEG 프로브 프레임을 만든다.
 func syntheticFrame(dim int) ([]byte, error) {
 	var encoded bytes.Buffer
 	if err := jpeg.Encode(&encoded, image.NewGray(image.Rect(0, 0, dim, dim)), &jpeg.Options{Quality: 75}); err != nil {
 		return nil, fmt.Errorf("encode preflight jpeg: %w", err)
 	}
 	return encoded.Bytes(), nil
+}
+
+// syntheticRawFrame은 raw wire 포맷용 회색조 yuv420p 프로브 프레임을 만든다.
+// Y 평면은 0x10, 크로마(U·V)는 0x80으로 채운 중립 회색이다. dim은 config가
+// 짝수 해상도만 허용하므로 항상 짝수라 크로마 평면이 딱 맞아떨어진다.
+func syntheticRawFrame(dim int) []byte {
+	size := dim*dim + 2*((dim+1)/2)*((dim+1)/2)
+	buffer := make([]byte, size)
+	luma := dim * dim
+	for i := 0; i < luma; i++ {
+		buffer[i] = 0x10
+	}
+	for i := luma; i < size; i++ {
+		buffer[i] = 0x80
+	}
+	return buffer
 }

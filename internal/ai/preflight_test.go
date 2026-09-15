@@ -69,19 +69,50 @@ func TestPreflightPassesAgainstSuccessServer(t *testing.T) {
 	}
 }
 
-// TestPreflightRejectsRawWireFormat: 이 AI 서버의 proto에는 width/height/pix_fmt
-// 필드가 없어서 raw yuv420p는 전달 자체가 불가능하다 — Preflight는 raw 라벨을
-// 달고 jpeg 데이터를 조용히 보내는 대신 시끄럽게 거부해야 한다.
-func TestPreflightRejectsRawWireFormat(t *testing.T) {
-	client := preflightClient(t, echoAIServer{})
+// TestPreflightPassesRawWireFormat: raw wire 포맷은 이제 지원된다. Preflight는
+// width/height/pix_fmt를 채운 raw yuv420p 프로브를 보내고 성공 응답에 통과해야 한다.
+func TestPreflightPassesRawWireFormat(t *testing.T) {
+	server := &capturingAIServer{}
+	client := preflightClient(t, server)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := client.Preflight(ctx, "raw", 0)
-	if err == nil {
-		t.Fatal("Preflight(raw) error = nil, want a not-supported error")
+	if err := client.Preflight(ctx, "raw", 0); err != nil {
+		t.Fatalf("Preflight(raw) error = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("Preflight(raw) error = %v, want it to say raw is not supported", err)
+	if server.pixFmt != "yuv420p" {
+		t.Fatalf("raw probe pix_fmt = %q, want yuv420p", server.pixFmt)
+	}
+	if server.width != uint32(preflightDim) || server.height != uint32(preflightDim) {
+		t.Fatalf("raw probe dims = %dx%d, want %dx%d", server.width, server.height, preflightDim, preflightDim)
+	}
+	wantSize := preflightDim*preflightDim + 2*((preflightDim+1)/2)*((preflightDim+1)/2)
+	if server.dataLen != wantSize {
+		t.Fatalf("raw probe data = %d bytes, want %d", server.dataLen, wantSize)
+	}
+}
+
+// capturingAIServer는 첫 요청의 raw 메타데이터를 기록하고 data를 에코해 성공을
+// 보고한다.
+type capturingAIServer struct {
+	aiv1.UnimplementedAiProcessorServer
+	width, height uint32
+	pixFmt        string
+	dataLen       int
+}
+
+func (s *capturingAIServer) ProcessVideo(stream grpc.BidiStreamingServer[aiv1.VideoChunk, aiv1.ProcessedVideoChunk]) error {
+	for {
+		request, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		s.width, s.height, s.pixFmt, s.dataLen = request.Width, request.Height, request.PixFmt, len(request.Data)
+		if err := stream.Send(&aiv1.ProcessedVideoChunk{Timestamp: request.Timestamp, Data: request.Data, StatusMessage: "success"}); err != nil {
+			return err
+		}
 	}
 }
 

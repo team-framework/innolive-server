@@ -34,6 +34,8 @@ const state = {
   authEmail: null,
   refreshPromise: null,
   signupToken: null,
+  // 치지직 인가 요청에 실은 state. 콜백에서 돌아온 값과 대조한 뒤 폐기한다.
+  chzzkState: null,
   pc: null,
   ws: null,
   localStream: null,
@@ -169,6 +171,13 @@ function bindElements() {
     "sessionJson",
     "connectYoutubeBtn",
     "youtubeDetail",
+    "connectChzzkBtn",
+    "disconnectChzzkBtn",
+    "chzzkCallbackRow",
+    "chzzkCallbackUrl",
+    "chzzkCompleteRow",
+    "completeChzzkBtn",
+    "chzzkDetail",
     "broadcastYoutubeAccount",
     "broadcastVideoInput",
     "broadcastRtmpState",
@@ -205,6 +214,9 @@ function bindEvents() {
   els.verifyBtn.addEventListener("click", () => void verifySignup());
   els.signOutBtn.addEventListener("click", () => void signOut());
   els.connectYoutubeBtn.addEventListener("click", () => void connectYoutube());
+  els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
+  els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
+  els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
   els.authPassword.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       void signIn();
@@ -748,9 +760,13 @@ function renderAuth() {
   els.signOutBtn.hidden = !signedIn;
   // YouTube 연결은 로그인(이메일)과 별개의 부가 기능이다 — 로그인 상태에서만 노출.
   els.connectYoutubeBtn.hidden = !signedIn;
+  els.connectChzzkBtn.hidden = !signedIn;
   if (!signedIn) {
     els.youtubeDetail.hidden = true;
+    resetChzzkUi();
     resetBroadcastStatus();
+  } else {
+    void refreshChzzkAccount().catch(() => null);
   }
   els.authDetail.textContent = signedIn
     ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
@@ -915,6 +931,129 @@ async function connectYoutube() {
     },
   });
   codeClient.requestCode();
+}
+
+// 치지직 연결은 GIS 같은 팝업 SDK가 없는 순수 리다이렉트 흐름이다. 등록된
+// redirect_uri에 아직 페이지가 없어(404) 코드가 자동으로 돌아오지 않으므로,
+// 사용자가 동의 후 이동한 주소를 붙여넣어 완료한다. state는 여기서 만들고
+// 여기서 대조한다 — 서버는 보관하지 않는다(docs/api/AUTHENTICATION.md).
+function resetChzzkUi() {
+  state.chzzkState = null;
+  els.chzzkCallbackRow.hidden = true;
+  els.chzzkCompleteRow.hidden = true;
+  els.chzzkCallbackUrl.value = "";
+  els.chzzkDetail.hidden = true;
+  els.disconnectChzzkBtn.hidden = true;
+}
+
+function setChzzkDetail(text, isError) {
+  els.chzzkDetail.hidden = false;
+  els.chzzkDetail.textContent = text;
+  els.chzzkDetail.style.color = isError ? "var(--danger, #b00020)" : "";
+}
+
+async function connectChzzk() {
+  if (!state.accessToken) {
+    setChzzkDetail("먼저 로그인하세요.", true);
+    return;
+  }
+  const chzzkState = crypto.randomUUID();
+  let config;
+  try {
+    config = await apiFetch(`/auth/chzzk/config?state=${encodeURIComponent(chzzkState)}`);
+  } catch (error) {
+    setChzzkDetail(`서버에서 치지직 연동 설정을 받지 못했습니다: ${error.message}`, true);
+    return;
+  }
+  if (!config?.authorize_url) {
+    setChzzkDetail("서버가 authorize_url을 돌려주지 않았습니다.", true);
+    return;
+  }
+  state.chzzkState = chzzkState;
+  els.chzzkCallbackRow.hidden = false;
+  els.chzzkCompleteRow.hidden = false;
+  els.chzzkCallbackUrl.value = "";
+  setChzzkDetail("새 창에서 동의한 뒤, 이동한 페이지의 주소를 붙여넣고 '치지직 연결 완료'를 누르세요.");
+  window.open(config.authorize_url, "_blank", "noopener");
+}
+
+// parseChzzkCallback은 붙여넣은 콜백 주소에서 code·state를 꺼낸다. URL이 아니면
+// null — code만 붙여넣는 경로는 state 대조가 불가능하므로 받지 않는다.
+function parseChzzkCallback(raw) {
+  let url;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  const code = url.searchParams.get("code") || "";
+  const returnedState = url.searchParams.get("state") || "";
+  if (!code || !returnedState) {
+    return null;
+  }
+  return { code, state: returnedState };
+}
+
+async function completeChzzkConnect() {
+  if (!state.chzzkState) {
+    setChzzkDetail("먼저 '치지직 계정 연결'로 인가를 시작하세요.", true);
+    return;
+  }
+  const parsed = parseChzzkCallback(els.chzzkCallbackUrl.value);
+  if (!parsed) {
+    setChzzkDetail("code와 state가 있는 콜백 URL 전체를 붙여넣으세요.", true);
+    return;
+  }
+  if (parsed.state !== state.chzzkState) {
+    setChzzkDetail("state가 인가 요청과 다릅니다. 연결을 다시 시작하세요.", true);
+    logEvent("error", "Chzzk state mismatch");
+    return;
+  }
+  try {
+    const result = await apiFetch("/auth/chzzk/connect", {
+      method: "POST",
+      body: JSON.stringify({ code: parsed.code, state: parsed.state }),
+    });
+    const title = result?.channel?.channelName || result?.channel?.channelId || "알 수 없는 채널";
+    state.chzzkState = null;
+    els.chzzkCallbackRow.hidden = true;
+    els.chzzkCompleteRow.hidden = true;
+    els.chzzkCallbackUrl.value = "";
+    setChzzkDetail(`치지직 연결됨: ${title}`);
+    logEvent("ok", "Chzzk account connected", result);
+    await refreshChzzkAccount();
+  } catch (error) {
+    setChzzkDetail(`연결 실패: ${error.message}`, true);
+    logEvent("error", "Chzzk connect failed", { message: error.message });
+  }
+}
+
+// refreshChzzkAccount는 연결 목록에서 치지직 항목만 읽어 표시한다. 유튜브 표시는
+// prepare 결과로 채워지는 기존 경로 그대로 둔다.
+async function refreshChzzkAccount() {
+  const accounts = await apiFetch("/auth/streaming/accounts");
+  const chzzk = Array.isArray(accounts) ? accounts.find((a) => a?.provider === "chzzk") : null;
+  els.disconnectChzzkBtn.hidden = !chzzk;
+  if (!chzzk) {
+    return;
+  }
+  const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
+  setChzzkDetail(
+    chzzk.reconnect_required ? `치지직 연결됨: ${title} (재연결 필요)` : `치지직 연결됨: ${title}`,
+    Boolean(chzzk.reconnect_required),
+  );
+}
+
+async function disconnectChzzk() {
+  try {
+    await apiFetch("/auth/streaming/accounts/chzzk", { method: "DELETE" });
+    els.disconnectChzzkBtn.hidden = true;
+    setChzzkDetail("치지직 연결을 해제했습니다.");
+    logEvent("ok", "Chzzk account disconnected");
+  } catch (error) {
+    setChzzkDetail(`해제 실패: ${error.message}`, true);
+    logEvent("error", "Chzzk disconnect failed", { message: error.message });
+  }
 }
 
 async function createSessionOnly() {

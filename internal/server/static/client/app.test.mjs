@@ -27,6 +27,13 @@ const buttonKeys = [
   "uploadReferenceFaceBtn",
   "refreshReferenceFaceBtn",
   "deleteReferenceFaceBtn",
+  "connectChzzkBtn",
+  "disconnectChzzkBtn",
+  "chzzkCallbackRow",
+  "chzzkCallbackUrl",
+  "chzzkCompleteRow",
+  "completeChzzkBtn",
+  "chzzkDetail",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -69,6 +76,7 @@ function createElement() {
   return {
     children: [],
     dataset: {},
+    style: {},
     files: { length: 0 },
     append(...items) {
       this.children.push(...items);
@@ -122,7 +130,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect };`,
     context,
     { filename: appPath },
   );
@@ -426,4 +434,76 @@ test("방송 종료 버튼은 송출이 살아 있을 때만 눌린다", async (
   state.session = null;
   updateButtons();
   assert.equal(els.stopBroadcastBtn.disabled, true);
+});
+
+function jsonResponse(body) {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-type": "application/json" }),
+    async text() {
+      return JSON.stringify(body);
+    },
+  };
+}
+
+test("치지직 콜백 state가 인가 요청과 다르면 서버를 호출하지 않는다", async () => {
+  const { completeChzzkConnect, state, els, fetchCalls } = await loadApp();
+  state.accessToken = "access-token";
+  state.chzzkState = "expected-state";
+  els.chzzkCallbackUrl.value =
+    "https://innolive.studio/auth/chzzk/callback?code=abc&state=other-state";
+
+  await completeChzzkConnect();
+
+  assert.equal(fetchCalls(), 0);
+  assert.match(els.chzzkDetail.textContent, /state/);
+  // 대조 실패는 인가를 소진하지 않는다 — 같은 state로 다시 붙여넣을 수 있어야 한다.
+  assert.equal(state.chzzkState, "expected-state");
+});
+
+test("치지직 콜백 URL이 아니면(code만 붙여넣기 포함) 서버를 호출하지 않는다", async () => {
+  const { completeChzzkConnect, state, els, fetchCalls } = await loadApp();
+  state.accessToken = "access-token";
+  state.chzzkState = "expected-state";
+  els.chzzkCallbackUrl.value = "abc";
+
+  await completeChzzkConnect();
+
+  assert.equal(fetchCalls(), 0);
+});
+
+test("치지직 콜백 state가 일치하면 code·state를 connect에 보내고 계정 목록을 갱신한다", async () => {
+  const calls = [];
+  const { completeChzzkConnect, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), method: options?.method, body: options?.body });
+      if (String(url).endsWith("/auth/chzzk/connect")) {
+        return jsonResponse({
+          connected: true,
+          provider: "chzzk",
+          channel: { channelId: "ch-1", channelName: "테스트 채널" },
+        });
+      }
+      return jsonResponse([
+        { provider: "chzzk", channel_id: "ch-1", channel_title: "테스트 채널", reconnect_required: false },
+      ]);
+    },
+  });
+  state.accessToken = "access-token";
+  state.chzzkState = "expected-state";
+  els.chzzkCallbackUrl.value =
+    "https://innolive.studio/auth/chzzk/callback?code=abc&state=expected-state";
+
+  await completeChzzkConnect();
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /\/auth\/chzzk\/connect$/);
+  assert.equal(calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].body), { code: "abc", state: "expected-state" });
+  assert.match(calls[1].url, /\/auth\/streaming\/accounts$/);
+  // 성공하면 state는 일회용으로 폐기된다.
+  assert.equal(state.chzzkState, null);
+  assert.equal(els.disconnectChzzkBtn.hidden, false);
+  assert.match(els.chzzkDetail.textContent, /테스트 채널/);
 });

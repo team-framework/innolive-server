@@ -568,8 +568,13 @@ test("치지직 세션은 방송 설정을 category_type·tags로 저장한다",
 });
 
 test("provider 폼 전환은 치지직 필드를 보이고 유튜브 전용 필드를 숨긴다", async () => {
-  const { applyProviderForm, els } = await loadApp();
+  const { applyProviderForm, els, state } = await loadApp();
+  els.broadcastCategoryId = { value: "20", dataset: {} };
+  state.touchedBroadcastFields.add("category_id");
   applyProviderForm("chzzk");
+  // 공유 category_id는 플랫폼 전환 시 비워지고 touched도 해제돼야 한다.
+  assert.equal(els.broadcastCategoryId.value, "");
+  assert.equal(state.touchedBroadcastFields.has("category_id"), false);
   assert.equal(els.chzzkCategoryTypeRow.hidden, false);
   assert.equal(els.chzzkTagsRow.hidden, false);
   assert.equal(els.broadcastPrivacyRow.hidden, true);

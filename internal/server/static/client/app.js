@@ -1091,6 +1091,11 @@ async function disconnectChzzk() {
 // 아동용)는 숨긴다.
 function applyProviderForm(provider) {
   const chzzk = provider === "chzzk";
+  // category_id 입력은 두 플랫폼이 공유한다. 플랫폼을 바꾸면 이전 플랫폼용
+  // 값(유튜브 숫자 id ↔ 치지직 문자열 id)이 남아 저장 시 어긋나므로 비우고
+  // touched 표식도 지운다 — 새 기본값이 다시 채우게 한다.
+  els.broadcastCategoryId.value = "";
+  state.touchedBroadcastFields.delete("category_id");
   els.chzzkCategoryTypeRow.hidden = !chzzk;
   els.chzzkTagsRow.hidden = !chzzk;
   // category_id는 양쪽 다 쓰므로 건드리지 않는다.
@@ -1141,6 +1146,8 @@ function broadcastFormFields() {
     category_id: els.broadcastCategoryId,
     privacy: els.broadcastPrivacy,
     made_for_kids: els.madeForKids,
+    category_type: els.chzzkCategoryType,
+    tags: els.chzzkTags,
   };
 }
 
@@ -1158,8 +1165,12 @@ async function applyBroadcastDefaults(sessionId) {
       if (untouched("category_id")) {
         els.broadcastCategoryId.value = defaults.category_id || "";
       }
-      els.chzzkCategoryType.value = defaults.category_type || "";
-      els.chzzkTags.value = (defaults.tags || []).join(",");
+      if (untouched("category_type")) {
+        els.chzzkCategoryType.value = defaults.category_type || "";
+      }
+      if (untouched("tags")) {
+        els.chzzkTags.value = (defaults.tags || []).join(",");
+      }
       els.broadcastSettingsDetail.textContent =
         "치지직 채널의 현재 설정을 불러왔습니다. 확인 후 저장하세요.";
       logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
@@ -1455,7 +1466,7 @@ async function saveBroadcastSettings() {
     setCurrentSession(updated);
     state.broadcastSettingsSaved = true;
     setBroadcastStatus(els.broadcastSettingsState, "저장됨", "ok");
-    els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated.broadcast);
+    els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated.broadcast, updated.chzzk_broadcast);
     logEvent("ok", "Broadcast settings saved", {
       session_id: sessionId,
       broadcast: updated.broadcast,
@@ -1477,9 +1488,9 @@ async function saveBroadcastSettings() {
   }
 }
 
-function describeBroadcastSettings(broadcast) {
+function describeBroadcastSettings(broadcast, chzzkBroadcast) {
   if (sessionIsChzzk()) {
-    const chzzk = state.session?.chzzk_broadcast;
+    const chzzk = chzzkBroadcast;
     if (!chzzk) {
       return "저장된 설정이 없습니다.";
     }

@@ -626,6 +626,7 @@ async function signIn() {
       renderAuth();
       logEvent("ok", "Signed in", { email, expires_in: pair?.expires_in });
       await refreshReferenceFace({ quiet: true }).catch(() => null);
+      await refreshChzzkAccount().catch(() => null);
     } catch (error) {
       clearAuthState();
       // runBusy가 실패를 기록하므로, 한 번만 표시되게 다시 던진다.
@@ -765,8 +766,6 @@ function renderAuth() {
     els.youtubeDetail.hidden = true;
     resetChzzkUi();
     resetBroadcastStatus();
-  } else {
-    void refreshChzzkAccount().catch(() => null);
   }
   els.authDetail.textContent = signedIn
     ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
@@ -973,8 +972,22 @@ async function connectChzzk() {
   els.chzzkCallbackRow.hidden = false;
   els.chzzkCompleteRow.hidden = false;
   els.chzzkCallbackUrl.value = "";
-  setChzzkDetail("새 창에서 동의한 뒤, 이동한 페이지의 주소를 붙여넣고 '치지직 연결 완료'를 누르세요.");
-  window.open(config.authorize_url, "_blank", "noopener");
+  // config 응답을 기다린 뒤라 클릭 활성화가 끝나 팝업이 막힐 수 있다 — 그때는
+  // 링크로 대신한다.
+  const opened = window.open(config.authorize_url, "_blank", "noopener");
+  if (opened) {
+    setChzzkDetail("새 창에서 동의한 뒤, 이동한 페이지의 주소를 붙여넣고 '치지직 연결 완료'를 누르세요.");
+    return;
+  }
+  els.chzzkDetail.hidden = false;
+  els.chzzkDetail.style.color = "";
+  els.chzzkDetail.textContent = "팝업이 차단됐습니다. 이 링크로 동의한 뒤 주소를 붙여넣으세요: ";
+  const link = document.createElement("a");
+  link.href = config.authorize_url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "치지직 인가 페이지";
+  els.chzzkDetail.append(link);
 }
 
 // parseChzzkCallback은 붙여넣은 콜백 주소에서 code·state를 꺼낸다. URL이 아니면
@@ -1021,17 +1034,22 @@ async function completeChzzkConnect() {
     els.chzzkCallbackUrl.value = "";
     setChzzkDetail(`치지직 연결됨: ${title}`);
     logEvent("ok", "Chzzk account connected", result);
-    await refreshChzzkAccount();
   } catch (error) {
     setChzzkDetail(`연결 실패: ${error.message}`, true);
     logEvent("error", "Chzzk connect failed", { message: error.message });
+    return;
   }
+  // 연결은 이미 끝났다 — 목록 갱신 실패를 연결 실패로 보이게 하지 않는다.
+  await refreshChzzkAccount().catch(() => null);
 }
 
 // refreshChzzkAccount는 연결 목록에서 치지직 항목만 읽어 표시한다. 유튜브 표시는
 // prepare 결과로 채워지는 기존 경로 그대로 둔다.
 async function refreshChzzkAccount() {
   const accounts = await apiFetch("/auth/streaming/accounts");
+  if (!state.accessToken) {
+    return; // 응답을 기다리는 사이 로그아웃됐다.
+  }
   const chzzk = Array.isArray(accounts) ? accounts.find((a) => a?.provider === "chzzk") : null;
   els.disconnectChzzkBtn.hidden = !chzzk;
   if (!chzzk) {

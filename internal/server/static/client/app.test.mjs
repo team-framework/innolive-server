@@ -507,3 +507,23 @@ test("치지직 콜백 state가 일치하면 code·state를 connect에 보내고
   assert.equal(els.disconnectChzzkBtn.hidden, false);
   assert.match(els.chzzkDetail.textContent, /테스트 채널/);
 });
+
+test("치지직 connect 성공 후 계정 목록 조회가 실패해도 연결 실패로 표시하지 않는다", async () => {
+  const { completeChzzkConnect, state, els } = await loadApp({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/auth/chzzk/connect")) {
+        return jsonResponse({ connected: true, provider: "chzzk", channel: { channelName: "테스트 채널" } });
+      }
+      throw new Error("network down");
+    },
+  });
+  state.accessToken = "access-token";
+  state.chzzkState = "expected-state";
+  els.chzzkCallbackUrl.value =
+    "https://innolive.studio/auth/chzzk/callback?code=abc&state=expected-state";
+
+  await completeChzzkConnect();
+
+  assert.match(els.chzzkDetail.textContent, /치지직 연결됨: 테스트 채널/);
+  assert.equal(state.chzzkState, null);
+});

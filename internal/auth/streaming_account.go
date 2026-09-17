@@ -20,6 +20,17 @@ const (
 	StreamingProviderChzzk   StreamingProvider = "chzzk"
 )
 
+// Valid는 알려진 송출 플랫폼 식별자인지 보고한다. 값 집합은 streaming_accounts의
+// chk_streaming_provider 제약과 함께 움직인다. 서버에 그 플랫폼 송출이 조립돼
+// 있는지는 별개 문제다 — 그쪽은 prepare가 501로 답한다.
+func (p StreamingProvider) Valid() bool {
+	switch p {
+	case StreamingProviderYouTube, StreamingProviderChzzk:
+		return true
+	}
+	return false
+}
+
 var ErrStreamingAccountNotFound = errors.New("streaming account not found")
 
 // StreamingAccount는 사용자가 연결한 송출 플랫폼 계정이다. 사용자당 플랫폼별

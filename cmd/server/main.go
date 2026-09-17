@@ -343,6 +343,11 @@ func main() {
 		logger.Error("invalid YouTube OAuth configuration", "error", err)
 		os.Exit(2)
 	}
+	chzzkOAuthConfig, err := auth.LoadChzzkOAuthConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid Chzzk OAuth configuration", "error", err)
+		os.Exit(2)
+	}
 	logger.Info(
 		"authentication token service ready",
 		"access_ttl", tokenConfig.AccessTTL,
@@ -354,6 +359,7 @@ func main() {
 		"apple_oauth_enabled", appleOAuthConfig.Enabled(),
 		"email_auth_enabled", emailAuthConfig.Enabled(),
 		"youtube_streaming_enabled", youtubeOAuthConfig.Enabled(),
+		"chzzk_streaming_enabled", chzzkOAuthConfig.Enabled(),
 	)
 
 	userStatusChecker := auth.NewGormUserStatusChecker(databaseConnection.DB)
@@ -362,6 +368,7 @@ func main() {
 	// 배포에서도 refresh token 암호화가 성립해야 한다.
 	var youtubeConnect *auth.YouTubeConnectService
 	var youtubeTokens *auth.YouTubeAccessTokenProvider
+	var chzzkConnect *auth.ChzzkConnectService
 	streamingProviders := map[auth.StreamingProvider]streaming.Provider{}
 	// 송출 계정 저장소·조회 서비스는 플랫폼 중립이라 YouTube 설정 여부와
 	// 무관하게 조립한다 — 연결이 없으면 조회가 빈 배열을 돌려줄 뿐이다.
@@ -407,6 +414,43 @@ func main() {
 		streamingDisconnectHooks[auth.StreamingProviderYouTube] = auth.StreamingDisconnectHooks{
 			CleanupResources: youtubeProvider.CleanupStreamingResources,
 			RevokeToken:      youtubeOAuthClient.RevokeToken,
+		}
+	}
+	// 치지직 송출 연동(#228). 계정 연결까지가 이 단계이며, 송출 프로바이더
+	// 등록(streamingProviders)은 #230이다.
+	if chzzkOAuthConfig.Enabled() {
+		if providerTokenCipher == nil {
+			providerTokenCipher, err = auth.NewProviderTokenCipherFromBase64(os.Getenv("AUTH_PROVIDER_TOKEN_ENCRYPTION_KEY_BASE64"))
+			if err != nil {
+				logger.Error("invalid provider token encryption configuration", "error", err)
+				os.Exit(2)
+			}
+		}
+		chzzkOAuthClient, err := auth.NewChzzkOAuthClient(chzzkOAuthConfig)
+		if err != nil {
+			logger.Error("create Chzzk OAuth client failed", "error", err)
+			os.Exit(2)
+		}
+		chzzkConnect, err = auth.NewChzzkConnectService(
+			chzzkOAuthClient,
+			streamingAccountStore,
+			userStatusChecker,
+			providerTokenCipher,
+		)
+		if err != nil {
+			logger.Error("create Chzzk connect service failed", "error", err)
+			os.Exit(2)
+		}
+		chzzkTokens, err := auth.NewChzzkAccessTokenProvider(chzzkOAuthClient, streamingAccountStore, providerTokenCipher)
+		if err != nil {
+			logger.Error("create Chzzk access token provider failed", "error", err)
+			os.Exit(2)
+		}
+		chzzkConnect.SetTokenCacheInvalidator(chzzkTokens.ClearCachedToken)
+		// 해제 시 정리 훅: 치지직은 재사용 스트림 같은 원격 리소스를 만들지
+		// 않으므로 CleanupResources가 없고 권한 취소만 한다.
+		streamingDisconnectHooks[auth.StreamingProviderChzzk] = auth.StreamingDisconnectHooks{
+			RevokeToken: chzzkOAuthClient.RevokeToken,
 		}
 	}
 	// 조회·해제 서비스는 플랫폼 중립이라 훅 구성 뒤 한 번만 조립한다.
@@ -525,7 +569,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithStreaming(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
+		Handler:           auth.MountAuthHTTPWithStreamingProviders(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, chzzkConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

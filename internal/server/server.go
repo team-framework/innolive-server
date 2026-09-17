@@ -438,13 +438,25 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		return
 	}
 	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.
-	options := prepareOptionsFrom(liveSession.BroadcastSettings())
-	if options.MadeForKids == nil {
+	// 방송 설정 모델이 플랫폼별이므로(#229) 읽는 곳도 갈린다.
+	var options streaming.PrepareOptions
+	if sessionProvider == auth.StreamingProviderChzzk {
+		options = chzzkPrepareOptionsFrom(liveSession.ChzzkBroadcastSettings())
+	} else {
+		options = prepareOptionsFrom(liveSession.BroadcastSettings())
 		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
-		// 서버가 기본값으로 대신 신고하지 않는다.
-		s.sessions.ResetBroadcastPreparation(liveSession.ID)
-		writeError(w, badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"}))
-		return
+		// 서버가 기본값으로 대신 신고하지 않는다. 치지직에는 없는 개념이라
+		// 이 검사는 유튜브 분기 안에 둔다.
+		//
+		// 이 검사를 프로바이더로 내리지 않은 이유: 현행 계약은 "잘못된 설정은
+		// 플랫폼에 닿지 않는다"이고(TestPrepareStreamMadeForKidsComesFromStoredSettings가
+		// prepare 호출 0을 단언한다), Prepare 안으로 옮기면 플랫폼 호출이 곧
+		// 검증이 되어 그 계약이 깨진다.
+		if options.MadeForKids == nil {
+			s.sessions.ResetBroadcastPreparation(liveSession.ID)
+			writeError(w, badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"}))
+			return
+		}
 	}
 	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
 	preparedRecord := session.PlatformBroadcast{
@@ -732,10 +744,28 @@ func prepareOptionsFrom(settings session.YouTubeBroadcastSettings) streaming.Pre
 	return options
 }
 
+// chzzkPrepareOptionsFrom은 저장된 치지직 설정을 준비 옵션으로 옮긴다.
+// 치지직에는 설명·공개범위·썸네일·아동용 신고가 없으므로 비운 채로 둔다.
+func chzzkPrepareOptionsFrom(settings session.ChzzkBroadcastSettings) streaming.PrepareOptions {
+	return streaming.PrepareOptions{
+		Title:        settings.Title,
+		CategoryType: settings.CategoryType,
+		CategoryID:   settings.CategoryID,
+		Tags:         settings.Tags,
+	}
+}
+
 // handlePutBroadcast는 방송 설정을 저장·검증만 한다. 플랫폼 호출은 송출
 // 시작(prepare) 시점으로 미룬다 — 설정 도중 방송이 만들어지지 않게 하려는 것.
 // PUT이므로 생략한 필드는 비워지는 전체 교체다.
 func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	// 방송 설정은 플랫폼별 모델이다(#229, D3). 세션이 어느 플랫폼으로 나가는지는
+	// 생성 시 정해져 있으므로 여기서 갈라 각자의 바디·검증을 태운다. 교차 바디는
+	// decodeOptionalJSON의 DisallowUnknownFields가 400으로 막는다.
+	if auth.StreamingProvider(liveSession.Provider) == auth.StreamingProviderChzzk {
+		s.handlePutChzzkBroadcast(w, r, liveSession)
+		return
+	}
 	request := struct {
 		Title       string `json:"title"`
 		Description string `json:"description"`
@@ -768,6 +798,47 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 		settings.Thumbnail = &session.YouTubeThumbnail{MIME: strings.TrimSpace(request.Thumbnail.MIME), Data: data}
 	}
 	if _, err := s.sessions.SetBroadcastSettings(liveSession.ID, settings); err != nil {
+		var invalid session.InvalidBroadcastSettingsError
+		switch {
+		case errors.As(err, &invalid):
+			writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"field": invalid.Field, "reason": invalid.Reason}))
+		case errors.Is(err, session.ErrBroadcastPrepared):
+			writeBroadcastPhaseError(w, session.BroadcastPhasePrepared, liveSession.ID)
+		case errors.Is(err, session.ErrBroadcastLive):
+			writeBroadcastPhaseError(w, session.BroadcastPhaseLive, liveSession.ID)
+		default:
+			writeSessionError(w, err, liveSession.ID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response())
+}
+
+// handlePutChzzkBroadcast는 치지직 세션의 방송 설정을 저장한다. 유튜브 경로와
+// 같은 원칙이다 — 저장·검증만 하고 플랫폼 호출은 prepare로 미룬다.
+func (s *Server) handlePutChzzkBroadcast(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Title        string   `json:"title"`
+		CategoryType string   `json:"category_type"`
+		CategoryID   string   `json:"category_id"`
+		Tags         []string `json:"tags"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBroadcastBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil {
+		writeError(w, badRequest("Invalid broadcast settings request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	settings := session.ChzzkBroadcastSettings{
+		Title:        strings.TrimSpace(request.Title),
+		CategoryType: strings.TrimSpace(request.CategoryType),
+		CategoryID:   strings.TrimSpace(request.CategoryID),
+	}
+	for _, tag := range request.Tags {
+		// 태그 자체의 공백은 Validate가 거절한다. 여기서 다듬는 것은 목록
+		// 양끝 공백뿐이다 — 사용자가 의도한 태그를 바꾸지 않는다.
+		settings.Tags = append(settings.Tags, strings.TrimSpace(tag))
+	}
+	if _, err := s.sessions.SetChzzkBroadcastSettings(liveSession.ID, settings); err != nil {
 		var invalid session.InvalidBroadcastSettingsError
 		switch {
 		case errors.As(err, &invalid):

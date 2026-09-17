@@ -28,6 +28,12 @@ type PrepareOptions struct {
 	CategoryID string
 	// Thumbnail은 업로드할 썸네일 원본. nil이면 올리지 않는다.
 	Thumbnail *Thumbnail
+	// CategoryType은 치지직 category.categoryType(GAME·SPORTS·ETC)이다.
+	// 치지직 카테고리는 타입과 id의 쌍이라 id만으로는 지정할 수 없다.
+	// 유튜브 카테고리에는 타입 개념이 없어 그쪽 구현은 무시한다.
+	CategoryType string
+	// Tags는 치지직 방송 태그다. 유튜브 구현은 무시한다.
+	Tags []string
 }
 
 // Thumbnail은 업로드할 썸네일 이미지다.

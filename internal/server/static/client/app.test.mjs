@@ -34,6 +34,16 @@ const buttonKeys = [
   "chzzkCompleteRow",
   "completeChzzkBtn",
   "chzzkDetail",
+  "sessionProvider",
+  "chzzkCategoryType",
+  "chzzkCategoryTypeRow",
+  "chzzkTags",
+  "chzzkTagsRow",
+  "broadcastCategoryIdRow",
+  "broadcastPrivacyRow",
+  "broadcastThumbnailRow",
+  "broadcastDescriptionRow",
+  "madeForKidsRow",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -130,7 +140,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm };`,
     context,
     { filename: appPath },
   );
@@ -526,4 +536,50 @@ test("치지직 connect 성공 후 계정 목록 조회가 실패해도 연결 �
 
   assert.match(els.chzzkDetail.textContent, /치지직 연결됨: 테스트 채널/);
   assert.equal(state.chzzkState, null);
+});
+
+test("치지직 세션은 방송 설정을 category_type·tags로 저장한다", async () => {
+  const calls = [];
+  const { saveBroadcastSettings, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), body: options?.body });
+      return jsonResponse({ session_id: "s-1", provider: "chzzk", chzzk_broadcast: { title: "제목", category_type: "GAME", category_id: "LoL", tags: ["게임"] } });
+    },
+  });
+  for (const id of ["broadcastTitle", "chzzkCategoryType", "broadcastCategoryId", "chzzkTags", "broadcastSettingsState", "broadcastSettingsDetail"]) {
+    els[id] = { value: "", dataset: {}, textContent: "" };
+  }
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", provider: "chzzk" };
+  els.sessionProvider.value = "chzzk";
+  els.broadcastTitle.value = "제목";
+  els.chzzkCategoryType.value = "GAME";
+  els.broadcastCategoryId.value = "LoL";
+  els.chzzkTags.value = "게임, 롤, ";
+
+  await saveBroadcastSettings();
+
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0].body);
+  assert.deepEqual(body, { title: "제목", category_type: "GAME", category_id: "LoL", tags: ["게임", "롤"] });
+  // 유튜브 전용 키가 새어 나가면 서버가 DisallowUnknownFields로 400을 준다.
+  assert.equal(body.made_for_kids, undefined);
+  assert.equal(body.privacy, undefined);
+});
+
+test("provider 폼 전환은 치지직 필드를 보이고 유튜브 전용 필드를 숨긴다", async () => {
+  const { applyProviderForm, els, state } = await loadApp();
+  els.broadcastCategoryId = { value: "20", dataset: {} };
+  state.touchedBroadcastFields.add("category_id");
+  applyProviderForm("chzzk");
+  // 공유 category_id는 플랫폼 전환 시 비워지고 touched도 해제돼야 한다.
+  assert.equal(els.broadcastCategoryId.value, "");
+  assert.equal(state.touchedBroadcastFields.has("category_id"), false);
+  assert.equal(els.chzzkCategoryTypeRow.hidden, false);
+  assert.equal(els.chzzkTagsRow.hidden, false);
+  assert.equal(els.broadcastPrivacyRow.hidden, true);
+  assert.equal(els.madeForKidsRow.hidden, true);
+  applyProviderForm("youtube");
+  assert.equal(els.chzzkTagsRow.hidden, true);
+  assert.equal(els.broadcastPrivacyRow.hidden, false);
 });

@@ -143,7 +143,7 @@ func TestTokenHTTPLogoutClosesUserSessionsAfterFamilyRevocation(t *testing.T) {
 	var closedUserID uuid.UUID
 	var refreshAfterCloseErr error
 	handler := mountAuthHTTP(
-		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil,
+		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), config,
 		func(id uuid.UUID) {
 			closedUserID = id
@@ -186,7 +186,7 @@ func TestTokenHTTPLogoutDoesNotCloseSessionsForRevokedRefreshToken(t *testing.T)
 
 	closed := false
 	handler := mountAuthHTTP(
-		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil,
+		http.NotFoundHandler(), service, nil, nil, nil, nil, nil, nil, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), config,
 		func(uuid.UUID) { closed = true },
 	)

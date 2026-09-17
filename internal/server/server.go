@@ -469,7 +469,12 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		s.writePrepareError(w, err, liveSession.ID, providerName)
 		return
 	}
-	if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
+	if egressAttachesAtGoLive(sessionProvider) {
+		// 치지직은 RTMP 연결이 곧 공개 방송이다(D1). 준비 단계에서 egress를
+		// 붙이면 "방송 준비"가 곧 라이브가 되므로 ingest URL만 들고 있다가
+		// 라이브 전환에서 붙인다.
+		preparedRecord.IngestURL = prepared.IngestURL
+	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
 		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
 		s.sessions.ResetBroadcastPreparation(liveSession.ID)
@@ -535,6 +540,15 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		}
 		return
 	}
+	if egressAttachesAtGoLive(providerName) {
+		// 치지직의 라이브 전환은 곧 egress 부착이다(D1). 붙이지 못하면
+		// 플랫폼에 되돌릴 것은 없고 준비 상태로만 돌아간다.
+		if _, err := s.sessions.StartStream(liveSession.ID, broadcast.IngestURL); err != nil {
+			s.sessions.AbortGoLive(liveSession.ID)
+			s.writeStartStreamError(w, err, liveSession.ID)
+			return
+		}
+	}
 	aborted, live, err := s.sessions.CompleteGoLive(liveSession.ID)
 	if live.BroadcastID == "" {
 		// 세션이 이미 사라졌으면 매니저가 방송 정보를 돌려줄 수 없다.
@@ -555,6 +569,12 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+// egressAttachesAtGoLive는 egress를 준비가 아니라 라이브 전환에서 붙이는
+// 플랫폼인지다. 방송 객체가 없어 RTMP 연결이 곧 공개인 치지직이 해당한다.
+func egressAttachesAtGoLive(provider auth.StreamingProvider) bool {
+	return provider == auth.StreamingProviderChzzk
 }
 
 // endLiveBroadcast는 중지에 밀린 라이브 방송을 플랫폼에서 즉시 끝낸다.
@@ -873,18 +893,24 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 			defaults = loaded
 		}
 	}
+	// category_type·tags는 치지직 전용이라 비면 생략한다 — 유튜브 응답은
+	// 바이트 단위로 종전과 같다.
 	writeJSON(w, http.StatusOK, struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Privacy     string `json:"privacy"`
-		MadeForKids *bool  `json:"made_for_kids"`
-		CategoryID  string `json:"category_id"`
+		Title        string   `json:"title"`
+		Description  string   `json:"description"`
+		Privacy      string   `json:"privacy"`
+		MadeForKids  *bool    `json:"made_for_kids"`
+		CategoryID   string   `json:"category_id"`
+		CategoryType string   `json:"category_type,omitempty"`
+		Tags         []string `json:"tags,omitempty"`
 	}{
-		Title:       defaults.Title,
-		Description: defaults.Description,
-		Privacy:     defaults.Privacy,
-		MadeForKids: defaults.MadeForKids,
-		CategoryID:  defaults.CategoryID,
+		Title:        defaults.Title,
+		Description:  defaults.Description,
+		Privacy:      defaults.Privacy,
+		MadeForKids:  defaults.MadeForKids,
+		CategoryID:   defaults.CategoryID,
+		CategoryType: defaults.CategoryType,
+		Tags:         defaults.Tags,
 	})
 }
 

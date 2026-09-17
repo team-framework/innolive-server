@@ -84,6 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeDefaults();
   initializeRuntimeNotice();
   bindEvents();
+  applyProviderForm(els.sessionProvider.value);
   resetRemoteStream();
   renderAuth();
   updatePeerUi();
@@ -178,6 +179,16 @@ function bindElements() {
     "chzzkCompleteRow",
     "completeChzzkBtn",
     "chzzkDetail",
+    "sessionProvider",
+    "chzzkCategoryType",
+    "chzzkCategoryTypeRow",
+    "chzzkTags",
+    "chzzkTagsRow",
+    "broadcastCategoryIdRow",
+    "broadcastPrivacyRow",
+    "broadcastThumbnailRow",
+    "broadcastDescriptionRow",
+    "madeForKidsRow",
     "broadcastYoutubeAccount",
     "broadcastVideoInput",
     "broadcastRtmpState",
@@ -217,6 +228,7 @@ function bindEvents() {
   els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
+  els.sessionProvider.addEventListener("change", () => applyProviderForm(els.sessionProvider.value));
   els.authPassword.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       void signIn();
@@ -1074,6 +1086,26 @@ async function disconnectChzzk() {
   }
 }
 
+// applyProviderForm은 선택한 플랫폼에 맞춰 방송 설정 폼을 전환한다. 치지직은
+// category_type·tags를 쓰고 유튜브 전용 필드(공개범위·카테고리ID·썸네일·설명·
+// 아동용)는 숨긴다.
+function applyProviderForm(provider) {
+  const chzzk = provider === "chzzk";
+  els.chzzkCategoryTypeRow.hidden = !chzzk;
+  els.chzzkTagsRow.hidden = !chzzk;
+  // category_id는 양쪽 다 쓰므로 건드리지 않는다.
+  els.broadcastPrivacyRow.hidden = chzzk;
+  els.broadcastThumbnailRow.hidden = chzzk;
+  els.broadcastDescriptionRow.hidden = chzzk;
+  els.madeForKidsRow.hidden = chzzk;
+}
+
+// sessionIsChzzk는 현재 세션의 송출 플랫폼이 치지직인지다. 세션이 없으면
+// 선택된 provider를 본다(세션 생성 전 폼 전환용).
+function sessionIsChzzk() {
+  return (state.session?.provider || els.sessionProvider.value) === "chzzk";
+}
+
 async function createSessionOnly() {
   await runBusy(async () => {
     const session = await createSession();
@@ -1087,7 +1119,7 @@ async function createSession() {
   const metadata = buildSessionMetadata();
   const session = await apiFetch("/sessions", {
     method: "POST",
-    body: JSON.stringify({ metadata }),
+    body: JSON.stringify({ provider: els.sessionProvider.value, metadata }),
   });
   // owner_token은 여기서 정확히 한 번만 반환된다. 이후 세션 범위 요청과 signaling이
   // 소유권을 증명하도록 메모리에 보관하며, 세션 새로고침 응답에는 다시 오지 않는다.
@@ -1116,10 +1148,22 @@ function broadcastFormFields() {
 // 필드는 덮지 않고, 조회가 실패해도 서버가 폴백값을 주므로 폼은 그대로 쓴다.
 async function applyBroadcastDefaults(sessionId) {
   const untouched = (field) => !state.touchedBroadcastFields.has(field);
+  const provider = els.sessionProvider.value;
   try {
-    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults`);
+    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}`);
     if (untouched("title")) {
       els.broadcastTitle.value = defaults.title || "";
+    }
+    if (provider === "chzzk") {
+      if (untouched("category_id")) {
+        els.broadcastCategoryId.value = defaults.category_id || "";
+      }
+      els.chzzkCategoryType.value = defaults.category_type || "";
+      els.chzzkTags.value = (defaults.tags || []).join(",");
+      els.broadcastSettingsDetail.textContent =
+        "치지직 채널의 현재 설정을 불러왔습니다. 확인 후 저장하세요.";
+      logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
+      return;
     }
     if (untouched("description")) {
       els.broadcastDescription.value = defaults.description || "";
@@ -1383,14 +1427,26 @@ async function saveBroadcastSettings() {
   if (!sessionId) {
     throw new Error("방송 설정을 저장할 세션이 없습니다.");
   }
-  const payload = {
-    title: els.broadcastTitle.value.trim(),
-    description: els.broadcastDescription.value,
-    privacy: els.broadcastPrivacy.value,
-    made_for_kids: els.madeForKids.checked,
-    category_id: els.broadcastCategoryId.value.trim(),
-    thumbnail: await readBroadcastThumbnail(),
-  };
+  const payload = sessionIsChzzk()
+    ? {
+        title: els.broadcastTitle.value.trim(),
+        category_type: els.chzzkCategoryType.value,
+        category_id: els.broadcastCategoryId.value.trim(),
+        // 빈 태그는 제거하고, 저장은 배열로 보낸다. 빈 문자열 하나를 보내면
+        // 서버가 tags[0] 비어 있음으로 거절한다.
+        tags: els.chzzkTags.value
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter((tag) => tag !== ""),
+      }
+    : {
+        title: els.broadcastTitle.value.trim(),
+        description: els.broadcastDescription.value,
+        privacy: els.broadcastPrivacy.value,
+        made_for_kids: els.madeForKids.checked,
+        category_id: els.broadcastCategoryId.value.trim(),
+        thumbnail: await readBroadcastThumbnail(),
+      };
   try {
     const updated = await apiFetch(`/sessions/${sessionId}/broadcast`, {
       method: "PUT",
@@ -1422,6 +1478,17 @@ async function saveBroadcastSettings() {
 }
 
 function describeBroadcastSettings(broadcast) {
+  if (sessionIsChzzk()) {
+    const chzzk = state.session?.chzzk_broadcast;
+    if (!chzzk) {
+      return "저장된 설정이 없습니다.";
+    }
+    return [
+      chzzk.title || "제목 없음",
+      chzzk.category_type ? `${chzzk.category_type}/${chzzk.category_id || ""}` : "카테고리 없음",
+      chzzk.tags?.length ? `태그 ${chzzk.tags.join(",")}` : "태그 없음",
+    ].join(" · ");
+  }
   if (!broadcast) {
     return "저장된 설정이 없습니다.";
   }
@@ -1448,7 +1515,9 @@ async function prepareYouTubeBroadcast(session) {
     await saveBroadcastSettings();
     const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
       method: "POST",
-      body: JSON.stringify({ provider: "youtube" }),
+      // provider는 세션이 들고 있으므로 생략한다 — 보내면 세션 값과 대조만 하고,
+      // 유튜브를 하드코딩하면 치지직 세션에서 400 mismatch가 난다.
+      body: JSON.stringify({}),
     });
     setCurrentSession(prepared);
     renderBroadcastStreamStatus(prepared.stream);

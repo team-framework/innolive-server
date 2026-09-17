@@ -128,6 +128,9 @@ type Response struct {
 	} `json:"media"`
 	Stream    StreamState               `json:"stream"`
 	Broadcast *YouTubeBroadcastResponse `json:"broadcast"`
+	// ChzzkBroadcast는 치지직 세션에서만 실린다. omitempty라 유튜브 응답은
+	// 이 필드가 생기기 전과 바이트 단위로 같다.
+	ChzzkBroadcast *ChzzkBroadcastResponse `json:"chzzk_broadcast,omitempty"`
 }
 
 type Session struct {
@@ -176,8 +179,12 @@ type Session struct {
 	aiInputPaused        bool
 	anonymizationEnabled bool
 	broadcast            *YouTubeBroadcastSettings
-	platformBroadcast    *PlatformBroadcast
-	broadcastPhase       BroadcastPhase
+	// chzzkBroadcast는 치지직 세션의 방송 설정이다(#229). 세션의 Provider는
+	// 생성 시 고정이라 broadcast와 이 필드 중 하나만 채워진다 — 플랫폼이
+	// 셋 이상이 되면 그때 추상화한다.
+	chzzkBroadcast    *ChzzkBroadcastSettings
+	platformBroadcast *PlatformBroadcast
+	broadcastPhase    BroadcastPhase
 	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
 	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
 	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다.
@@ -1490,6 +1497,10 @@ func (s *Session) Response() Response {
 	if s.broadcast != nil {
 		broadcast := s.broadcast.response()
 		response.Broadcast = &broadcast
+	}
+	if s.chzzkBroadcast != nil {
+		broadcast := s.chzzkBroadcast.response()
+		response.ChzzkBroadcast = &broadcast
 	}
 	if s.egress != nil {
 		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)

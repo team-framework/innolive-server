@@ -189,6 +189,10 @@ type PlatformBroadcast struct {
 	Provider    string
 	BroadcastID string
 	StreamID    string
+	// IngestURL은 egress를 준비 시점이 아니라 라이브 전환 시점에 붙이는
+	// 플랫폼(치지직)에서만 채워진다. 스트림키가 들어 있으므로 응답·로그에
+	// 싣지 않는다.
+	IngestURL string
 }
 
 // BeginBroadcastPrepare는 플랫폼 호출을 시작하기 전에 준비 구간을 선점한다.

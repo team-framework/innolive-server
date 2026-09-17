@@ -970,6 +970,16 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastP
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+		// egress 없이 준비만 된 방송(치지직: egress는 라이브 전환에서 붙는다)은
+		// 여기서 놓아준다 — 그러지 않으면 라이브 전환이나 세션 삭제 외에는
+		// 준비 상태를 빠져나갈 길이 없다. 유튜브는 준비와 동시에 egress가
+		// 붙으므로 이 분기에 오지 않는다.
+		if s.broadcastPhase == BroadcastPhasePrepared {
+			broadcast, phase := takeBroadcastLocked(s)
+			s.UpdatedAt = time.Now().UTC()
+			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)
+			return s, broadcast, phase, nil
+		}
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, ErrStreamNotActive
 	}
 	s.egressSlot.Clear()

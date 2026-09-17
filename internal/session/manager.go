@@ -110,6 +110,7 @@ type TrackState struct {
 
 type Response struct {
 	SessionID string              `json:"session_id"`
+	Provider  string              `json:"provider"`
 	Status    string              `json:"status"`
 	CreatedAt time.Time           `json:"created_at"`
 	UpdatedAt time.Time           `json:"updated_at"`
@@ -134,6 +135,10 @@ type Session struct {
 
 	ID     string
 	UserID uuid.UUID
+	// Provider는 이 세션이 송출할 플랫폼이다(#227). 생성 시점에 정해지고 이후
+	// 바뀌지 않으므로 mu 없이 읽는다. 값 집합은 서버 계층이 검증한다 —
+	// internal/session은 internal/auth에 의존하지 않는다.
+	Provider string
 	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
 	// 공개 세션 응답에는 절대 포함하지 않는다.
 	GuestID    string
@@ -435,11 +440,21 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 	return m.CreateForUser(uuid.Nil, metadata)
 }
 
+// DefaultProvider는 송출 플랫폼을 지정하지 않은 세션이 쓰는 값이다. 기존
+// 클라이언트는 provider를 보내지 않으므로 종전 동작(유튜브)이 유지된다.
+const DefaultProvider = "youtube"
+
 // CreateForUser는 userID가 소유하는 세션을 만든다. AI client ID는 요청 metadata로
 // 받지 않고 여기서 계산해, 얼굴 whitelist와 미디어 스트림이 항상 같은 인증 범위를
 // 사용하게 한다.
 func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*Session, string, error) {
-	return m.create(userID, "", metadata)
+	return m.CreateForUserWithProvider(userID, DefaultProvider, metadata)
+}
+
+// CreateForUserWithProvider는 송출 플랫폼을 지정해 세션을 만든다. 빈 provider는
+// DefaultProvider로 채운다.
+func (m *Manager) CreateForUserWithProvider(userID uuid.UUID, provider string, metadata map[string]string) (*Session, string, error) {
+	return m.create(userID, "", provider, metadata)
 }
 
 // CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
@@ -449,10 +464,13 @@ func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*S
 	if strings.TrimSpace(guestID) == "" {
 		return nil, "", errors.New("guest ID is required")
 	}
-	return m.create(uuid.Nil, guestID, metadata)
+	return m.create(uuid.Nil, guestID, DefaultProvider, metadata)
 }
 
-func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]string) (*Session, string, error) {
+func (m *Manager) create(userID uuid.UUID, guestID, provider string, metadata map[string]string) (*Session, string, error) {
+	if strings.TrimSpace(provider) == "" {
+		provider = DefaultProvider
+	}
 	var releaseOperation func()
 	if userID != uuid.Nil && m.userOperationGate != nil {
 		var admitted bool
@@ -517,6 +535,7 @@ func (m *Manager) create(userID uuid.UUID, guestID string, metadata map[string]s
 	s := &Session{
 		ID:                   id,
 		UserID:               userID,
+		Provider:             provider,
 		GuestID:              guestID,
 		AIClientID:           aiClientID,
 		CreatedAt:            now,
@@ -1434,6 +1453,7 @@ func (s *Session) Response() Response {
 	defer s.mu.RUnlock()
 	response := Response{
 		SessionID: s.ID,
+		Provider:  s.Provider,
 		Status:    s.Status,
 		CreatedAt: s.CreatedAt,
 		UpdatedAt: s.UpdatedAt,

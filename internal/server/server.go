@@ -312,14 +312,27 @@ func (s *Server) handleWebRTCConfig(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	request := struct {
 		Metadata map[string]string `json:"metadata"`
+		Provider string            `json:"provider"`
 	}{Metadata: map[string]string{}}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
 		writeError(w, badRequest("Invalid session request.", map[string]any{"error": err.Error()}))
 		return
 	}
+	// provider를 보내지 않는 기존 클라이언트는 종전대로 유튜브 세션을 만든다.
+	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
+	if providerName == "" {
+		providerName = auth.StreamingProviderYouTube
+	}
+	// 여기서는 식별자 자체만 본다. 그 플랫폼 송출이 이 배포에 조립돼 있는지는
+	// prepare가 501로 답하는 종전 계약을 유지한다 — 자격증명 없는 배포에서
+	// 세션 생성까지 막으면 회귀다.
+	if !providerName.Valid() {
+		writeError(w, badRequest("Unknown streaming provider.", map[string]any{"provider": request.Provider}))
+		return
+	}
 	userID, _ := auth.UserIDFromContext(r.Context())
-	liveSession, ownerToken, err := s.sessions.CreateForUser(userID, request.Metadata)
+	liveSession, ownerToken, err := s.sessions.CreateForUserWithProvider(userID, string(providerName), request.Metadata)
 	if errors.Is(err, session.ErrCapacityExceeded) {
 		active, limit := s.sessions.Capacity()
 		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)
@@ -394,15 +407,27 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, badRequest("Invalid stream prepare request.", map[string]any{"error": err.Error()}))
 		return
 	}
+	// 송출 플랫폼은 세션이 들고 있다(#227). 요청의 provider는 더 이상 선택이
+	// 아니라, 클라이언트가 다른 플랫폼으로 오해하고 있지 않은지 확인하는
+	// 용도다 — 생략하면 세션 값을 그대로 쓴다.
+	sessionProvider := auth.StreamingProvider(liveSession.Provider)
 	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
 	if providerName == "" {
-		providerName = auth.StreamingProviderYouTube
+		providerName = sessionProvider
 	}
 	provider := s.streaming[providerName]
 	if provider == nil {
 		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
-		// 계약(501)을 유지한다.
+		// 계약(501)을 유지한다. 세션 값과의 불일치보다 먼저 답한다 — 서버가
+		// 그 플랫폼을 아예 못 하는 것이 더 근본적인 사실이다.
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
+		return
+	}
+	if providerName != sessionProvider {
+		writeError(w, badRequest("The requested provider does not match the session provider.", map[string]any{
+			"provider":         string(providerName),
+			"session_provider": string(sessionProvider),
+		}))
 		return
 	}
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면

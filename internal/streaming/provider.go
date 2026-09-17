@@ -71,6 +71,9 @@ type BroadcastDefaults struct {
 	// 읽지 못했으면 사용자가 직접 골라야 하는 미선택이다.
 	MadeForKids *bool
 	CategoryID  string
+	// CategoryType·Tags는 치지직 전용이다(PrepareOptions와 같은 이유).
+	CategoryType string
+	Tags         []string
 }
 
 // FallbackDefaults는 직전 방송이 없거나 조회에 실패했을 때의 초기값이다.

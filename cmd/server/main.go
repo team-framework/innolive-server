@@ -501,6 +501,9 @@ func main() {
 	if youtubeConnect != nil {
 		youtubeConnect.SetUserOperationGate(withdrawal)
 	}
+	if chzzkConnect != nil {
+		chzzkConnect.SetUserOperationGate(withdrawal)
+	}
 	streamingAccounts.SetUserOperationGate(withdrawal)
 	withdrawal.SetCleanup(auth.WithdrawalCleanup{
 		CloseUserSessions:           sessionManager.CloseUserSessionsForWithdrawal,

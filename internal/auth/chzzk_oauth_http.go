@@ -65,8 +65,10 @@ func (h *tokenHTTPHandler) handleChzzkConnect(w http.ResponseWriter, r *http.Req
 		case errors.Is(err, ErrChzzkChannelMissing):
 			h.logChzzkConnectFailure(r, "channel_missing", err)
 			h.writeError(w, r, http.StatusUnprocessableEntity, "chzzk_channel_missing", "The Chzzk account has no channel.")
-		case errors.Is(err, ErrChzzkTokenExchange):
-			h.logger.Error("Chzzk token exchange failed", "request_id", tokenRequestID(r), "error", err)
+		case errors.Is(err, ErrChzzkTokenExchange), errors.Is(err, ErrChzzkPlatformUnavailable):
+			// 서버↔치지직 통신 실패다. 우리 결함이 아니므로 502로 답하고,
+			// 클라이언트에는 뭉뚱그린 문구만 가므로 원인은 이 로그에만 남는다.
+			h.logger.Error("Chzzk platform request failed", "request_id", tokenRequestID(r), "error", err)
 			h.writeError(w, r, http.StatusBadGateway, "chzzk_token_exchange_failed", "Chzzk authorization could not be completed.")
 		default:
 			h.logger.Error("Chzzk connect failed", "request_id", tokenRequestID(r), "error", err)

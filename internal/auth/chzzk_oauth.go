@@ -51,6 +51,9 @@ var (
 	// ErrChzzkScopeMissing: 사용자가 동의 화면에서 일부 권한을 뺐다. 연결을
 	// 저장해도 송출이 실패하므로 연결 단계에서 거절한다.
 	ErrChzzkScopeMissing = errors.New("Chzzk authorization is missing required scopes")
+	// ErrChzzkPlatformUnavailable: 치지직 쪽 장애·깨진 응답이다. 우리 서버
+	// 결함이 아니므로 500이 아니라 502로 답해야 한다.
+	ErrChzzkPlatformUnavailable = errors.New("Chzzk platform request failed")
 )
 
 // ChzzkHasScopes는 토큰 응답의 scope 문자열이 필요한 스코프를 모두 담고
@@ -214,11 +217,18 @@ func (c *chzzkOAuthClient) RevokeToken(ctx context.Context, refreshToken string)
 		return fmt.Errorf("request Chzzk token revocation: %w", err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, chzzkResponseLimit))
-	if response.StatusCode < http.StatusInternalServerError {
+	// 치지직은 실패도 HTTP 200 + 봉투 code로 주므로 여기서도 봉투를 봐야
+	// 한다. HTTP 상태만 보면 "권한이 안 풀렸는데 풀렸다고 보고"하게 된다.
+	_, code, message, err := decodeChzzkEnvelope(response)
+	if err != nil {
+		return err
+	}
+	// 이미 무효한 토큰은 해제 관점에서 목적이 달성된 상태다(유튜브 경로와
+	// 같은 판단). 그 외 실패는 올려서 호출자가 로그로 남기게 한다.
+	if code == http.StatusOK || code == http.StatusUnauthorized {
 		return nil
 	}
-	return fmt.Errorf("Chzzk token revocation returned HTTP %d", response.StatusCode)
+	return fmt.Errorf("Chzzk token revocation failed: platform code %d: %s", code, message)
 }
 
 func (c *chzzkOAuthClient) requestToken(ctx context.Context, payload map[string]string) (ChzzkTokenResponse, error) {
@@ -238,7 +248,7 @@ func (c *chzzkOAuthClient) requestToken(ctx context.Context, payload map[string]
 	defer response.Body.Close()
 	content, code, message, err := decodeChzzkEnvelope(response)
 	if err != nil {
-		return ChzzkTokenResponse{}, err
+		return ChzzkTokenResponse{}, fmt.Errorf("%w: %v", ErrChzzkTokenExchange, err)
 	}
 	if code != http.StatusOK {
 		// 코드·리프레시 거절은 재시도로 풀리지 않고 재연결이 유일한 해법이라
@@ -268,19 +278,19 @@ func (c *chzzkOAuthClient) ChannelForToken(ctx context.Context, accessToken stri
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return ChzzkChannel{}, fmt.Errorf("request Chzzk user: %w", err)
+		return ChzzkChannel{}, fmt.Errorf("%w: request user: %v", ErrChzzkPlatformUnavailable, err)
 	}
 	defer response.Body.Close()
 	content, code, message, err := decodeChzzkEnvelope(response)
 	if err != nil {
-		return ChzzkChannel{}, err
+		return ChzzkChannel{}, fmt.Errorf("%w: %v", ErrChzzkPlatformUnavailable, err)
 	}
 	if code != http.StatusOK {
-		return ChzzkChannel{}, fmt.Errorf("Chzzk user lookup failed: platform code %d: %s", code, message)
+		return ChzzkChannel{}, fmt.Errorf("%w: user lookup returned platform code %d: %s", ErrChzzkPlatformUnavailable, code, message)
 	}
 	channel := ChzzkChannel{}
 	if err := json.Unmarshal(content, &channel); err != nil {
-		return ChzzkChannel{}, fmt.Errorf("decode Chzzk user: %w", err)
+		return ChzzkChannel{}, fmt.Errorf("%w: decode user: %v", ErrChzzkPlatformUnavailable, err)
 	}
 	if strings.TrimSpace(channel.ID) == "" {
 		return ChzzkChannel{}, ErrChzzkChannelMissing

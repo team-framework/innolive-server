@@ -71,6 +71,7 @@ type chzzkStub struct {
 	channelID      string
 	channelName    string
 	rejectExchange bool
+	rejectRevoke   bool
 
 	exchanges     int
 	refreshes     int
@@ -139,6 +140,11 @@ func newChzzkStub(t *testing.T) *chzzkStub {
 	mux.HandleFunc("/auth/v1/token/revoke", func(w http.ResponseWriter, _ *http.Request) {
 		stub.revokes++
 		w.Header().Set("Content-Type", "application/json")
+		if stub.rejectRevoke {
+			// 치지직은 실패도 HTTP 200으로 준다 — 상태 코드로는 구분되지 않는다.
+			_, _ = w.Write([]byte(`{"code":400,"message":"invalid client"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"code":200,"message":null}`))
 	})
 	stub.server = httptest.NewServer(mux)
@@ -303,6 +309,88 @@ func TestChzzkRevokeTokenOnDisconnect(t *testing.T) {
 	}
 	if stub.revokes != 1 {
 		t.Fatalf("revoke calls = %d, want 1", stub.revokes)
+	}
+}
+
+// TestChzzkConnectRefusesDuringWithdrawal: 탈퇴 진행 중에는 새 연결이
+// 저장되면 안 된다. 저장되면 CleanupForWithdrawal이 이미 지나간 뒤라
+// revoke 없이 행만 지워지고, 사용자의 치지직 계정에는 권한이 남는다.
+func TestChzzkConnectRefusesDuringWithdrawal(t *testing.T) {
+	stub := newChzzkStub(t)
+	store := newMemoryStreamingAccountStore()
+	service, err := NewChzzkConnectService(stub.client(), store, testUserStatusChecker{status: UserStatusActive}, testProviderTokenCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetUserOperationGate(blockedOperationGate{})
+	userID := uuid.New()
+
+	if _, err := service.ConnectWithAuthCode(context.Background(), userID, "code", "state"); !errors.Is(err, ErrWithdrawalInProgress) {
+		t.Fatalf("error = %v, want ErrWithdrawalInProgress", err)
+	}
+	if stub.exchanges != 0 {
+		t.Fatalf("exchange calls = %d, want the gate to refuse before the platform round-trip", stub.exchanges)
+	}
+	if _, err := store.Get(context.Background(), userID, StreamingProviderChzzk); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatal("no account may be stored while withdrawal is in progress")
+	}
+}
+
+// blockedOperationGate는 탈퇴가 사용자의 배타 슬롯을 쥐고 있는 상태다.
+type blockedOperationGate struct{}
+
+func (blockedOperationGate) BeginOperation(uuid.UUID) (func(), bool) { return func() {}, false }
+
+// TestChzzkRevokeReportsEnvelopeFailure: 치지직이 HTTP 200에 실패 봉투를
+// 실어 보내면 revoke는 실패로 올라와야 한다. HTTP 상태만 보면 권한이 안
+// 풀렸는데 풀렸다고 보고하게 된다.
+func TestChzzkRevokeReportsEnvelopeFailure(t *testing.T) {
+	stub := newChzzkStub(t)
+	stub.rejectRevoke = true
+
+	err := stub.client().RevokeToken(context.Background(), "refresh-value")
+	if err == nil {
+		t.Fatal("a failing revoke envelope must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Fatalf("error = %v, want the platform code reported", err)
+	}
+}
+
+// TestChzzkRevokeTreatsInvalidTokenAsDone: 이미 무효한 토큰(401)은 해제
+// 관점에서 목적이 달성된 상태라 에러로 올리지 않는다.
+func TestChzzkRevokeTreatsInvalidTokenAsDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":401,"message":"expired"}`))
+	}))
+	defer server.Close()
+	client := &chzzkOAuthClient{
+		config:     ChzzkOAuthConfig{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://example.test/cb"},
+		httpClient: server.Client(),
+		revokeURL:  server.URL,
+	}
+	if err := client.RevokeToken(context.Background(), "stale"); err != nil {
+		t.Fatalf("an already-invalid token must not fail the disconnect: %v", err)
+	}
+}
+
+// TestChzzkChannelLookupFailureIsPlatformError: 플랫폼 장애는 우리 결함이
+// 아니라 ErrChzzkPlatformUnavailable로 분류돼야 한다 — HTTP 계층이 이걸로
+// 500이 아닌 502를 고른다.
+func TestChzzkChannelLookupFailureIsPlatformError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("upstream down"))
+	}))
+	defer server.Close()
+	client := &chzzkOAuthClient{
+		config:     ChzzkOAuthConfig{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://example.test/cb"},
+		httpClient: server.Client(),
+		usersMeURL: server.URL,
+	}
+	if _, err := client.ChannelForToken(context.Background(), "access"); !errors.Is(err, ErrChzzkPlatformUnavailable) {
+		t.Fatalf("error = %v, want ErrChzzkPlatformUnavailable", err)
 	}
 }
 

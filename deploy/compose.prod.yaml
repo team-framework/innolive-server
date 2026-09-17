@@ -13,6 +13,12 @@ services:
     # host 네트워크: WebRTC UDP mux(50001)·AI gRPC(127.0.0.1:5005x)·Postgres/Redis(localhost)
     # 접근을 한 번에 해결한다. 포트 매핑은 사용하지 않는다.
     network_mode: host
+    # NVENC 인코딩용 GPU 노출. nvidia 런타임이 libcuda/libnvidia-encode를
+    # 컨테이너에 주입한다 - 없으면 h264_nvenc가 libcuda.so.1에서 실패한다.
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     env_file:
       - /etc/innolive/server.env
       - /etc/innolive/server-secrets.env

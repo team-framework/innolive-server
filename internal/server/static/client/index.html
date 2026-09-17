@@ -45,6 +45,18 @@
           <button id="connectYoutubeBtn" class="button" type="button" hidden>YouTube 계정 연결</button>
         </div>
         <span id="youtubeDetail" class="field-wide" hidden></span>
+        <div class="button-row">
+          <button id="connectChzzkBtn" class="button" type="button" hidden>치지직 계정 연결</button>
+          <button id="disconnectChzzkBtn" class="button" type="button" hidden>치지직 연결 해제</button>
+        </div>
+        <label class="field field-wide" id="chzzkCallbackRow" hidden>
+          <span>치지직 콜백 URL</span>
+          <input id="chzzkCallbackUrl" type="text" autocomplete="off" placeholder="동의 후 이동한 페이지의 주소를 그대로 붙여넣기" />
+        </label>
+        <div class="button-row" id="chzzkCompleteRow" hidden>
+          <button id="completeChzzkBtn" class="button button-primary" type="button">치지직 연결 완료</button>
+        </div>
+        <span id="chzzkDetail" class="field-wide" hidden></span>
       </section>
 
       <section class="toolbar" aria-label="Connection controls">

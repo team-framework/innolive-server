@@ -186,6 +186,16 @@
               <option value="ETC">ETC</option>
             </select>
           </label>
+          <div class="field field-wide" id="chzzkCategorySearchRow" hidden>
+            <span>치지직 카테고리 검색</span>
+            <div class="broadcast-settings-actions">
+              <input id="chzzkCategoryQuery" autocomplete="off" placeholder="예: 리그 오브 레전드" />
+              <button id="chzzkCategorySearchBtn" class="button" type="button">카테고리 검색</button>
+            </div>
+            <select id="chzzkCategoryResults">
+              <option value="" selected>검색 결과에서 고르세요</option>
+            </select>
+          </div>
           <label class="field field-wide" id="chzzkTagsRow" hidden>
             <span>치지직 태그 (쉼표 구분, 공백·특수문자 불가)</span>
             <input id="chzzkTags" autocomplete="off" placeholder="예: 게임,롤" />

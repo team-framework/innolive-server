@@ -156,7 +156,14 @@ func (h *tokenHTTPHandler) handleChzzkCategories(w http.ResponseWriter, r *http.
 	}
 	categories, err := h.chzzk.SearchCategories(r.Context(), query, size)
 	if err != nil {
-		// 치지직 쪽 실패다. 우리 결함이 아니므로 502로 답하고 원인은 로그에만 남긴다.
+		// 치지직이 검색어 자체를 거절한 경우는 사용자 입력 문제다. 재시도가
+		// 아니라 다른 검색어가 해법이므로 통신 실패와 구분해 400으로 답한다.
+		if errors.Is(err, ErrChzzkCategoryQueryRejected) {
+			h.logger.Warn("Chzzk category search rejected", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Chzzk rejected the category search query.")
+			return
+		}
+		// 그 밖은 치지직 쪽 실패다. 우리 결함이 아니므로 502로 답하고 원인은 로그에만 남긴다.
 		h.logger.Error("Chzzk category search failed", "request_id", tokenRequestID(r), "error", err)
 		h.writeError(w, r, http.StatusBadGateway, "chzzk_category_search_failed", "Chzzk categories could not be searched.")
 		return

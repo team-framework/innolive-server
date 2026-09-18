@@ -55,6 +55,10 @@ var (
 	// ErrChzzkScopeMissing: 사용자가 동의 화면에서 일부 권한을 뺐다. 연결을
 	// 저장해도 송출이 실패하므로 연결 단계에서 거절한다.
 	ErrChzzkScopeMissing = errors.New("Chzzk authorization is missing required scopes")
+	// ErrChzzkCategoryQueryRejected: 치지직이 검색 파라미터 자체를 거절했다
+	// (봉투 400). 통신 실패가 아니라 사용자 입력 문제이므로 502가 아닌 400으로
+	// 답해야 한다 — 재시도해도 같은 검색어면 계속 거절된다.
+	ErrChzzkCategoryQueryRejected = errors.New("Chzzk rejected the category search query")
 	// ErrChzzkPlatformUnavailable: 치지직 쪽 장애·깨진 응답이다. 우리 서버
 	// 결함이 아니므로 500이 아니라 502로 답해야 한다.
 	ErrChzzkPlatformUnavailable = errors.New("Chzzk platform request failed")
@@ -349,6 +353,9 @@ func (c *chzzkOAuthClient) SearchCategories(ctx context.Context, query string, s
 	}
 	if code != http.StatusOK {
 		// message에는 자격증명이 실리지 않는다.
+		if code == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w: %s", ErrChzzkCategoryQueryRejected, message)
+		}
 		return nil, fmt.Errorf("%w: category search returned platform code %d: %s", ErrChzzkPlatformUnavailable, code, message)
 	}
 	payload := struct {

@@ -73,6 +73,8 @@ type chzzkStub struct {
 	rejectExchange bool
 	rejectRevoke   bool
 	rejectSearch   bool
+	// rejectSearchQuery는 치지직이 검색어 자체를 거절하는 경우다(봉투 400).
+	rejectSearchQuery bool
 
 	exchanges     int
 	refreshes     int
@@ -154,6 +156,10 @@ func newChzzkStub(t *testing.T) *chzzkStub {
 			t.Error("category search must not send a user access token")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if stub.rejectSearchQuery {
+			_, _ = w.Write([]byte(`{"code":400,"message":"잘못된 값을 입력했습니다."}`))
+			return
+		}
 		if stub.rejectSearch {
 			// 실패도 HTTP 200 + 봉투 code로 온다.
 			_, _ = w.Write([]byte(`{"code":401,"message":"INVALID_CLIENT"}`))

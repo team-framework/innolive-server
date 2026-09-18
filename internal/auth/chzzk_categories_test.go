@@ -51,6 +51,39 @@ func TestChzzkSearchCategoriesReportsEnvelopeFailure(t *testing.T) {
 	}
 }
 
+// TestChzzkSearchCategoriesSeparatesQueryRejection: 치지직이 검색어를 거절한
+// 것(봉투 400)은 통신 실패가 아니다. 섞으면 사용자 입력 문제가 "플랫폼 장애"로
+// 보고되고, 클라이언트는 재시도해도 풀리지 않는 502를 받는다.
+func TestChzzkSearchCategoriesSeparatesQueryRejection(t *testing.T) {
+	stub := newChzzkStub(t)
+	stub.rejectSearchQuery = true
+
+	_, err := stub.client().SearchCategories(context.Background(), "리그", 5)
+	if !errors.Is(err, ErrChzzkCategoryQueryRejected) {
+		t.Fatalf("error = %v, want ErrChzzkCategoryQueryRejected", err)
+	}
+	if errors.Is(err, ErrChzzkPlatformUnavailable) {
+		t.Fatal("a rejected query must not be classified as a platform outage")
+	}
+}
+
+// TestChzzkCategoriesEndpointReportsQueryRejectionAsBadRequest: 봉투 400은
+// 우리 400이다 — 해법이 재시도가 아니라 다른 검색어이기 때문이다.
+func TestChzzkCategoriesEndpointReportsQueryRejectionAsBadRequest(t *testing.T) {
+	stub := newChzzkStub(t)
+	stub.rejectSearchQuery = true
+	tokens, handler, _ := testChzzkHandler(t, stub, newMemoryStreamingAccountStore())
+	pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := getChzzkCategories(t, handler, pair.AccessToken, "query=리그")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+}
+
 // TestChzzkSearchCategoriesRejectsInvalidArguments: 플랫폼 왕복 전에 거른다.
 func TestChzzkSearchCategoriesRejectsInvalidArguments(t *testing.T) {
 	stub := newChzzkStub(t)

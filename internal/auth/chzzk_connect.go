@@ -60,6 +60,12 @@ func (s *ChzzkConnectService) ClientID() string                 { return s.oauth
 func (s *ChzzkConnectService) RedirectURI() string              { return s.oauth.RedirectURI() }
 func (s *ChzzkConnectService) AuthorizeURL(state string) string { return s.oauth.AuthorizeURL(state) }
 
+// SearchCategories는 카테고리 검색을 그대로 위임한다. Client 인증이라 사용자
+// 계정 상태나 연결 여부와 무관하다 — 저장소도 게이트도 타지 않는다.
+func (s *ChzzkConnectService) SearchCategories(ctx context.Context, query string, size int) ([]ChzzkCategory, error) {
+	return s.oauth.SearchCategories(ctx, query, size)
+}
+
 // ConnectWithAuthCode는 콜백 페이지가 릴레이한 code를 연결로 완결한다.
 // state는 클라이언트가 만들고 콜백에서 대조하며, 교환 요청에 그대로 실어
 // 보낸다 — 서버는 state를 보관하지 않는다.

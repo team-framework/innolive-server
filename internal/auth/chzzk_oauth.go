@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,7 +21,10 @@ const (
 	chzzkTokenEndpoint     = "https://openapi.chzzk.naver.com/auth/v1/token"
 	chzzkRevokeEndpoint    = "https://openapi.chzzk.naver.com/auth/v1/token/revoke"
 	chzzkUsersMeEndpoint   = "https://openapi.chzzk.naver.com/open/v1/users/me"
-	maxChzzkOAuthField     = 512
+	// chzzkCategoriesEndpoint는 카테고리 검색이다. 다른 엔드포인트와 달리
+	// 사용자 토큰이 아니라 Client 인증(Client-Id/Client-Secret 헤더)을 쓴다.
+	chzzkCategoriesEndpoint = "https://openapi.chzzk.naver.com/open/v1/categories/search"
+	maxChzzkOAuthField      = 512
 	// chzzkResponseLimit은 플랫폼 응답을 읽을 때의 상한이다. 정상 응답은
 	// 수백 바이트이므로 넉넉하면서도 무한정 읽지 않는다.
 	chzzkResponseLimit = 64 << 10
@@ -110,6 +114,18 @@ type ChzzkTokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
+// ChzzkCategory는 카테고리 검색 결과 한 건이다. categoryType과 categoryId는
+// 방송 설정에 항상 쌍으로 들어간다. PosterImageURL은 null이 올 수 있다(실측).
+type ChzzkCategory struct {
+	Type           string `json:"categoryType"`
+	ID             string `json:"categoryId"`
+	Value          string `json:"categoryValue"`
+	PosterImageURL string `json:"posterImageUrl"`
+}
+
+// MaxChzzkCategorySearchSize는 치지직이 받는 size 상한이다(공식 문서).
+const MaxChzzkCategorySearchSize = 50
+
 // ChzzkChannel은 users/me 응답이다. nickname은 문서에 없지만 실제로 온다.
 type ChzzkChannel struct {
 	ID   string `json:"channelId"`
@@ -130,6 +146,9 @@ type ChzzkAuthorizer interface {
 	RefreshAccessToken(ctx context.Context, refreshToken string) (ChzzkTokenResponse, error)
 	ChannelForToken(ctx context.Context, accessToken string) (ChzzkChannel, error)
 	RevokeToken(ctx context.Context, refreshToken string) error
+	// SearchCategories는 카테고리를 이름으로 검색한다. Client 인증이라
+	// 사용자 토큰이 필요 없다 — 치지직 계정을 연결하지 않은 사용자도 쓸 수 있다.
+	SearchCategories(ctx context.Context, query string, size int) ([]ChzzkCategory, error)
 	// AuthorizeURL은 사용자를 보낼 인가 페이지 주소다. state는 호출자가
 	// 만들고 콜백에서 대조한다.
 	AuthorizeURL(state string) string
@@ -138,12 +157,13 @@ type ChzzkAuthorizer interface {
 }
 
 type chzzkOAuthClient struct {
-	config       ChzzkOAuthConfig
-	httpClient   *http.Client
-	authorizeURL string
-	tokenURL     string
-	revokeURL    string
-	usersMeURL   string
+	config        ChzzkOAuthConfig
+	httpClient    *http.Client
+	authorizeURL  string
+	tokenURL      string
+	revokeURL     string
+	usersMeURL    string
+	categoriesURL string
 }
 
 func NewChzzkOAuthClient(config ChzzkOAuthConfig) (*chzzkOAuthClient, error) {
@@ -151,12 +171,13 @@ func NewChzzkOAuthClient(config ChzzkOAuthConfig) (*chzzkOAuthClient, error) {
 		return nil, errors.New("Chzzk OAuth is not configured")
 	}
 	return &chzzkOAuthClient{
-		config:       config,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		authorizeURL: chzzkAuthorizeEndpoint,
-		tokenURL:     chzzkTokenEndpoint,
-		revokeURL:    chzzkRevokeEndpoint,
-		usersMeURL:   chzzkUsersMeEndpoint,
+		config:        config,
+		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		authorizeURL:  chzzkAuthorizeEndpoint,
+		tokenURL:      chzzkTokenEndpoint,
+		revokeURL:     chzzkRevokeEndpoint,
+		usersMeURL:    chzzkUsersMeEndpoint,
+		categoriesURL: chzzkCategoriesEndpoint,
 	}, nil
 }
 
@@ -296,6 +317,47 @@ func (c *chzzkOAuthClient) ChannelForToken(ctx context.Context, accessToken stri
 		return ChzzkChannel{}, ErrChzzkChannelMissing
 	}
 	return channel, nil
+}
+
+// SearchCategories는 카테고리 검색 API를 호출한다. 이 엔드포인트만 Client
+// 인증(Client-Id/Client-Secret 헤더)을 쓰고 Bearer를 쓰지 않는다. 응답에
+// 페이지네이션은 없다 — size가 전부다.
+func (c *chzzkOAuthClient) SearchCategories(ctx context.Context, query string, size int) ([]ChzzkCategory, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("category search query is required")
+	}
+	if size <= 0 || size > MaxChzzkCategorySearchSize {
+		return nil, fmt.Errorf("category search size must be between 1 and %d", MaxChzzkCategorySearchSize)
+	}
+	params := url.Values{"query": {query}, "size": {strconv.Itoa(size)}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.categoriesURL+"?"+params.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Client-Id", c.config.ClientID)
+	request.Header.Set("Client-Secret", c.config.ClientSecret)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: search categories: %v", ErrChzzkPlatformUnavailable, err)
+	}
+	defer response.Body.Close()
+	// 치지직은 실패도 HTTP 200 + 봉투 code로 주므로 봉투를 판정 근거로 쓴다.
+	content, code, message, err := decodeChzzkEnvelope(response)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrChzzkPlatformUnavailable, err)
+	}
+	if code != http.StatusOK {
+		// message에는 자격증명이 실리지 않는다.
+		return nil, fmt.Errorf("%w: category search returned platform code %d: %s", ErrChzzkPlatformUnavailable, code, message)
+	}
+	payload := struct {
+		Data []ChzzkCategory `json:"data"`
+	}{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return nil, fmt.Errorf("%w: decode categories: %v", ErrChzzkPlatformUnavailable, err)
+	}
+	return payload.Data, nil
 }
 
 // decodeChzzkEnvelope는 공통 응답 봉투를 푼다. 치지직은 실패도 HTTP 200으로

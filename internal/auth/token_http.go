@@ -112,6 +112,7 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	if h.chzzk != nil {
 		mux.Handle("POST /auth/chzzk/connect", h.middleware(http.HandlerFunc(h.handleChzzkConnect)))
 		mux.Handle("GET /auth/chzzk/config", h.middleware(http.HandlerFunc(h.handleChzzkConfig)))
+		mux.Handle("GET /auth/chzzk/categories", h.middleware(http.HandlerFunc(h.handleChzzkCategories)))
 	}
 	if h.streamingAccounts != nil {
 		mux.Handle("GET /auth/streaming/accounts", h.middleware(http.HandlerFunc(h.handleListStreamingAccounts)))

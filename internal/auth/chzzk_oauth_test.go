@@ -72,12 +72,17 @@ type chzzkStub struct {
 	channelName    string
 	rejectExchange bool
 	rejectRevoke   bool
+	rejectSearch   bool
 
 	exchanges     int
 	refreshes     int
 	revokes       int
+	searches      int
 	lastRefresh   string
 	issuedRefresh []string
+
+	lastSearchQuery string
+	lastSearchSize  string
 }
 
 func newChzzkStub(t *testing.T) *chzzkStub {
@@ -137,6 +142,34 @@ func newChzzkStub(t *testing.T) *chzzkStub {
 			},
 		})
 	})
+	// 카테고리 검색만 Client 인증이다 — Bearer가 아니라 Client-Id/Client-Secret을 본다.
+	mux.HandleFunc("/open/v1/categories/search", func(w http.ResponseWriter, r *http.Request) {
+		stub.searches++
+		stub.lastSearchQuery = r.URL.Query().Get("query")
+		stub.lastSearchSize = r.URL.Query().Get("size")
+		if r.Header.Get("Client-Id") == "" || r.Header.Get("Client-Secret") == "" {
+			t.Error("category search must authenticate with Client-Id and Client-Secret headers")
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Error("category search must not send a user access token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if stub.rejectSearch {
+			// 실패도 HTTP 200 + 봉투 code로 온다.
+			_, _ = w.Write([]byte(`{"code":401,"message":"INVALID_CLIENT"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"content": map[string]any{
+				"data": []map[string]any{
+					{"categoryType": "GAME", "categoryId": "League_of_Legends", "categoryValue": "리그 오브 레전드", "posterImageUrl": "https://example.test/lol.png"},
+					// posterImageUrl은 null이 올 수 있다(실측).
+					{"categoryType": "GAME", "categoryId": "Marimo_League", "categoryValue": "마리모 리그", "posterImageUrl": nil},
+				},
+			},
+		})
+	})
 	mux.HandleFunc("/auth/v1/token/revoke", func(w http.ResponseWriter, _ *http.Request) {
 		stub.revokes++
 		w.Header().Set("Content-Type", "application/json")
@@ -154,12 +187,13 @@ func newChzzkStub(t *testing.T) *chzzkStub {
 
 func (s *chzzkStub) client() *chzzkOAuthClient {
 	return &chzzkOAuthClient{
-		config:       ChzzkOAuthConfig{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://example.test/cb"},
-		httpClient:   s.server.Client(),
-		authorizeURL: chzzkAuthorizeEndpoint,
-		tokenURL:     s.server.URL + "/auth/v1/token",
-		revokeURL:    s.server.URL + "/auth/v1/token/revoke",
-		usersMeURL:   s.server.URL + "/open/v1/users/me",
+		config:        ChzzkOAuthConfig{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://example.test/cb"},
+		httpClient:    s.server.Client(),
+		authorizeURL:  chzzkAuthorizeEndpoint,
+		tokenURL:      s.server.URL + "/auth/v1/token",
+		revokeURL:     s.server.URL + "/auth/v1/token/revoke",
+		usersMeURL:    s.server.URL + "/open/v1/users/me",
+		categoriesURL: s.server.URL + "/open/v1/categories/search",
 	}
 }
 

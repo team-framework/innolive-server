@@ -631,6 +631,12 @@ test("치지직 카테고리 검색 결과에서 고르면 종류·식별자가 
   // 고른 값을 기본값 주입이 덮지 않도록 touched로 표시한다.
   assert.equal(state.touchedBroadcastFields.has("category_id"), true);
   assert.equal(state.touchedBroadcastFields.has("category_type"), true);
+
+  // 안내 항목(value="")으로 되돌리면 아무것도 바뀌지 않아야 한다 — Number("")가
+  // 0이라 그대로 색인하면 고르지 않은 첫 결과가 적용된다.
+  els.chzzkCategoryResults.value = "";
+  applyChzzkCategorySelection();
+  assert.equal(els.broadcastCategoryId.value, "Marimo_League");
 });
 
 test("검색어가 비면 치지직 카테고리 검색을 호출하지 않는다", async () => {

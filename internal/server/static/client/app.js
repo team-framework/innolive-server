@@ -1169,7 +1169,13 @@ function clearChzzkCategoryResults() {
 }
 
 function applyChzzkCategorySelection() {
-  const selected = state.chzzkCategories[Number(els.chzzkCategoryResults.value)];
+  // 안내 항목의 값은 빈 문자열이다. Number("")는 0이라 그대로 색인하면
+  // 사용자가 고르지 않은 첫 결과가 적용된다.
+  const index = els.chzzkCategoryResults.value;
+  if (index === "") {
+    return;
+  }
+  const selected = state.chzzkCategories[Number(index)];
   if (!selected) {
     return;
   }

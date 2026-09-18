@@ -74,6 +74,8 @@ const state = {
   // 사용자가 직접 건드린 방송 설정 필드. 직전 방송 기본값(#143)이 이 필드를
   // 덮으면 고른 공개 범위·아동용 신고가 뒤집히므로 여기에 담아 보존한다.
   touchedBroadcastFields: new Set(),
+  // 치지직 카테고리 검색 결과. select의 값(색인)으로 종류·식별자 쌍을 되찾는다.
+  chzzkCategories: [],
   // 방송 설정을 한 번이라도 저장했는지. 미협상 세션이 회수돼 새 세션으로 이어갈
   // 때(#147) 저장했던 설정도 함께 사라지므로 폼 값을 다시 보내야 한다.
   broadcastSettingsSaved: false,
@@ -184,6 +186,10 @@ function bindElements() {
     "chzzkCategoryTypeRow",
     "chzzkTags",
     "chzzkTagsRow",
+    "chzzkCategorySearchRow",
+    "chzzkCategoryQuery",
+    "chzzkCategorySearchBtn",
+    "chzzkCategoryResults",
     "broadcastCategoryIdRow",
     "broadcastPrivacyRow",
     "broadcastThumbnailRow",
@@ -229,6 +235,10 @@ function bindEvents() {
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
   els.sessionProvider.addEventListener("change", () => applyProviderForm(els.sessionProvider.value));
+  els.chzzkCategorySearchBtn.addEventListener("click", () =>
+    void searchChzzkCategories().catch(() => null),
+  );
+  els.chzzkCategoryResults.addEventListener("change", () => applyChzzkCategorySelection());
   els.authPassword.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       void signIn();
@@ -1097,12 +1107,84 @@ function applyProviderForm(provider) {
   els.broadcastCategoryId.value = "";
   state.touchedBroadcastFields.delete("category_id");
   els.chzzkCategoryTypeRow.hidden = !chzzk;
+  els.chzzkCategorySearchRow.hidden = !chzzk;
   els.chzzkTagsRow.hidden = !chzzk;
+  // 카테고리 ID의 모양이 플랫폼마다 다르다 — 유튜브는 숫자, 치지직은 검색으로만
+  // 얻는 영문 식별자다. 안내 문구도 같이 바꾼다.
+  els.broadcastCategoryId.placeholder = chzzk
+    ? "검색해서 고르세요 (예: League_of_Legends)"
+    : "예: 20 (Gaming)";
+  clearChzzkCategoryResults();
   // category_id는 양쪽 다 쓰므로 건드리지 않는다.
   els.broadcastPrivacyRow.hidden = chzzk;
   els.broadcastThumbnailRow.hidden = chzzk;
   els.broadcastDescriptionRow.hidden = chzzk;
   els.madeForKidsRow.hidden = chzzk;
+}
+
+// 치지직의 categoryId는 사용자가 알 수 없는 영문 식별자라 검색으로만 얻는다.
+// 고른 결과의 종류·식별자는 항상 쌍으로 폼에 채운다.
+async function searchChzzkCategories() {
+  const query = els.chzzkCategoryQuery.value.trim();
+  if (!query) {
+    els.broadcastSettingsDetail.textContent = "카테고리 검색어를 입력하세요.";
+    return;
+  }
+  try {
+    // 치지직 응답에는 페이지네이션이 없어 상한(50)을 한 번에 받는다.
+    const payload = await apiFetch(
+      `/auth/chzzk/categories?query=${encodeURIComponent(query)}&size=50`,
+    );
+    state.chzzkCategories = payload.categories || [];
+    renderChzzkCategoryResults();
+    els.broadcastSettingsDetail.textContent = state.chzzkCategories.length
+      ? `카테고리 ${state.chzzkCategories.length}건을 찾았습니다. 목록에서 고르세요.`
+      : "검색 결과가 없습니다. 다른 이름으로 검색하세요.";
+    logEvent("ok", "Chzzk categories searched", { query, count: state.chzzkCategories.length });
+  } catch (error) {
+    els.broadcastSettingsDetail.textContent = `카테고리 검색 실패: ${error.message}`;
+    logEvent("error", "Chzzk category search failed", { message: error.message });
+  }
+}
+
+function renderChzzkCategoryResults() {
+  els.chzzkCategoryResults.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "검색 결과에서 고르세요";
+  els.chzzkCategoryResults.append(placeholder);
+  state.chzzkCategories.forEach((category, index) => {
+    const option = document.createElement("option");
+    // 값으로 색인을 쓴다 — 종류와 식별자를 쌍으로 되찾아야 하기 때문이다.
+    option.value = String(index);
+    option.textContent = `${category.category_value} (${category.category_type})`;
+    els.chzzkCategoryResults.append(option);
+  });
+  els.chzzkCategoryResults.value = "";
+}
+
+function clearChzzkCategoryResults() {
+  state.chzzkCategories = [];
+  renderChzzkCategoryResults();
+}
+
+function applyChzzkCategorySelection() {
+  // 안내 항목의 값은 빈 문자열이다. Number("")는 0이라 그대로 색인하면
+  // 사용자가 고르지 않은 첫 결과가 적용된다.
+  const index = els.chzzkCategoryResults.value;
+  if (index === "") {
+    return;
+  }
+  const selected = state.chzzkCategories[Number(index)];
+  if (!selected) {
+    return;
+  }
+  els.chzzkCategoryType.value = selected.category_type;
+  els.broadcastCategoryId.value = selected.category_id;
+  // 직접 고른 값이므로 기본값 주입이 덮지 않도록 표식을 남긴다.
+  state.touchedBroadcastFields.add("category_type");
+  state.touchedBroadcastFields.add("category_id");
+  els.broadcastSettingsDetail.textContent = `카테고리를 ${selected.category_value}로 골랐습니다. 저장하세요.`;
 }
 
 // sessionIsChzzk는 현재 세션의 송출 플랫폼이 치지직인지다. 세션이 없으면

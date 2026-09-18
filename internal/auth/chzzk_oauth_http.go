@@ -5,12 +5,16 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 )
 
 const maxChzzkConnectRequestBody = 16 << 10
+
+// defaultChzzkCategorySearchSize는 치지직 문서의 기본값과 같다.
+const defaultChzzkCategorySearchSize = 20
 
 // handleChzzkConnect는 콜백 페이지가 릴레이한 인가 코드를 받아 치지직 계정
 // 연결을 완결한다. 브라우저 리다이렉트만으로는 우리 사용자를 식별할 수 없어
@@ -115,6 +119,66 @@ func decodeChzzkConnectRequest(w http.ResponseWriter, r *http.Request) (string, 
 	// state는 클라이언트가 만들고 대조한다. 교환 요청에 그대로 실어야 하므로
 	// 받아만 두고 서버는 판정하지 않는다.
 	return request.Code, strings.TrimSpace(request.State), nil
+}
+
+// handleChzzkCategories는 카테고리 검색을 중계한다. 치지직의 categoryId는
+// 사용자가 알 수 없는 영문 식별자(예: League_of_Legends)라 검색이 유일한
+// 취득 경로다. 이 API는 Client 인증이라 치지직 계정을 연결하지 않은
+// 사용자도 쓸 수 있지만, 우리 자격증명과 쿼터로 나가는 호출이므로 우리
+// Bearer 인증은 요구한다.
+func (h *tokenHTTPHandler) handleChzzkCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	raw, ok := accessBearerToken(r)
+	if !ok {
+		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	}
+	if _, err := h.service.ValidateAccessToken(raw); err != nil {
+		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	if query == "" {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", "A category search query is required.")
+		return
+	}
+	size := defaultChzzkCategorySearchSize
+	if rawSize := strings.TrimSpace(r.URL.Query().Get("size")); rawSize != "" {
+		parsed, err := strconv.Atoi(rawSize)
+		if err != nil || parsed < 1 || parsed > MaxChzzkCategorySearchSize {
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "size must be between 1 and 50.")
+			return
+		}
+		size = parsed
+	}
+	categories, err := h.chzzk.SearchCategories(r.Context(), query, size)
+	if err != nil {
+		// 치지직이 검색어 자체를 거절한 경우는 사용자 입력 문제다. 재시도가
+		// 아니라 다른 검색어가 해법이므로 통신 실패와 구분해 400으로 답한다.
+		if errors.Is(err, ErrChzzkCategoryQueryRejected) {
+			h.logger.Warn("Chzzk category search rejected", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Chzzk rejected the category search query.")
+			return
+		}
+		// 그 밖은 치지직 쪽 실패다. 우리 결함이 아니므로 502로 답하고 원인은 로그에만 남긴다.
+		h.logger.Error("Chzzk category search failed", "request_id", tokenRequestID(r), "error", err)
+		h.writeError(w, r, http.StatusBadGateway, "chzzk_category_search_failed", "Chzzk categories could not be searched.")
+		return
+	}
+	items := make([]map[string]any, 0, len(categories))
+	for _, category := range categories {
+		items = append(items, map[string]any{
+			"category_type":    category.Type,
+			"category_id":      category.ID,
+			"category_value":   category.Value,
+			"poster_image_url": category.PosterImageURL,
+		})
+	}
+	// 치지직 응답에 페이지네이션이 없어 next 토큰도 없다 — size가 전부다.
+	h.writeJSON(w, http.StatusOK, map[string]any{"categories": items})
 }
 
 // handleChzzkConfig는 클라이언트가 인가 페이지로 보내는 데 필요한 공개

@@ -39,6 +39,11 @@ const buttonKeys = [
   "chzzkCategoryTypeRow",
   "chzzkTags",
   "chzzkTagsRow",
+  "chzzkCategorySearchRow",
+  "chzzkCategoryQuery",
+  "chzzkCategorySearchBtn",
+  "chzzkCategoryResults",
+  "broadcastSettingsDetail",
   "broadcastCategoryIdRow",
   "broadcastPrivacyRow",
   "broadcastThumbnailRow",
@@ -94,6 +99,9 @@ function createElement() {
     prepend(item) {
       this.children.unshift(item);
     },
+    replaceChildren(...items) {
+      this.children = items;
+    },
     get lastElementChild() {
       return this.children.at(-1) || null;
     },
@@ -140,7 +148,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
     context,
     { filename: appPath },
   );
@@ -582,4 +590,60 @@ test("provider 폼 전환은 치지직 필드를 보이고 유튜브 전용 필�
   applyProviderForm("youtube");
   assert.equal(els.chzzkTagsRow.hidden, true);
   assert.equal(els.broadcastPrivacyRow.hidden, false);
+});
+
+test("치지직 카테고리 검색 결과에서 고르면 종류·식별자가 쌍으로 채워진다", async () => {
+  const calls = [];
+  const { searchChzzkCategories, applyChzzkCategorySelection, els, state } = await loadApp({
+    fetchImpl(url) {
+      calls.push(url);
+      return jsonResponse({
+        categories: [
+          {
+            category_type: "GAME",
+            category_id: "League_of_Legends",
+            category_value: "리그 오브 레전드",
+            poster_image_url: "https://example.test/lol.png",
+          },
+          // posterImageUrl이 없는 항목도 목록에서 빠지지 않는다.
+          { category_type: "GAME", category_id: "Marimo_League", category_value: "마리모 리그", poster_image_url: "" },
+        ],
+      });
+    },
+  });
+  state.accessToken = "at";
+  els.broadcastCategoryId = { value: "", dataset: {} };
+  els.chzzkCategoryQuery.value = " 리그 ";
+
+  await searchChzzkCategories();
+
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].endsWith(`/auth/chzzk/categories?query=${encodeURIComponent("리그")}&size=50`));
+  assert.equal(state.chzzkCategories.length, 2);
+  // 안내 항목 + 결과 2건.
+  assert.equal(els.chzzkCategoryResults.children.length, 3);
+
+  els.chzzkCategoryResults.value = "1";
+  applyChzzkCategorySelection();
+
+  assert.equal(els.chzzkCategoryType.value, "GAME");
+  assert.equal(els.broadcastCategoryId.value, "Marimo_League");
+  // 고른 값을 기본값 주입이 덮지 않도록 touched로 표시한다.
+  assert.equal(state.touchedBroadcastFields.has("category_id"), true);
+  assert.equal(state.touchedBroadcastFields.has("category_type"), true);
+
+  // 안내 항목(value="")으로 되돌리면 아무것도 바뀌지 않아야 한다 — Number("")가
+  // 0이라 그대로 색인하면 고르지 않은 첫 결과가 적용된다.
+  els.chzzkCategoryResults.value = "";
+  applyChzzkCategorySelection();
+  assert.equal(els.broadcastCategoryId.value, "Marimo_League");
+});
+
+test("검색어가 비면 치지직 카테고리 검색을 호출하지 않는다", async () => {
+  const { searchChzzkCategories, els, fetchCalls } = await loadApp();
+  els.chzzkCategoryQuery.value = "   ";
+
+  await searchChzzkCategories();
+
+  assert.equal(fetchCalls(), 0);
 });

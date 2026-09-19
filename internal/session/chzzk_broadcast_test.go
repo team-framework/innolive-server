@@ -25,9 +25,13 @@ func TestChzzkBroadcastSettingsValidate(t *testing.T) {
 		{"tag with special character", ChzzkBroadcastSettings{Tags: []string{"retro!"}}, "tags[0]"},
 		{"tag with underscore", ChzzkBroadcastSettings{Tags: []string{"retro_game"}}, "tags[0]"},
 		{"empty tag", ChzzkBroadcastSettings{Tags: []string{"게임", ""}}, "tags[1]"},
-		{"tag too long", ChzzkBroadcastSettings{Tags: []string{strings.Repeat("가", 21)}}, "tags[0]"},
+		// 경계는 치지직 실측값이다(태그 5개·15자). 한 칸 안쪽은 통과하고 한 칸
+		// 밖은 거절해야 "잘못된 설정은 플랫폼에 닿지 않는다"가 성립한다.
+		{"tag at the length limit", ChzzkBroadcastSettings{Tags: []string{strings.Repeat("가", MaxChzzkTagLength)}}, ""},
+		{"tag too long", ChzzkBroadcastSettings{Tags: []string{strings.Repeat("가", MaxChzzkTagLength+1)}}, "tags[0]"},
+		{"tag count at the limit", ChzzkBroadcastSettings{Tags: []string{"a1", "a2", "a3", "a4", "a5"}}, ""},
 		{"too many tags", ChzzkBroadcastSettings{Tags: []string{
-			"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11",
+			"a1", "a2", "a3", "a4", "a5", "a6",
 		}}, "tags"},
 	}
 	for _, tc := range cases {

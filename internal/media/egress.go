@@ -294,6 +294,22 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 	return egress
 }
 
+// SetReconnectMaxElapsed는 이 egress의 재연결 예산 상한을 바꾼다. 플랫폼마다
+// "끊긴 방송을 언제까지 같은 방송으로 봐주는지"가 달라 호출자가 정한다 —
+// media는 어느 플랫폼인지 알지 않는다. d가 0 이하면 기본값을 그대로 둔다.
+// Run이 시작하면 예산은 고정되므로 Run 이전에 호출해야 한다.
+func (e *RTMPEgress) SetReconnectMaxElapsed(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	e.reconnectPolicy.maxElapsed = d
+}
+
+// ReconnectMaxElapsed는 이 egress가 쓰는 재연결 예산 상한이다.
+func (e *RTMPEgress) ReconnectMaxElapsed() time.Duration {
+	return e.reconnectPolicy.maxElapsed
+}
+
 // Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.
 func (e *RTMPEgress) Status() EgressStatus {
 	e.statusMu.Lock()

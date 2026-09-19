@@ -861,11 +861,18 @@ func (m *Manager) closeUserSessions(userID uuid.UUID, reason string) {
 	}
 }
 
+// StreamOptions는 egress 한 세대의 동작을 호출자가 조정하는 값이다. 지금은
+// 재연결 예산 하나뿐이고, 0이면 media의 기본값을 쓴다. 프로바이더별 판단은
+// 서버 계층이 한다 — internal/session은 플랫폼을 알지 않는다.
+type StreamOptions struct {
+	ReconnectMaxElapsed time.Duration
+}
+
 // StartStream은 세션의 처리(블러) 완료 출력에 RTMP egress를 붙인다.
 // outputURL은 스트림 키가 포함된 완성 URL이므로 로그에 남기지 않는다
 // (egress가 자체 마스킹으로 기록한다). 파이프라인이 이미 돌고 있어도
 // egressSlot을 통해 즉시 프레임이 흐르기 시작한다.
-func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
+func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
@@ -890,6 +897,10 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 		Gate:       m.spawnGate,
 		WireFormat: m.cfg.AIWireFormat,
 	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate, m.cfg.EgressVideoSize)
+	// 예산은 Run이 시작하면 고정되므로 고루틴을 띄우기 전에 정한다.
+	if len(options) > 0 {
+		egress.SetReconnectMaxElapsed(options[0].ReconnectMaxElapsed)
+	}
 	if s.audioPipe != nil {
 		s.audioPipe.SetMuted(false)
 	}
@@ -905,7 +916,8 @@ func (m *Manager) StartStream(id, outputURL string) (*Session, error) {
 		defer close(egressDone)
 		m.runEgress(s, egress, egressCtx)
 	}()
-	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL)
+	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL,
+		"reconnect_max_elapsed", egress.ReconnectMaxElapsed())
 	return s, nil
 }
 

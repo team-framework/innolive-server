@@ -474,7 +474,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// 붙이면 "방송 준비"가 곧 라이브가 되므로 ingest URL만 들고 있다가
 		// 라이브 전환에서 붙인다.
 		preparedRecord.IngestURL = prepared.IngestURL
-	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL); err != nil {
+	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL, streamOptionsFor(sessionProvider)); err != nil {
 		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
 		s.sessions.ResetBroadcastPreparation(liveSession.ID)
@@ -543,7 +543,7 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	if egressAttachesAtGoLive(providerName) {
 		// 치지직의 라이브 전환은 곧 egress 부착이다(D1). 붙이지 못하면
 		// 플랫폼에 되돌릴 것은 없고 준비 상태로만 돌아간다.
-		if _, err := s.sessions.StartStream(liveSession.ID, broadcast.IngestURL); err != nil {
+		if _, err := s.sessions.StartStream(liveSession.ID, broadcast.IngestURL, streamOptionsFor(providerName)); err != nil {
 			s.sessions.AbortGoLive(liveSession.ID)
 			s.writeStartStreamError(w, err, liveSession.ID)
 			return
@@ -569,6 +569,28 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+}
+
+// chzzkEgressReconnectMaxElapsed는 치지직 세션의 재연결 예산이다.
+//
+// 치지직은 방송 객체가 없어 **RTMP 재연결이 곧 새 방송**이다. 2026-09-19 실측
+// 결과 RTMP가 끊긴 뒤 치지직이 방송을 닫기까지의 유예는 13~14초였다(3회, 편차
+// 1초). 기본 예산 90초를 그대로 쓰면 유예가 지난 뒤 재연결에 성공해 시청자에게
+// 방송이 하나 더 생긴다.
+//
+// 10초인 이유: 실측 최솟값 13초에서 3초를 뺐다. 예산 시계는 네트워크가 끊긴
+// 순간이 아니라 egress가 실패를 감지한 순간부터 돌기 때문에 그만큼 여유가
+// 필요하다. 10초면 backoff 1·2·4초로 세 번 재시도해 순간적 끊김은 흡수한다.
+//
+// 유튜브는 같은 방송 객체에 다시 붙으므로 이 문제가 없다 — 기본 90초를 쓴다.
+const chzzkEgressReconnectMaxElapsed = 10 * time.Second
+
+// streamOptionsFor는 플랫폼별 egress 옵션이다. 치지직만 재연결 예산을 줄인다.
+func streamOptionsFor(provider auth.StreamingProvider) session.StreamOptions {
+	if provider == auth.StreamingProviderChzzk {
+		return session.StreamOptions{ReconnectMaxElapsed: chzzkEgressReconnectMaxElapsed}
+	}
+	return session.StreamOptions{}
 }
 
 // egressAttachesAtGoLive는 egress를 준비가 아니라 라이브 전환에서 붙이는

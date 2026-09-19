@@ -7,22 +7,18 @@ import (
 	"unicode/utf8"
 )
 
-// 치지직 방송 설정 한계값.
+// 치지직 방송 설정 한계값. 2026-09-19 치지직 스튜디오 방송 설정 화면과 실제
+// 입력으로 확인한 실측치다 — 공개 API 문서에는 숫자 상한이 없다.
 //
-// ⚠️ 이 숫자들은 **실측이 아니라 추정치다.** 치지직 공개 문서와 실측 계약
-// (docs/development/CHZZK_MULTISTREAM_HANDOFF.md)에 기록된 것은 필드의 존재
-// (defaultLiveTitle / category(Type+Id) / tags[])와 "태그에 공백·특수문자를
-// 받지 않는다"뿐이고, 길이·개수 상한은 어디에도 없다. 아래 값은 유튜브 쪽
-// 상한을 참고해 정한 보수적 방어선이다.
+// 제목은 한글·영문이 섞인 100자 문자열이 정확히 100에서 끊겨 바이트가 아니라
+// 문자 수로 센다는 것까지 확인했다(아래 검증이 쓰는 기준과 같다).
 //
 // 상한을 아예 두지 않는 선택지도 있었으나, 플랫폼이 거절할 입력을 방송 직전
-// (prepare)까지 들고 가는 편이 더 나쁘다고 보고 여기서 막는다. 실계정으로
-// lives/setting을 쳐 실제 한계를 확인하면(#230) 이 값들을 실측치로 교체하고
-// 이 주석을 지울 것.
+// (prepare)까지 들고 가면 "저장은 됐는데 방송이 안 되는" 상태가 된다.
 const (
 	MaxChzzkTitleLength = 100
-	MaxChzzkTags        = 10
-	MaxChzzkTagLength   = 20
+	MaxChzzkTags        = 5
+	MaxChzzkTagLength   = 15
 )
 
 // chzzkCategoryTypes는 lives/setting의 category.categoryType 열거값이다.

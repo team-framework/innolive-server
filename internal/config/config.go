@@ -34,6 +34,15 @@ const (
 	WireFormatRaw  WireFormat = "raw"
 )
 
+// EgressVideoEncoder는 RTMP 송출 인코더를 고른다. 기본값은 종전 그대로
+// libx264(CPU)이고, nvenc는 GPU 인코딩이라 GPU가 노출된 배포에서만 켠다.
+type EgressVideoEncoder string
+
+const (
+	EgressVideoEncoderX264  EgressVideoEncoder = "x264"
+	EgressVideoEncoderNVENC EgressVideoEncoder = "nvenc"
+)
+
 const (
 	// decoderPinMinLongEdge / decoderPinMaxLongEdge는 DECODER_PIN_LONG_EDGE의
 	// 허용 범위다. 상한은 AI 서버의 MAX_LONG_EDGE(1920)와 같게 두어, 프레임이
@@ -89,23 +98,28 @@ type Config struct {
 	EgressAudioOffset          time.Duration
 	EgressVideoBitrate         string
 	EgressVideoSize            string
-	DecoderPinLongEdge         int
-	RequireSessionAuth         bool
-	GuestQueueEnabled          bool
-	GuestQueueRedisAddr        string
-	GuestQueueRedisPassword    string
-	GuestQueueTTL              time.Duration
-	GuestSessionTTL            time.Duration
-	GuestAdmissionTTL          time.Duration
-	GuestQueueTrustedProxies   []string
-	PprofEnabled               bool
-	LogLevel                   string
-	DatabaseURL                string
-	DatabaseMaxOpenConns       int
-	DatabaseMaxIdleConns       int
-	DatabaseConnMaxLifetime    time.Duration
-	DatabaseConnMaxIdleTime    time.Duration
-	DatabaseMigrationMode      DatabaseMigrationMode
+	EgressVideoEncoder         EgressVideoEncoder
+	// EgressNVENCGPUs는 NVENC 세션을 돌려가며 배정할 GPU 개수다. 0(기본)이면
+	// -gpu를 지정하지 않고 FFmpeg에 맡긴다. FFmpeg는 자동 분산하지 않으므로
+	// 카드가 둘 이상이면 개수를 지정해야 한 장에 몰리지 않는다.
+	EgressNVENCGPUs          int
+	DecoderPinLongEdge       int
+	RequireSessionAuth       bool
+	GuestQueueEnabled        bool
+	GuestQueueRedisAddr      string
+	GuestQueueRedisPassword  string
+	GuestQueueTTL            time.Duration
+	GuestSessionTTL          time.Duration
+	GuestAdmissionTTL        time.Duration
+	GuestQueueTrustedProxies []string
+	PprofEnabled             bool
+	LogLevel                 string
+	DatabaseURL              string
+	DatabaseMaxOpenConns     int
+	DatabaseMaxIdleConns     int
+	DatabaseConnMaxLifetime  time.Duration
+	DatabaseConnMaxIdleTime  time.Duration
+	DatabaseMigrationMode    DatabaseMigrationMode
 }
 
 func Load() (Config, error) {
@@ -145,6 +159,8 @@ func Load() (Config, error) {
 		EgressAudioOffset:          time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
 		EgressVideoBitrate:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
 		EgressVideoSize:            strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
+		EgressVideoEncoder:         EgressVideoEncoder(env("EGRESS_VIDEO_ENCODER", string(EgressVideoEncoderX264))),
+		EgressNVENCGPUs:            envInt("EGRESS_NVENC_GPUS", 0),
 		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
@@ -223,6 +239,14 @@ func (c Config) Validate() error {
 	case "", WireFormatJPEG, WireFormatRaw: // empty defaults to jpeg downstream
 	default:
 		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be jpeg or raw: %q", c.AIWireFormat)
+	}
+	switch c.EgressVideoEncoder {
+	case "", EgressVideoEncoderX264, EgressVideoEncoderNVENC: // empty defaults to x264 downstream
+	default:
+		return fmt.Errorf("EGRESS_VIDEO_ENCODER must be x264 or nvenc: %q", c.EgressVideoEncoder)
+	}
+	if c.EgressNVENCGPUs < 0 {
+		return errors.New("EGRESS_NVENC_GPUS must not be negative")
 	}
 	switch c.AIFailurePolicy {
 	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream

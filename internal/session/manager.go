@@ -894,8 +894,10 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	}
 	egressCtx, egressCancel := context.WithCancel(s.baseCtx)
 	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
-		Gate:       m.spawnGate,
-		WireFormat: m.cfg.AIWireFormat,
+		Gate:               m.spawnGate,
+		WireFormat:         m.cfg.AIWireFormat,
+		EgressVideoEncoder: m.cfg.EgressVideoEncoder,
+		NVENCGPUs:          m.cfg.EgressNVENCGPUs,
 	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate, m.cfg.EgressVideoSize)
 	// 예산은 Run이 시작하면 고정되므로 고루틴을 띄우기 전에 정한다.
 	if len(options) > 0 {

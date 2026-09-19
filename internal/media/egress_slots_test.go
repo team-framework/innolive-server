@@ -202,3 +202,49 @@ func TestBudgetConcurrentAcquire(t *testing.T) {
 		t.Fatalf("Used() after release = %d, want 0", used)
 	}
 }
+
+// TestBudgetForwardsSignalFromTimedOutWaiter: 반납 신호가 막 시간이 다한
+// 대기자에게 전달되면 그 신호는 버려진다. 다음 대기자에게 넘기지 않으면
+// 자리가 비어 있는데도 남은 요청이 자기 시간이 다할 때까지 기다리다 실패한다.
+func TestBudgetForwardsSignalFromTimedOutWaiter(t *testing.T) {
+	budget := NewEgressSlotBudget(1, 0)
+	held, err := budget.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 대기자 둘을 세운다: 하나는 곧 시간이 다하고, 하나는 계속 기다린다.
+	shortCtx, cancelShort := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancelShort()
+	shortDone := make(chan struct{})
+	go func() {
+		defer close(shortDone)
+		if lease, err := budget.Acquire(shortCtx); err == nil {
+			lease.Release()
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	longDone := make(chan error, 1)
+	go func() {
+		lease, err := budget.Acquire(context.Background())
+		if lease != nil {
+			lease.Release()
+		}
+		longDone <- err
+	}()
+
+	// 첫 대기자의 시간이 다하는 순간에 맞춰 반납한다.
+	time.Sleep(60 * time.Millisecond)
+	held.Release()
+	<-shortDone
+
+	select {
+	case err := <-longDone:
+		if err != nil {
+			t.Fatalf("the remaining waiter must get the free slot: %v", err)
+		}
+	case <-time.After(egressSlotWait):
+		t.Fatal("the free slot was never handed to the remaining waiter")
+	}
+}

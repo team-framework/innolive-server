@@ -105,10 +105,10 @@ func (b *EgressSlotBudget) Acquire(ctx context.Context) (*EgressLease, error) {
 			// 자리가 나면 다시 시도한다. 깨어난 사이 다른 요청이 가져갔을 수
 			// 있으므로 획득을 재확인한다.
 		case <-deadline.C:
-			b.dropWaiter(waiter)
+			b.abandonWaiter(waiter)
 			return nil, ErrEgressSlotsExhausted
 		case <-ctx.Done():
-			b.dropWaiter(waiter)
+			b.abandonWaiter(waiter)
 			return nil, ctx.Err()
 		}
 	}
@@ -155,7 +155,11 @@ func (b *EgressSlotBudget) appendWaiterLocked() chan struct{} {
 	return waiter
 }
 
-func (b *EgressSlotBudget) dropWaiter(waiter chan struct{}) {
+// abandonWaiter는 기다리기를 포기한 요청을 대기열에서 뺀다. 이미 대기열에서
+// 빠졌다면 반납 신호가 이 요청에게 전달된 뒤 시간이 다한 것이므로, 그 신호를
+// 다음 대기자에게 넘긴다 — 그러지 않으면 자리가 비어 있는데도 남은 대기자가
+// 자기 시간이 다할 때까지 기다리다 실패한다.
+func (b *EgressSlotBudget) abandonWaiter(waiter chan struct{}) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for index, candidate := range b.waiters {
@@ -163,6 +167,12 @@ func (b *EgressSlotBudget) dropWaiter(waiter chan struct{}) {
 			b.waiters = append(b.waiters[:index], b.waiters[index+1:]...)
 			return
 		}
+	}
+	// 대기열에 없다 = 이미 신호를 받았다. 받은 신호를 흘리지 않고 넘긴다.
+	select {
+	case <-waiter:
+		b.wakeOneLocked()
+	default:
 	}
 }
 
@@ -175,13 +185,19 @@ func (b *EgressSlotBudget) release(device int) {
 	if device >= 0 && device < len(b.perCard) && b.perCard[device] > 0 {
 		b.perCard[device]--
 	}
-	if len(b.waiters) > 0 {
-		waiter := b.waiters[0]
-		b.waiters = b.waiters[1:]
-		select {
-		case waiter <- struct{}{}:
-		default:
-		}
+	b.wakeOneLocked()
+}
+
+// wakeOneLocked는 대기자 하나에게 자리가 났음을 알린다. 호출자가 mu를 쥐고 있어야 한다.
+func (b *EgressSlotBudget) wakeOneLocked() {
+	if len(b.waiters) == 0 {
+		return
+	}
+	waiter := b.waiters[0]
+	b.waiters = b.waiters[1:]
+	select {
+	case waiter <- struct{}{}:
+	default:
 	}
 }
 

@@ -236,8 +236,11 @@ type Manager struct {
 	metrics   *metrics.Registry
 	ai        *ai.Pool
 	spawnGate *media.SpawnGate
-	api       *webrtc.API
-	ice       []webrtc.ICEServer
+	// egressSlots는 동시 송출 자리 예산이다. 상한이 필요한 이유는 GPU가 아니라
+	// 회선이며, nil이면 제한도 카드 배정도 없다(종전 동작).
+	egressSlots *media.EgressSlotBudget
+	api         *webrtc.API
+	ice         []webrtc.ICEServer
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -381,6 +384,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		metrics:                     registry,
 		ai:                          aiPool,
 		spawnGate:                   spawnGate,
+		egressSlots:                 media.NewEgressSlotBudget(cfg.MaxEgressSlots, cfg.EgressNVENCGPUs),
 		api:                         webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		ice:                         iceServers,
 		sessions:                    make(map[string]*Session),
@@ -877,6 +881,19 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	// 자리는 세션 잠금 밖에서 잡는다 — 만석이면 짧게 기다리는데, 그동안 잠금을
+	// 쥐고 있으면 같은 세션의 다른 요청까지 멈춘다. 뒤이은 검증이 실패하면
+	// 아래 defer가 되돌린다.
+	lease, err := m.egressSlots.Acquire(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	started := false
+	defer func() {
+		if !started {
+			lease.Release()
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -897,12 +914,13 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		Gate:               m.spawnGate,
 		WireFormat:         m.cfg.AIWireFormat,
 		EgressVideoEncoder: m.cfg.EgressVideoEncoder,
-		NVENCGPUs:          m.cfg.EgressNVENCGPUs,
 	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate, m.cfg.EgressVideoSize)
-	// 예산은 Run이 시작하면 고정되므로 고루틴을 띄우기 전에 정한다.
+	// 예산·카드 배정은 Run이 시작하면 고정되므로 고루틴을 띄우기 전에 정한다.
 	if len(options) > 0 {
 		egress.SetReconnectMaxElapsed(options[0].ReconnectMaxElapsed)
 	}
+	egress.SetNVENCDevice(lease.Device())
+	m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
 	if s.audioPipe != nil {
 		s.audioPipe.SetMuted(false)
 	}
@@ -914,12 +932,20 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	egressDone := make(chan struct{})
 	s.egressDone = egressDone
 	s.UpdatedAt = time.Now().UTC()
+	// 자리는 egress 한 세대의 수명 전체를 점유한다. 프로세스 단위로 잡으면
+	// 재연결 때 반납·재획득이 일어나고, 만석이면 그 재연결이 실패한다.
+	started = true
 	go func() {
 		defer close(egressDone)
+		defer func() {
+			lease.Release()
+			m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
+		}()
 		m.runEgress(s, egress, egressCtx)
 	}()
 	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL,
-		"reconnect_max_elapsed", egress.ReconnectMaxElapsed())
+		"reconnect_max_elapsed", egress.ReconnectMaxElapsed(), "nvenc_device", egress.NVENCDevice(),
+		"egress_slots_used", m.egressSlots.Used())
 	return s, nil
 }
 

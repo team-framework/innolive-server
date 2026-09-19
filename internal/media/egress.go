@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -254,9 +253,10 @@ type RTMPEgress struct {
 	// 따라 해상도를 바꿔도 RTMP 출력 프로필이 흔들리지 않게 한다.
 	videoSize string
 	input     chan frame
-	// videoEncoder·nvencGPUs는 송출 인코더 선택이다. 빈 값이면 종전 x264다.
+	// videoEncoder는 송출 인코더 선택이다. 빈 값이면 종전 x264다.
+	// nvencDevice는 슬롯 예산이 배정한 GPU 번호이며 -1이면 지정하지 않는다.
 	videoEncoder config.EgressVideoEncoder
-	nvencGPUs    int
+	nvencDevice  int
 	// reconnectPolicy는 이 egress가 사용하는 자동 복구 예산이다. 기본값은
 	// 코드 상수지만, 테스트에서는 짧은 정책으로 교체해 실제 Run 루프를 검증한다.
 	reconnectPolicy reconnectPolicy
@@ -287,7 +287,9 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		bitrateOverride: videoBitrate,
 		videoSize:       videoSize,
 		videoEncoder:    options.EgressVideoEncoder,
-		nvencGPUs:       options.NVENCGPUs,
+		// 배정이 없으면 -gpu를 지정하지 않는다. 0은 실재하는 카드 번호라
+		// zero value를 "미지정"으로 쓸 수 없어 생성자에서 -1로 시작한다.
+		nvencDevice:     -1,
 		input:           make(chan frame, egressQueueSize),
 		reconnectPolicy: defaultReconnectPolicy,
 		status: EgressStatus{
@@ -310,6 +312,18 @@ func (e *RTMPEgress) SetReconnectMaxElapsed(d time.Duration) {
 	}
 	e.reconnectPolicy.maxElapsed = d
 }
+
+// SetNVENCDevice는 슬롯 예산이 배정한 GPU 번호를 지정한다. 음수면 지정하지
+// 않은 것으로 남는다. Run 이전에 호출해야 한다.
+func (e *RTMPEgress) SetNVENCDevice(index int) {
+	if index < 0 {
+		return
+	}
+	e.nvencDevice = index
+}
+
+// NVENCDevice는 이 egress에 배정된 GPU 번호다. -1이면 지정하지 않는다.
+func (e *RTMPEgress) NVENCDevice() int { return e.nvencDevice }
 
 // ReconnectMaxElapsed는 이 egress가 쓰는 재연결 예산 상한이다.
 func (e *RTMPEgress) ReconnectMaxElapsed() time.Duration {
@@ -338,26 +352,12 @@ func (e *RTMPEgress) videoEncoderArguments(videoBitrate string, fps int) []strin
 	// FFmpeg는 카드 사이에 자동 분산하지 않는다 — 지정하지 않으면 전부 GPU 0에
 	// 몰리고 카드당 한계(12세션)에 먼저 부딪힌다. -gpu는 인코더 사설 옵션이라
 	// -c:v 뒤에 와야 한다.
-	if e.nvencGPUs > 0 {
-		arguments = append(arguments, "-gpu", strconv.Itoa(nextNVENCDevice(e.nvencGPUs)))
+	// 카드는 슬롯 예산이 배정한다 — 가장 덜 찬 카드를 골라야 총량이 남았는데
+	// 한 카드만 한계에 닿는 편중을 막는다.
+	if e.nvencDevice >= 0 {
+		arguments = append(arguments, "-gpu", strconv.Itoa(e.nvencDevice))
 	}
 	return append(arguments, common...)
-}
-
-// nvencDeviceCursor는 프로세스 전역 라운드로빈 커서다. GPU는 프로세스 전역
-// 자원이라 세션별로 세면 전부 같은 카드로 간다. 재시작마다 다시 배정되므로
-// 한 카드가 비면 다음 시작이 그리로 간다.
-//
-// 이 배분은 시작 순서 기준이라 카드별 실제 점유 수를 세지 않는다. 종료가
-// 한쪽에 몰리면 편중될 수 있고, 그때는 총량이 남아도 한 카드가 먼저 한계
-// (12세션)에 닿는다. 카드별 회계는 슬롯 예산 작업에서 다룬다.
-var nvencDeviceCursor atomic.Uint64
-
-func nextNVENCDevice(count int) int {
-	if count <= 1 {
-		return 0
-	}
-	return int((nvencDeviceCursor.Add(1) - 1) % uint64(count))
 }
 
 // Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.

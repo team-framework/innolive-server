@@ -21,6 +21,8 @@ type histogram struct {
 
 type Registry struct {
 	activeSessions      atomic.Int64
+	egressSlotsUsed     atomic.Int64
+	egressSlotsCapacity atomic.Int64
 	connections         atomic.Uint64
 	connectionFailure   atomic.Uint64
 	reconnects          atomic.Uint64
@@ -94,7 +96,14 @@ func New() *Registry {
 	}
 }
 
-func (r *Registry) SetActiveSessions(value int)    { r.activeSessions.Store(int64(value)) }
+func (r *Registry) SetActiveSessions(value int) { r.activeSessions.Store(int64(value)) }
+
+// SetEgressSlots는 송출 자리 점유·상한이다. 상한 0은 제한 없음을 뜻한다.
+// 포화가 터지기 전에 보이는 유일한 수단이라 사용량과 상한을 같이 낸다.
+func (r *Registry) SetEgressSlots(used, capacity int) {
+	r.egressSlotsUsed.Store(int64(used))
+	r.egressSlotsCapacity.Store(int64(capacity))
+}
 func (r *Registry) IncConnections()                { r.connections.Add(1) }
 func (r *Registry) IncConnectionFailures()         { r.connectionFailure.Add(1) }
 func (r *Registry) IncReconnects()                 { r.reconnects.Add(1) }
@@ -248,6 +257,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeFloatCounter(w, "innolive_process_tree_cpu_seconds_total", "Total CPU time spent by the server and its FFmpeg child processes.", processTreeCPUSeconds)
 	writeGauge(w, "innolive_process_tree_resident_memory_bytes", "Resident memory used by the server and its active FFmpeg child processes.", int64(processTreeRSSBytes))
 	writeGauge(w, "innolive_active_sessions", "Number of active WebRTC sessions.", r.activeSessions.Load())
+	writeGauge(w, "innolive_egress_slots_used", "Egress slots currently held by running broadcasts.", r.egressSlotsUsed.Load())
+	writeGauge(w, "innolive_egress_slots_capacity", "Configured egress slot limit (0 means unlimited).", r.egressSlotsCapacity.Load())
 	writeCounter(w, "innolive_connection_total", "Number of WebRTC sessions created.", r.connections.Load())
 	writeCounter(w, "innolive_connection_failures_total", "Number of WebRTC connections that reached a failed state.", r.connectionFailure.Load())
 	writeCounter(w, "innolive_reconnect_total", "Number of WebRTC sessions that recovered after disconnecting.", r.reconnects.Load())

@@ -36,6 +36,10 @@ const (
 
 // EgressVideoEncoder는 RTMP 송출 인코더를 고른다. 기본값은 종전 그대로
 // libx264(CPU)이고, nvenc는 GPU 인코딩이라 GPU가 노출된 배포에서만 켠다.
+//
+// 짝이 되는 Config.EgressNVENCGPUs는 NVENC 세션을 돌려가며 배정할 GPU 개수다.
+// 0(기본)이면 -gpu를 지정하지 않고 FFmpeg에 맡긴다. FFmpeg는 카드 사이에 자동
+// 분산하지 않으므로 카드가 둘 이상이면 개수를 지정해야 한 장에 몰리지 않는다.
 type EgressVideoEncoder string
 
 const (
@@ -99,27 +103,24 @@ type Config struct {
 	EgressVideoBitrate         string
 	EgressVideoSize            string
 	EgressVideoEncoder         EgressVideoEncoder
-	// EgressNVENCGPUs는 NVENC 세션을 돌려가며 배정할 GPU 개수다. 0(기본)이면
-	// -gpu를 지정하지 않고 FFmpeg에 맡긴다. FFmpeg는 자동 분산하지 않으므로
-	// 카드가 둘 이상이면 개수를 지정해야 한 장에 몰리지 않는다.
-	EgressNVENCGPUs          int
-	DecoderPinLongEdge       int
-	RequireSessionAuth       bool
-	GuestQueueEnabled        bool
-	GuestQueueRedisAddr      string
-	GuestQueueRedisPassword  string
-	GuestQueueTTL            time.Duration
-	GuestSessionTTL          time.Duration
-	GuestAdmissionTTL        time.Duration
-	GuestQueueTrustedProxies []string
-	PprofEnabled             bool
-	LogLevel                 string
-	DatabaseURL              string
-	DatabaseMaxOpenConns     int
-	DatabaseMaxIdleConns     int
-	DatabaseConnMaxLifetime  time.Duration
-	DatabaseConnMaxIdleTime  time.Duration
-	DatabaseMigrationMode    DatabaseMigrationMode
+	EgressNVENCGPUs            int
+	DecoderPinLongEdge         int
+	RequireSessionAuth         bool
+	GuestQueueEnabled          bool
+	GuestQueueRedisAddr        string
+	GuestQueueRedisPassword    string
+	GuestQueueTTL              time.Duration
+	GuestSessionTTL            time.Duration
+	GuestAdmissionTTL          time.Duration
+	GuestQueueTrustedProxies   []string
+	PprofEnabled               bool
+	LogLevel                   string
+	DatabaseURL                string
+	DatabaseMaxOpenConns       int
+	DatabaseMaxIdleConns       int
+	DatabaseConnMaxLifetime    time.Duration
+	DatabaseConnMaxIdleTime    time.Duration
+	DatabaseMigrationMode      DatabaseMigrationMode
 }
 
 func Load() (Config, error) {

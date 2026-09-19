@@ -347,6 +347,10 @@ func (e *RTMPEgress) videoEncoderArguments(videoBitrate string, fps int) []strin
 // nvencDeviceCursor는 프로세스 전역 라운드로빈 커서다. GPU는 프로세스 전역
 // 자원이라 세션별로 세면 전부 같은 카드로 간다. 재시작마다 다시 배정되므로
 // 한 카드가 비면 다음 시작이 그리로 간다.
+//
+// 이 배분은 시작 순서 기준이라 카드별 실제 점유 수를 세지 않는다. 종료가
+// 한쪽에 몰리면 편중될 수 있고, 그때는 총량이 남아도 한 카드가 먼저 한계
+// (12세션)에 닿는다. 카드별 회계는 슬롯 예산 작업에서 다룬다.
 var nvencDeviceCursor atomic.Uint64
 
 func nextNVENCDevice(count int) int {

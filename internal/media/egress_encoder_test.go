@@ -15,10 +15,13 @@ import (
 
 // captureEgressArguments는 한 번의 프로세스 시작에서 FFmpeg에 넘어간 인자를
 // 그대로 돌려준다. 실제 FFmpeg는 실행하지 않는다.
-func captureEgressArguments(t *testing.T, options TranscoderOptions) []string {
+func captureEgressArguments(t *testing.T, options TranscoderOptions, device ...int) []string {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e := NewRTMPEgress("ffmpeg", logger, metrics.New(), options, "rtmp://host/live2/secret-key", nil, false, 0, "", "")
+	if len(device) > 0 {
+		e.SetNVENCDevice(device[0])
+	}
 	var captured []string
 	e.transcoder.newCommand = func(ctx context.Context, _ string, arguments ...string) *exec.Cmd {
 		captured = arguments
@@ -87,23 +90,18 @@ func TestEgressNVENCArguments(t *testing.T) {
 	}
 }
 
-// TestEgressNVENCDistributesAcrossGPUs: FFmpeg는 카드 사이에 자동 분산하지
-// 않는다. 지정하지 않으면 전부 GPU 0에 몰려 카드당 한계(12세션)에 먼저 닿는다.
-func TestEgressNVENCDistributesAcrossGPUs(t *testing.T) {
+// TestEgressNVENCUsesAssignedDevice: 카드는 슬롯 예산이 배정한다. 지정된 번호가
+// 그대로 -gpu로 나가야 편중 없이 두 카드를 쓴다.
+func TestEgressNVENCUsesAssignedDevice(t *testing.T) {
 	options := TranscoderOptions{
 		WireFormat:         config.WireFormatJPEG,
 		EgressVideoEncoder: config.EgressVideoEncoderNVENC,
-		NVENCGPUs:          2,
 	}
-	first := gpuArgument(t, captureEgressArguments(t, options))
-	second := gpuArgument(t, captureEgressArguments(t, options))
-	if first == second {
-		t.Fatalf("two consecutive starts both used GPU %s", first)
+	if device := gpuArgument(t, captureEgressArguments(t, options, 1)); device != "1" {
+		t.Fatalf("-gpu = %s, want 1", device)
 	}
-	for _, device := range []string{first, second} {
-		if device != "0" && device != "1" {
-			t.Fatalf("-gpu = %s, want 0 or 1", device)
-		}
+	if device := gpuArgument(t, captureEgressArguments(t, options, 0)); device != "0" {
+		t.Fatalf("-gpu = %s, want 0", device)
 	}
 }
 
@@ -118,18 +116,4 @@ func gpuArgument(t *testing.T, arguments []string) string {
 		t.Fatalf("-gpu must follow -c:v: %s", strings.Join(arguments, " "))
 	}
 	return arguments[index+1]
-}
-
-// TestNextNVENCDevice: 카드가 하나거나 미지정이면 항상 0이다.
-func TestNextNVENCDevice(t *testing.T) {
-	for _, count := range []int{-1, 0, 1} {
-		if device := nextNVENCDevice(count); device != 0 {
-			t.Fatalf("nextNVENCDevice(%d) = %d, want 0", count, device)
-		}
-	}
-	// 카드가 둘이면 연속 호출이 번갈아 나온다.
-	first, second, third := nextNVENCDevice(2), nextNVENCDevice(2), nextNVENCDevice(2)
-	if first == second || first != third {
-		t.Fatalf("round robin over 2 GPUs = %d, %d, %d", first, second, third)
-	}
 }

@@ -22,6 +22,7 @@ import (
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
 	"inno-live-server/internal/session"
@@ -766,6 +767,10 @@ func (s *Server) writeStartStreamError(w http.ResponseWriter, err error, session
 		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": sessionID}})
 	case errors.Is(err, session.ErrStreamActive):
 		writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": sessionID}})
+	case errors.Is(err, media.ErrEgressSlotsExhausted):
+		// 자리는 다른 방송이 끝나야 난다 — 즉시 재시도해도 풀리지 않으므로
+		// 사용자에게 알릴 실패로 내린다.
+		writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "egress_slots_exhausted", Message: "No streaming slot is available. Try again after another broadcast ends.", Details: map[string]any{"session_id": sessionID}})
 	default:
 		writeSessionError(w, err, sessionID)
 	}

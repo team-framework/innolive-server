@@ -104,6 +104,7 @@ type Config struct {
 	EgressVideoSize            string
 	EgressVideoEncoder         EgressVideoEncoder
 	EgressNVENCGPUs            int
+	MaxEgressSlots             int
 	DecoderPinLongEdge         int
 	RequireSessionAuth         bool
 	GuestQueueEnabled          bool
@@ -162,6 +163,7 @@ func Load() (Config, error) {
 		EgressVideoSize:            strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
 		EgressVideoEncoder:         EgressVideoEncoder(env("EGRESS_VIDEO_ENCODER", string(EgressVideoEncoderX264))),
 		EgressNVENCGPUs:            envInt("EGRESS_NVENC_GPUS", 0),
+		MaxEgressSlots:             envInt("MAX_EGRESS_SLOTS", 0),
 		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
@@ -248,6 +250,9 @@ func (c Config) Validate() error {
 	}
 	if c.EgressNVENCGPUs < 0 {
 		return errors.New("EGRESS_NVENC_GPUS must not be negative")
+	}
+	if c.MaxEgressSlots < 0 {
+		return errors.New("MAX_EGRESS_SLOTS must not be negative")
 	}
 	switch c.AIFailurePolicy {
 	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream

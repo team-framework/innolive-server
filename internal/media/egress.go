@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -253,6 +254,9 @@ type RTMPEgress struct {
 	// 따라 해상도를 바꿔도 RTMP 출력 프로필이 흔들리지 않게 한다.
 	videoSize string
 	input     chan frame
+	// videoEncoder·nvencGPUs는 송출 인코더 선택이다. 빈 값이면 종전 x264다.
+	videoEncoder config.EgressVideoEncoder
+	nvencGPUs    int
 	// reconnectPolicy는 이 egress가 사용하는 자동 복구 예산이다. 기본값은
 	// 코드 상수지만, 테스트에서는 짧은 정책으로 교체해 실제 Run 루프를 검증한다.
 	reconnectPolicy reconnectPolicy
@@ -282,6 +286,8 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		audioOffset:     audioOffset,
 		bitrateOverride: videoBitrate,
 		videoSize:       videoSize,
+		videoEncoder:    options.EgressVideoEncoder,
+		nvencGPUs:       options.NVENCGPUs,
 		input:           make(chan frame, egressQueueSize),
 		reconnectPolicy: defaultReconnectPolicy,
 		status: EgressStatus{
@@ -308,6 +314,50 @@ func (e *RTMPEgress) SetReconnectMaxElapsed(d time.Duration) {
 // ReconnectMaxElapsed는 이 egress가 쓰는 재연결 예산 상한이다.
 func (e *RTMPEgress) ReconnectMaxElapsed() time.Duration {
 	return e.reconnectPolicy.maxElapsed
+}
+
+// videoEncoderArguments는 영상 인코더 인자다. 기본(x264)은 종전과 바이트
+// 단위로 같은 인자를 만든다 — 유튜브 송출 회귀를 막는 기준선이다.
+//
+// NVENC는 CPU를 세션당 1.6코어에서 0.1코어로 줄여 동시 송출의 선행 조건이
+// 된다(#226). 프리셋 p1·-tune ll·-rc cbr은 프로덕션 컨테이너 ffmpeg 5.1.9에서
+// 동작을 확인한 조합이다.
+func (e *RTMPEgress) videoEncoderArguments(videoBitrate string, fps int) []string {
+	common := []string{
+		"-pix_fmt", "yuv420p", "-profile:v", "main",
+		"-b:v", videoBitrate, "-maxrate", videoBitrate, "-bufsize", videoBitrate,
+		"-g", strconv.Itoa(fps * 2), "-bf", "0",
+		"-r", strconv.Itoa(fps), "-fps_mode", "cfr",
+	}
+	if e.videoEncoder != config.EgressVideoEncoderNVENC {
+		return append([]string{
+			"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+		}, common...)
+	}
+	arguments := []string{"-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll", "-rc", "cbr"}
+	// FFmpeg는 카드 사이에 자동 분산하지 않는다 — 지정하지 않으면 전부 GPU 0에
+	// 몰리고 카드당 한계(12세션)에 먼저 부딪힌다. -gpu는 인코더 사설 옵션이라
+	// -c:v 뒤에 와야 한다.
+	if e.nvencGPUs > 0 {
+		arguments = append(arguments, "-gpu", strconv.Itoa(nextNVENCDevice(e.nvencGPUs)))
+	}
+	return append(arguments, common...)
+}
+
+// nvencDeviceCursor는 프로세스 전역 라운드로빈 커서다. GPU는 프로세스 전역
+// 자원이라 세션별로 세면 전부 같은 카드로 간다. 재시작마다 다시 배정되므로
+// 한 카드가 비면 다음 시작이 그리로 간다.
+//
+// 이 배분은 시작 순서 기준이라 카드별 실제 점유 수를 세지 않는다. 종료가
+// 한쪽에 몰리면 편중될 수 있고, 그때는 총량이 남아도 한 카드가 먼저 한계
+// (12세션)에 닿는다. 카드별 회계는 슬롯 예산 작업에서 다룬다.
+var nvencDeviceCursor atomic.Uint64
+
+func nextNVENCDevice(count int) int {
+	if count <= 1 {
+		return 0
+	}
+	return int((nvencDeviceCursor.Add(1) - 1) % uint64(count))
 }
 
 // Status는 egress 상태 스냅샷을 반환한다. 어느 고루틴에서든 호출 가능하다.
@@ -1042,12 +1092,8 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		arguments = append(arguments, "-vf", filter)
 	}
 	videoBitrate := e.videoBitrateFor(width, height)
+	arguments = append(arguments, e.videoEncoderArguments(videoBitrate, fps)...)
 	arguments = append(arguments,
-		"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-		"-pix_fmt", "yuv420p", "-profile:v", "main",
-		"-b:v", videoBitrate, "-maxrate", videoBitrate, "-bufsize", videoBitrate,
-		"-g", strconv.Itoa(fps*2), "-bf", "0",
-		"-r", strconv.Itoa(fps), "-fps_mode", "cfr",
 		"-c:a", "aac", "-b:a", egressAudioBitrate, "-ar", "44100", "-ac", "2",
 	)
 	if useAudio {

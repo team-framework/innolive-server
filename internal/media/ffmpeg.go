@@ -61,6 +61,13 @@ type TranscoderOptions struct {
 	// PinLongEdge는 디코더 출력의 장변을 고정한다. 0(기본)이면 첫 프레임을
 	// 따르는 종전 동작을 유지한다.
 	PinLongEdge uint16
+	// EgressVideoEncoder는 RTMP 송출 인코더다. 빈 값(기본)은 종전 libx264이며,
+	// 그때 egress 인자는 바이트 단위로 종전과 같다.
+	EgressVideoEncoder config.EgressVideoEncoder
+	// NVENCGPUs는 NVENC 세션을 돌려가며 배정할 GPU 개수다. 0이면 -gpu를
+	// 지정하지 않는다. 디코더·뷰어 인코더는 이 값을 쓰지 않는다 — NVENC 예산은
+	// egress 전용이라는 게 용량 계산의 전제다.
+	NVENCGPUs int
 }
 
 // decoderOutput은 디코더가 내보낼 치수와 그것을 강제하는 -vf 체인을 정한다.

@@ -861,10 +861,6 @@ func (m *Manager) closeUserSessions(userID uuid.UUID, reason string) {
 	}
 }
 
-// StartStream은 세션의 처리(블러) 완료 출력에 RTMP egress를 붙인다.
-// outputURL은 스트림 키가 포함된 완성 URL이므로 로그에 남기지 않는다
-// (egress가 자체 마스킹으로 기록한다). 파이프라인이 이미 돌고 있어도
-// egressSlot을 통해 즉시 프레임이 흐르기 시작한다.
 // StreamOptions는 egress 한 세대의 동작을 호출자가 조정하는 값이다. 지금은
 // 재연결 예산 하나뿐이고, 0이면 media의 기본값을 쓴다. 프로바이더별 판단은
 // 서버 계층이 한다 — internal/session은 플랫폼을 알지 않는다.
@@ -872,6 +868,10 @@ type StreamOptions struct {
 	ReconnectMaxElapsed time.Duration
 }
 
+// StartStream은 세션의 처리(블러) 완료 출력에 RTMP egress를 붙인다.
+// outputURL은 스트림 키가 포함된 완성 URL이므로 로그에 남기지 않는다
+// (egress가 자체 마스킹으로 기록한다). 파이프라인이 이미 돌고 있어도
+// egressSlot을 통해 즉시 프레임이 흐르기 시작한다.
 func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {

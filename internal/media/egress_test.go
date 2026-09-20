@@ -562,7 +562,7 @@ func TestEndInputRecoveryKeepsAudioMutedDuringUserPauseTransitions(t *testing.T)
 			}
 			e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
 			e.audio = audio
-			e.audioWriteEnd = audioFile
+			e.setAudioWriteEnd(audioFile)
 			e.setStreaming(1280, 720, 30)
 			if !e.Pause() {
 				t.Fatal("Pause returned false")

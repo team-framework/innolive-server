@@ -238,7 +238,10 @@ type RTMPEgress struct {
 	outputURL  string
 	audio      *AudioPipe
 	// audioWriteEnd는 현재 FFmpeg 자식 프로세스에 연결된 pipe write end다.
-	// 종료 시 후속 프로세스가 아니라 정확히 이 스트림만 분리한다.
+	// 종료 시 후속 프로세스가 아니라 정확히 이 스트림만 분리한다. Run 고루틴이
+	// spawn마다 갈아 끼우는데 pause·복구 경로는 호출자 고루틴에서 이 값을
+	// 읽으므로 audioMu로 감싼다.
+	audioMu       sync.Mutex
 	audioWriteEnd *os.File
 	latency       *latencyTracker
 	// audioOffset은 FFmpeg -itsoffset으로 마이크를 blur 지연된 영상에 맞춰
@@ -484,7 +487,7 @@ func (e *RTMPEgress) Pause() bool {
 		return false
 	}
 	if e.audio != nil {
-		e.audio.SetMuted(e.audioWriteEnd, true)
+		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
 	}
 	return true
 }
@@ -496,7 +499,7 @@ func (e *RTMPEgress) Resume() bool {
 		return false
 	}
 	if e.audio != nil && !e.inputRecovering() {
-		e.audio.SetMuted(e.audioWriteEnd, false)
+		e.audio.SetMuted(e.currentAudioWriteEnd(), false)
 	}
 	return true
 }
@@ -514,7 +517,7 @@ func (e *RTMPEgress) BeginInputRecovery() bool {
 	e.status.UpdatedAt = time.Now().UTC()
 	e.statusMu.Unlock()
 	if e.audio != nil {
-		e.audio.SetMuted(e.audioWriteEnd, true)
+		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
 	}
 	return true
 }
@@ -530,7 +533,7 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 	e.status.InputRecovering = false
 	e.status.UpdatedAt = time.Now().UTC()
 	if e.audio != nil {
-		e.audio.SetMuted(e.audioWriteEnd, userPausePhase(e.status.Phase))
+		e.audio.SetMuted(e.currentAudioWriteEnd(), userPausePhase(e.status.Phase))
 	}
 	e.statusMu.Unlock()
 	return true
@@ -724,7 +727,7 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 			// 자식 프로세스가 pipe:3에서 EOF를 받아 종료하게 하고, 다음 spawn이
 			// 새 Ogg 스트림을 연결할 수 있도록 해제한다.
 			if e.audio != nil {
-				e.audio.Detach(e.audioWriteEnd)
+				e.audio.Detach(e.currentAudioWriteEnd())
 			}
 			process.close()
 			if ctx.Err() != nil {
@@ -912,6 +915,19 @@ func (e *RTMPEgress) inputRecovering() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	return e.status.InputRecovering
+}
+
+// currentAudioWriteEnd는 지금 붙어 있는 스트림의 write end다(없으면 nil).
+func (e *RTMPEgress) currentAudioWriteEnd() *os.File {
+	e.audioMu.Lock()
+	defer e.audioMu.Unlock()
+	return e.audioWriteEnd
+}
+
+func (e *RTMPEgress) setAudioWriteEnd(writeEnd *os.File) {
+	e.audioMu.Lock()
+	defer e.audioMu.Unlock()
+	e.audioWriteEnd = writeEnd
 }
 
 // audioShouldMute는 새로 붙이는 오디오 스트림이 무음으로 시작해야 하는지다.
@@ -1122,7 +1138,7 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 		}
 		return nil, fmt.Errorf("start FFmpeg RTMP egress: %w", err)
 	}
-	e.audioWriteEnd = audioWriteEnd
+	e.setAudioWriteEnd(audioWriteEnd)
 	if audioWriteEnd != nil {
 		if err := e.audio.Attach(audioWriteEnd, e.audioShouldMute()); err != nil {
 			_ = audioWriteEnd.Close()

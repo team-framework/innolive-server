@@ -45,6 +45,8 @@ type Registry struct {
 	egressDropFrames    atomic.Int64
 	audioSamplesOut     atomic.Uint64
 	audioSamplesDrop    atomic.Uint64
+	nvencLeakSuspected  atomic.Uint64
+	nvencProbeFailures  atomic.Uint64
 	processTree         processTreeTracker
 
 	mu                  sync.RWMutex
@@ -54,6 +56,8 @@ type Registry struct {
 	aiInputPausedFrames map[string]uint64
 	aiTargetSessions    map[string]uint64
 	aiTargetReady       map[string]int64
+	nvencSessions       map[string]int64
+	nvencSlotsPerCard   map[string]int64
 	framesReceived      map[string]uint64
 	framesProcessed     map[string]uint64
 	framesDropped       map[string]uint64
@@ -78,6 +82,8 @@ func New() *Registry {
 		aiInputPausedFrames: make(map[string]uint64),
 		aiTargetSessions:    make(map[string]uint64),
 		aiTargetReady:       make(map[string]int64),
+		nvencSessions:       make(map[string]int64),
+		nvencSlotsPerCard:   make(map[string]int64),
 		framesReceived:      make(map[string]uint64),
 		framesProcessed:     make(map[string]uint64),
 		framesDropped:       make(map[string]uint64),
@@ -125,6 +131,28 @@ func (r *Registry) IncEgressReconnectInputTimeout() { r.egressInputTimed.Add(1) 
 func (r *Registry) IncEgressFrameDropped()          { r.egressDropped.Add(1) }
 func (r *Registry) SetEgressDupFrames(value int64)  { r.egressDupFrames.Store(value) }
 func (r *Registry) SetEgressDropFrames(value int64) { r.egressDropFrames.Store(value) }
+
+// SetNVENCCards는 카드별 NVENC 세션 실측치(nvidia-smi)와 내부 슬롯 회계를 함께
+// 기록한다. 둘을 한 번에 넣는 이유는 대조가 목적이기 때문이다 — 서로 다른 시점의
+// 값이 섞이면 있지도 않은 불일치가 보인다.
+func (r *Registry) SetNVENCCards(measured, accounted []int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index, value := range measured {
+		r.nvencSessions[strconv.Itoa(index)] = int64(value)
+	}
+	for index, value := range accounted {
+		r.nvencSlotsPerCard[strconv.Itoa(index)] = int64(value)
+	}
+}
+
+// IncNVENCLeakSuspected는 실측이 회계를 넘어선 경우를 센다 — 자리를 반납했는데
+// NVENC 세션이 남은 상태, 즉 놓친 FFmpeg 프로세스의 신호다.
+func (r *Registry) IncNVENCLeakSuspected() { r.nvencLeakSuspected.Add(1) }
+
+// IncNVENCProbeFailure는 nvidia-smi 프로브 실패를 센다. 감시가 죽으면 불일치가
+// 0으로 보이므로, 감시 자체의 생사를 따로 드러낸다.
+func (r *Registry) IncNVENCProbeFailure() { r.nvencProbeFailures.Add(1) }
 
 func (r *Registry) IncAudioSampleWritten() { r.audioSamplesOut.Add(1) }
 func (r *Registry) IncAudioSampleDropped() { r.audioSamplesDrop.Add(1) }
@@ -280,6 +308,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeGauge(w, "innolive_egress_dup_frames", "Frames duplicated by the egress CFR pacing in the current FFmpeg process.", r.egressDupFrames.Load())
 	writeGauge(w, "innolive_egress_drop_frames", "Frames dropped by the egress CFR pacing in the current FFmpeg process.", r.egressDropFrames.Load())
 	writeCounter(w, "innolive_audio_samples_written_total", "Number of Opus samples written to the RTMP egress audio pipe.", r.audioSamplesOut.Load())
+	writeCounter(w, "innolive_nvenc_leak_suspected_total", "Number of probes where measured NVENC sessions exceeded the internal egress slot accounting.", r.nvencLeakSuspected.Load())
+	writeCounter(w, "innolive_nvenc_probe_failures_total", "Number of failed nvidia-smi probes by the NVENC leak monitor.", r.nvencProbeFailures.Load())
 	writeCounter(w, "innolive_audio_samples_dropped_total", "Number of Opus samples dropped before the audio pipe (full queue, detached, non-monotonic, or pipe error).", r.audioSamplesDrop.Load())
 
 	r.mu.RLock()
@@ -289,6 +319,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_input_paused_frames_total", "Number of camera frames discarded before AI processing while a broadcast is paused.", "mode", r.aiInputPausedFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)
+	writeLabeledGaugesWithKey(w, "innolive_nvenc_sessions", "NVENC encoder sessions reported by nvidia-smi for each GPU.", "gpu", r.nvencSessions)
+	writeLabeledGaugesWithKey(w, "innolive_nvenc_slots_accounted", "Egress slots the server accounts for on each GPU.", "gpu", r.nvencSlotsPerCard)
 	writeLabeledGaugesWithKey(w, "innolive_ai_target_ready", "Whether the AI worker target answered the most recent preflight probe (1) or not (0).", "target", r.aiTargetReady)
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
 	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of processed video frames returned to WebRTC.", r.framesProcessed)

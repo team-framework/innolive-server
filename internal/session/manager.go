@@ -949,6 +949,9 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	return s, nil
 }
 
+// EgressSlots는 자리 예산이다. 누수 감시가 카드별 회계를 읽는다.
+func (m *Manager) EgressSlots() *media.EgressSlotBudget { return m.egressSlots }
+
 // runEgress는 egress의 자체 종료를 세션 슬롯 정리와 연결한다. Run 고루틴이
 // 재연결 예산을 소진해 끝난 경우에도 세션과 WebRTC 미리보기는 살아 있어야 하므로,
 // 이 함수는 세션을 지우지 않고 해당 egress만 슬롯에서 분리한다.

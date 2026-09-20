@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,37 +53,98 @@ type frame struct {
 	height   uint16
 }
 
-// EgressSlot은 실행 중인 파이프라인에 egress를 나중에 꽂거나 뗄 수 있게 하는
+// EgressFanout은 실행 중인 파이프라인에 egress를 나중에 꽂거나 뗄 수 있게 하는
 // 홀더다. 명시적 송출 시작(#83)은 트랙 도착(파이프라인 기동) 이후에 오므로,
-// 파이프라인은 egress를 직접 들지 않고 이 슬롯을 통해서만 참조한다.
-type EgressSlot struct {
-	current atomic.Pointer[RTMPEgress]
+// 파이프라인은 egress를 직접 들지 않고 이 홀더를 통해서만 참조한다.
+//
+// 대상(플랫폼)마다 자기 egress를 가지므로 키로 구분해 여럿을 들 수 있다(#232).
+// 읽기는 프레임마다 일어나므로 스냅샷을 캐싱해 그 경로에 할당을 만들지 않는다.
+type EgressFanout struct {
+	mu      sync.RWMutex
+	sinks   map[string]*RTMPEgress
+	current atomic.Pointer[[]*RTMPEgress]
 }
 
-func NewEgressSlot() *EgressSlot { return &EgressSlot{} }
+func NewEgressFanout() *EgressFanout {
+	fanout := &EgressFanout{sinks: make(map[string]*RTMPEgress)}
+	fanout.publishLocked()
+	return fanout
+}
 
-// Set은 활성 egress를 교체한다.
-func (s *EgressSlot) Set(egress *RTMPEgress) { s.current.Store(egress) }
+// Add는 한 대상의 egress를 설치한다. 같은 키가 이미 있으면 교체한다.
+func (f *EgressFanout) Add(key string, egress *RTMPEgress) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sinks[key] = egress
+	f.publishLocked()
+}
 
-// Clear는 슬롯을 비운다. 이후 파이프라인 프레임은 egress로 가지 않는다.
-func (s *EgressSlot) Clear() { s.current.Store(nil) }
+// Remove는 한 대상을 뗀다. 이후 파이프라인 프레임은 그 대상으로 가지 않는다.
+func (f *EgressFanout) Remove(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sinks, key)
+	f.publishLocked()
+}
 
-// ClearIf는 현재 슬롯이 expected를 가리킬 때만 비운다. 이전 egress Run 고루틴이
-// 종료되는 사이 새 방송이 같은 슬롯에 설치될 수 있으므로, 무조건 Clear하면 새
-// 방송까지 끊길 수 있다.
-func (s *EgressSlot) ClearIf(expected *RTMPEgress) bool {
-	if s == nil {
+// RemoveAll은 모든 대상을 뗀다(세션 종료).
+func (f *EgressFanout) RemoveAll() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clear(f.sinks)
+	f.publishLocked()
+}
+
+// RemoveIf는 해당 키가 expected를 가리킬 때만 뗀다. 이전 egress Run 고루틴이
+// 종료되는 사이 새 방송이 같은 키에 설치될 수 있으므로, 무조건 떼면 새 방송까지
+// 끊길 수 있다.
+func (f *EgressFanout) RemoveIf(key string, expected *RTMPEgress) bool {
+	if f == nil {
 		return false
 	}
-	return s.current.CompareAndSwap(expected, nil)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sinks[key] != expected {
+		return false
+	}
+	delete(f.sinks, key)
+	f.publishLocked()
+	return true
 }
 
-// Load는 현재 활성 egress를 돌려준다(슬롯이 nil이거나 비었으면 nil).
-func (s *EgressSlot) Load() *RTMPEgress {
-	if s == nil {
+// Sinks는 현재 설치된 egress들이다. 프레임 경로에서 매번 불리므로 스냅샷을
+// 그대로 돌려준다 — 호출자는 이 슬라이스를 수정하면 안 된다.
+func (f *EgressFanout) Sinks() []*RTMPEgress {
+	if f == nil {
 		return nil
 	}
-	return s.current.Load()
+	if snapshot := f.current.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return nil
+}
+
+// publishLocked는 읽기 경로가 쓸 스냅샷을 갱신한다. 호출자가 mu를 쥐고 있어야 한다.
+func (f *EgressFanout) publishLocked() {
+	snapshot := make([]*RTMPEgress, 0, len(f.sinks))
+	for _, key := range sortedSinkKeys(f.sinks) {
+		snapshot = append(snapshot, f.sinks[key])
+	}
+	f.current.Store(&snapshot)
+}
+
+// sortedSinkKeys는 대상 순서를 고정한다. map 순회 순서가 프레임마다 달라지면
+// 대상 간 전달 순서가 흔들려 시작 시점 차이(#234)를 재현할 수 없다.
+func sortedSinkKeys(sinks map[string]*RTMPEgress) []string {
+	keys := make([]string, 0, len(sinks))
+	for key := range sinks {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type rtpSequenceObservation struct {
@@ -239,7 +301,7 @@ func RunTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
-	egress *EgressSlot,
+	egress *EgressFanout,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
@@ -257,7 +319,7 @@ func runTranscodedTrack(
 	local *webrtc.TrackLocalStaticSample,
 	processor *Processor,
 	transcoder *FFmpegTranscoder,
-	egress *EgressSlot,
+	egress *EgressFanout,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	queueSize int,
@@ -401,7 +463,7 @@ func processImages(
 	processor *Processor,
 	decoded <-chan frame,
 	processed chan<- frame,
-	egress *EgressSlot,
+	egress *EgressFanout,
 	registry *metrics.Registry,
 	mode config.PrivacyMode,
 	onProcessedFrame func(),
@@ -430,7 +492,7 @@ func processImages(
 			registry.IncFrameProcessed(string(mode))
 			item.data = output
 			item.stageAt = time.Now()
-			if sink := egress.Load(); sink != nil {
+			for _, sink := range egress.Sinks() {
 				sink.Enqueue(item)
 			}
 			if onProcessedFrame != nil {

@@ -163,16 +163,15 @@ type Session struct {
 	audioTrackID     string
 	audioPipe        *media.AudioPipe
 	// egress 수명은 명시적 start~stop 구간이다(#83). 트랙 수명이 아니라(#84)
-	// 카메라 전환에도 살아남고, 파이프라인은 egressSlot을 통해서만 참조하므로
+	// 카메라 전환에도 살아남고, 파이프라인은 egressFanout을 통해서만 참조하므로
 	// 트랙 도착 이후에 시작해도 실행 중인 파이프라인에 꽂힌다.
 	// baseCtx는 세션 수명 컨텍스트로, start 시점의 egress 컨텍스트 파생원이다.
-	baseCtx          context.Context
-	egressSlot       *media.EgressSlot
-	egress           *media.RTMPEgress
-	egressCancel     context.CancelFunc
-	egressDone       chan struct{}
-	streamStopReason *string
-	processor        *media.Processor
+	baseCtx      context.Context
+	egressFanout *media.EgressFanout
+	// targets는 플랫폼별 송출 상태다(#232). 지금은 세션의 Provider 하나만
+	// 채워진다 — 동시 송출(#233)이 둘째를 넣는다.
+	targets   map[string]*streamTarget
+	processor *media.Processor
 	// aiInputPaused는 방송 pause 의도를 보존한다. egress가 재구성·재연결 중인
 	// 경우와 카메라 트랙이 교체되는 경우에도 새 카메라 프레임을 AI worker로
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
@@ -182,9 +181,7 @@ type Session struct {
 	// chzzkBroadcast는 치지직 세션의 방송 설정이다(#229). 세션의 Provider는
 	// 생성 시 고정이라 broadcast와 이 필드 중 하나만 채워진다 — 플랫폼이
 	// 셋 이상이 되면 그때 추상화한다.
-	chzzkBroadcast    *ChzzkBroadcastSettings
-	platformBroadcast *PlatformBroadcast
-	broadcastPhase    BroadcastPhase
+	chzzkBroadcast *ChzzkBroadcastSettings
 	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
 	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
 	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다.
@@ -322,18 +319,19 @@ func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 // 되돌린다. 라이브 전환 왕복 중이면 손대지 않는다 — 이미 나간 요청의 결과를
 // 받는 쪽이 마무리해야 하기 때문이다. Session.mu를 가진 호출자만 쓴다.
 func takeBroadcastLocked(s *Session) (PlatformBroadcast, BroadcastPhase) {
-	phase := s.broadcastPhase
+	t := s.primaryTarget()
+	phase := t.phase
 	if phase == BroadcastPhaseGoingLive {
 		return PlatformBroadcast{}, BroadcastPhaseIdle
 	}
 	var broadcast PlatformBroadcast
-	if s.platformBroadcast != nil && (phase == BroadcastPhasePrepared || phase == BroadcastPhaseLive) {
-		broadcast = *s.platformBroadcast
+	if t.platformBroadcast != nil && (phase == BroadcastPhasePrepared || phase == BroadcastPhaseLive) {
+		broadcast = *t.platformBroadcast
 	} else {
 		phase = BroadcastPhaseIdle
 	}
-	s.platformBroadcast = nil
-	s.broadcastPhase = BroadcastPhaseIdle
+	t.platformBroadcast = nil
+	t.phase = BroadcastPhaseIdle
 	return broadcast, phase
 }
 
@@ -556,14 +554,16 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider string, metadata ma
 		Status:               "active",
 		PC:                   pc,
 		Stream:               StreamState{Status: "idle", UpdatedAt: now, BroadcastPhase: BroadcastPhaseIdle},
-		broadcastPhase:       BroadcastPhaseIdle,
 		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
 		ownerHash:            ownerHash,
 		cancel:               cancel,
 		recovery:             peerRecovery{status: PeerRecoveryStatusIdle},
 	}
 	s.baseCtx = ctx
-	s.egressSlot = media.NewEgressSlot()
+	s.egressFanout = media.NewEgressFanout()
+	// 대상은 세션 생성과 함께 만들어 둔다 — 읽기 잠금만 쥔 경로에서 지연
+	// 생성하면 targets 맵을 쓰기와 경합시킨다.
+	s.targets = map[string]*streamTarget{provider: {phase: BroadcastPhaseIdle}}
 	// audio pipe는 트랙 도착 순서와 무관하게 미리 만든다. 영상 또는 오디오 트랙의
 	// OnTrack 중 무엇이 먼저 실행돼도 egress가 연결할 수 있다. 마이크 트랙이
 	// 입력을 공급하고 egress가 pipe를 연결할 때까지는 샘플을 버리며 유휴 상태다.
@@ -800,13 +800,14 @@ func (m *Manager) cleanupWithdrawalBroadcast(ctx context.Context, userID uuid.UU
 func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.platformBroadcast == nil {
-		s.broadcastPhase = BroadcastPhaseIdle
+	t := s.primaryTarget()
+	if t.platformBroadcast == nil {
+		t.phase = BroadcastPhaseIdle
 		s.goLiveStopRequested = false
 		return PlatformBroadcast{}, BroadcastPhaseIdle
 	}
-	broadcast := *s.platformBroadcast
-	phase := s.broadcastPhase
+	broadcast := *t.platformBroadcast
+	phase := t.phase
 	if phase == BroadcastPhaseGoingLive {
 		// Session HTTP operations are gated during withdrawal, so an in-flight
 		// transition has completed by this point. Treat a leftover marker as live
@@ -816,19 +817,30 @@ func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
 	if phase != BroadcastPhasePrepared && phase != BroadcastPhaseLive {
 		phase = BroadcastPhaseIdle
 	}
-	s.platformBroadcast = nil
-	s.broadcastPhase = BroadcastPhaseIdle
+	t.platformBroadcast = nil
+	t.phase = BroadcastPhaseIdle
 	s.goLiveStopRequested = false
 	return broadcast, phase
 }
 
 func (m *Manager) waitForEgress(ctx context.Context, s *Session) error {
 	s.mu.RLock()
-	done := s.egressDone
-	s.mu.RUnlock()
-	if done == nil {
-		return nil
+	waits := make([]chan struct{}, 0, len(s.targets))
+	for _, target := range s.targets {
+		if target.done != nil {
+			waits = append(waits, target.done)
+		}
 	}
+	s.mu.RUnlock()
+	for _, done := range waits {
+		if err := waitForDone(ctx, done); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitForDone(ctx context.Context, done chan struct{}) error {
 	select {
 	case <-done:
 		return nil
@@ -865,6 +877,50 @@ func (m *Manager) closeUserSessions(userID uuid.UUID, reason string) {
 	}
 }
 
+// streamTarget은 한 플랫폼으로 나가는 송출 한 세대다. egress와 플랫폼 방송의
+// 상태가 대상마다 독립이어야 동시 송출에서 한쪽의 재연결·종료가 다른 쪽을
+// 건드리지 않는다(#232). zero value는 "아무것도 없는 idle"이라 생성 시점과
+// 최초 사용 시점을 구분할 필요가 없다.
+type streamTarget struct {
+	egress            *media.RTMPEgress
+	cancel            context.CancelFunc
+	done              chan struct{}
+	stopReason        *string
+	platformBroadcast *PlatformBroadcast
+	phase             BroadcastPhase
+}
+
+// target은 provider의 송출 상태를 돌려준다. 없으면 만든다 — zero value가 곧
+// idle이므로 읽기 경로에서 만들어도 상태가 달라지지 않는다.
+// Session.mu를 가진 호출자만 쓴다.
+func (s *Session) target(provider string) *streamTarget {
+	if s.targets == nil {
+		s.targets = make(map[string]*streamTarget, 1)
+	}
+	existing, ok := s.targets[provider]
+	if !ok {
+		existing = &streamTarget{}
+		s.targets[provider] = existing
+	}
+	return existing
+}
+
+// primaryTarget은 이 세션의 유일한 송출 대상이다. 세션의 Provider는 생성 시
+// 고정이므로(#227) 지금은 대상이 언제나 하나다. 대상을 고르는 호출자가
+// 생기면(#233) 이 우회로 대신 provider를 받는 경로로 바꾼다.
+// Session.mu를 가진 호출자만 쓴다.
+func (s *Session) primaryTarget() *streamTarget { return s.target(s.Provider) }
+
+// readTarget은 읽기 잠금에서 쓰는 스냅샷이다. 값으로 돌려주므로 읽기 경로가
+// 실수로 상태를 바꿀 수 없고, targets 맵을 읽기 중에 쓰지도 않는다.
+// 대상이 아직 없으면 zero value(= idle)다.
+func (s *Session) readTarget() streamTarget {
+	if existing := s.targets[s.Provider]; existing != nil {
+		return *existing
+	}
+	return streamTarget{}
+}
+
 // StreamOptions는 egress 한 세대의 동작을 호출자가 조정하는 값이다. 지금은
 // 재연결 예산 하나뿐이고, 0이면 media의 기본값을 쓴다. 프로바이더별 판단은
 // 서버 계층이 한다 — internal/session은 플랫폼을 알지 않는다.
@@ -896,6 +952,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -903,10 +960,15 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	if s.rawTrackID == "" {
 		return nil, ErrNoVideoTrack
 	}
-	// 중지가 요청된(streamStopReason != nil) egress는 종료 절차 중이므로
-	// 활성으로 보지 않는다 — stop 직후의 재시작이 이전 Run 고루틴의 종료
-	// 타이밍에 좌우되면 안 된다.
-	if s.egress != nil && s.streamStopReason == nil && s.egress.Status().Phase != media.EgressPhaseStopped {
+	// 중지가 요청된(stopReason != nil) egress는 종료 절차 중이므로 활성으로
+	// 보지 않는다 — stop 직후의 재시작이 이전 Run 고루틴의 종료 타이밍에
+	// 좌우되면 안 된다.
+	//
+	// 이 검사는 한 세션이 동시에 둘 이상을 송출하지 못하게 막는다. 파이프라인은
+	// 이미 대상 여럿을 나를 수 있지만(#232) AudioPipe는 아직 하나뿐이라, 이
+	// 가드를 풀면 두 ffmpeg가 같은 파이프를 읽어 양쪽 오디오가 깨진다.
+	// 오디오 팬아웃이 들어오기 전까지는 이것이 유일한 안전장치다.
+	if t.egress != nil && t.stopReason == nil && t.egress.Status().Phase != media.EgressPhaseStopped {
 		return nil, ErrStreamActive
 	}
 	egressCtx, egressCancel := context.WithCancel(s.baseCtx)
@@ -925,12 +987,12 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		s.audioPipe.SetMuted(false)
 	}
 	s.setAIInputPaused(false)
-	s.egress = egress
-	s.egressCancel = egressCancel
-	s.streamStopReason = nil
-	s.egressSlot.Set(egress)
+	t.egress = egress
+	t.cancel = egressCancel
+	t.stopReason = nil
+	s.egressFanout.Add(s.Provider, egress)
 	egressDone := make(chan struct{})
-	s.egressDone = egressDone
+	t.done = egressDone
 	s.UpdatedAt = time.Now().UTC()
 	// 자리는 egress 한 세대의 수명 전체를 점유한다. 프로세스 단위로 잡으면
 	// 재연결 때 반납·재획득이 일어나고, 만석이면 그 재연결이 실패한다.
@@ -960,17 +1022,18 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 	status := egress.Status()
 
 	s.mu.Lock()
-	if s.egress != egress {
+	t := s.primaryTarget()
+	if t.egress != egress {
 		s.mu.Unlock()
 		return
 	}
 	// 같은 세션에서 새 방송이 먼저 시작된 경우에는 ClearIf가 새 egress를
 	// 지우지 않는다. 이 비교·교환은 트랙 파이프라인과의 경계를 원자적으로
 	// 유지한다.
-	s.egressSlot.ClearIf(egress)
-	if s.egressCancel != nil {
-		s.egressCancel()
-		s.egressCancel = nil
+	s.egressFanout.RemoveIf(s.Provider, egress)
+	if t.cancel != nil {
+		t.cancel()
+		t.cancel = nil
 	}
 	if !s.closed {
 		// pause 상태에서 재연결 예산이 소진된 경우에도 미리보기·AI 파이프라인은
@@ -1011,13 +1074,14 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastP
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, err
 	}
 	s.mu.Lock()
+	t := s.primaryTarget()
 	defer s.mu.Unlock()
-	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+	if t.egress == nil || t.stopReason != nil || t.egress.Status().Phase == media.EgressPhaseStopped {
 		// egress 없이 준비만 된 방송(치지직: egress는 라이브 전환에서 붙는다)은
 		// 여기서 놓아준다 — 그러지 않으면 라이브 전환이나 세션 삭제 외에는
 		// 준비 상태를 빠져나갈 길이 없다. 유튜브는 준비와 동시에 egress가
 		// 붙으므로 이 분기에 오지 않는다.
-		if s.broadcastPhase == BroadcastPhasePrepared {
+		if t.phase == BroadcastPhasePrepared {
 			broadcast, phase := takeBroadcastLocked(s)
 			s.UpdatedAt = time.Now().UTC()
 			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)
@@ -1025,18 +1089,18 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastP
 		}
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, ErrStreamNotActive
 	}
-	s.egressSlot.Clear()
-	s.egress.Stop()
-	s.egressCancel()
+	s.egressFanout.Remove(s.Provider)
+	t.egress.Stop()
+	t.cancel()
 	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
 	// 보존한다. pause 상태에서 stop한 경우에도 이후 처리 프레임은 다시 AI로
 	// 보낼 수 있게 차단을 해제한다.
 	s.setAIInputPaused(false)
 	reason := "user_requested"
-	s.streamStopReason = &reason
+	t.stopReason = &reason
 	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
 	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
-	if s.broadcastPhase == BroadcastPhaseGoingLive {
+	if t.phase == BroadcastPhaseGoingLive {
 		s.goLiveStopRequested = true
 		s.UpdatedAt = time.Now().UTC()
 		m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
@@ -1057,11 +1121,12 @@ func (m *Manager) PauseStream(id string) (*Session, error) {
 		return nil, err
 	}
 	s.mu.Lock()
+	t := s.primaryTarget()
 	defer s.mu.Unlock()
-	if s.egress == nil || s.streamStopReason != nil {
+	if t.egress == nil || t.stopReason != nil {
 		return nil, ErrStreamNotActive
 	}
-	if err := pauseEgress(s.egress); err != nil {
+	if err := pauseEgress(t.egress); err != nil {
 		return nil, err
 	}
 	s.setAIInputPaused(true)
@@ -1078,11 +1143,12 @@ func (m *Manager) ResumeStream(id string) (*Session, error) {
 		return nil, err
 	}
 	s.mu.Lock()
+	t := s.primaryTarget()
 	defer s.mu.Unlock()
-	if s.egress == nil || s.streamStopReason != nil {
+	if t.egress == nil || t.stopReason != nil {
 		return nil, ErrStreamNotActive
 	}
-	if err := resumeEgress(s.egress); err != nil {
+	if err := resumeEgress(t.egress); err != nil {
 		return nil, err
 	}
 	s.setAIInputPaused(false)
@@ -1399,7 +1465,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 		// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
 		// Enqueue 경로가 끊기지 않는다.
-		egressSlot := s.egressSlot
+		egressFanout := s.egressFanout
 		s.mu.Unlock()
 		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
 		trackID := track.ID()
@@ -1429,7 +1495,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				s.Output,
 				processor,
 				transcoder,
-				egressSlot,
+				egressFanout,
 				m.metrics,
 				m.cfg.PrivacyMode,
 				m.cfg.FrameQueueSize,
@@ -1510,6 +1576,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 
 func (s *Session) Response() Response {
 	s.mu.RLock()
+	t := s.readTarget()
 	defer s.mu.RUnlock()
 	response := Response{
 		SessionID: s.ID,
@@ -1555,10 +1622,10 @@ func (s *Session) Response() Response {
 		broadcast := s.chzzkBroadcast.response()
 		response.ChzzkBroadcast = &broadcast
 	}
-	if s.egress != nil {
-		response.Stream = streamStateFromEgress(s.egress.Status(), s.rawTrackID != "", s.streamStopReason)
+	if t.egress != nil {
+		response.Stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
 	}
-	response.Stream.BroadcastPhase = s.broadcastPhase
+	response.Stream.BroadcastPhase = t.phase
 	return response
 }
 
@@ -1604,10 +1671,15 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 	// 명시하기 위해 상태를 먼저 stopped로 전이하고 전용 cancel을 직접 호출한다.
 	// 이 순서로 WebRTC 종료·세션 삭제·로그아웃 모두 재구성 완료를 기다리지
 	// 않고 같은 stop 전이와 RTMP 종료 경로를 사용한다.
-	if s.egressCancel != nil {
-		s.egress.Stop()
-		s.egressCancel()
+	// 세션이 끝나면 대상이 몇 개든 전부 끝낸다(#232).
+	for _, target := range s.targets {
+		if target.cancel == nil {
+			continue
+		}
+		target.egress.Stop()
+		target.cancel()
 	}
+	s.egressFanout.RemoveAll()
 	s.cancel()
 	s.mu.Unlock()
 	if err := s.PC.Close(); err != nil {

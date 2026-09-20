@@ -244,8 +244,9 @@ func (s *Session) cancelRecoveryLocked() {
 }
 
 func activeEgressLocked(s *Session) *media.RTMPEgress {
-	if s.egress == nil || s.streamStopReason != nil || s.egress.Status().Phase == media.EgressPhaseStopped {
+	t := s.primaryTarget()
+	if t.egress == nil || t.stopReason != nil || t.egress.Status().Phase == media.EgressPhaseStopped {
 		return nil
 	}
-	return s.egress
+	return t.egress
 }

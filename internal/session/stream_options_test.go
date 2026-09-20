@@ -20,7 +20,7 @@ func startedEgressBudget(t *testing.T, options ...StreamOptions) time.Duration {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
-	egress := created.egress
+	egress := created.primaryTarget().egress
 	created.mu.RUnlock()
 	if egress == nil {
 		t.Fatal("StartStream must install an egress")

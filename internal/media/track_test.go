@@ -30,24 +30,24 @@ func TestRTPSequenceTrackerRecordsGapRecoveryAndOutOfOrder(t *testing.T) {
 	}
 }
 
-func TestEgressSlotClearIfKeepsReplacement(t *testing.T) {
-	slot := NewEgressSlot()
+func TestEgressFanoutRemoveIfKeepsReplacement(t *testing.T) {
+	fanout := NewEgressFanout()
 	previous := &RTMPEgress{}
 	replacement := &RTMPEgress{}
-	slot.Set(previous)
-	slot.Set(replacement)
+	fanout.Add("youtube", previous)
+	fanout.Add("youtube", replacement)
 
-	if slot.ClearIf(previous) {
-		t.Fatal("ClearIf must not clear a replacement egress")
+	if fanout.RemoveIf("youtube", previous) {
+		t.Fatal("RemoveIf must not remove a replacement egress")
 	}
-	if got := slot.Load(); got != replacement {
-		t.Fatalf("slot.Load() = %p, want replacement %p", got, replacement)
+	if got := fanout.Sinks(); len(got) != 1 || got[0] != replacement {
+		t.Fatalf("Sinks() = %v, want [replacement %p]", got, replacement)
 	}
-	if !slot.ClearIf(replacement) {
-		t.Fatal("ClearIf must clear the current egress")
+	if !fanout.RemoveIf("youtube", replacement) {
+		t.Fatal("RemoveIf must remove the current egress")
 	}
-	if got := slot.Load(); got != nil {
-		t.Fatalf("slot.Load() = %p after clear, want nil", got)
+	if got := fanout.Sinks(); len(got) != 0 {
+		t.Fatalf("Sinks() = %v after removal, want empty", got)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestProcessImagesSkipsPausedAIInput(t *testing.T) {
 	decoded <- frame{data: []byte("camera-frame"), width: 640, height: 480}
 	close(decoded)
 	processed := make(chan frame, 1)
-	processImages(context.Background(), nil, processor, decoded, processed, NewEgressSlot(), registry, config.PrivacyModeReal, nil)
+	processImages(context.Background(), nil, processor, decoded, processed, NewEgressFanout(), registry, config.PrivacyModeReal, nil)
 
 	if calls != 0 {
 		t.Fatalf("AI Process calls = %d, want 0 while paused", calls)

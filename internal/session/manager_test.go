@@ -194,7 +194,7 @@ func TestCloseUserSessionsForWithdrawalRetriesAfterEgressWaitCancellation(t *tes
 	}
 	egressDone := make(chan struct{})
 	liveSession.mu.Lock()
-	liveSession.egressDone = egressDone
+	liveSession.primaryTarget().done = egressDone
 	liveSession.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -365,8 +365,8 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
-	slotted := created.egressSlot.Load()
-	active := created.egress
+	slotted := singleSink(created.egressFanout)
+	active := created.primaryTarget().egress
 	created.mu.RUnlock()
 	if active == nil || slotted != active {
 		t.Fatal("started egress must be installed in the session slot")
@@ -399,7 +399,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
-	cleared := created.egressSlot.Load()
+	cleared := singleSink(created.egressFanout)
 	created.mu.RUnlock()
 	if cleared != nil {
 		t.Fatal("stop must clear the egress slot")
@@ -422,7 +422,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	// 세션 삭제가 활성 egress를 정리해야 한다.
 	restarted := created
 	restarted.mu.RLock()
-	activeEgress := restarted.egress
+	activeEgress := restarted.primaryTarget().egress
 	restarted.mu.RUnlock()
 	if err := manager.Delete(created.ID, "test"); err != nil {
 		t.Fatal(err)
@@ -446,8 +446,8 @@ func TestTerminalEgressClearsSlotAndAllowsRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
-	egress := created.egress
-	cancel := created.egressCancel
+	egress := created.primaryTarget().egress
+	cancel := created.primaryTarget().cancel
 	created.mu.RUnlock()
 	if egress == nil || cancel == nil {
 		t.Fatal("StartStream must install an egress and cancellation function")
@@ -460,7 +460,7 @@ func TestTerminalEgressClearsSlotAndAllowsRestart(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		created.mu.RLock()
-		slotted := created.egressSlot.Load()
+		slotted := singleSink(created.egressFanout)
 		created.mu.RUnlock()
 		if slotted == nil {
 			break
@@ -468,7 +468,7 @@ func TestTerminalEgressClearsSlotAndAllowsRestart(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	created.mu.RLock()
-	slotted := created.egressSlot.Load()
+	slotted := singleSink(created.egressFanout)
 	created.mu.RUnlock()
 	if slotted != nil {
 		t.Fatal("terminal egress must be removed from the egress slot")
@@ -1000,4 +1000,14 @@ func TestRevokedCreateReleasesUserSlot(t *testing.T) {
 	if _, _, err := manager.CreateForUser(userID, nil); err != nil {
 		t.Fatalf("CreateForUser() after revocation error = %v", err)
 	}
+}
+
+// singleSink은 팬아웃에 설치된 유일한 egress다(없으면 nil). 세션 하나가 대상
+// 하나를 갖는 동안은 종전 Load()와 같은 것을 본다.
+func singleSink(fanout *media.EgressFanout) *media.RTMPEgress {
+	sinks := fanout.Sinks()
+	if len(sinks) == 0 {
+		return nil
+	}
+	return sinks[0]
 }

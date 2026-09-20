@@ -114,10 +114,11 @@ func (m *Manager) SetChzzkBroadcastSettings(id string, settings ChzzkBroadcastSe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
-	switch s.broadcastPhase {
+	switch t.phase {
 	case BroadcastPhasePreparing, BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:

@@ -133,10 +133,11 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
-	switch s.broadcastPhase {
+	switch t.phase {
 	case BroadcastPhasePreparing, BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
@@ -205,16 +206,17 @@ func (m *Manager) BeginBroadcastPrepare(id string) (*Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
-	switch s.broadcastPhase {
+	switch t.phase {
 	case BroadcastPhasePreparing, BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
 		return nil, ErrBroadcastLive
 	}
-	s.broadcastPhase = BroadcastPhasePreparing
+	t.phase = BroadcastPhasePreparing
 	s.UpdatedAt = time.Now().UTC()
 	return s, nil
 }
@@ -228,11 +230,12 @@ func (m *Manager) ResetBroadcastPreparation(id string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.broadcastPhase != BroadcastPhasePreparing {
+	t := s.primaryTarget()
+	if t.phase != BroadcastPhasePreparing {
 		return
 	}
-	s.platformBroadcast = nil
-	s.broadcastPhase = BroadcastPhaseIdle
+	t.platformBroadcast = nil
+	t.phase = BroadcastPhaseIdle
 	s.UpdatedAt = time.Now().UTC()
 }
 
@@ -246,10 +249,11 @@ func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
-	switch s.broadcastPhase {
+	switch t.phase {
 	case BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
@@ -258,8 +262,8 @@ func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) 
 	default:
 		return nil, ErrBroadcastNotPrepared
 	}
-	s.platformBroadcast = &broadcast
-	s.broadcastPhase = BroadcastPhasePrepared
+	t.platformBroadcast = &broadcast
+	t.phase = BroadcastPhasePrepared
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("platform broadcast prepared", "session_id", s.ID,
 		"provider", broadcast.Provider, "broadcast_id", broadcast.BroadcastID)
@@ -276,10 +280,11 @@ func (m *Manager) BeginGoLive(id string) (*Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	t := s.primaryTarget()
 	if s.closed {
 		return nil, ErrNotFound
 	}
-	switch s.broadcastPhase {
+	switch t.phase {
 	case BroadcastPhaseLive:
 		return nil, ErrBroadcastLive
 	case BroadcastPhaseGoingLive:
@@ -288,7 +293,7 @@ func (m *Manager) BeginGoLive(id string) (*Session, error) {
 	default:
 		return nil, ErrBroadcastNotPrepared
 	}
-	s.broadcastPhase = BroadcastPhaseGoingLive
+	t.phase = BroadcastPhaseGoingLive
 	s.goLiveStopRequested = false
 	s.UpdatedAt = time.Now().UTC()
 	return s, nil
@@ -304,21 +309,22 @@ func (m *Manager) CompleteGoLive(id string) (aborted bool, broadcast PlatformBro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.platformBroadcast != nil {
-		broadcast = *s.platformBroadcast
+	t := s.primaryTarget()
+	if t.platformBroadcast != nil {
+		broadcast = *t.platformBroadcast
 	}
 	if s.closed || s.goLiveStopRequested {
-		s.platformBroadcast = nil
-		s.broadcastPhase = BroadcastPhaseIdle
+		t.platformBroadcast = nil
+		t.phase = BroadcastPhaseIdle
 		s.goLiveStopRequested = false
 		s.UpdatedAt = time.Now().UTC()
 		m.logger.Info("go live aborted by stop", "session_id", s.ID, "broadcast_id", broadcast.BroadcastID)
 		return true, broadcast, nil
 	}
-	if s.broadcastPhase != BroadcastPhaseGoingLive {
+	if t.phase != BroadcastPhaseGoingLive {
 		return true, broadcast, ErrBroadcastNotPrepared
 	}
-	s.broadcastPhase = BroadcastPhaseLive
+	t.phase = BroadcastPhaseLive
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("platform broadcast is live", "session_id", s.ID)
 	return false, broadcast, nil
@@ -333,20 +339,21 @@ func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadc
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.platformBroadcast != nil {
-		broadcast = *s.platformBroadcast
+	t := s.primaryTarget()
+	if t.platformBroadcast != nil {
+		broadcast = *t.platformBroadcast
 	}
-	if s.broadcastPhase != BroadcastPhaseGoingLive {
+	if t.phase != BroadcastPhaseGoingLive {
 		return true, broadcast
 	}
 	if s.closed || s.goLiveStopRequested {
-		s.platformBroadcast = nil
-		s.broadcastPhase = BroadcastPhaseIdle
+		t.platformBroadcast = nil
+		t.phase = BroadcastPhaseIdle
 		s.goLiveStopRequested = false
 		s.UpdatedAt = time.Now().UTC()
 		return true, broadcast
 	}
-	s.broadcastPhase = BroadcastPhasePrepared
+	t.phase = BroadcastPhasePrepared
 	s.UpdatedAt = time.Now().UTC()
 	return false, broadcast
 }
@@ -356,8 +363,9 @@ func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadc
 func (s *Session) PlatformBroadcast() (PlatformBroadcast, BroadcastPhase) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.platformBroadcast == nil {
-		return PlatformBroadcast{}, s.broadcastPhase
+	t := s.primaryTarget()
+	if t.platformBroadcast == nil {
+		return PlatformBroadcast{}, t.phase
 	}
-	return *s.platformBroadcast, s.broadcastPhase
+	return *t.platformBroadcast, t.phase
 }

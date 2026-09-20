@@ -219,6 +219,15 @@ func main() {
 		)
 		os.Exit(1)
 	}
+	// NVENC 누수 감시: 자리를 반납했는데 카드에 세션이 남으면 회계로는 보이지
+	// 않는다. nvidia-smi 실측과 주기 대조해 그 방향의 불일치만 드러낸다(#226).
+	if cfg.EgressNVENCGPUs > 0 {
+		leakContext, stopLeakMonitor := context.WithCancel(context.Background())
+		defer stopLeakMonitor()
+
+		go media.NewNVENCMonitor(sessionManager.EgressSlots(), registry, logger).Run(leakContext)
+	}
+
 	tokenConfig, err := auth.LoadTokenConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid token configuration", "error", err)

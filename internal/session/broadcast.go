@@ -363,7 +363,7 @@ func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadc
 func (s *Session) PlatformBroadcast() (PlatformBroadcast, BroadcastPhase) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	t := s.primaryTarget()
+	t := s.readTarget()
 	if t.platformBroadcast == nil {
 		return PlatformBroadcast{}, t.phase
 	}

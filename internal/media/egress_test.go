@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -550,13 +552,22 @@ func TestEndInputRecoveryKeepsAudioMutedDuringUserPauseTransitions(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			audio := NewAudioPipe(testLogger(), metrics.New(), 2)
+			// mute는 스트림마다 독립이므로(#232) 붙은 스트림이 있어야 관측된다.
+			audioFile, err := os.Create(filepath.Join(t.TempDir(), "audio.ogg"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := audio.Attach(audioFile, false); err != nil {
+				t.Fatal(err)
+			}
 			e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
 			e.audio = audio
+			e.audioWriteEnd = audioFile
 			e.setStreaming(1280, 720, 30)
 			if !e.Pause() {
 				t.Fatal("Pause returned false")
 			}
-			if !audio.Muted() {
+			if !audio.Muted(audioFile) {
 				t.Fatal("Pause must mute audio")
 			}
 			if !e.BeginInputRecovery() {
@@ -570,7 +581,7 @@ func TestEndInputRecoveryKeepsAudioMutedDuringUserPauseTransitions(t *testing.T)
 			if !e.EndInputRecovery() {
 				t.Fatal("EndInputRecovery returned false")
 			}
-			if !audio.Muted() {
+			if !audio.Muted(audioFile) {
 				t.Fatal("input recovery completion must keep audio muted while user pause is preserved")
 			}
 			if status := e.Status(); status.Phase != tc.wantPhase || status.InputRecovering {

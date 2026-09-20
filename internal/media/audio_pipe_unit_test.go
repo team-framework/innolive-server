@@ -78,7 +78,7 @@ func TestAudioPipeMonotonicGuardDropsBackwardTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Attach(f); err != nil {
+	if err := p.Attach(f, false); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	payload := []byte{0xf8, 0x01, 0x02, 0x03}
@@ -109,7 +109,7 @@ func TestAudioPipeDetachIsWriteEndTargeted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Attach(f1); err != nil {
+	if err := p.Attach(f1, false); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	p.Detach(f2) // some other (stale) write end — must be a no-op
@@ -155,7 +155,7 @@ func TestAudioPipeAttachWritesOggOpusHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Attach(f); err != nil {
+	if err := p.Attach(f, false); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	p.Detach(f)

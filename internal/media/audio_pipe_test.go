@@ -34,7 +34,7 @@ func TestAudioPipeProducesValidOgg(t *testing.T) {
 	defer cancel()
 	go pipe.Run(ctx)
 
-	if err := pipe.Attach(file); err != nil {
+	if err := pipe.Attach(file, false); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 
@@ -81,12 +81,11 @@ func TestMutedAudioPipeProducesDecodableSilenceOgg(t *testing.T) {
 		t.Fatal(err)
 	}
 	pipe := NewAudioPipe(testLogger(), metrics.New(), 2)
-	if err := pipe.Attach(file); err != nil {
+	if err := pipe.Attach(file, true); err != nil {
 		t.Fatal(err)
 	}
-	pipe.SetMuted(true)
 	for index := 0; index < 75; index++ {
-		pipe.writeSilenceSample()
+		pipe.writeSilenceSamples()
 	}
 	pipe.Detach(file)
 

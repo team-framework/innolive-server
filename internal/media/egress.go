@@ -484,7 +484,7 @@ func (e *RTMPEgress) Pause() bool {
 		return false
 	}
 	if e.audio != nil {
-		e.audio.SetMuted(true)
+		e.audio.SetMuted(e.audioWriteEnd, true)
 	}
 	return true
 }
@@ -496,7 +496,7 @@ func (e *RTMPEgress) Resume() bool {
 		return false
 	}
 	if e.audio != nil && !e.inputRecovering() {
-		e.audio.SetMuted(false)
+		e.audio.SetMuted(e.audioWriteEnd, false)
 	}
 	return true
 }
@@ -514,7 +514,7 @@ func (e *RTMPEgress) BeginInputRecovery() bool {
 	e.status.UpdatedAt = time.Now().UTC()
 	e.statusMu.Unlock()
 	if e.audio != nil {
-		e.audio.SetMuted(true)
+		e.audio.SetMuted(e.audioWriteEnd, true)
 	}
 	return true
 }
@@ -530,7 +530,7 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 	e.status.InputRecovering = false
 	e.status.UpdatedAt = time.Now().UTC()
 	if e.audio != nil {
-		e.audio.SetMuted(userPausePhase(e.status.Phase))
+		e.audio.SetMuted(e.audioWriteEnd, userPausePhase(e.status.Phase))
 	}
 	e.statusMu.Unlock()
 	return true
@@ -914,6 +914,15 @@ func (e *RTMPEgress) inputRecovering() bool {
 	return e.status.InputRecovering
 }
 
+// audioShouldMute는 새로 붙이는 오디오 스트림이 무음으로 시작해야 하는지다.
+// 사용자 pause와 입력 복구는 재연결을 넘어 유지되는 의도인데, 새 write end는
+// 새 스트림이라 이전 상태를 물려받지 않는다 — Attach 때 다시 실어 준다.
+func (e *RTMPEgress) audioShouldMute() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.status.InputRecovering || userPausePhase(e.status.Phase)
+}
+
 func (e *RTMPEgress) shouldWriteCancellationSlate() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
@@ -1115,7 +1124,7 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 	}
 	e.audioWriteEnd = audioWriteEnd
 	if audioWriteEnd != nil {
-		if err := e.audio.Attach(audioWriteEnd); err != nil {
+		if err := e.audio.Attach(audioWriteEnd, e.audioShouldMute()); err != nil {
 			_ = audioWriteEnd.Close()
 			process.close()
 			return nil, fmt.Errorf("attach audio egress pipe: %w", err)

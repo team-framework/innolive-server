@@ -77,6 +77,13 @@ func TestNVENCMonitorCountsUnaccountedSessions(t *testing.T) {
 	if got := metricValue(t, registry, "innolive_nvenc_leak_suspected_total"); got != "1" {
 		t.Fatalf("after two probes leak suspected = %s, want 1", got)
 	}
+	// 누수가 이어지면 계속 센다 — 한 번만 세면 rate 경보가 스스로 해제된다.
+	if err := monitor.sample(context.Background()); err != nil {
+		t.Fatalf("sample: %v", err)
+	}
+	if got := metricValue(t, registry, "innolive_nvenc_leak_suspected_total"); got != "2" {
+		t.Fatalf("after three probes leak suspected = %s, want 2", got)
+	}
 	if !strings.Contains(metricsText(registry), `innolive_nvenc_sessions{gpu="0"} 1`) {
 		t.Fatalf("measured gauge missing:\n%s", metricsText(registry))
 	}
@@ -166,6 +173,50 @@ func TestNVENCMonitorCountsLaterProbeFailures(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// 우리가 배정하지 않는 카드까지 견주면 남의 인코딩이 누수로 보인다. 카드 수가
+// 어긋나면 대조를 건너뛴다.
+func TestNVENCMonitorSkipsComparisonOnCardCountMismatch(t *testing.T) {
+	budget := NewEgressSlotBudget(4, 1)
+	monitor, registry := newTestNVENCMonitor(budget, func(context.Context) ([]int, error) {
+		return []int{0, 3}, nil
+	})
+	for range nvencLeakStreak + 1 {
+		if err := monitor.sample(context.Background()); err != nil {
+			t.Fatalf("sample: %v", err)
+		}
+	}
+	if got := metricValue(t, registry, "innolive_nvenc_leak_suspected_total"); got != "0" {
+		t.Fatalf("leak suspected = %s, want 0", got)
+	}
+	if !strings.Contains(metricsText(registry), `innolive_nvenc_sessions{gpu="1"} 3`) {
+		t.Fatalf("measured gauge should still be published:\n%s", metricsText(registry))
+	}
+}
+
+// 카드 순서(NVML)와 FFmpeg -gpu 번호(CUDA 서수)가 어긋나도 총량은 맞으므로
+// 누수로 세지 않는다.
+func TestNVENCMonitorToleratesCardOrderSkew(t *testing.T) {
+	budget := NewEgressSlotBudget(4, 2)
+	lease, err := budget.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer lease.Release()
+
+	monitor, registry := newTestNVENCMonitor(budget, func(context.Context) ([]int, error) {
+		// 회계는 카드 0에 1개, 실측은 카드 1에 1개로 뒤집혀 보인다.
+		return []int{0, 1}, nil
+	})
+	for range nvencLeakStreak + 1 {
+		if err := monitor.sample(context.Background()); err != nil {
+			t.Fatalf("sample: %v", err)
+		}
+	}
+	if got := metricValue(t, registry, "innolive_nvenc_leak_suspected_total"); got != "0" {
+		t.Fatalf("leak suspected = %s, want 0", got)
 	}
 }
 

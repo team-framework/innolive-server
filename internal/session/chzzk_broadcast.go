@@ -104,7 +104,7 @@ func (b ChzzkBroadcastSettings) response() ChzzkBroadcastResponse {
 // SetChzzkBroadcastSettings는 치지직 방송 설정을 세션에 저장한다. 단계 가드는
 // 유튜브와 같다 — 준비가 읽어간 설정과 저장값이 갈리면 조회 결과와 실제
 // 방송이 어긋난다(#142).
-func (m *Manager) SetChzzkBroadcastSettings(id string, settings ChzzkBroadcastSettings) (*Session, error) {
+func (m *Manager) SetChzzkBroadcastSettings(id string, settings ChzzkBroadcastSettings, providers ...string) (*Session, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (m *Manager) SetChzzkBroadcastSettings(id string, settings ChzzkBroadcastSe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if s.closed {
 		return nil, ErrNotFound
 	}

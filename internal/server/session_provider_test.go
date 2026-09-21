@@ -93,15 +93,15 @@ func TestCreateSessionRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
-// TestPrepareStreamRejectsProviderMismatch: prepare의 provider는 더 이상
-// 선택이 아니라 세션 값과 일치하는지 확인하는 용도다. 어긋나면 플랫폼을
-// 부르기 전에 400이다.
-func TestPrepareStreamRejectsProviderMismatch(t *testing.T) {
-	provider := &stubStreamingProvider{}
-	// 치지직도 등록해 둔다 — 미등록(501)이 아니라 불일치(400)를 보는 테스트다.
+// TestPrepareStreamAddsRequestedProviderTarget: prepare의 provider는 이 호출이
+// 준비할 대상이다(#233). 세션의 기본 대상과 달라도 거절하지 않고 대상을
+// 추가한다 — 동시 송출은 대상마다 prepare를 한 번씩 부르는 것으로 표현한다.
+func TestPrepareStreamAddsRequestedProviderTarget(t *testing.T) {
+	youtube := &stubStreamingProvider{}
+	chzzk := &stubStreamingProvider{}
 	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: provider,
-		auth.StreamingProviderChzzk:   &stubStreamingProvider{},
+		auth.StreamingProviderYouTube: youtube,
+		auth.StreamingProviderChzzk:   chzzk,
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 	if created.Provider != string(auth.StreamingProviderYouTube) {
@@ -109,12 +109,43 @@ func TestPrepareStreamRejectsProviderMismatch(t *testing.T) {
 	}
 
 	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{"provider":"chzzk"}`)
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (payload %v)", response.StatusCode, payload)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (payload %v)", response.StatusCode, payload)
 	}
-	if provider.prepareCalls != 0 {
-		t.Fatalf("prepare calls = %d, want no platform call", provider.prepareCalls)
+	// 요청한 대상만 플랫폼을 부른다 — 기본 대상은 건드리지 않는다.
+	if chzzk.prepareCalls != 1 {
+		t.Fatalf("chzzk prepare calls = %d, want 1", chzzk.prepareCalls)
 	}
+	if youtube.prepareCalls != 0 {
+		t.Fatalf("youtube prepare calls = %d, want 0", youtube.prepareCalls)
+	}
+	phase := targetBroadcastPhase(t, payload, string(auth.StreamingProviderChzzk))
+	if phase != string(session.BroadcastPhasePrepared) {
+		t.Fatalf("chzzk target phase = %q, want prepared", phase)
+	}
+}
+
+// targetBroadcastPhase는 응답의 targets에서 한 대상의 방송 단계를 꺼낸다.
+func targetBroadcastPhase(t *testing.T, payload map[string]any, provider string) string {
+	t.Helper()
+	targets, ok := payload["targets"].([]any)
+	if !ok {
+		t.Fatalf("targets missing in payload %v", payload)
+	}
+	for _, entry := range targets {
+		target, ok := entry.(map[string]any)
+		if !ok || target["provider"] != provider {
+			continue
+		}
+		stream, ok := target["stream"].(map[string]any)
+		if !ok {
+			t.Fatalf("target stream missing for %q in %v", provider, payload)
+		}
+		phase, _ := stream["broadcast_phase"].(string)
+		return phase
+	}
+	t.Fatalf("target %q missing in %v", provider, payload)
+	return ""
 }
 
 // TestPrepareStreamUsesSessionProvider: provider를 생략한 prepare는 세션이

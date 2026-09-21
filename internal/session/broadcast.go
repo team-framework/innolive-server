@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -123,7 +124,7 @@ func (b YouTubeBroadcastSettings) response() YouTubeBroadcastResponse {
 // SetBroadcastSettings는 검증된 방송 설정을 세션에 저장한다. 플랫폼 호출은
 // 하지 않는다. 방송이 이미 준비된 뒤에는 거절한다 — 저장값을 바꿔도 만들어진
 // 방송에는 반영되지 않아 설정과 실물이 어긋나기 때문이다(#142).
-func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSettings) (*Session, error) {
+func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSettings, providers ...string) (*Session, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -133,7 +134,7 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -199,14 +200,14 @@ type PlatformBroadcast struct {
 // BeginBroadcastPrepare는 플랫폼 호출을 시작하기 전에 준비 구간을 선점한다.
 // 플랫폼 왕복은 수 초가 걸리고, 그동안 설정이 바뀌면 만들어진 방송과 저장값이
 // 어긋나므로 phase를 먼저 preparing으로 옮겨 설정 변경과 중복 준비를 막는다.
-func (m *Manager) BeginBroadcastPrepare(id string) (*Session, error) {
+func (m *Manager) BeginBroadcastPrepare(id string, providers ...string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -223,14 +224,14 @@ func (m *Manager) BeginBroadcastPrepare(id string) (*Session, error) {
 
 // ResetBroadcastPreparation은 선점한 준비 구간을 되돌린다. 플랫폼 준비가
 // 실패했거나 egress를 붙이지 못했을 때 호출한다.
-func (m *Manager) ResetBroadcastPreparation(id string) {
+func (m *Manager) ResetBroadcastPreparation(id string, providers ...string) {
 	s, err := m.Get(id)
 	if err != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if t.phase != BroadcastPhasePreparing {
 		return
 	}
@@ -242,14 +243,14 @@ func (m *Manager) ResetBroadcastPreparation(id string) {
 // MarkBroadcastPrepared는 플랫폼 방송 준비 결과를 세션에 기록한다.
 // BeginBroadcastPrepare로 선점한 구간에서만 기록할 수 있다 — 방송 2개가 한
 // 세션에 붙으면 어느 쪽이 라이브가 되는지 알 수 없다.
-func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) (*Session, error) {
+func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast, providers ...string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -273,14 +274,14 @@ func (m *Manager) MarkBroadcastPrepared(id string, broadcast PlatformBroadcast) 
 // BeginGoLive는 라이브 전환 구간을 선점한다. 플랫폼에 요청을 보내고 나면
 // 취소할 수 없으므로, 그 사이에 들어온 중지는 즉시 방송을 지우는 대신 중지
 // 요청만 기록하고 전환 결과를 이 구간의 주인이 마무리한다.
-func (m *Manager) BeginGoLive(id string) (*Session, error) {
+func (m *Manager) BeginGoLive(id string, providers ...string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -294,7 +295,7 @@ func (m *Manager) BeginGoLive(id string) (*Session, error) {
 		return nil, ErrBroadcastNotPrepared
 	}
 	t.phase = BroadcastPhaseGoingLive
-	s.goLiveStopRequested = false
+	t.goLiveStopRequested = false
 	s.UpdatedAt = time.Now().UTC()
 	return s, nil
 }
@@ -302,21 +303,21 @@ func (m *Manager) BeginGoLive(id string) (*Session, error) {
 // CompleteGoLive는 플랫폼 전환이 성공한 뒤의 마무리다. 전환 도중 중지가
 // 요청됐으면 aborted=true와 함께 방송 정보를 돌려준다 — 호출자는 그 방송을
 // 즉시 종료시켜야 한다. 세션이 이미 사라진 경우도 중지로 본다.
-func (m *Manager) CompleteGoLive(id string) (aborted bool, broadcast PlatformBroadcast, err error) {
+func (m *Manager) CompleteGoLive(id string, providers ...string) (aborted bool, broadcast PlatformBroadcast, err error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return true, PlatformBroadcast{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if t.platformBroadcast != nil {
 		broadcast = *t.platformBroadcast
 	}
-	if s.closed || s.goLiveStopRequested {
+	if s.closed || t.goLiveStopRequested {
 		t.platformBroadcast = nil
 		t.phase = BroadcastPhaseIdle
-		s.goLiveStopRequested = false
+		t.goLiveStopRequested = false
 		s.UpdatedAt = time.Now().UTC()
 		m.logger.Info("go live aborted by stop", "session_id", s.ID, "broadcast_id", broadcast.BroadcastID)
 		return true, broadcast, nil
@@ -332,24 +333,24 @@ func (m *Manager) CompleteGoLive(id string) (aborted bool, broadcast PlatformBro
 
 // AbortGoLive는 전환 요청이 실패했을 때 선점을 되돌린다. 그 사이 중지가
 // 요청됐으면 준비 상태로 돌아가지 않고 방송을 넘겨준다 — 호출자가 지운다.
-func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadcast) {
+func (m *Manager) AbortGoLive(id string, providers ...string) (stopped bool, broadcast PlatformBroadcast) {
 	s, err := m.Get(id)
 	if err != nil {
 		return true, PlatformBroadcast{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	if t.platformBroadcast != nil {
 		broadcast = *t.platformBroadcast
 	}
 	if t.phase != BroadcastPhaseGoingLive {
 		return true, broadcast
 	}
-	if s.closed || s.goLiveStopRequested {
+	if s.closed || t.goLiveStopRequested {
 		t.platformBroadcast = nil
 		t.phase = BroadcastPhaseIdle
-		s.goLiveStopRequested = false
+		t.goLiveStopRequested = false
 		s.UpdatedAt = time.Now().UTC()
 		return true, broadcast
 	}
@@ -358,12 +359,28 @@ func (m *Manager) AbortGoLive(id string) (stopped bool, broadcast PlatformBroadc
 	return false, broadcast
 }
 
-// PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. preparing 구간에는
-// 아직 방송 정보가 없으므로 방송은 zero value이고 단계만 유효하다.
-func (s *Session) PlatformBroadcast() (PlatformBroadcast, BroadcastPhase) {
+// PreparedTargets는 라이브 전환을 기다리는 대상을 provider 정렬 순으로
+// 돌려준다. 동시 발사의 대상 목록이다(#233) — 발사 순서가 응답마다 흔들리면
+// 대상 사이의 시작 시점 차이를 잴 수 없다.
+func (s *Session) PreparedTargets() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	t := s.readTarget()
+	providers := make([]string, 0, len(s.targets))
+	for provider, t := range s.targets {
+		if t.phase == BroadcastPhasePrepared {
+			providers = append(providers, provider)
+		}
+	}
+	sort.Strings(providers)
+	return providers
+}
+
+// PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. preparing 구간에는
+// 아직 방송 정보가 없으므로 방송은 zero value이고 단계만 유효하다.
+func (s *Session) PlatformBroadcast(providers ...string) (PlatformBroadcast, BroadcastPhase) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t := s.readTarget(s.targetProvider(providers))
 	if t.platformBroadcast == nil {
 		return PlatformBroadcast{}, t.phase
 	}

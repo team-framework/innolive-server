@@ -369,7 +369,7 @@ func TestEgressSelfStopReleasesLiveBroadcast(t *testing.T) {
 
 	// 중지 요청 없이 egress만 끝낸다 — 재연결 예산을 소진한 egress와 같은 경로다.
 	s.mu.Lock()
-	cancelEgress := s.primaryTarget().cancel
+	cancelEgress := s.target(s.Provider).cancel
 	s.mu.Unlock()
 	cancelEgress()
 

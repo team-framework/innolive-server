@@ -71,6 +71,14 @@ type StreamState struct {
 	BroadcastPhase BroadcastPhase `json:"broadcast_phase"`
 }
 
+// TargetState는 한 플랫폼으로 나가는 송출의 상태다. 대상 순서는 provider
+// 이름 정렬로 고정한다 — 응답마다 순서가 흔들리면 클라이언트가 대상을
+// 위치로 기억할 수 없다.
+type TargetState struct {
+	Provider string      `json:"provider"`
+	Stream   StreamState `json:"stream"`
+}
+
 // PeerRecoveryStatus는 WebRTC 입력 연결의 네트워크 복구 단계다. RTMP egress의
 // 재연결 상태와 달리, 이 값은 같은 PeerConnection에서 ICE 후보를 다시 모으는
 // 세션 계층의 수명만 나타낸다.
@@ -126,7 +134,12 @@ type Response struct {
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
 		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
 	} `json:"media"`
-	Stream    StreamState               `json:"stream"`
+	Stream StreamState `json:"stream"`
+	// Targets는 대상별 송출 상태다(#233). 대상이 하나뿐인 세션에서는 Stream과
+	// 같은 값 하나가 들어간다 — 기존 클라이언트는 Stream만 읽으면 되고,
+	// 동시 송출을 아는 클라이언트는 여기서 대상을 구분한다. 대상이 아직
+	// 없으면 실리지 않는다.
+	Targets   []TargetState             `json:"targets,omitempty"`
 	Broadcast *YouTubeBroadcastResponse `json:"broadcast"`
 	// ChzzkBroadcast는 치지직 세션에서만 실린다. omitempty라 유튜브 응답은
 	// 이 필드가 생기기 전과 바이트 단위로 같다.
@@ -1668,7 +1681,32 @@ func (s *Session) Response() Response {
 		response.Stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
 	}
 	response.Stream.BroadcastPhase = t.phase
+	response.Targets = targetStatesLocked(s)
 	return response
+}
+
+// targetStatesLocked는 대상별 송출 상태를 provider 정렬 순으로 모은다.
+// Session.mu를 읽기 잠금 이상으로 가진 호출자만 쓴다.
+func targetStatesLocked(s *Session) []TargetState {
+	if len(s.targets) == 0 {
+		return nil
+	}
+	providers := make([]string, 0, len(s.targets))
+	for provider := range s.targets {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	states := make([]TargetState, 0, len(providers))
+	for _, provider := range providers {
+		t := s.targets[provider]
+		stream := StreamState{}
+		if t.egress != nil {
+			stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
+		}
+		stream.BroadcastPhase = t.phase
+		states = append(states, TargetState{Provider: provider, Stream: stream})
+	}
+	return states
 }
 
 // streamStateFromEgress는 egress 상태 스냅샷을 API 응답 계약(StreamState)으로

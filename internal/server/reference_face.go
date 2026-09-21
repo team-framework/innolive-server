@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/auth"
@@ -124,6 +125,7 @@ func downscaleForAI(data []byte) ([]byte, error) {
 // referenceFace is the stored form of one registered face. It is persisted to
 // disk but never written to an API response — referenceFaceView is.
 type referenceFace struct {
+	Name   string `json:"name,omitempty"`
 	FaceID string `json:"face_id"`
 	// EntryIDs maps an AI worker address to the entry id that worker minted for
 	// this face. Every worker generates its own id, so deleting the face means
@@ -135,6 +137,7 @@ type referenceFace struct {
 // referenceFaceView is the public shape of a registered face: the worker entry
 // ids are internal bookkeeping and stay out of the API.
 type referenceFaceView struct {
+	Name         string    `json:"name,omitempty"`
 	FaceID       string    `json:"face_id"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
@@ -327,6 +330,11 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		writeError(w, badRequest("이미지는 최대 20개까지 업로드할 수 있습니다.", nil))
 		return
 	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 40 || strings.ContainsAny(name, "\r\n\x00") || (name != "" && len(files) != 1) {
+		writeError(w, badRequest("name must be at most 40 characters and apply to one image.", map[string]any{"field": "name"}))
+		return
+	}
 	// "image" (single field) replaces the client's set; "images[]" appends.
 	replace := len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
 	if replace {
@@ -404,7 +412,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			writeError(w, apiError{Status: http.StatusBadRequest, Code: code, Message: "AI 서버가 기준 얼굴 등록을 거부했습니다.", Details: map[string]any{"reason": msg}})
 			return
 		}
-		registered = append(registered, referenceFace{FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
+		registered = append(registered, referenceFace{Name: name, FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
 	if gate, sessionID, ok := guestReferenceGateFromContext(r.Context()); ok && gate.IsClosed(sessionID) {
 		// 이 요청이 얼굴을 등록하는 동안 세션이 종료됐다. 이미 terminal 정리가 수행한
@@ -540,7 +548,7 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 	s.mu.RUnlock()
 	views := make([]referenceFaceView, 0, len(faces))
 	for _, face := range faces {
-		views = append(views, referenceFaceView{FaceID: face.FaceID, RegisteredAt: face.RegisteredAt})
+		views = append(views, referenceFaceView{Name: face.Name, FaceID: face.FaceID, RegisteredAt: face.RegisteredAt})
 	}
 	result := referenceStatus{ClientID: clientID, Count: len(faces), Faces: views}
 	if len(faces) > 0 {

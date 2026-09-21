@@ -424,3 +424,16 @@ Apache-2.0)입니다. 런타임 컨테이너의 FFmpeg은 Debian이 `--enable-gp
 ## 라이선스
 
 이 프로젝트는 [Apache License 2.0](LICENSE) 하에 배포됩니다.
+
+### 세션별 AI 처리 위치
+
+`POST /sessions`의 선택적 `ai_processing`은 `server`(기본) 또는 `on_device`다.
+이전 서버와 같은 본문을 쓰는 앱은 `metadata.ai_processing`으로 요청할 수 있다.
+둘 다 있으면 최상위 필드를 우선한다. 생성·조회 응답은 확정한 최상위 값을 반환한다.
+`on_device` 세션은 이미 비식별화된 영상을 받으며 AI 스트림을 만들지 않는다.
+해당 세션의 서버 비식별화 변경 요청은 409 `on_device_processing`을 반환한다.
+다른 세션의 처리 모드에는 영향을 주지 않는다.
+
+얼굴 등록은 기존 계정별 저장소를 유지한다. 한 장 업로드 시 선택적 multipart `name`을
+받고 `faces[].name`으로 반환·영속화한다. 이름은 공백 정리 후 최대 40 Unicode scalar이며
+CR/LF/NUL과 잘못된 UTF-8은 거절한다. 이름 없는 기존 요청·저장 데이터는 계속 지원한다.

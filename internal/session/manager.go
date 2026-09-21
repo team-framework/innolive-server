@@ -191,9 +191,9 @@ type Session struct {
 	aiInputPaused        bool
 	anonymizationEnabled bool
 	broadcast            *YouTubeBroadcastSettings
-	// chzzkBroadcast는 치지직 세션의 방송 설정이다(#229). 세션의 Provider는
-	// 생성 시 고정이라 broadcast와 이 필드 중 하나만 채워진다 — 플랫폼이
-	// 셋 이상이 되면 그때 추상화한다.
+	// chzzkBroadcast는 치지직 대상의 방송 설정이다(#229). 동시 송출 세션은
+	// broadcast와 이 필드를 함께 든다(#233) — 플랫폼이 셋 이상이 되면
+	// 그때 추상화한다.
 	chzzkBroadcast      *ChzzkBroadcastSettings
 	ignoredTracks       int
 	offerReceivedAt     time.Time
@@ -1685,6 +1685,25 @@ func (s *Session) Response() Response {
 	return response
 }
 
+// TargetStream은 대상 하나의 송출 상태다. 대상을 생략하면 기본 대상이다.
+// 개별 제어(pause·resume·stop)가 조작한 대상의 상태만 돌려줄 때 쓴다.
+func (s *Session) TargetStream(providers ...string) StreamState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return targetStreamLocked(s, s.readTarget(s.targetProvider(providers)))
+}
+
+// targetStreamLocked는 대상 스냅샷을 API 응답 계약으로 옮긴다. egress가 아직
+// 없으면 idle이다. Session.mu를 읽기 잠금 이상으로 가진 호출자만 쓴다.
+func targetStreamLocked(s *Session, t streamTarget) StreamState {
+	stream := StreamState{Status: "idle", UpdatedAt: s.UpdatedAt}
+	if t.egress != nil {
+		stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
+	}
+	stream.BroadcastPhase = t.phase
+	return stream
+}
+
 // targetStatesLocked는 대상별 송출 상태를 provider 정렬 순으로 모은다.
 // Session.mu를 읽기 잠금 이상으로 가진 호출자만 쓴다.
 func targetStatesLocked(s *Session) []TargetState {
@@ -1698,13 +1717,7 @@ func targetStatesLocked(s *Session) []TargetState {
 	sort.Strings(providers)
 	states := make([]TargetState, 0, len(providers))
 	for _, provider := range providers {
-		t := s.targets[provider]
-		stream := StreamState{Status: "idle", UpdatedAt: s.UpdatedAt}
-		if t.egress != nil {
-			stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
-		}
-		stream.BroadcastPhase = t.phase
-		states = append(states, TargetState{Provider: provider, Stream: stream})
+		states = append(states, TargetState{Provider: provider, Stream: targetStreamLocked(s, *s.targets[provider])})
 	}
 	return states
 }

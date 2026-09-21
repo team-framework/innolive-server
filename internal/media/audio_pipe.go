@@ -44,6 +44,10 @@ var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
 // mutex로 교체한다. egress가 새 pipe를 Attach할 때까지는 분리된 상태로 샘플을
 // 버리고, Attach마다 새 Ogg 헤더를 쓰는 oggwriter를 만들어 모든 FFmpeg 프로세스가
 // 첫 바이트부터 유효한 스트림을 받게 한다.
+//
+// 출력은 여럿일 수 있다(#232). ffmpeg 프로세스마다 자기 pipe:3과 자기 Ogg 헤더가
+// 필요하다 — 하나의 파이프를 둘이 읽으면 Opus 프레임이 쪼개져 양쪽 다 깨지므로,
+// 대상을 공유하지 않고 write end마다 독립 스트림을 만든다.
 type AudioPipe struct {
 	logger   *slog.Logger
 	metrics  *metrics.Registry
@@ -54,14 +58,22 @@ type AudioPipe struct {
 
 	packetSeen          atomic.Bool
 	lastPacketTimestamp atomic.Uint32
-	muted               atomic.Bool
 
-	mu            sync.Mutex
+	mu sync.Mutex
+	// sinks는 write end별 출력이다. 키가 *os.File인 것은 egress가 자기 pipe의
+	// write end로만 자기 출력을 가리키기 때문이다 — media는 플랫폼을 모른다.
+	sinks map[*os.File]*audioSink
+}
+
+// audioSink는 한 FFmpeg 프로세스로 가는 Ogg 스트림이다. 타임스탬프 계보와 mute는
+// 스트림마다 독립이어야 한다 — 한쪽만 pause하거나 한쪽만 재연결하는 경우
+// 나머지 스트림의 granule이 흔들리면 안 된다.
+type audioSink struct {
 	ogg           *oggwriter.OggWriter
-	writeEnd      *os.File
 	havePrev      bool
 	prevTimestamp uint32
-	pipeErrLogged bool
+	muted         bool
+	errLogged     bool
 }
 
 // NewAudioPipe는 Opus 트랙이 지정한 채널 수(track.Codec().Channels)를 사용하는
@@ -78,6 +90,7 @@ func NewAudioPipe(logger *slog.Logger, registry *metrics.Registry, channels uint
 			samplebuilder.WithMaxTimeDelay(audioReorderMaxDelay),
 		),
 	}
+	p.sinks = make(map[*os.File]*audioSink)
 	p.SetChannels(channels)
 	return p
 }
@@ -121,12 +134,24 @@ func (p *AudioPipe) WritePacket(packet *rtp.Packet) {
 // 실제 마이크와 무음 중 어느 입력을 사용할지 결정하는 데 사용한다.
 func (p *AudioPipe) PacketSeen() bool { return p.packetSeen.Load() }
 
-// SetMuted는 연결된 egress 오디오를 발행자 마이크와 생성한 Opus 무음 사이에서
-// 전환한다. mute 상태는 egress 수명에 속하므로 FFmpeg가 재연결되어도 유지한다.
-func (p *AudioPipe) SetMuted(muted bool) { p.muted.Store(muted) }
+// SetMuted는 한 egress의 오디오를 발행자 마이크와 생성한 Opus 무음 사이에서
+// 전환한다. mute는 egress 수명에 속하므로 FFmpeg가 재연결되면 호출자가 Attach에
+// 다시 넘긴다 — 새 write end는 새 스트림이라 이전 상태를 물려받지 않는다.
+func (p *AudioPipe) SetMuted(writeEnd *os.File, muted bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if sink := p.sinks[writeEnd]; sink != nil {
+		sink.muted = muted
+	}
+}
 
-// Muted는 실제 마이크 샘플을 현재 막고 있는지 반환한다.
-func (p *AudioPipe) Muted() bool { return p.muted.Load() }
+// Muted는 해당 egress가 실제 마이크 샘플을 현재 막고 있는지 반환한다.
+func (p *AudioPipe) Muted(writeEnd *os.File) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sink := p.sinks[writeEnd]
+	return sink != nil && sink.muted
+}
 
 // Run은 단일 writer 고루틴을 실행한다. 패킷을 재정렬해 완성된 Opus 샘플을 현재
 // 연결된 Ogg 스트림에 기록하고, 분리된 동안에는 샘플을 버린다. ctx가 취소되면
@@ -145,9 +170,7 @@ func (p *AudioPipe) Run(ctx context.Context) {
 				p.writeSample(sample.PacketTimestamp, sample.Data)
 			}
 		case <-ticker.C:
-			if p.Muted() {
-				p.writeSilenceSample()
-			}
+			p.writeSilenceSamples()
 		}
 	}
 }
@@ -159,77 +182,85 @@ func (p *AudioPipe) Run(ctx context.Context) {
 func (p *AudioPipe) writeSample(timestamp uint32, payload []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.Muted() {
+	if len(p.sinks) == 0 {
 		p.metrics.IncAudioSampleDropped()
 		return
 	}
-	p.writeSampleLocked(timestamp, payload)
+	for writeEnd, sink := range p.sinks {
+		if sink.muted {
+			// 무음은 ticker가 채운다. 마이크 샘플까지 쓰면 두 계보가 섞인다.
+			p.metrics.IncAudioSampleDropped()
+			continue
+		}
+		p.writeSinkLocked(writeEnd, sink, timestamp, payload)
+	}
 }
 
-// writeSilenceSample은 유효한 20ms Opus 무음 프레임 하나를 추가한다. 마이크
-// 패킷과 같은 timestamp 흐름을 사용하므로 재개 뒤 oggwriter가 과거 시점으로
-// 되돌아간 것으로 판단하지 않는다.
-func (p *AudioPipe) writeSilenceSample() {
+// writeSilenceSamples는 mute된 스트림마다 유효한 20ms Opus 무음 프레임 하나를
+// 추가한다. 마이크 패킷과 같은 timestamp 흐름을 사용하므로 재개 뒤 oggwriter가
+// 과거 시점으로 되돌아간 것으로 판단하지 않는다. 계보가 스트림마다 독립이라
+// 한쪽만 pause해도 나머지 스트림의 granule은 흔들리지 않는다.
+func (p *AudioPipe) writeSilenceSamples() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.Muted() {
-		return
+	for writeEnd, sink := range p.sinks {
+		if !sink.muted {
+			continue
+		}
+		timestamp := uint32(0)
+		if sink.havePrev {
+			timestamp = sink.prevTimestamp + uint32(opusClockRate*opusSilenceFrameDuration/time.Second)
+		} else if p.PacketSeen() {
+			// 아직 samplebuilder가 첫 샘플을 내보내기 전 pause된 경우에도, WebRTC
+			// RTP timestamp 근처에서 시작해 이후 실제 마이크 패킷과 큰 간격이 나지
+			// 않게 한다.
+			timestamp = p.lastPacketTimestamp.Load()
+		}
+		p.writeSinkLocked(writeEnd, sink, timestamp, opusSilenceFrame)
 	}
-	timestamp := uint32(0)
-	if p.havePrev {
-		timestamp = p.prevTimestamp + uint32(opusClockRate*opusSilenceFrameDuration/time.Second)
-	} else if p.PacketSeen() {
-		// 아직 samplebuilder가 첫 샘플을 내보내기 전 pause된 경우에도, WebRTC
-		// RTP timestamp 근처에서 시작해 이후 실제 마이크 패킷과 큰 간격이 나지
-		// 않게 한다.
-		timestamp = p.lastPacketTimestamp.Load()
-	}
-	p.writeSampleLocked(timestamp, opusSilenceFrame)
 }
 
-func (p *AudioPipe) writeSampleLocked(timestamp uint32, payload []byte) {
-	if p.ogg == nil {
+func (p *AudioPipe) writeSinkLocked(writeEnd *os.File, sink *audioSink, timestamp uint32, payload []byte) {
+	if sink.havePrev && int32(timestamp-sink.prevTimestamp) <= 0 {
 		p.metrics.IncAudioSampleDropped()
 		return
 	}
-	if p.havePrev && int32(timestamp-p.prevTimestamp) <= 0 {
-		p.metrics.IncAudioSampleDropped()
-		return
-	}
-	err := p.ogg.WriteRTP(&rtp.Packet{
+	err := sink.ogg.WriteRTP(&rtp.Packet{
 		Header:  rtp.Header{Timestamp: timestamp},
 		Payload: payload,
 	})
 	if err != nil {
 		p.metrics.IncAudioSampleDropped()
-		if !p.pipeErrLogged {
+		if !sink.errLogged {
 			p.logger.Warn("audio pipe write failed; dropping until egress reattaches", "error", err)
-			p.pipeErrLogged = true
+			sink.errLogged = true
 		}
-		p.detachLocked()
+		// 깨진 스트림만 뗀다 — 나머지 대상은 계속 나가야 한다.
+		p.detachLocked(writeEnd)
 		return
 	}
-	p.prevTimestamp = timestamp
-	p.havePrev = true
+	sink.prevTimestamp = timestamp
+	sink.havePrev = true
 	p.metrics.IncAudioSampleWritten()
 }
 
 // Attach는 writeEnd 위에 새 Ogg 스트림을 만들어 pipe를 새로 생성된 egress
 // FFmpeg에 연결한다. 자식 프로세스가 즉시 유효한 스트림을 받도록 Ogg/Opus 헤더를
 // 동기적으로 기록한다. 호출자는 이후 Detach를 통해서만 writeEnd를 닫는다.
-func (p *AudioPipe) Attach(writeEnd *os.File) error {
+// muted는 이 egress의 현재 mute 의도다. 새 write end는 새 스트림이라 이전
+// 스트림의 상태를 물려받지 않으므로, pause 중에 재연결한 경우 호출자가 그
+// 의도를 여기로 다시 넘겨야 소리가 새어 나가지 않는다.
+func (p *AudioPipe) Attach(writeEnd *os.File, muted bool) error {
 	ogg, err := oggwriter.NewWith(writeEnd, opusClockRate, p.Channels())
 	if err != nil {
 		return err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// 이전 연결이 아직 닫히기 전에 재연결되는 경우처럼, 남아 있는 스트림을 교체한다.
-	p.detachLocked()
-	p.ogg = ogg
-	p.writeEnd = writeEnd
-	p.havePrev = false
-	p.pipeErrLogged = false
+	// 이전 연결이 아직 닫히기 전에 재연결되는 경우처럼, 같은 write end에 남아
+	// 있는 스트림을 교체한다. 다른 대상은 건드리지 않는다.
+	p.detachLocked(writeEnd)
+	p.sinks[writeEnd] = &audioSink{ogg: ogg, muted: muted}
 	return nil
 }
 
@@ -240,26 +271,32 @@ func (p *AudioPipe) Attach(writeEnd *os.File) error {
 func (p *AudioPipe) Detach(writeEnd *os.File) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.writeEnd != writeEnd {
-		return
-	}
-	p.detachLocked()
+	p.detachLocked(writeEnd)
 }
 
-// closeCurrent는 현재 연결된 스트림을 종료한다. 호출자가 특정 write end를 추적하지
-// 않는 세션 종료에 사용한다.
+// closeCurrent는 연결된 스트림을 전부 종료한다. 호출자가 특정 write end를
+// 추적하지 않는 세션 종료에 사용한다.
 func (p *AudioPipe) closeCurrent() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.detachLocked()
+	for writeEnd := range p.sinks {
+		p.detachLocked(writeEnd)
+	}
 }
 
-func (p *AudioPipe) detachLocked() {
-	if p.ogg == nil {
+func (p *AudioPipe) detachLocked(writeEnd *os.File) {
+	sink := p.sinks[writeEnd]
+	if sink == nil {
 		return
 	}
 	// Close는 스트림 모드에서 하위 io.Writer(pipe write end)를 닫는다.
-	_ = p.ogg.Close()
-	p.ogg = nil
-	p.writeEnd = nil
+	_ = sink.ogg.Close()
+	delete(p.sinks, writeEnd)
+}
+
+// sinkCount는 현재 붙어 있는 출력 수다(테스트용 관측).
+func (p *AudioPipe) sinkCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.sinks)
 }

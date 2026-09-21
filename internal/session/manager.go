@@ -983,9 +983,8 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	}
 	egress.SetNVENCDevice(lease.Device())
 	m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
-	if s.audioPipe != nil {
-		s.audioPipe.SetMuted(false)
-	}
+	// 오디오 mute는 스트림마다 독립이므로(#232) 이전 방송이 남긴 상태가 없다.
+	// 새 egress가 Attach할 때 자기 mute 의도를 싣고 시작한다.
 	s.setAIInputPaused(false)
 	t.egress = egress
 	t.cancel = egressCancel

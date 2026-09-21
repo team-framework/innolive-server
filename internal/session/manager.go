@@ -1176,18 +1176,28 @@ func (m *Manager) PauseStream(id string, providers ...string) (*Session, error) 
 // allTargetsPausedLocked는 송출 중인 대상이 전부 일시 중단 상태인지다.
 // Session.mu를 가진 호출자만 쓴다.
 func allTargetsPausedLocked(s *Session) bool {
-	active := 0
-	paused := 0
+	phases := make([]media.EgressPhase, 0, len(s.targets))
 	for _, t := range s.targets {
 		if t.egress == nil || t.stopReason != nil {
 			continue
 		}
-		active++
-		if t.egress.Status().Phase == media.EgressPhasePaused {
-			paused++
+		phases = append(phases, t.egress.Status().Phase)
+	}
+	return allTargetsPaused(phases)
+}
+
+// allTargetsPaused는 송출 중인 대상의 단계로 AI 입력 차단 여부를 정한다.
+// 하나라도 실제 영상을 내보내는 중이면 AI 입력을 끊을 수 없다 — 입력은
+// 세션에 하나뿐이라 끊는 순간 그 대상 시청자의 화면도 멈춘다.
+func allTargetsPaused(phases []media.EgressPhase) bool {
+	for _, phase := range phases {
+		switch phase {
+		case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
+		default:
+			return false
 		}
 	}
-	return active > 0 && active == paused
+	return len(phases) > 0
 }
 
 // ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은

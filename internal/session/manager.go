@@ -397,7 +397,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		settingEngine.SetNAT1To1IPs([]string{cfg.AnnouncedIP}, webrtc.ICECandidateTypeHost)
 	}
 	iceServers := buildICEServers(cfg)
-	return &Manager{
+	manager := &Manager{
 		cfg:                         cfg,
 		logger:                      logger,
 		metrics:                     registry,
@@ -411,7 +411,12 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		pipelines:                   make(map[string]struct{}),
 		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
 		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
-	}, nil
+	}
+	// 자리 상한은 첫 송출을 기다리지 않고 지금 낸다. 이 게이지에서 0은
+	// "제한 없음"이라, 설정해 둔 상한이 첫 방송 전까지 0으로 보이면
+	// 운영자는 설정이 안 먹은 것으로 읽는다.
+	registry.SetEgressSlots(manager.egressSlots.Used(), manager.egressSlots.Capacity())
+	return manager, nil
 }
 
 func (m *Manager) ICEServers() []webrtc.ICEServer {

@@ -194,7 +194,7 @@ func TestCloseUserSessionsForWithdrawalRetriesAfterEgressWaitCancellation(t *tes
 	}
 	egressDone := make(chan struct{})
 	liveSession.mu.Lock()
-	liveSession.primaryTarget().done = egressDone
+	liveSession.target(liveSession.Provider).done = egressDone
 	liveSession.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -366,7 +366,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	}
 	created.mu.RLock()
 	slotted := singleSink(created.egressFanout)
-	active := created.primaryTarget().egress
+	active := created.target(created.Provider).egress
 	created.mu.RUnlock()
 	if active == nil || slotted != active {
 		t.Fatal("started egress must be installed in the session slot")
@@ -422,7 +422,7 @@ func TestStartStopStreamLifecycle(t *testing.T) {
 	// 세션 삭제가 활성 egress를 정리해야 한다.
 	restarted := created
 	restarted.mu.RLock()
-	activeEgress := restarted.primaryTarget().egress
+	activeEgress := restarted.target(restarted.Provider).egress
 	restarted.mu.RUnlock()
 	if err := manager.Delete(created.ID, "test"); err != nil {
 		t.Fatal(err)
@@ -446,8 +446,8 @@ func TestTerminalEgressClearsSlotAndAllowsRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	created.mu.RLock()
-	egress := created.primaryTarget().egress
-	cancel := created.primaryTarget().cancel
+	egress := created.target(created.Provider).egress
+	cancel := created.target(created.Provider).cancel
 	created.mu.RUnlock()
 	if egress == nil || cancel == nil {
 		t.Fatal("StartStream must install an egress and cancellation function")

@@ -93,7 +93,7 @@ func TestStartStreamAssignsNVENCDevice(t *testing.T) {
 		}
 		t.Cleanup(func() { manager.StopStream(created.ID) })
 		created.mu.RLock()
-		devices[created.primaryTarget().egress.NVENCDevice()] = true
+		devices[created.target(created.Provider).egress.NVENCDevice()] = true
 		created.mu.RUnlock()
 	}
 	if len(devices) != 2 {

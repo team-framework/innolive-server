@@ -120,7 +120,7 @@ func (m *Manager) beginRecovery(s *Session, generation uint64, cause string) {
 	}
 	s.recovery.status = PeerRecoveryStatusRecovering
 	s.recovery.lastError = recoveryError(cause)
-	if egress := activeEgressLocked(s); egress != nil {
+	for _, egress := range activeEgressesLocked(s) {
 		egress.BeginInputRecovery()
 	}
 	s.UpdatedAt = now
@@ -171,7 +171,7 @@ func (m *Manager) connectedDuringRecovery(s *Session) {
 		s.mu.Unlock()
 		return
 	}
-	if activeEgressLocked(s) == nil || s.aiInputPaused {
+	if len(activeEgressesLocked(s)) == 0 || s.aiInputPaused {
 		m.finishRecoveryLocked(s)
 		s.mu.Unlock()
 		return
@@ -210,7 +210,7 @@ func (m *Manager) finishRecoveryLocked(s *Session) {
 		s.recovery.deadlineTimer.Stop()
 		s.recovery.deadlineTimer = nil
 	}
-	if egress := activeEgressLocked(s); egress != nil {
+	for _, egress := range activeEgressesLocked(s) {
 		egress.EndInputRecovery()
 	}
 	s.recovery.status = PeerRecoveryStatusIdle
@@ -243,10 +243,17 @@ func (s *Session) cancelRecoveryLocked() {
 	s.recovery.generation++
 }
 
-func activeEgressLocked(s *Session) *media.RTMPEgress {
-	t := s.primaryTarget()
-	if t.egress == nil || t.stopReason != nil || t.egress.Status().Phase == media.EgressPhaseStopped {
-		return nil
+// activeEgressesLocked는 지금 송출 중인 모든 대상의 egress다. WebRTC 입력은
+// 세션에 하나뿐이라 입력 복구는 대상 전부에 걸린다 — 한 대상만 슬레이트로
+// 덮으면 나머지 대상 시청자는 멈춘 화면을 그대로 본다.
+// Session.mu를 가진 호출자만 쓴다.
+func activeEgressesLocked(s *Session) []*media.RTMPEgress {
+	egresses := make([]*media.RTMPEgress, 0, len(s.targets))
+	for _, t := range s.targets {
+		if t.egress == nil || t.stopReason != nil || t.egress.Status().Phase == media.EgressPhaseStopped {
+			continue
+		}
+		egresses = append(egresses, t.egress)
 	}
-	return t.egress
+	return egresses
 }

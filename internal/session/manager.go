@@ -181,11 +181,7 @@ type Session struct {
 	// chzzkBroadcast는 치지직 세션의 방송 설정이다(#229). 세션의 Provider는
 	// 생성 시 고정이라 broadcast와 이 필드 중 하나만 채워진다 — 플랫폼이
 	// 셋 이상이 되면 그때 추상화한다.
-	chzzkBroadcast *ChzzkBroadcastSettings
-	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
-	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
-	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다.
-	goLiveStopRequested bool
+	chzzkBroadcast      *ChzzkBroadcastSettings
 	ignoredTracks       int
 	offerReceivedAt     time.Time
 	answerCreatedAt     time.Time
@@ -310,16 +306,28 @@ func (m *Manager) SetUserOperationGate(gate UserOperationGate) {
 // 않도록 별도 고루틴에서 돌린다.
 func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 	s.mu.Lock()
-	broadcast, phase := takeBroadcastLocked(s)
+	pending := make([]pendingBroadcast, 0, len(s.targets))
+	for provider := range s.targets {
+		broadcast, phase := takeBroadcastLocked(s, provider)
+		pending = append(pending, pendingBroadcast{broadcast: broadcast, phase: phase})
+	}
 	s.mu.Unlock()
-	m.disposeBroadcast(s.UserID, broadcast, phase)
+	for _, item := range pending {
+		m.disposeBroadcast(s.UserID, item.broadcast, item.phase)
+	}
+}
+
+// pendingBroadcast는 세션에서 떼어낸, 아직 플랫폼에서 치우지 않은 방송이다.
+type pendingBroadcast struct {
+	broadcast PlatformBroadcast
+	phase     BroadcastPhase
 }
 
 // takeBroadcastLocked는 정리해야 할 방송을 세션에서 떼어내고 단계를 idle로
 // 되돌린다. 라이브 전환 왕복 중이면 손대지 않는다 — 이미 나간 요청의 결과를
 // 받는 쪽이 마무리해야 하기 때문이다. Session.mu를 가진 호출자만 쓴다.
-func takeBroadcastLocked(s *Session) (PlatformBroadcast, BroadcastPhase) {
-	t := s.primaryTarget()
+func takeBroadcastLocked(s *Session, provider string) (PlatformBroadcast, BroadcastPhase) {
+	t := s.target(provider)
 	phase := t.phase
 	if phase == BroadcastPhaseGoingLive {
 		return PlatformBroadcast{}, BroadcastPhaseIdle
@@ -800,10 +808,10 @@ func (m *Manager) cleanupWithdrawalBroadcast(ctx context.Context, userID uuid.UU
 func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	t := s.target(s.Provider)
 	if t.platformBroadcast == nil {
 		t.phase = BroadcastPhaseIdle
-		s.goLiveStopRequested = false
+		t.goLiveStopRequested = false
 		return PlatformBroadcast{}, BroadcastPhaseIdle
 	}
 	broadcast := *t.platformBroadcast
@@ -819,7 +827,7 @@ func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
 	}
 	t.platformBroadcast = nil
 	t.phase = BroadcastPhaseIdle
-	s.goLiveStopRequested = false
+	t.goLiveStopRequested = false
 	return broadcast, phase
 }
 
@@ -888,6 +896,11 @@ type streamTarget struct {
 	stopReason        *string
 	platformBroadcast *PlatformBroadcast
 	phase             BroadcastPhase
+	// goLiveStopRequested는 라이브 전환 왕복 중에 들어온 중지 요청이다.
+	// 이미 플랫폼으로 나간 전환 요청은 취소할 수 없으므로, 중지가 이겼다는
+	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다. 대상마다
+	// 따로 둔다 — 한쪽 중지가 다른 쪽의 라이브 전환을 취소하면 안 된다.
+	goLiveStopRequested bool
 }
 
 // target은 provider의 송출 상태를 돌려준다. 없으면 만든다 — zero value가 곧
@@ -905,17 +918,21 @@ func (s *Session) target(provider string) *streamTarget {
 	return existing
 }
 
-// primaryTarget은 이 세션의 유일한 송출 대상이다. 세션의 Provider는 생성 시
-// 고정이므로(#227) 지금은 대상이 언제나 하나다. 대상을 고르는 호출자가
-// 생기면(#233) 이 우회로 대신 provider를 받는 경로로 바꾼다.
-// Session.mu를 가진 호출자만 쓴다.
-func (s *Session) primaryTarget() *streamTarget { return s.target(s.Provider) }
+// targetProvider는 호출자가 고른 대상을 정한다. 생략하면 세션의 기본
+// 대상(Session.Provider)이다 — 대상이 하나뿐인 세션을 다루는 호출자가
+// 여전히 대부분이라, 대상을 고르는 경로(#233)를 가변 인자로 얹는다.
+func (s *Session) targetProvider(providers []string) string {
+	if len(providers) > 0 && providers[0] != "" {
+		return providers[0]
+	}
+	return s.Provider
+}
 
 // readTarget은 읽기 잠금에서 쓰는 스냅샷이다. 값으로 돌려주므로 읽기 경로가
 // 실수로 상태를 바꿀 수 없고, targets 맵을 읽기 중에 쓰지도 않는다.
 // 대상이 아직 없으면 zero value(= idle)다.
-func (s *Session) readTarget() streamTarget {
-	if existing := s.targets[s.Provider]; existing != nil {
+func (s *Session) readTarget(provider string) streamTarget {
+	if existing := s.targets[provider]; existing != nil {
 		return *existing
 	}
 	return streamTarget{}
@@ -925,6 +942,8 @@ func (s *Session) readTarget() streamTarget {
 // 재연결 예산 하나뿐이고, 0이면 media의 기본값을 쓴다. 프로바이더별 판단은
 // 서버 계층이 한다 — internal/session은 플랫폼을 알지 않는다.
 type StreamOptions struct {
+	// Provider는 이 egress를 붙일 대상이다. 비우면 세션의 기본 대상이다.
+	Provider            string
 	ReconnectMaxElapsed time.Duration
 }
 
@@ -952,7 +971,12 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.primaryTarget()
+	var providers []string
+	if len(options) > 0 {
+		providers = []string{options[0].Provider}
+	}
+	provider := s.targetProvider(providers)
+	t := s.target(provider)
 	if s.closed {
 		return nil, ErrNotFound
 	}
@@ -964,10 +988,9 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	// 보지 않는다 — stop 직후의 재시작이 이전 Run 고루틴의 종료 타이밍에
 	// 좌우되면 안 된다.
 	//
-	// 이 검사는 한 세션이 동시에 둘 이상을 송출하지 못하게 막는다. 파이프라인은
-	// 이미 대상 여럿을 나를 수 있지만(#232) AudioPipe는 아직 하나뿐이라, 이
-	// 가드를 풀면 두 ffmpeg가 같은 파이프를 읽어 양쪽 오디오가 깨진다.
-	// 오디오 팬아웃이 들어오기 전까지는 이것이 유일한 안전장치다.
+	// 검사는 대상 단위다. 같은 대상에 egress를 겹쳐 붙이는 것만 막고, 다른
+	// 대상의 송출은 막지 않는다 — 영상 팬아웃과 대상별 오디오 스트림이
+	// 갖춰졌으므로(#232) 두 ffmpeg가 같은 파이프를 읽는 문제는 없다.
 	if t.egress != nil && t.stopReason == nil && t.egress.Status().Phase != media.EgressPhaseStopped {
 		return nil, ErrStreamActive
 	}
@@ -989,7 +1012,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	t.egress = egress
 	t.cancel = egressCancel
 	t.stopReason = nil
-	s.egressFanout.Add(s.Provider, egress)
+	s.egressFanout.Add(provider, egress)
 	egressDone := make(chan struct{})
 	t.done = egressDone
 	s.UpdatedAt = time.Now().UTC()
@@ -1002,9 +1025,9 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 			lease.Release()
 			m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
 		}()
-		m.runEgress(s, egress, egressCtx)
+		m.runEgress(s, provider, egress, egressCtx)
 	}()
-	m.logger.Info("RTMP egress started", "session_id", s.ID, "url", egress.Status().TargetURL,
+	m.logger.Info("RTMP egress started", "session_id", s.ID, "provider", provider, "url", egress.Status().TargetURL,
 		"reconnect_max_elapsed", egress.ReconnectMaxElapsed(), "nvenc_device", egress.NVENCDevice(),
 		"egress_slots_used", m.egressSlots.Used())
 	return s, nil
@@ -1016,12 +1039,12 @@ func (m *Manager) EgressSlots() *media.EgressSlotBudget { return m.egressSlots }
 // runEgress는 egress의 자체 종료를 세션 슬롯 정리와 연결한다. Run 고루틴이
 // 재연결 예산을 소진해 끝난 경우에도 세션과 WebRTC 미리보기는 살아 있어야 하므로,
 // 이 함수는 세션을 지우지 않고 해당 egress만 슬롯에서 분리한다.
-func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx context.Context) {
+func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgress, egressCtx context.Context) {
 	egress.Run(egressCtx)
 	status := egress.Status()
 
 	s.mu.Lock()
-	t := s.primaryTarget()
+	t := s.target(provider)
 	if t.egress != egress {
 		s.mu.Unlock()
 		return
@@ -1029,7 +1052,7 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 	// 같은 세션에서 새 방송이 먼저 시작된 경우에는 ClearIf가 새 egress를
 	// 지우지 않는다. 이 비교·교환은 트랙 파이프라인과의 경계를 원자적으로
 	// 유지한다.
-	s.egressFanout.RemoveIf(s.Provider, egress)
+	s.egressFanout.RemoveIf(provider, egress)
 	if t.cancel != nil {
 		t.cancel()
 		t.cancel = nil
@@ -1042,7 +1065,7 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 	// egress가 스스로 끝난 경우에도 플랫폼 방송과 단계를 정리한다. 그러지
 	// 않으면 단계가 live에 남아 설정 변경이 영구히 409로 막히고, 유튜브 쪽
 	// 방송도 다음 송출과 겹친다.
-	broadcast, phase := takeBroadcastLocked(s)
+	broadcast, phase := takeBroadcastLocked(s, provider)
 	s.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
 	m.disposeBroadcast(s.UserID, broadcast, phase)
@@ -1067,13 +1090,14 @@ func (m *Manager) runEgress(s *Session, egress *media.RTMPEgress, egressCtx cont
 // 플랫폼 방송은 autoStop(송출 중단 약 1분 후 반영, 실측 57.6초)을 기다리지
 // 않고 여기서 끝낸다 — 그 사이에 다음 방송을 시작하면 재사용 스트림 키를 통해
 // 라이브가 둘이 되기 때문이다.
-func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastPhase, error) {
+func (m *Manager) StopStream(id string, providers ...string) (*Session, PlatformBroadcast, BroadcastPhase, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, err
 	}
 	s.mu.Lock()
-	t := s.primaryTarget()
+	provider := s.targetProvider(providers)
+	t := s.target(provider)
 	defer s.mu.Unlock()
 	if t.egress == nil || t.stopReason != nil || t.egress.Status().Phase == media.EgressPhaseStopped {
 		// egress 없이 준비만 된 방송(치지직: egress는 라이브 전환에서 붙는다)은
@@ -1081,14 +1105,14 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastP
 		// 준비 상태를 빠져나갈 길이 없다. 유튜브는 준비와 동시에 egress가
 		// 붙으므로 이 분기에 오지 않는다.
 		if t.phase == BroadcastPhasePrepared {
-			broadcast, phase := takeBroadcastLocked(s)
+			broadcast, phase := takeBroadcastLocked(s, provider)
 			s.UpdatedAt = time.Now().UTC()
 			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)
 			return s, broadcast, phase, nil
 		}
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, ErrStreamNotActive
 	}
-	s.egressFanout.Remove(s.Provider)
+	s.egressFanout.Remove(provider)
 	t.egress.Stop()
 	t.cancel()
 	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
@@ -1100,27 +1124,27 @@ func (m *Manager) StopStream(id string) (*Session, PlatformBroadcast, BroadcastP
 	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
 	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
 	if t.phase == BroadcastPhaseGoingLive {
-		s.goLiveStopRequested = true
+		t.goLiveStopRequested = true
 		s.UpdatedAt = time.Now().UTC()
-		m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
+		m.logger.Info("RTMP egress stopped", "session_id", s.ID, "provider", provider, "reason", reason)
 		return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 	}
-	broadcast, phase := takeBroadcastLocked(s)
+	broadcast, phase := takeBroadcastLocked(s, provider)
 	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "reason", reason)
+	m.logger.Info("RTMP egress stopped", "session_id", s.ID, "provider", provider, "reason", reason)
 	return s, broadcast, phase, nil
 }
 
 // PauseStream은 RTMP 연결을 유지한 채 실행 중인 egress를 일시 중단 상태로
 // 표시한다. 미디어 계층은 기록된 출력 형식으로 취소 슬레이트를 공급하게 되며,
 // 이 제어 동작 자체는 플랫폼 방송을 종료하지 않는다.
-func (m *Manager) PauseStream(id string) (*Session, error) {
+func (m *Manager) PauseStream(id string, providers ...string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	defer s.mu.Unlock()
 	if t.egress == nil || t.stopReason != nil {
 		return nil, ErrStreamNotActive
@@ -1128,21 +1152,40 @@ func (m *Manager) PauseStream(id string) (*Session, error) {
 	if err := pauseEgress(t.egress); err != nil {
 		return nil, err
 	}
-	s.setAIInputPaused(true)
+	// AI 입력은 세션에 하나뿐이라 대상 하나를 멈춘다고 끊으면 나머지 대상의
+	// 화면까지 정지한다. 남은 대상이 전부 멈춘 뒤에만 차단한다.
+	s.setAIInputPaused(allTargetsPausedLocked(s))
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress paused", "session_id", s.ID)
 	return s, nil
 }
 
+// allTargetsPausedLocked는 송출 중인 대상이 전부 일시 중단 상태인지다.
+// Session.mu를 가진 호출자만 쓴다.
+func allTargetsPausedLocked(s *Session) bool {
+	active := 0
+	paused := 0
+	for _, t := range s.targets {
+		if t.egress == nil || t.stopReason != nil {
+			continue
+		}
+		active++
+		if t.egress.Status().Phase == media.EgressPhasePaused {
+			paused++
+		}
+	}
+	return active > 0 && active == paused
+}
+
 // ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은
 // egress를 계속 사용하므로 플랫폼 방송과 측정된 출력 형식도 유지된다.
-func (m *Manager) ResumeStream(id string) (*Session, error) {
+func (m *Manager) ResumeStream(id string, providers ...string) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	t := s.primaryTarget()
+	t := s.target(s.targetProvider(providers))
 	defer s.mu.Unlock()
 	if t.egress == nil || t.stopReason != nil {
 		return nil, ErrStreamNotActive
@@ -1575,7 +1618,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 
 func (s *Session) Response() Response {
 	s.mu.RLock()
-	t := s.readTarget()
+	t := s.readTarget(s.Provider)
 	defer s.mu.RUnlock()
 	response := Response{
 		SessionID: s.ID,

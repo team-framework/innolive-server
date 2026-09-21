@@ -145,6 +145,11 @@
             <dd id="broadcastYoutubeState" data-state="idle">확인 전</dd>
           </div>
         </dl>
+        <div class="target-list-wrap">
+          <h3 class="eyebrow">송출 대상</h3>
+          <p id="targetListEmpty">아직 준비된 대상이 없습니다.</p>
+          <ul id="targetList" class="target-list"></ul>
+        </div>
       </section>
 
       <section class="broadcast-settings" aria-labelledby="broadcastSettingsTitle">
@@ -207,6 +212,25 @@
           <label class="field field-wide" id="broadcastDescriptionRow">
             <span>설명 (5000자)</span>
             <textarea id="broadcastDescription" maxlength="5000" rows="4" placeholder="방송 설명 · 해시태그 포함"></textarea>
+          </label>
+          <label class="check-row field-wide" id="simulcastRow">
+            <input id="simulcastEnabled" type="checkbox" />
+            <span>동시 송출 — 아래 플랫폼으로도 함께 내보낸다</span>
+          </label>
+          <label class="field" id="simulcastProviderRow" hidden>
+            <span>추가 송출 대상</span>
+            <select id="simulcastProvider">
+              <option value="chzzk" selected>치지직</option>
+              <option value="youtube">YouTube</option>
+            </select>
+          </label>
+          <label class="field" id="simulcastTitleRow" hidden>
+            <span>추가 대상 제목 (비우면 직전 방송 값)</span>
+            <input id="simulcastTitle" maxlength="100" autocomplete="off" placeholder="추가 대상 방송 제목" />
+          </label>
+          <label class="check-row" id="simulcastMadeForKidsRow" hidden>
+            <input id="simulcastMadeForKids" type="checkbox" />
+            <span>추가 대상(YouTube)을 아동용 콘텐츠로 신고</span>
           </label>
           <div class="broadcast-settings-actions">
             <button id="saveBroadcastBtn" class="button button-primary" type="button" disabled>

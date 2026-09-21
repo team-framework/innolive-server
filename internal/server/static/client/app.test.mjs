@@ -49,6 +49,15 @@ const buttonKeys = [
   "broadcastThumbnailRow",
   "broadcastDescriptionRow",
   "madeForKidsRow",
+  "simulcastEnabled",
+  "simulcastProvider",
+  "simulcastProviderRow",
+  "simulcastTitle",
+  "simulcastTitleRow",
+  "simulcastMadeForKids",
+  "simulcastMadeForKidsRow",
+  "targetList",
+  "targetListEmpty",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -93,6 +102,10 @@ function createElement() {
     dataset: {},
     style: {},
     files: { length: 0 },
+    listeners: {},
+    addEventListener(type, handler) {
+      (this.listeners[type] ||= []).push(handler);
+    },
     append(...items) {
       this.children.push(...items);
     },
@@ -148,7 +161,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
     context,
     { filename: appPath },
   );
@@ -454,10 +467,10 @@ test("방송 종료 버튼은 송출이 살아 있을 때만 눌린다", async (
   assert.equal(els.stopBroadcastBtn.disabled, true);
 });
 
-function jsonResponse(body) {
+function jsonResponse(body, status = 200) {
   return {
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
     headers: new Headers({ "content-type": "application/json" }),
     async text() {
       return JSON.stringify(body);
@@ -646,4 +659,197 @@ test("검색어가 비면 치지직 카테고리 검색을 호출하지 않는�
   await searchChzzkCategories();
 
   assert.equal(fetchCalls(), 0);
+});
+
+test("동시 송출 추가 대상은 기본값을 채우고 제목만 덮어 저장한 뒤 준비한다", async () => {
+  const calls = [];
+  const { prepareSimulcastTarget, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url);
+      calls.push({ path, method: options?.method || "GET", body: options?.body });
+      if (path.includes("/broadcast/defaults")) {
+        return jsonResponse({
+          title: "직전 제목",
+          category_type: "GAME",
+          category_id: "LoL",
+          tags: ["게임"],
+        });
+      }
+      return jsonResponse({ session_id: "s-1", provider: "youtube", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", provider: "youtube" };
+  els.simulcastTitle.value = "동시 송출 제목";
+
+  await prepareSimulcastTarget("s-1", "chzzk");
+
+  assert.equal(calls.length, 3);
+  assert.match(calls[0].path, /\/broadcast\/defaults\?provider=chzzk$/);
+  // 설정은 그 대상 앞으로 저장해야 한다 — provider를 빼면 기본 대상에 덮어쓴다.
+  assert.match(calls[1].path, /\/broadcast\?provider=chzzk$/);
+  assert.equal(calls[1].method, "PUT");
+  assert.deepEqual(JSON.parse(calls[1].body), {
+    title: "동시 송출 제목",
+    category_type: "GAME",
+    category_id: "LoL",
+    tags: ["게임"],
+  });
+  assert.match(calls[2].path, /\/stream\/prepare$/);
+  assert.deepEqual(JSON.parse(calls[2].body), { provider: "chzzk" });
+});
+
+test("추가 대상 준비가 실패해도 기본 대상 세션은 유지된다", async () => {
+  const { prepareSimulcastTarget, state, els } = await loadApp({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/broadcast/defaults")) {
+        return jsonResponse({ title: "직전 제목" });
+      }
+      return jsonResponse({ error: { code: "streaming_not_connected" } }, 409);
+    },
+  });
+  state.accessToken = "access-token";
+  const original = { session_id: "s-1", provider: "youtube" };
+  state.session = original;
+
+  await prepareSimulcastTarget("s-1", "chzzk");
+
+  assert.equal(state.session, original);
+  assert.match(els.broadcastSettingsDetail.textContent, /추가 대상\(chzzk\) 준비 실패/);
+});
+
+test("추가 대상이 기본 대상과 같으면 동시 송출 대상이 없다", async () => {
+  const { simulcastTarget, state, els } = await loadApp();
+  els.simulcastEnabled.checked = true;
+  els.simulcastProvider.value = "youtube";
+  state.session = { session_id: "s-1", provider: "youtube" };
+  assert.equal(simulcastTarget(), "");
+
+  els.simulcastProvider.value = "chzzk";
+  assert.equal(simulcastTarget(), "chzzk");
+
+  // 체크를 끄면 단독 송출이다 — 종전 경로가 그대로여야 한다.
+  els.simulcastEnabled.checked = false;
+  assert.equal(simulcastTarget(), "");
+});
+
+test("개별 제어는 그 대상에만 건다", async () => {
+  const calls = [];
+  const { renderTargets, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method });
+      return jsonResponse({ status: "paused" });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", provider: "youtube" };
+
+  renderTargets({
+    targets: [
+      { provider: "chzzk", stream: { status: "streaming", broadcast_phase: "live" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  });
+
+  assert.equal(els.targetList.children.length, 2);
+  assert.equal(els.targetListEmpty.hidden, true);
+  const [chzzkRow] = els.targetList.children;
+  // 행마다 일시중지·재개·종료 버튼이 붙는다.
+  const buttons = chzzkRow.children.filter((child) => child.type === "button");
+  assert.equal(buttons.length, 3);
+
+  await buttons[0].listeners.click[0]();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/stream\/pause\?provider=chzzk$/);
+  assert.equal(calls[0].method, "POST");
+});
+
+test("동시 송출 중 방송 종료는 대상 전부를 끈다", async () => {
+  const calls = [];
+  const { stopBroadcast, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method || "GET" });
+      return jsonResponse({ session_id: "s-1", provider: "youtube", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "streaming", broadcast_phase: "live" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+
+  await stopBroadcast();
+
+  // 대상마다 한 번씩 + 마지막 세션 갱신 한 번.
+  const stops = calls.filter((call) => call.path.includes("/stream/stop"));
+  assert.equal(stops.length, 2);
+  assert.match(stops[0].path, /\/stream\/stop\?provider=chzzk$/);
+  assert.match(stops[1].path, /\/stream\/stop\?provider=youtube$/);
+});
+
+test("한 대상의 종료가 실패해도 나머지 대상은 계속 끈다", async () => {
+  const calls = [];
+  const { stopBroadcast, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url);
+      calls.push(path);
+      if (path.includes("provider=chzzk")) {
+        return jsonResponse({ error: { code: "stream_not_active" } }, 409);
+      }
+      return jsonResponse({ session_id: "s-1", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "streaming", broadcast_phase: "live" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+
+  await stopBroadcast();
+
+  assert.equal(calls.filter((path) => path.includes("/stream/stop")).length, 2);
+  assert.match(els.broadcastSettingsDetail.textContent, /일부 대상 제어 실패 — chzzk: stream_not_active/);
+});
+
+test("준비를 거친 대상이 하나뿐이면 상단 버튼은 종전처럼 provider 없이 부른다", async () => {
+  const { broadcastControlTargets, state } = await loadApp();
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+  assert.deepEqual(Array.from(broadcastControlTargets()), []);
+
+  state.session.targets[0].stream.broadcast_phase = "prepared";
+  assert.deepEqual(Array.from(broadcastControlTargets()), ["chzzk", "youtube"]);
+});
+
+test("추가 대상 경고는 조건이 풀리면 지워진다", async () => {
+  const { applySimulcastForm, state, els } = await loadApp();
+  state.session = { session_id: "s-1", provider: "youtube" };
+  els.simulcastEnabled.checked = true;
+  els.simulcastProvider.value = "youtube";
+
+  applySimulcastForm();
+  assert.match(els.broadcastSettingsDetail.textContent, /기본 대상과 같습니다/);
+
+  els.simulcastProvider.value = "chzzk";
+  applySimulcastForm();
+  assert.equal(els.broadcastSettingsDetail.textContent, "");
+
+  // 다른 메시지는 건드리지 않는다 — 이 영역은 저장 결과와 공유한다.
+  els.broadcastSettingsDetail.textContent = "저장됨";
+  applySimulcastForm();
+  assert.equal(els.broadcastSettingsDetail.textContent, "저장됨");
 });

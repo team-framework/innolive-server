@@ -805,3 +805,39 @@ dd {
     justify-content: start;
   }
 }
+
+/* 송출 대상 목록 — 동시 송출에서 대상마다 상태와 개별 제어를 보여준다(#260). */
+.target-list-wrap {
+  margin-top: 16px;
+}
+
+.target-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.target-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 8px;
+}
+
+.target-row .target-name {
+  font-weight: 600;
+  min-width: 72px;
+}
+
+/* 상태가 남는 공간을 먹어 버튼 묶음이 오른쪽에 붙는다. 버튼마다 margin을
+   주면 첫 버튼만 밀려 나머지가 다음 줄로 떨어진다. */
+.target-row .target-state {
+  flex: 1;
+  white-space: nowrap;
+  color: rgba(100, 116, 139, 1);
+}

@@ -19,8 +19,18 @@ type appleRevocationCredential struct {
 
 type WithdrawalAccountStore interface {
 	AppleRevocationCredential(context.Context, uuid.UUID) (*appleRevocationCredential, error)
+	UserState(context.Context, uuid.UUID) (WithdrawalUserState, error)
 	MarkUserDeleted(context.Context, uuid.UUID, time.Time) error
 }
+
+type WithdrawalUserState int
+
+const (
+	WithdrawalUserUnknown WithdrawalUserState = iota
+	WithdrawalUserMissing
+	WithdrawalUserActive
+	WithdrawalUserInactive
+)
 
 // WithdrawalCleanup contains the external and in-memory cleanup stages that
 // must succeed before the account rows are deleted. Each callback must
@@ -55,6 +65,24 @@ func (s *gormWithdrawalAccountStore) AppleRevocationCredential(ctx context.Conte
 		return nil, nil
 	}
 	return &appleRevocationCredential{Ciphertext: account.ProviderRefreshTokenCiphertext, Version: account.ProviderTokenKeyVersion}, nil
+}
+
+func (s *gormWithdrawalAccountStore) UserState(ctx context.Context, userID uuid.UUID) (WithdrawalUserState, error) {
+	if s == nil || s.db == nil {
+		return WithdrawalUserUnknown, ErrWithdrawalUnavailable
+	}
+	var user User
+	result := s.db.WithContext(ctx).Select("status").Where("id = ?", userID).Take(&user)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return WithdrawalUserMissing, nil
+	}
+	if result.Error != nil {
+		return WithdrawalUserUnknown, result.Error
+	}
+	if user.Status != UserStatusActive {
+		return WithdrawalUserInactive, nil
+	}
+	return WithdrawalUserActive, nil
 }
 
 func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, _ time.Time) error {
@@ -200,4 +228,11 @@ func (s *AccountWithdrawalService) Withdraw(ctx context.Context, userID uuid.UUI
 		s.afterDeleted(userID)
 	}
 	return nil
+}
+
+func (s *AccountWithdrawalService) UserState(ctx context.Context, userID uuid.UUID) (WithdrawalUserState, error) {
+	if s == nil || s.store == nil {
+		return WithdrawalUserUnknown, ErrWithdrawalUnavailable
+	}
+	return s.store.UserState(ctx, userID)
 }

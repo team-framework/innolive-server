@@ -1699,7 +1699,7 @@ func targetStatesLocked(s *Session) []TargetState {
 	states := make([]TargetState, 0, len(providers))
 	for _, provider := range providers {
 		t := s.targets[provider]
-		stream := StreamState{}
+		stream := StreamState{Status: "idle", UpdatedAt: s.UpdatedAt}
 		if t.egress != nil {
 			stream = streamStateFromEgress(t.egress.Status(), s.rawTrackID != "", t.stopReason)
 		}

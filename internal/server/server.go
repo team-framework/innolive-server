@@ -408,40 +408,32 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, badRequest("Invalid stream prepare request.", map[string]any{"error": err.Error()}))
 		return
 	}
-	// 송출 플랫폼은 세션이 들고 있다(#227). 요청의 provider는 더 이상 선택이
-	// 아니라, 클라이언트가 다른 플랫폼으로 오해하고 있지 않은지 확인하는
-	// 용도다 — 생략하면 세션 값을 그대로 쓴다.
-	sessionProvider := auth.StreamingProvider(liveSession.Provider)
+	// 요청의 provider는 이 호출이 준비할 대상이다(#233). 생략하면 세션이
+	// 생성 시 받은 기본 대상이다(#227). 동시 송출은 대상마다 이 엔드포인트를
+	// 한 번씩 불러 대상을 쌓는 것으로 표현한다 — 단독 송출은 한 번만 부르는
+	// 경우로 그대로 성립한다.
 	providerName := auth.StreamingProvider(strings.TrimSpace(request.Provider))
 	if providerName == "" {
-		providerName = sessionProvider
+		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
 	provider := s.streaming[providerName]
 	if provider == nil {
 		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
-		// 계약(501)을 유지한다. 세션 값과의 불일치보다 먼저 답한다 — 서버가
-		// 그 플랫폼을 아예 못 하는 것이 더 근본적인 사실이다.
+		// 계약(501)을 유지한다.
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
-		return
-	}
-	if providerName != sessionProvider {
-		writeError(w, badRequest("The requested provider does not match the session provider.", map[string]any{
-			"provider":         string(providerName),
-			"session_provider": string(sessionProvider),
-		}))
 		return
 	}
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
 	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
-	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID); err != nil {
+	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID, string(providerName)); err != nil {
 		writeBroadcastBeginError(w, err, liveSession.ID)
 		return
 	}
 	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.
 	// 방송 설정 모델이 플랫폼별이므로(#229) 읽는 곳도 갈린다.
 	var options streaming.PrepareOptions
-	if sessionProvider == auth.StreamingProviderChzzk {
+	if providerName == auth.StreamingProviderChzzk {
 		options = chzzkPrepareOptionsFrom(liveSession.ChzzkBroadcastSettings())
 	} else {
 		options = prepareOptionsFrom(liveSession.BroadcastSettings())
@@ -454,7 +446,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// prepare 호출 0을 단언한다), Prepare 안으로 옮기면 플랫폼 호출이 곧
 		// 검증이 되어 그 계약이 깨진다.
 		if options.MadeForKids == nil {
-			s.sessions.ResetBroadcastPreparation(liveSession.ID)
+			s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 			writeError(w, badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"}))
 			return
 		}
@@ -466,26 +458,26 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		StreamID:    prepared.StreamID,
 	}
 	if err != nil {
-		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.writePrepareError(w, err, liveSession.ID, providerName)
 		return
 	}
-	if egressAttachesAtGoLive(sessionProvider) {
+	if egressAttachesAtGoLive(providerName) {
 		// 치지직은 RTMP 연결이 곧 공개 방송이다(D1). 준비 단계에서 egress를
 		// 붙이면 "방송 준비"가 곧 라이브가 되므로 ingest URL만 들고 있다가
 		// 라이브 전환에서 붙인다.
 		preparedRecord.IngestURL = prepared.IngestURL
-	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL, streamOptionsFor(sessionProvider)); err != nil {
+	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL, streamOptionsFor(providerName)); err != nil {
 		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
-		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.writeStartStreamError(w, err, liveSession.ID)
 		return
 	}
-	if _, err := s.sessions.MarkBroadcastPrepared(liveSession.ID, preparedRecord); err != nil {
+	if _, err := s.sessions.MarkBroadcastPrepared(liveSession.ID, preparedRecord, string(providerName)); err != nil {
 		// 세션이 방금 닫힌 경우 등 — 기록하지 못한 방송은 남겨두지 않는다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
-		s.sessions.ResetBroadcastPreparation(liveSession.ID)
+		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Error("record prepared broadcast failed", "session_id", liveSession.ID, "error", err)
 		writeSessionError(w, err, liveSession.ID)
 		return
@@ -588,10 +580,11 @@ const chzzkEgressReconnectMaxElapsed = 10 * time.Second
 
 // streamOptionsFor는 플랫폼별 egress 옵션이다. 치지직만 재연결 예산을 줄인다.
 func streamOptionsFor(provider auth.StreamingProvider) session.StreamOptions {
+	options := session.StreamOptions{Provider: string(provider)}
 	if provider == auth.StreamingProviderChzzk {
-		return session.StreamOptions{ReconnectMaxElapsed: chzzkEgressReconnectMaxElapsed}
+		options.ReconnectMaxElapsed = chzzkEgressReconnectMaxElapsed
 	}
-	return session.StreamOptions{}
+	return options
 }
 
 // egressAttachesAtGoLive는 egress를 준비가 아니라 라이브 전환에서 붙이는

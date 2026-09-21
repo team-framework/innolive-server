@@ -494,17 +494,59 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 // 중지가 이기도록 정한다(PR #146 리뷰) — 중지가 요청됐으면 전환 결과를 받은
 // 이 핸들러가 방송을 즉시 종료시키고 요청은 409로 끝낸다.
 func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	broadcast, _ := liveSession.PlatformBroadcast()
-	if _, err := s.sessions.BeginGoLive(liveSession.ID); err != nil {
-		writeGoLiveBeginError(w, err, liveSession.ID)
+	// 준비된 대상을 모두 발사한다(#233). 대상이 하나뿐이면 종전과 같은
+	// 한 번의 전환이다. 준비된 대상이 없으면 기본 대상으로 시도해 종전과
+	// 같은 오류(409 broadcast_not_prepared)를 그대로 낸다.
+	providers := liveSession.PreparedTargets()
+	if len(providers) == 0 {
+		providers = []string{liveSession.Provider}
+	}
+	failures := make([]goLiveFailure, 0, len(providers))
+	var firstFailure *apiError
+	for _, name := range providers {
+		providerName := auth.StreamingProvider(name)
+		failure := s.goLiveTarget(r, liveSession, providerName)
+		if failure == nil {
+			continue
+		}
+		failures = append(failures, goLiveFailure{Provider: name, Code: failure.Code, Message: failure.Message})
+		if firstFailure == nil {
+			firstFailure = failure
+		}
+	}
+	// 한쪽이 실패해도 나머지는 그대로 간다(사용자 결정). 전부 실패한
+	// 경우에만 요청 자체가 실패다 — 대상이 하나면 종전 동작과 같다.
+	if len(failures) == len(providers) {
+		writeError(w, *firstFailure)
 		return
 	}
-	providerName := auth.StreamingProvider(broadcast.Provider)
+	response := liveSession.Response()
+	writeJSON(w, http.StatusOK, struct {
+		session.StreamState
+		Targets []session.TargetState `json:"targets,omitempty"`
+		Failed  []goLiveFailure       `json:"failed_targets,omitempty"`
+	}{StreamState: response.Stream, Targets: response.Targets, Failed: failures})
+}
+
+// goLiveFailure는 동시 발사에서 한 대상만 실패했을 때 응답에 싣는 사유다.
+// 나머지 대상은 라이브로 남으므로 요청 전체를 실패로 돌리지 않는다.
+type goLiveFailure struct {
+	Provider string `json:"provider"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+}
+
+// goLiveTarget은 대상 하나를 라이브로 전환한다. 성공하면 nil, 실패하면
+// 그 대상의 사유를 돌려준다 — 호출자가 대상 전체의 결과를 모아 판단한다.
+func (s *Server) goLiveTarget(r *http.Request, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
+	broadcast, _ := liveSession.PlatformBroadcast(string(providerName))
+	if _, err := s.sessions.BeginGoLive(liveSession.ID, string(providerName)); err != nil {
+		return goLiveBeginError(err, liveSession.ID)
+	}
 	provider := s.streaming[providerName]
 	if provider == nil {
-		s.sessions.AbortGoLive(liveSession.ID)
-		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
-		return
+		s.sessions.AbortGoLive(liveSession.ID, string(providerName))
+		return &apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}}
 	}
 	prepared := streaming.PreparedBroadcast{
 		Provider:    providerName,
@@ -514,7 +556,7 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	if err := provider.GoLive(r.Context(), liveSession.UserID, prepared); err != nil {
 		// 전환에 실패했으면 준비 상태로 되돌린다. 그 사이 중지가 들어왔다면
 		// 되돌릴 곳이 없으므로 방송을 지운다.
-		if stopped, abandoned := s.sessions.AbortGoLive(liveSession.ID); stopped {
+		if stopped, abandoned := s.sessions.AbortGoLive(liveSession.ID, string(providerName)); stopped {
 			if abandoned.BroadcastID == "" {
 				abandoned = broadcast
 			}
@@ -524,25 +566,23 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		case errors.Is(err, streaming.ErrBroadcastNotReady):
 			// 송출 프레임이 플랫폼에 아직 도착하지 않은 상태 — 잠시 후 재시도로
 			// 풀리므로 준비 실패(502)와 구분한다.
-			writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}})
+			return &apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}}
 		case errors.Is(err, auth.ErrStreamingReconnectRequired):
-			writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
+			return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
 		default:
 			s.logger.Error("go live failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
-			writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."})
+			return &apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."}
 		}
-		return
 	}
 	if egressAttachesAtGoLive(providerName) {
 		// 치지직의 라이브 전환은 곧 egress 부착이다(D1). 붙이지 못하면
 		// 플랫폼에 되돌릴 것은 없고 준비 상태로만 돌아간다.
 		if _, err := s.sessions.StartStream(liveSession.ID, broadcast.IngestURL, streamOptionsFor(providerName)); err != nil {
-			s.sessions.AbortGoLive(liveSession.ID)
-			s.writeStartStreamError(w, err, liveSession.ID)
-			return
+			s.sessions.AbortGoLive(liveSession.ID, string(providerName))
+			return startStreamError(err, liveSession.ID)
 		}
 	}
-	aborted, live, err := s.sessions.CompleteGoLive(liveSession.ID)
+	aborted, live, err := s.sessions.CompleteGoLive(liveSession.ID, string(providerName))
 	if live.BroadcastID == "" {
 		// 세션이 이미 사라졌으면 매니저가 방송 정보를 돌려줄 수 없다.
 		// 전환을 시작할 때 들고 있던 값으로 마무리한다.
@@ -552,16 +592,14 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		// 전환은 성공했지만 중지가 이겼다 — autoStop(약 1분)을 기다리면 그동안
 		// 시청자에게 노출되므로 직접 끝낸다.
 		s.endLiveBroadcast(liveSession.UserID, live)
-		s.logger.Info("go live superseded by stop", "session_id", liveSession.ID, "error", err)
-		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_stopped", Message: "The stream was stopped while the broadcast was switching to live.", Details: map[string]any{"session_id": liveSession.ID}})
-		return
+		s.logger.Info("go live superseded by stop", "session_id", liveSession.ID, "provider", providerName, "error", err)
+		return &apiError{Status: http.StatusConflict, Code: "broadcast_stopped", Message: "The stream was stopped while the broadcast was switching to live.", Details: map[string]any{"session_id": liveSession.ID}}
 	}
 	if err != nil {
-		s.logger.Error("record live broadcast failed", "session_id", liveSession.ID, "error", err)
-		writeSessionError(w, err, liveSession.ID)
-		return
+		s.logger.Error("record live broadcast failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
+		return sessionError(err, liveSession.ID)
 	}
-	writeJSON(w, http.StatusOK, liveSession.Response().Stream)
+	return nil
 }
 
 // chzzkEgressReconnectMaxElapsed는 치지직 세션의 재연결 예산이다.
@@ -624,17 +662,18 @@ func (s *Server) endLiveBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 	}
 }
 
-// writeGoLiveBeginError는 라이브 전환 선점 실패를 응답으로 옮긴다.
-func writeGoLiveBeginError(w http.ResponseWriter, err error, sessionID string) {
+// goLiveBeginError는 라이브 전환 선점 실패를 응답 오류로 옮긴다. 동시 발사는
+// 대상별 실패를 모아 판단하므로 쓰지 않고 값으로 돌려준다.
+func goLiveBeginError(err error, sessionID string) *apiError {
 	switch {
 	case errors.Is(err, session.ErrBroadcastLive):
-		writeBroadcastPhaseError(w, session.BroadcastPhaseLive, sessionID)
+		return broadcastPhaseError(session.BroadcastPhaseLive, sessionID)
 	case errors.Is(err, session.ErrBroadcastGoingLive):
-		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_going_live", Message: "The broadcast is already switching to live.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "broadcast_going_live", Message: "The broadcast is already switching to live.", Details: map[string]any{"session_id": sessionID}}
 	case errors.Is(err, session.ErrBroadcastNotPrepared):
-		writeBroadcastPhaseError(w, session.BroadcastPhaseIdle, sessionID)
+		return broadcastPhaseError(session.BroadcastPhaseIdle, sessionID)
 	default:
-		writeSessionError(w, err, sessionID)
+		return sessionError(err, sessionID)
 	}
 }
 
@@ -737,13 +776,17 @@ func writeBroadcastBeginError(w http.ResponseWriter, err error, sessionID string
 
 // writeBroadcastPhaseError는 방송 단계 위반을 409로 옮긴다.
 func writeBroadcastPhaseError(w http.ResponseWriter, phase session.BroadcastPhase, sessionID string) {
+	writeError(w, *broadcastPhaseError(phase, sessionID))
+}
+
+func broadcastPhaseError(phase session.BroadcastPhase, sessionID string) *apiError {
 	switch phase {
 	case session.BroadcastPhaseLive:
-		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_live", Message: "The broadcast is already live.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "broadcast_live", Message: "The broadcast is already live.", Details: map[string]any{"session_id": sessionID}}
 	case session.BroadcastPhasePreparing, session.BroadcastPhasePrepared:
-		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_prepared", Message: "The broadcast is already prepared.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "broadcast_prepared", Message: "The broadcast is already prepared.", Details: map[string]any{"session_id": sessionID}}
 	default:
-		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_not_prepared", Message: "Prepare the broadcast before going live.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "broadcast_not_prepared", Message: "Prepare the broadcast before going live.", Details: map[string]any{"session_id": sessionID}}
 	}
 }
 
@@ -766,17 +809,21 @@ func (s *Server) writePrepareError(w http.ResponseWriter, err error, sessionID s
 
 // writeStartStreamError는 egress 부착 실패를 응답으로 옮긴다.
 func (s *Server) writeStartStreamError(w http.ResponseWriter, err error, sessionID string) {
+	writeError(w, *startStreamError(err, sessionID))
+}
+
+func startStreamError(err error, sessionID string) *apiError {
 	switch {
 	case errors.Is(err, session.ErrNoVideoTrack):
-		writeError(w, apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": sessionID}}
 	case errors.Is(err, session.ErrStreamActive):
-		writeError(w, apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": sessionID}}
 	case errors.Is(err, media.ErrEgressSlotsExhausted):
 		// 자리는 다른 방송이 끝나야 난다 — 즉시 재시도해도 풀리지 않으므로
 		// 사용자에게 알릴 실패로 내린다.
-		writeError(w, apiError{Status: http.StatusServiceUnavailable, Code: "egress_slots_exhausted", Message: "No streaming slot is available. Try again after another broadcast ends.", Details: map[string]any{"session_id": sessionID}})
+		return &apiError{Status: http.StatusServiceUnavailable, Code: "egress_slots_exhausted", Message: "No streaming slot is available. Try again after another broadcast ends.", Details: map[string]any{"session_id": sessionID}}
 	default:
-		writeSessionError(w, err, sessionID)
+		return sessionError(err, sessionID)
 	}
 }
 
@@ -1162,11 +1209,15 @@ func internalError() apiError {
 }
 
 func writeSessionError(w http.ResponseWriter, err error, id string) {
+	writeError(w, *sessionError(err, id))
+}
+
+func sessionError(err error, id string) *apiError {
 	if errors.Is(err, session.ErrNotFound) {
-		writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}})
-		return
+		return &apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}}
 	}
-	writeError(w, internalError())
+	internal := internalError()
+	return &internal
 }
 
 func writeError(w http.ResponseWriter, err apiError) {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -356,6 +357,22 @@ func (m *Manager) AbortGoLive(id string, providers ...string) (stopped bool, bro
 	t.phase = BroadcastPhasePrepared
 	s.UpdatedAt = time.Now().UTC()
 	return false, broadcast
+}
+
+// PreparedTargets는 라이브 전환을 기다리는 대상을 provider 정렬 순으로
+// 돌려준다. 동시 발사의 대상 목록이다(#233) — 발사 순서가 응답마다 흔들리면
+// 대상 사이의 시작 시점 차이를 잴 수 없다.
+func (s *Session) PreparedTargets() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	providers := make([]string, 0, len(s.targets))
+	for provider, t := range s.targets {
+		if t.phase == BroadcastPhasePrepared {
+			providers = append(providers, provider)
+		}
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 // PlatformBroadcast는 준비된 방송과 그 단계의 스냅샷이다. preparing 구간에는

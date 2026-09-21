@@ -19,9 +19,18 @@ type appleRevocationCredential struct {
 
 type WithdrawalAccountStore interface {
 	AppleRevocationCredential(context.Context, uuid.UUID) (*appleRevocationCredential, error)
-	UserExists(context.Context, uuid.UUID) (bool, error)
+	UserState(context.Context, uuid.UUID) (WithdrawalUserState, error)
 	MarkUserDeleted(context.Context, uuid.UUID, time.Time) error
 }
+
+type WithdrawalUserState int
+
+const (
+	WithdrawalUserUnknown WithdrawalUserState = iota
+	WithdrawalUserMissing
+	WithdrawalUserActive
+	WithdrawalUserInactive
+)
 
 // WithdrawalCleanup contains the external and in-memory cleanup stages that
 // must succeed before the account rows are deleted. Each callback must
@@ -58,15 +67,22 @@ func (s *gormWithdrawalAccountStore) AppleRevocationCredential(ctx context.Conte
 	return &appleRevocationCredential{Ciphertext: account.ProviderRefreshTokenCiphertext, Version: account.ProviderTokenKeyVersion}, nil
 }
 
-func (s *gormWithdrawalAccountStore) UserExists(ctx context.Context, userID uuid.UUID) (bool, error) {
+func (s *gormWithdrawalAccountStore) UserState(ctx context.Context, userID uuid.UUID) (WithdrawalUserState, error) {
 	if s == nil || s.db == nil {
-		return false, ErrWithdrawalUnavailable
+		return WithdrawalUserUnknown, ErrWithdrawalUnavailable
 	}
-	var count int64
-	if err := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Count(&count).Error; err != nil {
-		return false, err
+	var user User
+	result := s.db.WithContext(ctx).Select("status").Where("id = ?", userID).Take(&user)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return WithdrawalUserMissing, nil
 	}
-	return count > 0, nil
+	if result.Error != nil {
+		return WithdrawalUserUnknown, result.Error
+	}
+	if user.Status != UserStatusActive {
+		return WithdrawalUserInactive, nil
+	}
+	return WithdrawalUserActive, nil
 }
 
 func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, _ time.Time) error {
@@ -214,10 +230,9 @@ func (s *AccountWithdrawalService) Withdraw(ctx context.Context, userID uuid.UUI
 	return nil
 }
 
-func (s *AccountWithdrawalService) IsDeleted(ctx context.Context, userID uuid.UUID) (bool, error) {
+func (s *AccountWithdrawalService) UserState(ctx context.Context, userID uuid.UUID) (WithdrawalUserState, error) {
 	if s == nil || s.store == nil {
-		return false, ErrWithdrawalUnavailable
+		return WithdrawalUserUnknown, ErrWithdrawalUnavailable
 	}
-	exists, err := s.store.UserExists(ctx, userID)
-	return !exists, err
+	return s.store.UserState(ctx, userID)
 }

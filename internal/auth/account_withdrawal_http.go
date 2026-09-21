@@ -23,22 +23,41 @@ func (h *tokenHTTPHandler) handleWithdrawal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	claims, err := h.service.ValidateAccessToken(raw)
+	expired := false
 	if err != nil {
-		claims, retryErr := h.service.ValidateAccessTokenAtExpiry(raw)
-		if retryErr == nil {
-			if userID, parseErr := uuid.Parse(claims.Subject); parseErr == nil {
-				if deleted, lookupErr := h.withdrawal.IsDeleted(r.Context(), userID); lookupErr == nil && deleted {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
+		claims, err = h.service.ValidateExpiredAccessToken(raw)
+		if err != nil {
+			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			return
 		}
-		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
-		return
+		expired = true
 	}
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	}
+	state, err := h.withdrawal.UserState(r.Context(), userID)
+	if err != nil {
+		h.logger.Error("account withdrawal state lookup failed", "request_id", tokenRequestID(r), "error", err)
+		h.writeError(w, r, http.StatusServiceUnavailable, "withdrawal_unavailable", "Account deletion is temporarily unavailable.")
+		return
+	}
+	switch state {
+	case WithdrawalUserMissing:
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case WithdrawalUserInactive:
+		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	case WithdrawalUserActive:
+		if expired {
+			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			return
+		}
+	default:
+		h.logger.Error("account withdrawal state lookup returned unknown state", "request_id", tokenRequestID(r))
+		h.writeError(w, r, http.StatusServiceUnavailable, "withdrawal_unavailable", "Account deletion is temporarily unavailable.")
 		return
 	}
 	if err := h.withdrawal.Withdraw(r.Context(), userID); err != nil {
@@ -46,9 +65,15 @@ func (h *tokenHTTPHandler) handleWithdrawal(w http.ResponseWriter, r *http.Reque
 		case errors.Is(err, ErrWithdrawalInProgress):
 			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case errors.Is(err, ErrUserInactive):
-			// The authenticated subject has already been deleted. Treat the repeated
-			// request as success so clients can reconcile a lost 204 response.
-			w.WriteHeader(http.StatusNoContent)
+			state, lookupErr := h.withdrawal.UserState(r.Context(), userID)
+			if lookupErr != nil {
+				h.logger.Error("account withdrawal state lookup failed", "request_id", tokenRequestID(r), "error", lookupErr)
+				h.writeError(w, r, http.StatusServiceUnavailable, "withdrawal_unavailable", "Account deletion is temporarily unavailable.")
+			} else if state == WithdrawalUserMissing {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			}
 		case errors.Is(err, ErrWithdrawalUnavailable):
 			h.writeError(w, r, http.StatusServiceUnavailable, "withdrawal_unavailable", "Account deletion is temporarily unavailable.")
 		default:

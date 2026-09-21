@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -18,14 +19,26 @@ type stubWithdrawalStore struct {
 	credentialErr error
 	markErr       error
 	marked        uuid.UUID
+	missing       bool
+	userStatus    UserStatus
+	stateErr      error
 }
 
 func (s *stubWithdrawalStore) AppleRevocationCredential(_ context.Context, _ uuid.UUID) (*appleRevocationCredential, error) {
 	return s.credential, s.credentialErr
 }
 
-func (s *stubWithdrawalStore) UserExists(_ context.Context, userID uuid.UUID) (bool, error) {
-	return s.marked != userID, nil
+func (s *stubWithdrawalStore) UserState(_ context.Context, userID uuid.UUID) (WithdrawalUserState, error) {
+	if s.stateErr != nil {
+		return WithdrawalUserUnknown, s.stateErr
+	}
+	if s.missing || s.marked == userID {
+		return WithdrawalUserMissing, nil
+	}
+	if s.userStatus != "" && s.userStatus != UserStatusActive {
+		return WithdrawalUserInactive, nil
+	}
+	return WithdrawalUserActive, nil
 }
 
 func (s *stubWithdrawalStore) MarkUserDeleted(_ context.Context, userID uuid.UUID, _ time.Time) error {
@@ -200,15 +213,71 @@ func TestAccountWithdrawalHTTPIsIdempotentAfterUserDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, withdrawal, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+	request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("initial status=%d, want %d", response.Code, http.StatusNoContent)
+	}
 
-	for attempt := 1; attempt <= 2; attempt++ {
-		request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
-		request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		if response.Code != http.StatusNoContent {
-			t.Fatalf("attempt %d status=%d, want %d", attempt, response.Code, http.StatusNoContent)
-		}
+	cleanupCalls := 0
+	restarted, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.SetCleanup(WithdrawalCleanup{
+		ClearReferenceData: func(context.Context, uuid.UUID) error {
+			cleanupCalls++
+			return errors.New("must not run for deleted user")
+		},
+	})
+	handler = MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, restarted, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+	request = httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || cleanupCalls != 0 {
+		t.Fatalf("retry status=%d cleanup calls=%d, want 204 and 0", response.Code, cleanupCalls)
+	}
+}
+
+func TestAccountWithdrawalHTTPDoesNotTreatInactiveUserAsDeleted(t *testing.T) {
+	store := &stubWithdrawalStore{userStatus: UserStatusDisabled}
+	handler, accessToken := withdrawalHTTPFixture(t, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || store.marked != uuid.Nil {
+		t.Fatalf("status=%d marked=%s, want 401 and no deletion", response.Code, store.marked)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"code":"unauthorized"`)) {
+		t.Fatalf("body=%s, want unauthorized code", response.Body.String())
+	}
+}
+
+func TestAccountWithdrawalHTTPReportsStateLookupFailure(t *testing.T) {
+	store := &stubWithdrawalStore{stateErr: errors.New("database unavailable")}
+	var logs bytes.Buffer
+	handler, accessToken := withdrawalHTTPFixture(t, store, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"code":"withdrawal_unavailable"`)) {
+		t.Fatalf("body=%s, want withdrawal_unavailable code", response.Body.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("account withdrawal state lookup failed")) ||
+		!bytes.Contains(logs.Bytes(), []byte("database unavailable")) {
+		t.Fatalf("missing lookup failure log: %s", logs.String())
 	}
 }
 
@@ -269,4 +338,56 @@ func TestAccountWithdrawalHTTPAcceptsExpiredTokenOnlyAfterDeletion(t *testing.T)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("active user status=%d, want %d", response.Code, http.StatusUnauthorized)
 	}
+}
+
+func TestAccountWithdrawalHTTPRejectsFutureTokenForDeletedUser(t *testing.T) {
+	store := &stubWithdrawalStore{missing: true}
+	withdrawal, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := testTokenService(newMemoryRefreshStore())
+	userID := uuid.New()
+	futureToken, err := tokens.issueAccessToken(
+		userID,
+		uuid.New(),
+		time.Now().UTC().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, withdrawal, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+futureToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"code":"unauthorized"`)) {
+		t.Fatalf("body=%s, want unauthorized code", response.Body.String())
+	}
+}
+
+func withdrawalHTTPFixture(t *testing.T, store *stubWithdrawalStore, logger *slog.Logger) (http.Handler, string) {
+	t.Helper()
+	withdrawal, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := testTokenService(newMemoryRefreshStore())
+	pair, err := tokens.IssuePair(context.Background(), uuid.New(), ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, withdrawal, logger, config), pair.AccessToken
 }

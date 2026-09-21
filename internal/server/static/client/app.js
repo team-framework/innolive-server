@@ -1165,10 +1165,18 @@ function applySimulcastForm() {
   const secondary = simulcastTarget();
   els.simulcastMadeForKidsRow.hidden = !enabled || secondary !== "youtube";
   if (enabled && !secondary) {
-    els.broadcastSettingsDetail.textContent =
-      "추가 대상이 세션의 기본 대상과 같습니다 — 다른 플랫폼을 고르세요.";
+    els.broadcastSettingsDetail.textContent = SIMULCAST_SAME_PROVIDER_NOTICE;
+    return;
+  }
+  // 조건이 풀렸는데 경고가 남으면 설정이 정상인데도 잘못된 것으로 읽힌다.
+  // 이 영역은 저장 결과·준비 실패 메시지와 공유하므로 자기 문구일 때만 지운다.
+  if (els.broadcastSettingsDetail.textContent === SIMULCAST_SAME_PROVIDER_NOTICE) {
+    els.broadcastSettingsDetail.textContent = "";
   }
 }
+
+const SIMULCAST_SAME_PROVIDER_NOTICE =
+  "추가 대상이 세션의 기본 대상과 같습니다 — 다른 플랫폼을 고르세요.";
 
 // saveSimulcastSettings는 추가 대상의 방송 설정을 저장한다. 상세 설정은
 // 직전 방송 기본값을 그대로 쓰고 제목만 덮는다 — 이 클라이언트는 검증용이고,
@@ -1259,6 +1267,40 @@ function renderTargets(session) {
       row.append(button);
     }
     els.targetList.append(row);
+  }
+}
+
+// broadcastControlTargets는 상단 제어 버튼이 걸어야 할 대상이다. 준비를 거친
+// 대상이 둘 이상일 때만 목록을 돌려준다 — 하나뿐이면 빈 배열이라 호출부가
+// 종전처럼 provider 없이 부르고, 단독 송출 경로는 바뀌지 않는다.
+function broadcastControlTargets() {
+  const targets = (state.session?.targets || []).filter(
+    (target) => (target.stream?.broadcast_phase || "idle") !== "idle",
+  );
+  return targets.length > 1 ? targets.map((target) => target.provider) : [];
+}
+
+// applyToEveryTarget은 제어를 대상 전부에 건다. 상단 버튼이 기본 대상만
+// 끄면 동시 송출에서 나머지 플랫폼이 라이브로 남는데, 화면은 종료된 것처럼
+// 보인다. 한 대상이 실패해도 나머지는 계속 건다 — 하나 때문에 다른 방송이
+// 남는 것이 더 나쁘다.
+async function applyToEveryTarget(action, providers, sessionId) {
+  const failures = [];
+  for (const provider of providers) {
+    try {
+      const stream = await apiFetch(`/sessions/${sessionId}/stream/${action}?provider=${provider}`, {
+        method: "POST",
+      });
+      logEvent("ok", "Broadcast control applied", { session_id: sessionId, provider, action, stream });
+    } catch (error) {
+      const code = error?.payload?.error?.code || error?.message;
+      failures.push(`${provider}: ${code}`);
+      logEvent("error", "Broadcast control failed", { session_id: sessionId, provider, action, code });
+    }
+  }
+  await refreshCurrentSession({ quiet: true });
+  if (failures.length) {
+    els.broadcastSettingsDetail.textContent = `일부 대상 제어 실패 — ${failures.join(" · ")}`;
   }
 }
 
@@ -1849,6 +1891,12 @@ async function pauseBroadcast() {
     throw new Error("일시 중지할 방송 세션이 없습니다.");
   }
   await runBusy(async () => {
+    // 동시 송출에서는 상단 버튼도 대상 전부에 건다(#260).
+    const providers = broadcastControlTargets();
+    if (providers.length > 0) {
+      await applyToEveryTarget("pause", providers, sessionId);
+      return;
+    }
     const paused = await apiFetch(`/sessions/${sessionId}/stream/pause`, {
       method: "POST",
     });
@@ -1868,6 +1916,12 @@ async function stopBroadcast() {
     throw new Error("종료할 방송 세션이 없습니다.");
   }
   await runBusy(async () => {
+    // 동시 송출에서는 상단 버튼도 대상 전부에 건다(#260).
+    const providers = broadcastControlTargets();
+    if (providers.length > 0) {
+      await applyToEveryTarget("stop", providers, sessionId);
+      return;
+    }
     const stopped = await apiFetch(`/sessions/${sessionId}/stream/stop`, {
       method: "POST",
     });
@@ -1885,6 +1939,12 @@ async function resumeBroadcast() {
     throw new Error("재개할 방송 세션이 없습니다.");
   }
   await runBusy(async () => {
+    // 동시 송출에서는 상단 버튼도 대상 전부에 건다(#260).
+    const providers = broadcastControlTargets();
+    if (providers.length > 0) {
+      await applyToEveryTarget("resume", providers, sessionId);
+      return;
+    }
     const resumed = await apiFetch(`/sessions/${sessionId}/stream/resume`, {
       method: "POST",
     });

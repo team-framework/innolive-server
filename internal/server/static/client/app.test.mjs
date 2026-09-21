@@ -161,7 +161,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
     context,
     { filename: appPath },
   );
@@ -467,10 +467,10 @@ test("방송 종료 버튼은 송출이 살아 있을 때만 눌린다", async (
   assert.equal(els.stopBroadcastBtn.disabled, true);
 });
 
-function jsonResponse(body) {
+function jsonResponse(body, status = 200) {
   return {
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
     headers: new Headers({ "content-type": "application/json" }),
     async text() {
       return JSON.stringify(body);
@@ -762,4 +762,94 @@ test("개별 제어는 그 대상에만 건다", async () => {
   assert.equal(calls.length, 1);
   assert.match(calls[0].path, /\/sessions\/s-1\/stream\/pause\?provider=chzzk$/);
   assert.equal(calls[0].method, "POST");
+});
+
+test("동시 송출 중 방송 종료는 대상 전부를 끈다", async () => {
+  const calls = [];
+  const { stopBroadcast, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method || "GET" });
+      return jsonResponse({ session_id: "s-1", provider: "youtube", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "streaming", broadcast_phase: "live" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+
+  await stopBroadcast();
+
+  // 대상마다 한 번씩 + 마지막 세션 갱신 한 번.
+  const stops = calls.filter((call) => call.path.includes("/stream/stop"));
+  assert.equal(stops.length, 2);
+  assert.match(stops[0].path, /\/stream\/stop\?provider=chzzk$/);
+  assert.match(stops[1].path, /\/stream\/stop\?provider=youtube$/);
+});
+
+test("한 대상의 종료가 실패해도 나머지 대상은 계속 끈다", async () => {
+  const calls = [];
+  const { stopBroadcast, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url);
+      calls.push(path);
+      if (path.includes("provider=chzzk")) {
+        return jsonResponse({ error: { code: "stream_not_active" } }, 409);
+      }
+      return jsonResponse({ session_id: "s-1", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "streaming", broadcast_phase: "live" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+
+  await stopBroadcast();
+
+  assert.equal(calls.filter((path) => path.includes("/stream/stop")).length, 2);
+  assert.match(els.broadcastSettingsDetail.textContent, /일부 대상 제어 실패 — chzzk: stream_not_active/);
+});
+
+test("준비를 거친 대상이 하나뿐이면 상단 버튼은 종전처럼 provider 없이 부른다", async () => {
+  const { broadcastControlTargets, state } = await loadApp();
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    targets: [
+      { provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  };
+  assert.deepEqual(Array.from(broadcastControlTargets()), []);
+
+  state.session.targets[0].stream.broadcast_phase = "prepared";
+  assert.deepEqual(Array.from(broadcastControlTargets()), ["chzzk", "youtube"]);
+});
+
+test("추가 대상 경고는 조건이 풀리면 지워진다", async () => {
+  const { applySimulcastForm, state, els } = await loadApp();
+  state.session = { session_id: "s-1", provider: "youtube" };
+  els.simulcastEnabled.checked = true;
+  els.simulcastProvider.value = "youtube";
+
+  applySimulcastForm();
+  assert.match(els.broadcastSettingsDetail.textContent, /기본 대상과 같습니다/);
+
+  els.simulcastProvider.value = "chzzk";
+  applySimulcastForm();
+  assert.equal(els.broadcastSettingsDetail.textContent, "");
+
+  // 다른 메시지는 건드리지 않는다 — 이 영역은 저장 결과와 공유한다.
+  els.broadcastSettingsDetail.textContent = "저장됨";
+  applySimulcastForm();
+  assert.equal(els.broadcastSettingsDetail.textContent, "저장됨");
 });

@@ -1,7 +1,10 @@
 package session
 
 import (
+	"context"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"inno-live-server/internal/media"
 )
@@ -128,5 +131,36 @@ func TestAllTargetsPausedRequiresEveryTarget(t *testing.T) {
 				t.Fatalf("allTargetsPaused(%v) = %v, want %v", tc.phases, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWithdrawalClearsEveryTargetBroadcast: 탈퇴는 대상마다 만들어진 방송을
+// 모두 치워야 한다 — 하나만 훑으면 나머지 플랫폼에 방송이 남는다.
+func TestWithdrawalClearsEveryTargetBroadcast(t *testing.T) {
+	manager := newTestManager(t, 0)
+	created := trackedSession(t, manager)
+
+	for _, provider := range []string{"youtube", "chzzk"} {
+		if _, err := manager.BeginBroadcastPrepare(created.ID, provider); err != nil {
+			t.Fatalf("%s BeginBroadcastPrepare() error = %v", provider, err)
+		}
+		if _, err := manager.MarkBroadcastPrepared(created.ID, PlatformBroadcast{
+			Provider:    provider,
+			BroadcastID: provider + "-bid",
+		}, provider); err != nil {
+			t.Fatalf("%s MarkBroadcastPrepared() error = %v", provider, err)
+		}
+	}
+
+	cleaned := map[string]BroadcastPhase{}
+	manager.SetBroadcastCleanupWithContext(func(_ context.Context, _ uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase) error {
+		cleaned[broadcast.Provider] = phase
+		return nil
+	})
+	if err := manager.CloseUserSessionsForWithdrawal(context.Background(), created.UserID); err != nil {
+		t.Fatalf("CloseUserSessionsForWithdrawal() error = %v", err)
+	}
+	if len(cleaned) != 2 || cleaned["youtube"] != BroadcastPhasePrepared || cleaned["chzzk"] != BroadcastPhasePrepared {
+		t.Fatalf("cleaned = %v, want both targets released", cleaned)
 	}
 }

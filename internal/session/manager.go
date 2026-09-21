@@ -769,16 +769,18 @@ func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uui
 	}
 
 	for _, liveSession := range sessions {
-		broadcast, phase := takeWithdrawalBroadcast(liveSession)
+		taken := takeWithdrawalBroadcasts(liveSession)
 		liveSession.close("user_withdrawal", m.logger)
 		if err := m.waitForEgress(ctx, liveSession); err != nil {
 			errs = append(errs, fmt.Errorf("wait for session egress: %w", err))
 			failedSessions = append(failedSessions, liveSession)
 		}
-		if err := m.cleanupWithdrawalBroadcast(ctx, userID, broadcast, phase); err != nil {
-			errs = append(errs, fmt.Errorf("cleanup platform broadcast: %w", err))
-			if phase != BroadcastPhaseIdle && broadcast.BroadcastID != "" {
-				failed = append(failed, pendingBroadcastCleanup{broadcast: broadcast, phase: phase})
+		for _, item := range taken {
+			if err := m.cleanupWithdrawalBroadcast(ctx, userID, item.broadcast, item.phase); err != nil {
+				errs = append(errs, fmt.Errorf("cleanup platform broadcast: %w", err))
+				if item.phase != BroadcastPhaseIdle && item.broadcast.BroadcastID != "" {
+					failed = append(failed, pendingBroadcastCleanup{broadcast: item.broadcast, phase: item.phase})
+				}
 			}
 		}
 		if m.sessionCleanup != nil {
@@ -818,10 +820,29 @@ func (m *Manager) cleanupWithdrawalBroadcast(ctx context.Context, userID uuid.UU
 	return m.broadcastCleanupWithContext(ctx, userID, broadcast, phase)
 }
 
-func takeWithdrawalBroadcast(s *Session) (PlatformBroadcast, BroadcastPhase) {
+// takeWithdrawalBroadcasts는 탈퇴로 치워야 할 방송을 대상마다 떼어낸다.
+// 동시 송출 세션은 대상마다 방송이 있으므로 하나만 훑으면 나머지 플랫폼에
+// 방송이 남는다(#233).
+func takeWithdrawalBroadcasts(s *Session) []pendingBroadcast {
+	s.mu.Lock()
+	providers := make([]string, 0, len(s.targets))
+	for provider := range s.targets {
+		providers = append(providers, provider)
+	}
+	s.mu.Unlock()
+	sort.Strings(providers)
+	taken := make([]pendingBroadcast, 0, len(providers))
+	for _, provider := range providers {
+		broadcast, phase := takeWithdrawalBroadcast(s, provider)
+		taken = append(taken, pendingBroadcast{broadcast: broadcast, phase: phase})
+	}
+	return taken
+}
+
+func takeWithdrawalBroadcast(s *Session, provider string) (PlatformBroadcast, BroadcastPhase) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.target(s.Provider)
+	t := s.target(provider)
 	if t.platformBroadcast == nil {
 		t.phase = BroadcastPhaseIdle
 		t.goLiveStopRequested = false

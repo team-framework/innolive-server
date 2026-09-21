@@ -1011,3 +1011,36 @@ func singleSink(fanout *media.EgressFanout) *media.RTMPEgress {
 	}
 	return sinks[0]
 }
+
+func TestAIProcessingIsFixedPerSessionAndDefaultsToServer(t *testing.T) {
+	manager := newTestManager(t, 0)
+	// No tracks in this test: inspect selection independently of an AI worker.
+	manager.cfg.PrivacyMode = config.PrivacyModeReal
+	remote, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, AIProcessingOnDevice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.privacyMode != config.PrivacyModeReal || remote.Response().AIProcessing != AIProcessingServer || !remote.Response().Media.AnonymizationEnabled {
+		t.Fatal("default session must preserve server AI processing")
+	}
+	if local.privacyMode != config.PrivacyModeBypass || local.Response().AIProcessing != AIProcessingOnDevice || local.Response().Media.AnonymizationEnabled {
+		t.Fatal("on-device session must bypass server AI")
+	}
+	if _, err := manager.SetAnonymizationEnabled(local.ID, true); !errors.Is(err, ErrOnDeviceProcessing) {
+		t.Fatalf("toggle error = %v", err)
+	}
+	if !remote.Response().Media.AnonymizationEnabled {
+		t.Fatal("local session changed another session")
+	}
+	before, _ := manager.Capacity()
+	if _, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, "unknown", nil); !errors.Is(err, ErrInvalidAIProcessing) {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+	if after, _ := manager.Capacity(); after != before {
+		t.Fatal("invalid mode consumed a session")
+	}
+}

@@ -24,6 +24,8 @@ import (
 )
 
 var (
+	ErrInvalidAIProcessing       = errors.New("invalid AI processing mode")
+	ErrOnDeviceProcessing        = errors.New("anonymization is controlled on device")
 	ErrNotFound                  = errors.New("session not found")
 	ErrCapacityExceeded          = errors.New("session capacity exceeded")
 	ErrUserSessionExists         = errors.New("user already has an active session")
@@ -116,16 +118,22 @@ type TrackState struct {
 	ReadyState string `json:"ready_state"`
 }
 
+const (
+	AIProcessingServer   = "server"
+	AIProcessingOnDevice = "on_device"
+)
+
 type Response struct {
-	SessionID string              `json:"session_id"`
-	Provider  string              `json:"provider"`
-	Status    string              `json:"status"`
-	CreatedAt time.Time           `json:"created_at"`
-	UpdatedAt time.Time           `json:"updated_at"`
-	Metadata  map[string]string   `json:"metadata"`
-	Peer      PeerConnectionState `json:"peer_connection"`
-	Timing    Timing              `json:"timing"`
-	Media     struct {
+	AIProcessing string              `json:"ai_processing"`
+	SessionID    string              `json:"session_id"`
+	Provider     string              `json:"provider"`
+	Status       string              `json:"status"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	Metadata     map[string]string   `json:"metadata"`
+	Peer         PeerConnectionState `json:"peer_connection"`
+	Timing       Timing              `json:"timing"`
+	Media        struct {
 		RawVideoTrack          *TrackState `json:"raw_video_track"`
 		ProcessedVideoTrack    *TrackState `json:"processed_video_track"`
 		VideoSenderActive      bool        `json:"video_sender_active"`
@@ -147,7 +155,9 @@ type Response struct {
 }
 
 type Session struct {
-	mu sync.RWMutex
+	AIProcessing string
+	privacyMode  config.PrivacyMode
+	mu           sync.RWMutex
 
 	ID     string
 	UserID uuid.UUID
@@ -489,7 +499,18 @@ func (m *Manager) CreateForUser(userID uuid.UUID, metadata map[string]string) (*
 // CreateForUserWithProvider는 송출 플랫폼을 지정해 세션을 만든다. 빈 provider는
 // DefaultProvider로 채운다.
 func (m *Manager) CreateForUserWithProvider(userID uuid.UUID, provider string, metadata map[string]string) (*Session, string, error) {
-	return m.create(userID, "", provider, metadata)
+	return m.CreateForUserWithAIProcessing(userID, provider, AIProcessingServer, metadata)
+}
+
+// CreateForUserWithAIProcessing fixes the processing location for this session.
+func (m *Manager) CreateForUserWithAIProcessing(userID uuid.UUID, provider, processing string, metadata map[string]string) (*Session, string, error) {
+	if processing == "" {
+		processing = AIProcessingServer
+	}
+	if processing != AIProcessingServer && processing != AIProcessingOnDevice {
+		return nil, "", ErrInvalidAIProcessing
+	}
+	return m.create(userID, "", provider, processing, metadata)
 }
 
 // CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
@@ -499,10 +520,10 @@ func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*S
 	if strings.TrimSpace(guestID) == "" {
 		return nil, "", errors.New("guest ID is required")
 	}
-	return m.create(uuid.Nil, guestID, DefaultProvider, metadata)
+	return m.create(uuid.Nil, guestID, DefaultProvider, AIProcessingServer, metadata)
 }
 
-func (m *Manager) create(userID uuid.UUID, guestID, provider string, metadata map[string]string) (*Session, string, error) {
+func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string, metadata map[string]string) (*Session, string, error) {
 	if strings.TrimSpace(provider) == "" {
 		provider = DefaultProvider
 	}
@@ -567,7 +588,13 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider string, metadata ma
 	if guestID != "" {
 		aiClientID = "guest:" + guestID + ":session:" + id
 	}
+	privacyMode := m.cfg.PrivacyMode
+	if processing == AIProcessingOnDevice {
+		privacyMode = config.PrivacyModeBypass
+	}
 	s := &Session{
+		AIProcessing:         processing,
+		privacyMode:          privacyMode,
 		ID:                   id,
 		UserID:               userID,
 		Provider:             provider,
@@ -580,7 +607,7 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider string, metadata ma
 		Status:               "active",
 		PC:                   pc,
 		Stream:               StreamState{Status: "idle", UpdatedAt: now, BroadcastPhase: BroadcastPhaseIdle},
-		anonymizationEnabled: m.cfg.PrivacyMode == config.PrivacyModeReal,
+		anonymizationEnabled: privacyMode == config.PrivacyModeReal,
 		ownerHash:            ownerHash,
 		cancel:               cancel,
 		recovery:             peerRecovery{status: PeerRecoveryStatusIdle},
@@ -1270,6 +1297,9 @@ func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, er
 	if s.closed {
 		return nil, ErrNotFound
 	}
+	if s.AIProcessing == AIProcessingOnDevice {
+		return nil, ErrOnDeviceProcessing
+	}
 	s.anonymizationEnabled = enabled
 	if s.processor != nil {
 		s.processor.SetAnonymizationEnabled(enabled)
@@ -1533,7 +1563,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		s.mu.Unlock()
 
 		var aiStream media.AIStream
-		if m.cfg.PrivacyMode == config.PrivacyModeReal {
+		if s.privacyMode == config.PrivacyModeReal {
 			client := m.ai.Next()
 			m.metrics.IncAITargetSession(client.Address())
 			// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
@@ -1548,7 +1578,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			VideoCodec:     codec,
 			PinLongEdge:    uint16(m.cfg.DecoderPinLongEdge),
 		})
-		processor, err := media.NewProcessor(m.cfg.PrivacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
+		processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {
 			m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
 			return
@@ -1567,7 +1597,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		// Enqueue 경로가 끊기지 않는다.
 		egressFanout := s.egressFanout
 		s.mu.Unlock()
-		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", m.cfg.PrivacyMode)
+		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode)
 		trackID := track.ID()
 		// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
 		// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
@@ -1597,7 +1627,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				transcoder,
 				egressFanout,
 				m.metrics,
-				m.cfg.PrivacyMode,
+				s.privacyMode,
 				m.cfg.FrameQueueSize,
 				requestKeyframe,
 				func() { m.noteProcessedMediaFrame(s) },
@@ -1679,14 +1709,15 @@ func (s *Session) Response() Response {
 	t := s.readTarget(s.Provider)
 	defer s.mu.RUnlock()
 	response := Response{
-		SessionID: s.ID,
-		Provider:  s.Provider,
-		Status:    s.Status,
-		CreatedAt: s.CreatedAt,
-		UpdatedAt: s.UpdatedAt,
-		Metadata:  copyMetadata(s.Metadata),
-		Timing:    s.Timing,
-		Stream:    s.Stream,
+		AIProcessing: s.AIProcessing,
+		SessionID:    s.ID,
+		Provider:     s.Provider,
+		Status:       s.Status,
+		CreatedAt:    s.CreatedAt,
+		UpdatedAt:    s.UpdatedAt,
+		Metadata:     copyMetadata(s.Metadata),
+		Timing:       s.Timing,
+		Stream:       s.Stream,
 	}
 	response.Peer.ConnectionState = s.PC.ConnectionState().String()
 	response.Peer.ICEConnectionState = s.PC.ICEConnectionState().String()

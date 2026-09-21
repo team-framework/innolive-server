@@ -312,8 +312,9 @@ func (s *Server) handleWebRTCConfig(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	request := struct {
-		Metadata map[string]string `json:"metadata"`
-		Provider string            `json:"provider"`
+		AIProcessing string            `json:"ai_processing"`
+		Metadata     map[string]string `json:"metadata"`
+		Provider     string            `json:"provider"`
 	}{Metadata: map[string]string{}}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
@@ -332,8 +333,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("Unknown streaming provider.", map[string]any{"provider": request.Provider}))
 		return
 	}
+	// Metadata selection also works with clients that must negotiate with older servers.
+	if request.AIProcessing == "" {
+		request.AIProcessing = request.Metadata["ai_processing"]
+	}
 	userID, _ := auth.UserIDFromContext(r.Context())
-	liveSession, ownerToken, err := s.sessions.CreateForUserWithProvider(userID, string(providerName), request.Metadata)
+	liveSession, ownerToken, err := s.sessions.CreateForUserWithAIProcessing(userID, string(providerName), request.AIProcessing, request.Metadata)
+	if errors.Is(err, session.ErrInvalidAIProcessing) {
+		writeError(w, badRequest("ai_processing must be server or on_device.", map[string]any{"field": "ai_processing"}))
+		return
+	}
 	if errors.Is(err, session.ErrCapacityExceeded) {
 		active, limit := s.sessions.Capacity()
 		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)
@@ -1244,6 +1253,9 @@ func writeSessionError(w http.ResponseWriter, err error, id string) {
 }
 
 func sessionError(err error, id string) *apiError {
+	if errors.Is(err, session.ErrOnDeviceProcessing) {
+		return &apiError{Status: http.StatusConflict, Code: "on_device_processing", Message: "Control anonymization on the sending device."}
+	}
 	if errors.Is(err, session.ErrNotFound) {
 		return &apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}}
 	}

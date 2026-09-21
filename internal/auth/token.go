@@ -316,6 +316,51 @@ func (s *TokenService) ValidateAccessToken(raw string) (*AccessClaims, error) {
 	return claims, nil
 }
 
+// ValidateAccessTokenAtExpiry verifies every access-token property at the last
+// instant when the token was valid. It is only for reconciling a repeated
+// account deletion after the user row and refresh sessions are already gone.
+func (s *TokenService) ValidateAccessTokenAtExpiry(raw string) (*AccessClaims, error) {
+	unverified := &AccessClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, unverified); err != nil || unverified.ExpiresAt == nil {
+		return nil, ErrInvalidAccessToken
+	}
+	validationTime := unverified.ExpiresAt.Time.Add(-time.Nanosecond)
+	claims := &AccessClaims{}
+	token, err := jwt.ParseWithClaims(
+		raw,
+		claims,
+		func(token *jwt.Token) (any, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+			}
+			return s.cfg.AccessKey, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(s.cfg.Issuer),
+		jwt.WithAudience(s.cfg.Audience),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(s.cfg.ClockSkew),
+		jwt.WithTimeFunc(func() time.Time { return validationTime }),
+	)
+	if err != nil || !token.Valid || claims.TokenType != "access" {
+		return nil, ErrInvalidAccessToken
+	}
+	if claims.ExpiresAt == nil || claims.NotBefore == nil || claims.IssuedAt == nil {
+		return nil, ErrInvalidAccessToken
+	}
+	if _, err := uuid.Parse(claims.Subject); err != nil {
+		return nil, ErrInvalidAccessToken
+	}
+	if _, err := uuid.Parse(claims.SessionID); err != nil {
+		return nil, ErrInvalidAccessToken
+	}
+	if _, err := uuid.Parse(claims.ID); err != nil {
+		return nil, ErrInvalidAccessToken
+	}
+	return claims, nil
+}
+
 func (s *TokenService) issueAccessToken(userID, sessionID uuid.UUID, now time.Time) (string, error) {
 	claims := AccessClaims{
 		SessionID: sessionID.String(),

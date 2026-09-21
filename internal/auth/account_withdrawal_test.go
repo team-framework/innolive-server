@@ -24,6 +24,10 @@ func (s *stubWithdrawalStore) AppleRevocationCredential(_ context.Context, _ uui
 	return s.credential, s.credentialErr
 }
 
+func (s *stubWithdrawalStore) UserExists(_ context.Context, userID uuid.UUID) (bool, error) {
+	return s.marked != userID, nil
+}
+
 func (s *stubWithdrawalStore) MarkUserDeleted(_ context.Context, userID uuid.UUID, _ time.Time) error {
 	s.marked = userID
 	return s.markErr
@@ -176,5 +180,93 @@ func TestAccountWithdrawalHTTPDeletesAuthenticatedUser(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || store.marked != userID {
 		t.Fatalf("status=%d marked=%s want=%s", response.Code, store.marked, userID)
+	}
+}
+
+func TestAccountWithdrawalHTTPIsIdempotentAfterUserDeletion(t *testing.T) {
+	store := &stubWithdrawalStore{}
+	withdrawal, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := testTokenService(newMemoryRefreshStore())
+	userID := uuid.New()
+	pair, err := tokens.IssuePair(context.Background(), userID, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, withdrawal, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+		request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("attempt %d status=%d, want %d", attempt, response.Code, http.StatusNoContent)
+		}
+	}
+}
+
+func TestAccountWithdrawalHTTPAcceptsExpiredTokenOnlyAfterDeletion(t *testing.T) {
+	store := &stubWithdrawalStore{}
+	withdrawal, err := NewAccountWithdrawalService(store, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := testTokenService(newMemoryRefreshStore())
+	userID := uuid.New()
+	pair, err := tokens.IssuePair(context.Background(), userID, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := NewTokenHTTPConfig(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := MountAuthHTTPWithWithdrawal(http.NotFoundHandler(), tokens, nil, nil, withdrawal, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	request := httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("initial status=%d, want %d", response.Code, http.StatusNoContent)
+	}
+
+	expiredToken, err := tokens.issueAccessToken(
+		userID,
+		uuid.New(),
+		time.Now().UTC().Add(-tokens.cfg.AccessTTL-time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+expiredToken)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("retry status=%d, want %d", response.Code, http.StatusNoContent)
+	}
+
+	activeUserToken, err := tokens.issueAccessToken(
+		uuid.New(),
+		uuid.New(),
+		time.Now().UTC().Add(-tokens.cfg.AccessTTL-time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodDelete, "/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+activeUserToken)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("active user status=%d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }

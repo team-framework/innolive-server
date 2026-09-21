@@ -24,6 +24,15 @@ func (h *tokenHTTPHandler) handleWithdrawal(w http.ResponseWriter, r *http.Reque
 	}
 	claims, err := h.service.ValidateAccessToken(raw)
 	if err != nil {
+		claims, retryErr := h.service.ValidateAccessTokenAtExpiry(raw)
+		if retryErr == nil {
+			if userID, parseErr := uuid.Parse(claims.Subject); parseErr == nil {
+				if deleted, lookupErr := h.withdrawal.IsDeleted(r.Context(), userID); lookupErr == nil && deleted {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+		}
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
@@ -37,7 +46,9 @@ func (h *tokenHTTPHandler) handleWithdrawal(w http.ResponseWriter, r *http.Reque
 		case errors.Is(err, ErrWithdrawalInProgress):
 			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case errors.Is(err, ErrUserInactive):
-			h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			// The authenticated subject has already been deleted. Treat the repeated
+			// request as success so clients can reconcile a lost 204 response.
+			w.WriteHeader(http.StatusNoContent)
 		case errors.Is(err, ErrWithdrawalUnavailable):
 			h.writeError(w, r, http.StatusServiceUnavailable, "withdrawal_unavailable", "Account deletion is temporarily unavailable.")
 		default:

@@ -19,6 +19,7 @@ type appleRevocationCredential struct {
 
 type WithdrawalAccountStore interface {
 	AppleRevocationCredential(context.Context, uuid.UUID) (*appleRevocationCredential, error)
+	UserExists(context.Context, uuid.UUID) (bool, error)
 	MarkUserDeleted(context.Context, uuid.UUID, time.Time) error
 }
 
@@ -55,6 +56,17 @@ func (s *gormWithdrawalAccountStore) AppleRevocationCredential(ctx context.Conte
 		return nil, nil
 	}
 	return &appleRevocationCredential{Ciphertext: account.ProviderRefreshTokenCiphertext, Version: account.ProviderTokenKeyVersion}, nil
+}
+
+func (s *gormWithdrawalAccountStore) UserExists(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrWithdrawalUnavailable
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, _ time.Time) error {
@@ -200,4 +212,12 @@ func (s *AccountWithdrawalService) Withdraw(ctx context.Context, userID uuid.UUI
 		s.afterDeleted(userID)
 	}
 	return nil
+}
+
+func (s *AccountWithdrawalService) IsDeleted(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if s == nil || s.store == nil {
+		return false, ErrWithdrawalUnavailable
+	}
+	exists, err := s.store.UserExists(ctx, userID)
+	return !exists, err
 }

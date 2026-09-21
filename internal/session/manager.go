@@ -937,8 +937,9 @@ type streamTarget struct {
 	goLiveStopRequested bool
 }
 
-// target은 provider의 송출 상태를 돌려준다. 없으면 만든다 — zero value가 곧
-// idle이므로 읽기 경로에서 만들어도 상태가 달라지지 않는다.
+// target은 provider의 송출 상태를 돌려준다. 없으면 만든다. phase만은 zero
+// value("")가 아니라 idle로 시작한다 — 응답 계약의 값 집합에 빈 문자열이
+// 없어서, 그대로 내보내면 클라이언트가 단계로 분기할 수 없다.
 // Session.mu를 가진 호출자만 쓴다.
 func (s *Session) target(provider string) *streamTarget {
 	if s.targets == nil {
@@ -946,7 +947,7 @@ func (s *Session) target(provider string) *streamTarget {
 	}
 	existing, ok := s.targets[provider]
 	if !ok {
-		existing = &streamTarget{}
+		existing = &streamTarget{phase: BroadcastPhaseIdle}
 		s.targets[provider] = existing
 	}
 	return existing
@@ -964,12 +965,12 @@ func (s *Session) targetProvider(providers []string) string {
 
 // readTarget은 읽기 잠금에서 쓰는 스냅샷이다. 값으로 돌려주므로 읽기 경로가
 // 실수로 상태를 바꿀 수 없고, targets 맵을 읽기 중에 쓰지도 않는다.
-// 대상이 아직 없으면 zero value(= idle)다.
+// 대상이 아직 없으면 idle이다.
 func (s *Session) readTarget(provider string) streamTarget {
 	if existing := s.targets[provider]; existing != nil {
 		return *existing
 	}
-	return streamTarget{}
+	return streamTarget{phase: BroadcastPhaseIdle}
 }
 
 // StreamOptions는 egress 한 세대의 동작을 호출자가 조정하는 값이다. 지금은
@@ -1094,7 +1095,8 @@ func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgres
 	if !s.closed {
 		// pause 상태에서 재연결 예산이 소진된 경우에도 미리보기·AI 파이프라인은
 		// 계속 동작해야 하므로 egress 종료와 함께 AI 입력 차단을 해제한다.
-		s.setAIInputPaused(false)
+		// 남은 대상이 아직 일시 중지 중이면 그 의도를 지키고 유지한다.
+		s.setAIInputPaused(allTargetsPausedLocked(s))
 	}
 	// egress가 스스로 끝난 경우에도 플랫폼 방송과 단계를 정리한다. 그러지
 	// 않으면 단계가 live에 남아 설정 변경이 영구히 409로 막히고, 유튜브 쪽
@@ -1149,12 +1151,14 @@ func (m *Manager) StopStream(id string, providers ...string) (*Session, Platform
 	s.egressFanout.Remove(provider)
 	t.egress.Stop()
 	t.cancel()
-	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
-	// 보존한다. pause 상태에서 stop한 경우에도 이후 처리 프레임은 다시 AI로
-	// 보낼 수 있게 차단을 해제한다.
-	s.setAIInputPaused(false)
 	reason := "user_requested"
 	t.stopReason = &reason
+	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
+	// 보존한다. pause 상태에서 stop한 경우에도 이후 처리 프레임은 다시 AI로
+	// 보낼 수 있게 차단을 해제한다 — 단, 남은 대상이 아직 멈춰 있으면
+	// 그 일시 중지가 풀리는 셈이므로 유지한다. stopReason을 먼저 남겨
+	// 방금 끝낸 대상이 이 판정에서 빠지게 한다.
+	s.setAIInputPaused(allTargetsPausedLocked(s))
 	// 라이브 전환 왕복 중이면 상태를 지우지 않는다 — 전환 결과를 받은 쪽이
 	// 방송을 종료시켜야 하므로 중지가 요청됐다는 사실만 남긴다.
 	if t.phase == BroadcastPhaseGoingLive {
@@ -1207,18 +1211,23 @@ func allTargetsPausedLocked(s *Session) bool {
 	return allTargetsPaused(phases)
 }
 
-// allTargetsPaused는 송출 중인 대상의 단계로 AI 입력 차단 여부를 정한다.
-// 하나라도 실제 영상을 내보내는 중이면 AI 입력을 끊을 수 없다 — 입력은
-// 세션에 하나뿐이라 끊는 순간 그 대상 시청자의 화면도 멈춘다.
+// allTargetsPaused는 대상들의 단계로 AI 입력 차단 여부를 정한다. 하나라도
+// 실제 영상을 내보내는 중이면 끊을 수 없다 — 입력은 세션에 하나뿐이라 끊는
+// 순간 그 대상 시청자의 화면도 멈춘다. 이미 끝난(stopped) 대상은 세지 않는다:
+// 활성으로 세면 한 대상이 스스로 끝났을 때 나머지의 일시 중지가 풀린다.
 func allTargetsPaused(phases []media.EgressPhase) bool {
+	paused := 0
 	for _, phase := range phases {
 		switch phase {
+		case media.EgressPhaseStopped:
+			continue
 		case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
+			paused++
 		default:
 			return false
 		}
 	}
-	return len(phases) > 0
+	return paused > 0
 }
 
 // ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은

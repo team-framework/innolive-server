@@ -124,6 +124,11 @@ func TestAllTargetsPausedRequiresEveryTarget(t *testing.T) {
 		{"단독 송출 멈춤", []media.EgressPhase{media.EgressPhasePaused}, true},
 		{"단독 송출 중", []media.EgressPhase{media.EgressPhaseStreaming}, false},
 		{"송출 중인 대상 없음", nil, false},
+		// 스스로 끝난 대상을 활성으로 세면, 한쪽 egress가 재연결 예산을
+		// 소진했을 때 나머지 대상의 일시 중지가 풀린다.
+		{"한쪽은 멈추고 한쪽은 종료됨", []media.EgressPhase{media.EgressPhasePaused, media.EgressPhaseStopped}, true},
+		{"전부 종료됨", []media.EgressPhase{media.EgressPhaseStopped, media.EgressPhaseStopped}, false},
+		{"종료된 대상 + 송출 중", []media.EgressPhase{media.EgressPhaseStopped, media.EgressPhaseStreaming}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

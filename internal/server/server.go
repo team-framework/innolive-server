@@ -629,11 +629,23 @@ func streamOptionsFor(provider auth.StreamingProvider) session.StreamOptions {
 // 쿼리 파라미터로 받는 이유는, 제어 엔드포인트(pause·resume·stop)에는 body가
 // 없고 방송 설정은 플랫폼마다 body 모양이 달라 어느 쪽으로 해석할지 정하기
 // 전에 대상을 알아야 하기 때문이다. 생략하면 세션의 기본 대상이다.
-func targetProviderFrom(r *http.Request, liveSession *session.Session) auth.StreamingProvider {
-	if requested := strings.TrimSpace(r.URL.Query().Get("provider")); requested != "" {
-		return auth.StreamingProvider(requested)
+//
+// 식별자는 세션에 닿기 전에 검증한다. 세션의 대상 맵은 요청한 이름으로
+// 대상을 만들어 주므로, 거르지 않으면 임의의 문자열이 그대로 세션에 남아
+// 응답의 targets[]에 실리고 맵이 무한히 자란다.
+// POST /sessions와 같은 계약이다 — 식별자 자체만 보고, 그 플랫폼이 이
+// 배포에 조립돼 있는지는 prepare가 501로 답한다.
+func targetProviderFrom(r *http.Request, liveSession *session.Session) (auth.StreamingProvider, *apiError) {
+	requested := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if requested == "" {
+		return auth.StreamingProvider(liveSession.Provider), nil
 	}
-	return auth.StreamingProvider(liveSession.Provider)
+	providerName := auth.StreamingProvider(requested)
+	if !providerName.Valid() {
+		invalid := badRequest("Unknown streaming provider.", map[string]any{"provider": requested})
+		return "", &invalid
+	}
+	return providerName, nil
 }
 
 // egressAttachesAtGoLive는 egress를 준비가 아니라 라이브 전환에서 붙이는
@@ -861,7 +873,11 @@ func (s *Server) handlePutBroadcast(w http.ResponseWriter, r *http.Request, live
 	// 고른 대상이 정한다(#233) — 동시 송출 세션은 두 플랫폼의 설정을 함께
 	// 들고 있으므로 세션 하나로는 가를 수 없다. 교차 바디는
 	// decodeOptionalJSON의 DisallowUnknownFields가 400으로 막는다.
-	providerName := targetProviderFrom(r, liveSession)
+	providerName, invalid := targetProviderFrom(r, liveSession)
+	if invalid != nil {
+		writeError(w, *invalid)
+		return
+	}
 	if providerName == auth.StreamingProviderChzzk {
 		s.handlePutChzzkBroadcast(w, r, liveSession, providerName)
 		return
@@ -998,7 +1014,12 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 // 단계에 따라 삭제하거나(준비까지만 간 방송, #142) 즉시 종료한다(라이브였던
 // 방송) — autoStop을 기다리면 다음 방송과 겹친다.
 func (s *Server) handleStopStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	_, broadcast, phase, err := s.sessions.StopStream(liveSession.ID, string(targetProviderFrom(r, liveSession)))
+	providerName, invalid := targetProviderFrom(r, liveSession)
+	if invalid != nil {
+		writeError(w, *invalid)
+		return
+	}
+	_, broadcast, phase, err := s.sessions.StopStream(liveSession.ID, string(providerName))
 	if err != nil {
 		if errors.Is(err, session.ErrStreamNotActive) {
 			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
@@ -1010,14 +1031,19 @@ func (s *Server) handleStopStream(w http.ResponseWriter, r *http.Request, liveSe
 	// 라이브 전환 왕복 중이었다면 여기서 지우지 않는다 — 전환 결과를 받은
 	// golive 핸들러가 방송을 종료시킨다.
 	s.disposeBroadcast(liveSession.UserID, broadcast, phase)
-	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(targetProviderFrom(r, liveSession))))
+	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(providerName)))
 }
 
 // handlePauseStream은 RTMP·플랫폼 방송을 유지하고 소스 일시 중단을 기록한다.
 // 미디어 egress는 이 상태를 보고 취소 슬레이트로 전환하며, 최종 송출 중지와는
 // 의도적으로 다른 동작이다.
 func (s *Server) handlePauseStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	if _, err := s.sessions.PauseStream(liveSession.ID, string(targetProviderFrom(r, liveSession))); err != nil {
+	providerName, invalid := targetProviderFrom(r, liveSession)
+	if invalid != nil {
+		writeError(w, *invalid)
+		return
+	}
+	if _, err := s.sessions.PauseStream(liveSession.ID, string(providerName)); err != nil {
 		switch {
 		case errors.Is(err, session.ErrStreamNotActive):
 			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
@@ -1028,11 +1054,16 @@ func (s *Server) handlePauseStream(w http.ResponseWriter, r *http.Request, liveS
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(targetProviderFrom(r, liveSession))))
+	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(providerName)))
 }
 
 func (s *Server) handleResumeStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	if _, err := s.sessions.ResumeStream(liveSession.ID, string(targetProviderFrom(r, liveSession))); err != nil {
+	providerName, invalid := targetProviderFrom(r, liveSession)
+	if invalid != nil {
+		writeError(w, *invalid)
+		return
+	}
+	if _, err := s.sessions.ResumeStream(liveSession.ID, string(providerName)); err != nil {
 		switch {
 		case errors.Is(err, session.ErrStreamNotActive):
 			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_active", Message: "The stream is not active.", Details: map[string]any{"session_id": liveSession.ID}})
@@ -1043,7 +1074,7 @@ func (s *Server) handleResumeStream(w http.ResponseWriter, r *http.Request, live
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(targetProviderFrom(r, liveSession))))
+	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(providerName)))
 }
 
 // handlePatchAnonymization controls AI privacy processing without changing the

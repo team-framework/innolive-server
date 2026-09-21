@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"inno-live-server/internal/auth"
@@ -115,5 +116,62 @@ func TestGoLiveFailsWhenEveryTargetFails(t *testing.T) {
 	response, payload := goLive(t, server.URL, created.SessionID, ownerToken)
 	if response.StatusCode != http.StatusConflict || streamErrorCode(payload) != "broadcast_not_ready" {
 		t.Fatalf("go live = %d %q, want 409 broadcast_not_ready", response.StatusCode, streamErrorCode(payload))
+	}
+}
+
+// TestControlRejectsUnknownProviderWithoutCreatingTarget: 제어·설정
+// 엔드포인트의 provider는 세션에 닿기 전에 걸러야 한다. 세션의 대상 맵은
+// 요청한 이름으로 대상을 만들어 주므로, 거르지 않으면 임의의 문자열이 그대로
+// 세션에 남아 응답에 실리고 맵이 무한히 자란다.
+func TestControlRejectsUnknownProviderWithoutCreatingTarget(t *testing.T) {
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{},
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	for _, action := range []string{"stop", "pause", "resume"} {
+		response, payload := postStream(t, server.URL, created.SessionID, ownerToken, action+"?provider=bogus", "")
+		if response.StatusCode != http.StatusBadRequest || streamErrorCode(payload) != "bad_request" {
+			t.Fatalf("%s?provider=bogus = %d %q, want 400 bad_request", action, response.StatusCode, streamErrorCode(payload))
+		}
+	}
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/sessions/"+created.SessionID+"/broadcast?provider=bogus", strings.NewReader(`{"made_for_kids":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Session-Owner-Token", ownerToken)
+	putResponse, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer putResponse.Body.Close()
+	if putResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT /broadcast?provider=bogus = %d, want 400", putResponse.StatusCode)
+	}
+
+	// 거절된 요청은 세션에 흔적을 남기지 않는다 — 기본 대상 하나뿐이어야 한다.
+	targets, _ := getSessionPayload(t, server.URL, created.SessionID, ownerToken)["targets"].([]any)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want only the default target", targets)
+	}
+}
+
+// TestControlTargetStartsIdleNotEmptyPhase: 지연 생성된 대상도 응답 계약의
+// 값 집합 안에 있어야 한다. 빈 문자열이면 클라이언트가 단계로 분기할 수 없다.
+func TestControlTargetStartsIdleNotEmptyPhase(t *testing.T) {
+	server := newStreamTestApplication(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{},
+		auth.StreamingProviderChzzk:   &stubStreamingProvider{},
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+
+	// 유튜브 기본 세션에서 준비 없이 치지직 대상을 건드린다.
+	if response, payload := postStream(t, server.URL, created.SessionID, ownerToken, "stop?provider=chzzk", ""); response.StatusCode != http.StatusConflict {
+		t.Fatalf("stop?provider=chzzk = %d, want 409 stream_not_active (payload %v)", response.StatusCode, payload)
+	}
+	phase := targetBroadcastPhase(t, getSessionPayload(t, server.URL, created.SessionID, ownerToken), string(auth.StreamingProviderChzzk))
+	if phase != string(session.BroadcastPhaseIdle) {
+		t.Fatalf("chzzk target phase = %q, want idle", phase)
 	}
 }

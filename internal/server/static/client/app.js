@@ -87,6 +87,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeRuntimeNotice();
   bindEvents();
   applyProviderForm(els.sessionProvider.value);
+  applySimulcastForm();
   resetRemoteStream();
   renderAuth();
   updatePeerUi();
@@ -195,6 +196,15 @@ function bindElements() {
     "broadcastThumbnailRow",
     "broadcastDescriptionRow",
     "madeForKidsRow",
+    "simulcastEnabled",
+    "simulcastProvider",
+    "simulcastProviderRow",
+    "simulcastTitle",
+    "simulcastTitleRow",
+    "simulcastMadeForKids",
+    "simulcastMadeForKidsRow",
+    "targetList",
+    "targetListEmpty",
     "broadcastYoutubeAccount",
     "broadcastVideoInput",
     "broadcastRtmpState",
@@ -234,7 +244,12 @@ function bindEvents() {
   els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
-  els.sessionProvider.addEventListener("change", () => applyProviderForm(els.sessionProvider.value));
+  els.sessionProvider.addEventListener("change", () => {
+    applyProviderForm(els.sessionProvider.value);
+    applySimulcastForm();
+  });
+  els.simulcastEnabled.addEventListener("change", () => applySimulcastForm());
+  els.simulcastProvider.addEventListener("change", () => applySimulcastForm());
   els.chzzkCategorySearchBtn.addEventListener("click", () =>
     void searchChzzkCategories().catch(() => null),
   );
@@ -1122,6 +1137,155 @@ function applyProviderForm(provider) {
   els.madeForKidsRow.hidden = chzzk;
 }
 
+// ── 동시 송출(#260) ───────────────────────────────────────────────
+// 서버는 대상마다 prepare를 한 번씩 부르고 golive를 한 번 부르는 것으로
+// 동시 송출을 표현한다(#233). 클라이언트도 같은 모양으로 맞춘다.
+
+// simulcastTargets는 기본 대상과 추가 대상이 겹치지 않을 때만 추가 대상을
+// 돌려준다 — 같은 플랫폼을 두 번 준비하면 서버가 409로 거절한다.
+function simulcastTarget() {
+  if (!els.simulcastEnabled.checked) {
+    return "";
+  }
+  const secondary = els.simulcastProvider.value;
+  return secondary === sessionProviderValue() ? "" : secondary;
+}
+
+function sessionProviderValue() {
+  return state.session?.provider || els.sessionProvider.value;
+}
+
+// applySimulcastForm은 추가 대상 입력을 상황에 맞게 보인다. 추가 대상이
+// 유튜브일 때만 made_for_kids를 묻는다 — 법적 신고 항목이라 서버가 대신
+// 정하지 않으므로, 비워두면 그 대상의 prepare가 400으로 막힌다.
+function applySimulcastForm() {
+  const enabled = els.simulcastEnabled.checked;
+  els.simulcastProviderRow.hidden = !enabled;
+  els.simulcastTitleRow.hidden = !enabled;
+  const secondary = simulcastTarget();
+  els.simulcastMadeForKidsRow.hidden = !enabled || secondary !== "youtube";
+  if (enabled && !secondary) {
+    els.broadcastSettingsDetail.textContent =
+      "추가 대상이 세션의 기본 대상과 같습니다 — 다른 플랫폼을 고르세요.";
+  }
+}
+
+// saveSimulcastSettings는 추가 대상의 방송 설정을 저장한다. 상세 설정은
+// 직전 방송 기본값을 그대로 쓰고 제목만 덮는다 — 이 클라이언트는 검증용이고,
+// 추가 대상의 상세 설정이 필요하면 그 플랫폼을 기본 대상으로 세션을 만든다.
+async function saveSimulcastSettings(sessionId, provider) {
+  let defaults = {};
+  try {
+    defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}`);
+  } catch (error) {
+    logEvent("warn", "Simulcast defaults load failed", {
+      session_id: sessionId,
+      provider,
+      message: error?.message,
+    });
+  }
+  const title = els.simulcastTitle.value.trim() || defaults.title || "";
+  const payload =
+    provider === "chzzk"
+      ? {
+          title,
+          category_type: defaults.category_type || "",
+          category_id: defaults.category_id || "",
+          tags: defaults.tags || [],
+        }
+      : {
+          title,
+          description: defaults.description || "",
+          privacy: defaults.privacy || "private",
+          made_for_kids: els.simulcastMadeForKids.checked,
+          category_id: defaults.category_id || "",
+        };
+  return apiFetch(`/sessions/${sessionId}/broadcast?provider=${provider}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+// prepareSimulcastTarget은 추가 대상을 세션에 더한다. 실패해도 기본 대상의
+// 준비는 이미 끝나 있으므로 세션을 되돌리지 않고 사유만 남긴다 — 한쪽 실패가
+// 나머지를 끌어내리지 않는 서버 정책과 같은 태도다.
+async function prepareSimulcastTarget(sessionId, provider) {
+  try {
+    await saveSimulcastSettings(sessionId, provider);
+    const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
+      method: "POST",
+      body: JSON.stringify({ provider }),
+    });
+    setCurrentSession(prepared);
+    logEvent("ok", "Simulcast target prepared", { session_id: sessionId, provider });
+  } catch (error) {
+    logEvent("error", "Simulcast target prepare failed", {
+      session_id: sessionId,
+      provider,
+      code: error?.payload?.error?.code,
+      message: error?.message,
+      status: error?.status,
+    });
+    els.broadcastSettingsDetail.textContent = `추가 대상(${provider}) 준비 실패: ${error?.message || "알 수 없는 오류"}`;
+  }
+}
+
+// renderTargets는 대상별 상태와 개별 제어를 그린다. 서버 응답의 targets[]는
+// provider 이름 정렬이라 순서가 흔들리지 않는다.
+function renderTargets(session) {
+  const targets = session?.targets || [];
+  els.targetList.replaceChildren();
+  els.targetListEmpty.hidden = targets.length > 0;
+  for (const target of targets) {
+    const row = document.createElement("li");
+    row.className = "target-row";
+    const name = document.createElement("span");
+    name.className = "target-name";
+    name.textContent = target.provider;
+    const stateText = document.createElement("span");
+    stateText.className = "target-state";
+    stateText.textContent = `${target.stream?.status || "idle"} · ${target.stream?.broadcast_phase || "idle"}`;
+    row.append(name, stateText);
+    for (const [action, label] of [
+      ["pause", "일시 중지"],
+      ["resume", "재개"],
+      ["stop", "종료"],
+    ]) {
+      const button = document.createElement("button");
+      button.className = action === "stop" ? "button button-danger" : "button";
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", () => void controlTarget(target.provider, action));
+      row.append(button);
+    }
+    els.targetList.append(row);
+  }
+}
+
+// controlTarget은 한 대상에만 제어를 건다. provider를 생략하면 서버가 세션의
+// 기본 대상으로 보내므로, 개별 제어에는 반드시 실어야 한다.
+async function controlTarget(provider, action) {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    return;
+  }
+  try {
+    const stream = await apiFetch(`/sessions/${sessionId}/stream/${action}?provider=${provider}`, {
+      method: "POST",
+    });
+    logEvent("ok", "Target control applied", { session_id: sessionId, provider, action, stream });
+    await refreshCurrentSession({ quiet: true });
+  } catch (error) {
+    logEvent("error", "Target control failed", {
+      session_id: sessionId,
+      provider,
+      action,
+      code: error?.payload?.error?.code,
+      message: error?.message,
+    });
+  }
+}
+
 // 치지직의 categoryId는 사용자가 알 수 없는 영문 식별자라 검색으로만 얻는다.
 // 고른 결과의 종류·식별자는 항상 쌍으로 폼에 채운다.
 async function searchChzzkCategories() {
@@ -1619,6 +1783,13 @@ async function prepareYouTubeBroadcast(session) {
       session_id: sessionId,
       stream: prepared.stream,
     });
+    // 동시 송출은 대상마다 prepare를 한 번씩 부르는 것으로 표현한다(#233).
+    // 기본 대상이 준비된 뒤에 더한다 — 순서가 곧 발사 순서는 아니지만,
+    // 기본 대상의 실패를 추가 대상이 가리지 않게 한다.
+    const secondary = simulcastTarget();
+    if (secondary) {
+      await prepareSimulcastTarget(sessionId, secondary);
+    }
   } catch (error) {
     renderBroadcastStartError(error);
     logEvent("error", "YouTube broadcast prepare failed", {
@@ -1646,6 +1817,19 @@ async function goLiveBroadcast() {
       renderBroadcastStreamStatus(stream);
       setBroadcastStatus(els.broadcastYoutubeState, "라이브", "ok");
       logEvent("ok", "YouTube broadcast is live", { session_id: sessionId, stream });
+      // 동시 송출에서 한쪽만 실패하면 요청은 200이고 사유만 실려 온다 —
+      // 나머지 대상은 라이브로 남는다(#233). 조용히 지나가면 안 된다.
+      if (stream?.failed_targets?.length) {
+        const summary = stream.failed_targets
+          .map((failure) => `${failure.provider}: ${failure.code}`)
+          .join(" · ");
+        setBroadcastStatus(els.broadcastYoutubeState, "일부 대상 실패", "warn");
+        els.broadcastSettingsDetail.textContent = `라이브 전환 실패한 대상 — ${summary}`;
+        logEvent("warn", "Some simulcast targets failed to go live", {
+          session_id: sessionId,
+          failed_targets: stream.failed_targets,
+        });
+      }
       await refreshCurrentSession({ quiet: true });
     } catch (error) {
       renderBroadcastStartError(error);
@@ -2812,6 +2996,7 @@ function setCurrentSession(session) {
   state.session = session;
   state.lastSessionJson = session;
   renderSessionDetails(session);
+  renderTargets(session);
   updateButtons();
 }
 

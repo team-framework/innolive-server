@@ -60,6 +60,52 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
 5. **첫 태그 파일**: `printf 'INNOLIVE_TAG=<현재 배포 커밋SHA>\n' > /opt/innolive/deploy/current_tag`
 6. 구 preflight 우회(`/etc/innolive/preflight-off.env`)는 유닛 교체와 함께 제거한다.
 
+## 런타임 로그 보관 (#268)
+
+journald는 용량 상한에 닿으면 오래된 로그부터 지운다. `log-archive.sh`가 `innolive-server`의
+전체 런타임 로그를 **매일 00:10**(`innolive-log-archive.timer`)과 **배포 재시작 직전**
+(`apply-release.sh`)에 보관 디스크로 옮긴다.
+
+- 파일: `/srv/innolive-logs/innolive-server-YYYY-MM-DD.log.zst` (서버 현지 날짜, 하루 한 파일, root:adm 640)
+- 없는 날은 채우고 어제·오늘은 다시 쓴다. 첫 실행은 journald에 남은 가장 오래된 날부터 채운다.
+- 스트림 키·토큰·비밀번호는 가린다. 사용자 IP(ICE 후보)는 장애 조사용으로 남는다.
+- `/srv/innolive-logs`가 마운트 지점이 아니면 쓰지 않는다(루트 디스크에 잘못 쌓이는 것 방지).
+- 배포 중 보관이 실패해도 배포는 진행한다. 사유는 `/opt/innolive/deploy/logs/`의 상세 로그에만 남는다.
+
+### 보관 디스크 준비 (1회, root)
+미사용 디스크(sda)의 빈 공간에 파티션을 만든다. **먼저 확인 명령으로 데이터가 없는지 본다.**
+```bash
+sudo sgdisk -p /dev/sda     # 확인만: 1번(Microsoft reserved, 16MiB)만 있어야 한다
+sudo wipefs -n /dev/sda     # 확인만: gpt/PMBR 외 서명이 없어야 한다
+sudo sgdisk -n 2:0:0 -t 2:8300 -c 2:innolive-logs /dev/sda
+sudo partprobe /dev/sda
+sudo mkfs.ext4 -L innolive-logs /dev/sda2
+sudo mkdir -p /srv/innolive-logs
+echo 'LABEL=innolive-logs /srv/innolive-logs ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+sudo mount /srv/innolive-logs
+sudo chown root:adm /srv/innolive-logs && sudo chmod 750 /srv/innolive-logs
+```
+`nofail`이라 디스크가 고장 나도 부팅은 멈추지 않는다(그동안 보관만 실패한다).
+
+### 설치 (PR 머지 후, root)
+```bash
+sudo install -o root -g root -m 755 log-archive.sh /opt/innolive/deploy/log-archive.sh
+sudo install -o root -g root -m 755 -b apply-release.sh /opt/innolive/deploy/apply-release.sh
+sudo install -o root -g root -m 644 innolive-log-archive.service innolive-log-archive.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now innolive-log-archive.timer
+sudo systemctl start innolive-log-archive.service   # 첫 실행: 과거 로그 채우기
+```
+
+### 확인·열람
+```bash
+systemctl list-timers innolive-log-archive.timer
+journalctl -u innolive-log-archive -n 5
+ls -l /srv/innolive-logs
+zstdcat /srv/innolive-logs/innolive-server-2026-09-21.log.zst | less
+zstdgrep 'peer_connection_failed' /srv/innolive-logs/innolive-server-*.log.zst
+```
+
 ## GitHub 설정
 
 - Secrets (Actions): `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`(Read&Write),

@@ -11,6 +11,8 @@
 --   - ended_at이 NULL인 행(unclean_shutdown)은 시간 합계에서 빠진다.
 --   - ended_at_estimated=true는 백필에서 세션 종료 시각으로 채운 송출이다.
 --   - 간격이 수 분 이내면 재접속(네트워크 끊김 후 다시 켬)일 가능성이 크다.
+--   - 종료 분류: 정상 종료 / 연결 끊김(사용자 네트워크인지 우리 쪽인지 가를 수 없음) / 시스템 오류.
+--     송출 사유가 session_closed면 세션이 끝난 이유로 판정한다.
 --   - 팀·테스트 계정은 아직 제외하지 않는다.
 
 \pset footer off
@@ -22,12 +24,13 @@ SELECT b.*,
        s.is_guest,
        s.started_at AS session_started_at,
        s.ended_at   AS session_ended_at,
+       s.end_reason AS session_end_reason,
        GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0)
            AS on_air_seconds
 FROM usage_broadcasts b
 JOIN usage_sessions s USING (session_id);
 
-CREATE TEMP VIEW usage_rounds AS
+CREATE TEMP VIEW usage_rounds_base AS
 SELECT session_id,
        MIN(user_id::text)::uuid                        AS user_id,
        BOOL_OR(is_guest)                                AS is_guest,
@@ -38,9 +41,45 @@ SELECT session_id,
        MIN(session_started_at)                          AS session_started_at,
        MIN(session_ended_at)                            AS session_ended_at,
        COUNT(DISTINCT provider)                         AS providers,
-       STRING_AGG(DISTINCT provider, '+')               AS platforms
+       STRING_AGG(DISTINCT provider, '+')               AS platforms,
+       -- 동시 송출이면 가장 늦게 끝난(끝나지 않았으면 그것) 송출의 사유
+       (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,
+       MIN(session_end_reason)                          AS session_end_reason
 FROM usage_on_air
 GROUP BY session_id;
+
+-- 종료 사유. 송출 사유가 session_closed면 세션이 끝난 이유가 실제 사유다.
+CREATE TEMP VIEW usage_rounds AS
+SELECT r.*,
+       CASE
+         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'
+         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'
+         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'
+         WHEN broadcast_end_reason = 'unclean_shutdown'
+           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'
+         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'
+         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'
+         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'
+         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'
+         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'
+         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',
+                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'
+         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'
+         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')
+       END AS end_detail,
+       CASE
+         WHEN broadcast_end_reason = 'user_requested'
+           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',
+                                     'user_logout', 'user_signed_out', 'user_withdrawal',
+                                     'guest_session_timeout')             THEN '정상 종료'
+         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')
+           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',
+                                     'guest_queue_transition_failed')     THEN '시스템 오류'
+         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',
+                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'
+         ELSE '확인 필요'
+       END AS end_class
+FROM usage_rounds_base r;
 
 -- 1. 전체 요약 -----------------------------------------------------------
 \echo '== 1. 전체 요약'
@@ -108,6 +147,8 @@ SELECT r.user_id                                                   AS 계정,
        MAKE_INTERVAL(secs => ROUND(r.on_air_seconds))              AS 방송_시간_정지제외,
        MAKE_INTERVAL(secs => ROUND(r.paused_seconds))              AS 일시정지,
        r.platforms                                                 AS 플랫폼,
+       r.end_class                                                 AS 종료_분류,
+       r.end_detail                                                AS 종료_사유,
        ROUND((EXTRACT(EPOCH FROM r.round_start
              - LAG(r.round_end) OVER (PARTITION BY r.user_id ORDER BY r.round_start)) / 3600)::numeric, 1)
                                                                    AS 직전_이후h
@@ -145,10 +186,11 @@ GROUP BY platforms
 ORDER BY 회차 DESC;
 
 -- 6. 종료 사유 -------------------------------------------------------------
-\echo '== 6. 송출 종료 사유 (사용자 종료 vs 장애)'
-SELECT COALESCE(end_reason, '(열림)') AS 사유,
-       COUNT(*)                        AS 송출,
-       COUNT(*) FILTER (WHERE ended_at_estimated) AS 추정
-FROM usage_broadcasts
-GROUP BY end_reason
-ORDER BY 송출 DESC;
+\echo '== 6. 방송 종료 분류 (정상 / 연결 끊김 / 시스템 오류)'
+SELECT end_class                                        AS 분류,
+       end_detail                                       AS 사유,
+       COUNT(*)                                         AS 회차,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS 비율
+FROM usage_rounds
+GROUP BY end_class, end_detail
+ORDER BY end_class, 회차 DESC;

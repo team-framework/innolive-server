@@ -105,9 +105,9 @@ sudo systemctl daemon-reload
 ```
 3) 설치 전에 미리 떠 둔 보관본(`~hkit/innolive-log-archive-preinstall/`, 2026-09-23 생성)이 있으면
 **첫 실행 전에** 옮긴다. journald가 그사이 오래된 로그를 지웠어도 그 날짜가 보존된다.
-기존 파일은 덮어쓰지 않고(`-n`), 이후 스크립트는 없는 날만 채우고 어제·오늘만 다시 쓴다.
+기존 파일은 덮어쓰지 않고(`--update=none`), 이후 스크립트는 없는 날만 채우고 어제·오늘만 다시 쓴다.
 ```bash
-sudo cp -n ~hkit/innolive-log-archive-preinstall/*.log.zst /srv/innolive-logs/
+sudo cp --update=none ~hkit/innolive-log-archive-preinstall/*.log.zst /srv/innolive-logs/
 sudo chgrp adm /srv/innolive-logs/*.log.zst && sudo chmod 640 /srv/innolive-logs/*.log.zst
 ```
 4) 첫 실행 후 매일 타이머를 켠다.

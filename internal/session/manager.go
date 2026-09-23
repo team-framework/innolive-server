@@ -292,6 +292,8 @@ type Manager struct {
 	broadcastCleanupWithContext func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error
 	sessionCleanup              func(*Session)
 	userOperationGate           UserOperationGate
+	// usage는 실사용 기록(#266)이다. nil이면 기록하지 않는다.
+	usage UsageRecorder
 	// A broadcast is removed from a session before its provider call. Keep a
 	// failed cleanup here so the next withdrawal request can retry by id.
 	pendingWithdrawalBroadcasts map[uuid.UUID][]pendingBroadcastCleanup
@@ -648,6 +650,7 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string,
 		time.AfterFunc(timeout, func() { m.reapUnnegotiated(id) })
 	}
 	m.logger.Info("created live session", "session_id", id, "user_id", userID)
+	m.recordUsage(UsageEvent{Kind: UsageSessionStarted, At: now, SessionID: id, UserID: userID, AIProcessing: processing})
 	return s, ownerToken, nil
 }
 
@@ -803,6 +806,7 @@ func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uui
 	for _, liveSession := range sessions {
 		taken := takeWithdrawalBroadcasts(liveSession)
 		liveSession.close("user_withdrawal", m.logger)
+		m.recordSessionEnded(liveSession, "user_withdrawal")
 		if err := m.waitForEgress(ctx, liveSession); err != nil {
 			errs = append(errs, fmt.Errorf("wait for session egress: %w", err))
 			failedSessions = append(failedSessions, liveSession)
@@ -967,6 +971,8 @@ type streamTarget struct {
 	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다. 대상마다
 	// 따로 둔다 — 한쪽 중지가 다른 쪽의 라이브 전환을 취소하면 안 된다.
 	goLiveStopRequested bool
+	// usageID는 실사용 기록에서 이 egress 한 세대를 가리키는 식별자다.
+	usageID string
 }
 
 // target은 provider의 송출 상태를 돌려준다. 없으면 만든다. phase만은 zero
@@ -1082,6 +1088,8 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	s.egressFanout.Add(provider, egress)
 	egressDone := make(chan struct{})
 	t.done = egressDone
+	usageID := uuid.NewString()
+	t.usageID = usageID
 	s.UpdatedAt = time.Now().UTC()
 	// 자리는 egress 한 세대의 수명 전체를 점유한다. 프로세스 단위로 잡으면
 	// 재연결 때 반납·재획득이 일어나고, 만석이면 그 재연결이 실패한다.
@@ -1092,8 +1100,9 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 			lease.Release()
 			m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
 		}()
-		m.runEgress(s, provider, egress, egressCtx)
+		m.runEgress(s, provider, egress, egressCtx, usageID)
 	}()
+	m.recordUsage(UsageEvent{Kind: UsageBroadcastStarted, SessionID: s.ID, BroadcastID: usageID, Provider: provider})
 	m.logger.Info("RTMP egress started", "session_id", s.ID, "provider", provider, "url", egress.Status().TargetURL,
 		"reconnect_max_elapsed", egress.ReconnectMaxElapsed(), "nvenc_device", egress.NVENCDevice(),
 		"egress_slots_used", m.egressSlots.Used())
@@ -1106,12 +1115,31 @@ func (m *Manager) EgressSlots() *media.EgressSlotBudget { return m.egressSlots }
 // runEgress는 egress의 자체 종료를 세션 슬롯 정리와 연결한다. Run 고루틴이
 // 재연결 예산을 소진해 끝난 경우에도 세션과 WebRTC 미리보기는 살아 있어야 하므로,
 // 이 함수는 세션을 지우지 않고 해당 egress만 슬롯에서 분리한다.
-func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgress, egressCtx context.Context) {
+func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgress, egressCtx context.Context, usageID string) {
 	egress.Run(egressCtx)
 	status := egress.Status()
 
 	s.mu.Lock()
 	t := s.target(provider)
+	// 새 egress로 교체된 경우에도 이 세대의 종료는 기록한다. 교체는 이전
+	// 세대의 중지 뒤에만 가능하다.
+	usageReason := "user_requested"
+	switch {
+	case status.StopReason != nil:
+		usageReason = string(*status.StopReason)
+	case t.egress == egress && t.stopReason != nil:
+		usageReason = *t.stopReason
+	case s.closed:
+		usageReason = "session_closed"
+	}
+	endedAt := time.Now().UTC()
+	if status.StoppedAt != nil {
+		endedAt = *status.StoppedAt
+	}
+	m.recordUsage(UsageEvent{Kind: UsageBroadcastEnded, At: endedAt, BroadcastID: usageID, Reason: usageReason})
+	if t.usageID == usageID {
+		t.usageID = ""
+	}
 	if t.egress != egress {
 		s.mu.Unlock()
 		return
@@ -1222,6 +1250,7 @@ func (m *Manager) PauseStream(id string, providers ...string) (*Session, error) 
 	if err := pauseEgress(t.egress); err != nil {
 		return nil, err
 	}
+	m.recordUsage(UsageEvent{Kind: UsageBroadcastPaused, BroadcastID: t.usageID})
 	// AI 입력은 세션에 하나뿐이라 대상 하나를 멈춘다고 끊으면 나머지 대상의
 	// 화면까지 정지한다. 남은 대상이 전부 멈춘 뒤에만 차단한다.
 	s.setAIInputPaused(allTargetsPausedLocked(s))
@@ -1278,6 +1307,7 @@ func (m *Manager) ResumeStream(id string, providers ...string) (*Session, error)
 	if err := resumeEgress(t.egress); err != nil {
 		return nil, err
 	}
+	m.recordUsage(UsageEvent{Kind: UsageBroadcastResumed, BroadcastID: t.usageID})
 	s.setAIInputPaused(false)
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
@@ -1386,6 +1416,7 @@ func (m *Manager) Delete(id, reason string) error {
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
+	m.recordSessionEnded(s, reason)
 	if m.sessionCleanup != nil {
 		m.sessionCleanup(s)
 	}
@@ -1433,6 +1464,7 @@ func (m *Manager) CloseAll() {
 	for _, s := range sessions {
 		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
+		m.recordSessionEnded(s, "application_shutdown")
 		if m.sessionCleanup != nil {
 			m.sessionCleanup(s)
 		}

@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -115,18 +116,21 @@ func TestPostgresRecorderGuestAndWithdrawal(t *testing.T) {
 	}
 }
 
-// TestPostgresRecorderSurvivesWriteFailure: 쓰기가 실패해도 워커는 멈추지 않고
-// 다음 사건을 쓴다.
-func TestPostgresRecorderSurvivesWriteFailure(t *testing.T) {
+// TestPostgresRecorderSkipsRetryForPermanentError: 제약 위반은 다시 써도 같으므로
+// 재시도하지 않고, 워커는 멈추지 않고 다음 사건을 쓴다.
+func TestPostgresRecorderSkipsRetryForPermanentError(t *testing.T) {
 	db := newPostgresUsageTestDB(t)
-	recorder := NewRecorder(db, discardLogger)
+	// 재시도하면 Close가 이 간격을 기다리느라 제한 시간을 넘긴다.
+	recorder := newRecorder(db, discardLogger, []time.Duration{time.Hour})
 	// 존재하지 않는 세션의 송출은 FK 위반으로 실패한다.
 	recorder.RecordUsage(session.UsageEvent{Kind: session.UsageBroadcastStarted, At: time.Now().UTC(),
 		SessionID: uuid.NewString(), BroadcastID: uuid.NewString(), Provider: "youtube"})
 	next := uuid.NewString()
 	recorder.RecordUsage(session.UsageEvent{Kind: session.UsageSessionStarted, At: time.Now().UTC(), SessionID: next})
-	if err := recorder.Close(context.Background()); err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := recorder.Close(ctx); err != nil {
+		t.Fatalf("Close() = %v; permanent error was retried", err)
 	}
 	var count int64
 	if err := db.Model(&Broadcast{}).Count(&count).Error; err != nil || count != 0 {
@@ -134,6 +138,68 @@ func TestPostgresRecorderSurvivesWriteFailure(t *testing.T) {
 	}
 	if err := db.First(&Session{}, "session_id = ?", next).Error; err != nil {
 		t.Fatalf("event after failure was not written: %v", err)
+	}
+}
+
+// TestPostgresRecorderRetriesTransientFailure: 테이블이 잠깐 없는(DB 일시 장애)
+// 동안의 사건은 재시도로 살아남는다.
+func TestPostgresRecorderRetriesTransientFailure(t *testing.T) {
+	db := newPostgresUsageTestDB(t)
+	if err := db.Exec("ALTER TABLE usage_sessions RENAME TO usage_sessions_away").Error; err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	recorder := newRecorder(db, slog.New(slog.NewTextHandler(&logs, nil)),
+		[]time.Duration{50 * time.Millisecond, 200 * time.Millisecond, time.Second})
+	sessionID := uuid.NewString()
+	recorder.RecordUsage(session.UsageEvent{Kind: session.UsageSessionStarted, At: time.Now().UTC(), SessionID: sessionID})
+	time.Sleep(100 * time.Millisecond)
+	if err := db.Exec("ALTER TABLE usage_sessions_away RENAME TO usage_sessions").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&Session{}, "session_id = ?", sessionID).Error; err != nil {
+		t.Fatalf("event was not written after retry: %v", err)
+	}
+	if !strings.Contains(logs.String(), "retrying") || strings.Contains(logs.String(), "event lost") {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
+// TestPostgresRecorderLogsLostEventAfterRetries: 재시도를 다 써도 실패하면 유실을
+// 오류 로그로 남긴다 — 조용히 사라지지 않는다.
+func TestPostgresRecorderLogsLostEventAfterRetries(t *testing.T) {
+	db := newPostgresUsageTestDB(t)
+	if err := db.Exec("ALTER TABLE usage_sessions RENAME TO usage_sessions_away").Error; err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	recorder := newRecorder(db, slog.New(slog.NewTextHandler(&logs, nil)), []time.Duration{10 * time.Millisecond})
+	recorder.RecordUsage(session.UsageEvent{Kind: session.UsageSessionStarted, At: time.Now().UTC(), SessionID: uuid.NewString()})
+	if err := recorder.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "event lost") ||
+		!strings.Contains(logs.String(), "attempts=2") {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
+// TestPostgresRecorderWarnsWhenUpdateFindsNoRow: 시작 기록이 없는 행의 종료는
+// 0행 갱신으로 조용히 끝나지 않고 경고를 남긴다.
+func TestPostgresRecorderWarnsWhenUpdateFindsNoRow(t *testing.T) {
+	db := newPostgresUsageTestDB(t)
+	var logs bytes.Buffer
+	recorder := newRecorder(db, slog.New(slog.NewTextHandler(&logs, nil)), nil)
+	missing := uuid.NewString()
+	recorder.RecordUsage(session.UsageEvent{Kind: session.UsageBroadcastEnded, At: time.Now().UTC(), BroadcastID: missing, Reason: "user_requested"})
+	if err := recorder.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "usage row not found for update") || !strings.Contains(logs.String(), missing) {
+		t.Fatalf("logs = %s", logs.String())
 	}
 }
 
@@ -217,7 +283,8 @@ func newPostgresUsageTestDB(t *testing.T) *gorm.DB {
 	query := parsed.Query()
 	query.Set("search_path", schema)
 	parsed.RawQuery = query.Encode()
-	db, err := gorm.Open(postgres.Open(parsed.String()), &gorm.Config{})
+	// 운영과 같게 제약 위반을 gorm 오류로 번역한다 — 재시도 판정이 여기에 기댄다.
+	db, err := gorm.Open(postgres.Open(parsed.String()), &gorm.Config{TranslateError: true})
 	if err != nil {
 		t.Fatal(err)
 	}

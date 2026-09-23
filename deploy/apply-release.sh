@@ -75,6 +75,10 @@ docker login docker.io -u "${DOCKERHUB_USER}" --password-stdin \
 docker pull "${INNOLIVE_IMAGE}:${TAG}" >>"${DETAIL_LOG}" 2>&1 || fail "docker pull failed"
 echo "PULL OK"
 
+# ── 재시작 전 런타임 로그 보관 ──────────────────────────────────
+# 실패해도 배포는 진행한다 — 원본은 journald에 남는다. 출력은 상세 로그에만 쓴다.
+/opt/innolive/deploy/log-archive.sh >>"${DETAIL_LOG}" 2>&1 || detail "log archive failed"
+
 # ── 태그 교체(이전 태그는 롤백용으로 백업) ───────────────────────
 if [[ -f "${TAG_FILE}" ]]; then
   cp "${TAG_FILE}" "${TAG_FILE}.prev"

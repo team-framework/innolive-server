@@ -1,0 +1,12 @@
+# 매일 00:10에 전날 로그를 마감해 보관한다. /etc/systemd/system/innolive-log-archive.timer 로 설치한다.
+
+[Unit]
+Description=Daily InnoLive runtime log archive
+
+[Timer]
+OnCalendar=*-*-* 00:10:00
+# 서버가 꺼져 있어 놓친 실행은 켜진 뒤 한 번 돈다.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

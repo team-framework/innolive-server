@@ -1,0 +1,14 @@
+# 서버 런타임 로그를 날짜별 파일로 보관한다(log-archive.sh). innolive-log-archive.timer가 매일 실행한다.
+# /etc/systemd/system/innolive-log-archive.service 로 설치한다.
+
+[Unit]
+Description=Archive InnoLive server runtime logs to dated files
+# 보관 디스크(/srv/innolive-logs)가 마운트된 뒤에만 돈다. 없으면 스크립트가 쓰지 않고 실패한다.
+RequiresMountsFor=/srv/innolive-logs
+
+[Service]
+Type=oneshot
+ExecStart=/opt/innolive/deploy/log-archive.sh
+# 방송 중에도 돌 수 있으므로 CPU·디스크 우선순위를 가장 낮춘다.
+Nice=19
+IOSchedulingClass=idle

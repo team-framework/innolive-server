@@ -96,6 +96,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now innolive-log-archive.timer
 sudo systemctl start innolive-log-archive.service   # 첫 실행: 과거 로그 채우기
 ```
+설치 전에 미리 떠 둔 보관본(`~hkit/innolive-log-archive-preinstall/`, 2026-09-23 생성)이 있으면
+**첫 실행 전에** 먼저 옮긴다. journald가 그사이 오래된 로그를 지웠어도 그 날짜가 보존된다.
+기존 파일은 덮어쓰지 않고(`-n`), 스크립트는 없는 날만 채우고 어제·오늘만 다시 쓴다.
+```bash
+sudo cp -n ~hkit/innolive-log-archive-preinstall/*.log.zst /srv/innolive-logs/
+sudo chgrp adm /srv/innolive-logs/*.log.zst && sudo chmod 640 /srv/innolive-logs/*.log.zst
+```
 
 ### 확인·열람
 ```bash

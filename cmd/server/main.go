@@ -24,6 +24,7 @@ import (
 	"inno-live-server/internal/server"
 	"inno-live-server/internal/session"
 	"inno-live-server/internal/streaming"
+	"inno-live-server/internal/usage"
 )
 
 func main() {
@@ -79,6 +80,11 @@ func main() {
 			"error", err,
 		)
 		os.Exit(1)
+	}
+
+	// 실사용 기록은 방송에 필수가 아니므로 실패해도 기동을 막지 않는다.
+	if err := usage.CloseOrphans(startupContext, databaseConnection.DB); err != nil {
+		logger.Warn("close orphaned usage rows failed", "error", err)
 	}
 
 	startupCancel()
@@ -219,6 +225,17 @@ func main() {
 		)
 		os.Exit(1)
 	}
+	// 실사용 기록(#266). 이 defer는 뒤에 등록되는 세션 teardown(CloseAll)보다
+	// 늦게, DB 연결을 닫기보다 먼저 돌아 종료 사건까지 쓴다.
+	usageRecorder := usage.NewRecorder(databaseConnection.DB, logger)
+	sessionManager.SetUsageRecorder(usageRecorder)
+	defer func() {
+		drainContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := usageRecorder.Close(drainContext); err != nil {
+			logger.Warn("usage recorder did not drain before shutdown", "error", err)
+		}
+	}()
 	// NVENC 누수 감시: 자리를 반납했는데 카드에 세션이 남으면 회계로는 보이지
 	// 않는다. nvidia-smi 실측과 주기 대조해 그 방향의 불일치만 드러낸다(#226).
 	if cfg.EgressNVENCGPUs > 0 {

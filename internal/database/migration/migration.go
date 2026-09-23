@@ -7,6 +7,7 @@ import (
 
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/usage"
 
 	"gorm.io/gorm"
 )
@@ -23,7 +24,10 @@ func Run(
 
 	switch mode {
 	case config.DatabaseMigrationModeAuto:
-		return auth.AutoMigrate(ctx, db)
+		if err := auth.AutoMigrate(ctx, db); err != nil {
+			return err
+		}
+		return usage.AutoMigrate(ctx, db)
 
 	case config.DatabaseMigrationModeVersioned:
 		return runVersioned(databaseURL)

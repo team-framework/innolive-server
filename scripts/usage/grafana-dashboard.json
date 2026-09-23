@@ -1,0 +1,389 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_INNOLIVE_USAGE",
+      "label": "InnoLive PostgreSQL",
+      "description": "usage_* 테이블을 읽는 읽기 전용 데이터소스",
+      "type": "datasource",
+      "pluginId": "grafana-postgresql-datasource",
+      "pluginName": "PostgreSQL"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "datasource",
+      "id": "grafana-postgresql-datasource",
+      "name": "PostgreSQL",
+      "version": "1.0.0"
+    }
+  ],
+  "title": "InnoLive 실사용",
+  "uid": "innolive-usage",
+  "description": "스트리머 실사용 기록(#266). 정의는 scripts/usage/report.sql과 같다.",
+  "tags": [
+    "innolive",
+    "usage"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "min_minutes",
+        "label": "최소 방송 시간(분)",
+        "type": "custom",
+        "description": "이보다 짧은 방송 회차는 모든 패널에서 뺀다. 테스트성 짧은 송출을 걸러낼 때 올린다.",
+        "query": "0,1,5,10,30",
+        "current": {
+          "text": "0",
+          "value": "0"
+        },
+        "options": [
+          {
+            "text": "0",
+            "value": "0",
+            "selected": true
+          },
+          {
+            "text": "1",
+            "value": "1",
+            "selected": false
+          },
+          {
+            "text": "5",
+            "value": "5",
+            "selected": false
+          },
+          {
+            "text": "10",
+            "value": "10",
+            "selected": false
+          },
+          {
+            "text": "30",
+            "value": "30",
+            "selected": false
+          }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "요약 (선택 기간, 방송 시간은 일시정지 제외)",
+      "description": "방송 회차 = 송출이 있었던 세션(동시 송출은 1회차). 방송 시간은 라이브 전환부터, 일시정지 제외.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT COUNT(DISTINCT user_id)                                        AS \"방송한 계정\",\n       COUNT(*)                                                        AS \"방송 회차\",\n       ROUND((SUM(sec) / 3600)::numeric, 1)                           AS \"총 방송 시간(h)\",\n       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sec) / 60)::numeric, 1) AS \"방송 중앙값(분)\",\n       (SELECT COUNT(*) FROM (\n          SELECT user_id FROM r\n          WHERE user_id IS NOT NULL AND $__timeFilter(round_start)\n          GROUP BY user_id HAVING COUNT(DISTINCT round_start::date) >= 2) t) AS \"2일 이상 방송한 계정\"\nFROM r\nWHERE $__timeFilter(round_start)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "id": 1,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "주별 방송한 계정 (신규 / 재방문)",
+      "description": "신규 = 그 주가 첫 방송인 계정. 첫 방송 주는 기간과 무관하게 전체 기록에서 정한다.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n), weekly AS (\n  SELECT DISTINCT user_id, DATE_TRUNC('week', round_start) AS week\n  FROM r WHERE user_id IS NOT NULL\n), first_week AS (\n  SELECT user_id, MIN(week) AS first_week FROM weekly GROUP BY user_id\n)\nSELECT TO_CHAR(w.week, 'YYYY-MM-DD')               AS \"주\",\n       COUNT(*) FILTER (WHERE w.week = f.first_week) AS \"신규\",\n       COUNT(*) FILTER (WHERE w.week > f.first_week) AS \"재방문\"\nFROM weekly w JOIN first_week f USING (user_id)\nWHERE $__timeFilter(w.week)\nGROUP BY w.week\nORDER BY w.week"
+        }
+      ],
+      "options": {
+        "stacking": "normal",
+        "xField": "주",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "id": 2,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "일별 방송 시간 · 회차",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT DATE_TRUNC('day', round_start)        AS time,\n       ROUND((SUM(sec) / 3600)::numeric, 2) AS \"방송 시간(h)\",\n       COUNT(*)                              AS \"방송 회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY 1\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "barAlignment": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "방송 회차"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "id": 3,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "table",
+      "title": "계정별",
+      "description": "이메일은 users 테이블에서 가져온다. 탈퇴한 계정은 집계에서 빠진다(user_id NULL).",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n), gaps AS (\n  SELECT user_id, round_start,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n), sessions AS (\n  SELECT user_id, COUNT(*) AS n,\n         SUM(EXTRACT(EPOCH FROM ended_at - started_at)) / 3600 AS h\n  FROM usage_sessions\n  WHERE user_id IS NOT NULL AND $__timeFilter(started_at)\n  GROUP BY user_id\n)\nSELECT COALESCE(u.email, s.user_id::text)                                   AS \"계정\",\n       u.display_name                                                        AS \"이름\",\n       s.n                                                                   AS \"접속\",\n       ROUND(s.h::numeric, 1)                                                AS \"접속 시간(h)\",\n       COUNT(r.session_id)                                                   AS \"방송 회차\",\n       ROUND((COALESCE(SUM(r.sec), 0) / 3600)::numeric, 1)                   AS \"방송 시간(h, 일시정지 제외)\",\n       ROUND((COALESCE(SUM(r.paused), 0) / 60)::numeric, 1)                  AS \"일시정지(분)\",\n       ROUND((AVG(r.sec) / 60)::numeric, 1)                                  AS \"평균 방송(분)\",\n       (SELECT ROUND(AVG(g.gap_h)::numeric, 1) FROM gaps g\n         WHERE g.user_id = s.user_id AND $__timeFilter(g.round_start))       AS \"평균 방송 간격(h)\",\n       COUNT(DISTINCT r.round_start::date)                                   AS \"방송한 날\",\n       MIN(r.round_start)                                                    AS \"첫 방송\",\n       MAX(r.round_start)                                                    AS \"마지막 방송\"\nFROM sessions s\nLEFT JOIN users u ON u.id = s.user_id\nLEFT JOIN r ON r.user_id = s.user_id AND $__timeFilter(r.round_start)\nGROUP BY s.user_id, u.email, u.display_name, s.n, s.h\nORDER BY \"방송 회차\" DESC, \"접속\" DESC"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 10
+      },
+      "id": 4,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "table",
+      "title": "회차별 — 접속·방송·종료 시각, 방송 시간, 직전 방송 이후 간격",
+      "description": "간격이 수 분 이내면 네트워크 끊김 후 재접속일 가능성이 크다.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n), ordered AS (\n  SELECT r.*,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n)\nSELECT COALESCE(u.email, o.user_id::text)         AS \"계정\",\n       o.session_start                            AS \"접속\",\n       o.round_start                              AS \"방송 시작\",\n       o.round_end                                AS \"방송 종료\",\n       o.session_end                              AS \"접속 종료\",\n       o.sec                                      AS \"방송 시간(일시정지 제외)\",\n       o.paused                                   AS \"일시정지\",\n       o.platforms                                AS \"플랫폼\",\n       o.end_class                                AS \"종료 분류\",\n       o.end_detail                               AS \"종료 사유\",\n       ROUND(o.gap_h::numeric, 1)                 AS \"직전 방송 이후(h)\"\nFROM ordered o\nLEFT JOIN users u ON u.id = o.user_id\nWHERE $__timeFilter(o.round_start)\nORDER BY o.round_start DESC"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "방송 시간(일시정지 제외)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "일시정지"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 10
+      },
+      "id": 5,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "플랫폼 조합 (회차)",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT platforms AS \"플랫폼\", COUNT(*) AS \"회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY platforms\nORDER BY 2 DESC"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "pieType": "donut",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "id": 6,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    },
+    {
+      "type": "table",
+      "title": "방송 종료 분류 (정상 / 연결 끊김 / 시스템 오류)",
+      "description": "송출 사유가 session_closed면 세션이 끝난 이유로 판정한다. 연결 끊김은 사용자 네트워크인지 서버 쪽인지 가를 수 없어 따로 둔다.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_INNOLIVE_USAGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end, s.end_reason AS session_end_reason, b.end_reason,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms,\n         (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,\n         MIN(session_end_reason)  AS session_end_reason\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT all_rounds.*,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'\n         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'\n         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'\n         WHEN broadcast_end_reason = 'unclean_shutdown'\n           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'\n         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'\n         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'\n         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'\n         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'\n         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'\n         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'\n         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')\n       END AS end_detail,\n       CASE\n         WHEN broadcast_end_reason = 'user_requested'\n           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',\n                                     'user_logout', 'user_signed_out', 'user_withdrawal',\n                                     'guest_session_timeout')             THEN '정상 종료'\n         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')\n           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',\n                                     'guest_queue_transition_failed')     THEN '시스템 오류'\n         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',\n                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'\n         ELSE '확인 필요'\n       END AS end_class\n  FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT end_class AS \"분류\", end_detail AS \"사유\", COUNT(*) AS \"회차\",\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS \"비율(%)\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY end_class, end_detail\nORDER BY 1, 3 DESC"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "id": 7,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_INNOLIVE_USAGE}"
+      }
+    }
+  ]
+}

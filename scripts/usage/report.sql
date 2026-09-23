@@ -1,0 +1,196 @@
+-- 스트리머 실사용 집계(#266). psql -f 로 실행한다. 읽기 전용이다.
+--
+-- 정의
+--   접속 시간   : 세션(앱을 켠 구간) started_at ~ ended_at
+--   방송 시간   : 송출 COALESCE(live_at, started_at) ~ ended_at 에서 일시정지 시간을 뺀 값
+--                 (유튜브는 준비 단계에 송출이 먼저 붙으므로 라이브 전환부터 센다)
+--   방송 회차   : 송출이 하나 이상 있었던 세션. 동시 송출(유튜브+치지직)은 한 회차다.
+--   방송 간격   : 같은 계정의 직전 회차 종료 ~ 이번 회차 시작(시간)
+--
+-- 주의
+--   - ended_at이 NULL인 행(unclean_shutdown)은 시간 합계에서 빠진다.
+--   - ended_at_estimated=true는 백필에서 세션 종료 시각으로 채운 송출이다.
+--   - 간격이 수 분 이내면 재접속(네트워크 끊김 후 다시 켬)일 가능성이 크다.
+--   - 종료 분류: 정상 종료 / 연결 끊김(사용자 네트워크인지 우리 쪽인지 가를 수 없음) / 시스템 오류.
+--     송출 사유가 session_closed면 세션이 끝난 이유로 판정한다.
+--   - 팀·테스트 계정은 아직 제외하지 않는다.
+
+\pset footer off
+
+-- 공통 뷰 ---------------------------------------------------------------
+CREATE TEMP VIEW usage_on_air AS
+SELECT b.*,
+       s.user_id,
+       s.is_guest,
+       s.started_at AS session_started_at,
+       s.ended_at   AS session_ended_at,
+       s.end_reason AS session_end_reason,
+       GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0)
+           AS on_air_seconds
+FROM usage_broadcasts b
+JOIN usage_sessions s USING (session_id);
+
+CREATE TEMP VIEW usage_rounds_base AS
+SELECT session_id,
+       MIN(user_id::text)::uuid                        AS user_id,
+       BOOL_OR(is_guest)                                AS is_guest,
+       MIN(COALESCE(live_at, started_at))               AS round_start,
+       MAX(ended_at)                                    AS round_end,
+       SUM(on_air_seconds)                              AS on_air_seconds,
+       SUM(paused_seconds)                              AS paused_seconds,
+       MIN(session_started_at)                          AS session_started_at,
+       MIN(session_ended_at)                            AS session_ended_at,
+       COUNT(DISTINCT provider)                         AS providers,
+       STRING_AGG(DISTINCT provider, '+')               AS platforms,
+       -- 동시 송출이면 가장 늦게 끝난(끝나지 않았으면 그것) 송출의 사유
+       (ARRAY_AGG(end_reason ORDER BY ended_at DESC NULLS FIRST))[1] AS broadcast_end_reason,
+       MIN(session_end_reason)                          AS session_end_reason
+FROM usage_on_air
+GROUP BY session_id;
+
+-- 종료 사유. 송출 사유가 session_closed면 세션이 끝난 이유가 실제 사유다.
+CREATE TEMP VIEW usage_rounds AS
+SELECT r.*,
+       CASE
+         WHEN broadcast_end_reason = 'user_requested'                     THEN '사용자가 방송 종료'
+         WHEN broadcast_end_reason = 'rtmp_reconnect_exhausted'           THEN '송출 재연결 실패'
+         WHEN broadcast_end_reason = 'reconnect_input_timeout'            THEN '송출 입력 끊김'
+         WHEN broadcast_end_reason = 'unclean_shutdown'
+           OR session_end_reason  = 'unclean_shutdown'                    THEN '서버 비정상 종료'
+         WHEN session_end_reason  = 'peer_connection_closed'              THEN '앱/브라우저 종료'
+         WHEN session_end_reason IN ('delete_session', 'delete_guest_session') THEN '세션 종료 요청'
+         WHEN session_end_reason IN ('user_logout', 'user_signed_out')    THEN '로그아웃'
+         WHEN session_end_reason  = 'user_withdrawal'                     THEN '회원 탈퇴'
+         WHEN session_end_reason  = 'guest_session_timeout'               THEN '체험 시간 만료'
+         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',
+                                     'peer_connection_disconnected_timeout') THEN '네트워크 끊김'
+         WHEN session_end_reason  = 'application_shutdown'                THEN '서버 재시작(배포)'
+         ELSE COALESCE(session_end_reason, broadcast_end_reason, '(기록 없음)')
+       END AS end_detail,
+       CASE
+         WHEN broadcast_end_reason = 'user_requested'
+           OR session_end_reason IN ('peer_connection_closed', 'delete_session', 'delete_guest_session',
+                                     'user_logout', 'user_signed_out', 'user_withdrawal',
+                                     'guest_session_timeout')             THEN '정상 종료'
+         WHEN broadcast_end_reason IN ('rtmp_reconnect_exhausted', 'reconnect_input_timeout', 'unclean_shutdown')
+           OR session_end_reason IN ('application_shutdown', 'unclean_shutdown',
+                                     'guest_queue_transition_failed')     THEN '시스템 오류'
+         WHEN session_end_reason IN ('peer_connection_failed', 'peer_connection_recovery_exhausted',
+                                     'peer_connection_disconnected_timeout') THEN '연결 끊김'
+         ELSE '확인 필요'
+       END AS end_class
+FROM usage_rounds_base r;
+
+-- 1. 전체 요약 -----------------------------------------------------------
+\echo '== 1. 전체 요약'
+SELECT MIN(s.started_at)::date                                          AS 기간_시작,
+       MAX(s.started_at)::date                                          AS 기간_끝,
+       COUNT(*)                                                         AS 세션,
+       COUNT(*) FILTER (WHERE NOT s.is_guest)                           AS 회원_세션,
+       COUNT(DISTINCT s.user_id)                                        AS 접속_계정,
+       (SELECT COUNT(*) FROM usage_rounds)                              AS 방송_회차,
+       (SELECT COUNT(DISTINCT user_id) FROM usage_rounds)               AS 방송한_계정,
+       (SELECT ROUND((SUM(on_air_seconds) / 3600)::numeric, 1) FROM usage_rounds) AS 총_방송_시간h_정지제외,
+       (SELECT ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY on_air_seconds) / 60)::numeric, 1)
+          FROM usage_rounds WHERE round_end IS NOT NULL)                AS 방송_중앙값_분,
+       (SELECT COUNT(*) FROM usage_broadcasts WHERE ended_at_estimated) AS 추정_마감_송출
+FROM usage_sessions s;
+
+-- 2. 계정별 ---------------------------------------------------------------
+\echo '== 2. 계정별 (방송 회차 많은 순)'
+WITH gaps AS (
+    SELECT user_id,
+           EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600
+               AS gap_hours
+    FROM usage_rounds
+    WHERE user_id IS NOT NULL
+),
+sessions AS (
+    SELECT user_id,
+           COUNT(*)                                                  AS sessions,
+           SUM(EXTRACT(EPOCH FROM ended_at - started_at)) / 3600     AS connected_hours,
+           MIN(started_at)                                           AS first_seen,
+           MAX(started_at)                                           AS last_seen
+    FROM usage_sessions
+    WHERE user_id IS NOT NULL
+    GROUP BY user_id
+)
+SELECT s.user_id                                                   AS 계정,
+       u.email                                                     AS 이메일,
+       u.display_name                                              AS 이름,
+       s.sessions                                                  AS 접속,
+       ROUND(s.connected_hours::numeric, 1)                        AS 접속_시간h,
+       COUNT(r.session_id)                                         AS 방송_회차,
+       COUNT(r.session_id) FILTER (WHERE r.on_air_seconds >= 300)  AS 방송_5분이상,
+       ROUND((SUM(r.on_air_seconds) / 3600)::numeric, 1)           AS 방송_시간h_정지제외,
+       ROUND((SUM(r.paused_seconds) / 60)::numeric, 1)             AS 일시정지_분,
+       ROUND((AVG(r.on_air_seconds) / 60)::numeric, 1)             AS 평균_방송_분,
+       MIN(r.round_start)::date                                    AS 첫_방송,
+       MAX(r.round_start)::date                                    AS 마지막_방송,
+       (SELECT ROUND(AVG(gap_hours)::numeric, 1) FROM gaps g WHERE g.user_id = s.user_id)
+                                                                   AS 평균_간격h,
+       COUNT(DISTINCT DATE_TRUNC('week', r.round_start))           AS 방송한_주
+FROM sessions s
+LEFT JOIN users u ON u.id = s.user_id
+LEFT JOIN usage_rounds r ON r.user_id = s.user_id
+GROUP BY s.user_id, u.email, u.display_name, s.sessions, s.connected_hours
+ORDER BY 방송_회차 DESC, 접속 DESC;
+
+-- 3. 회차별 -----------------------------------------------------------------
+\echo '== 3. 회차별 (계정, 시작순) — 접속·방송·종료 시각, 일시정지 제외 방송 시간, 직전 방송 이후 간격'
+SELECT r.user_id                                                   AS 계정,
+       u.email                                                     AS 이메일,
+       r.session_started_at                                        AS 접속,
+       r.round_start                                               AS 방송_시작,
+       r.round_end                                                 AS 방송_종료,
+       r.session_ended_at                                          AS 접속_종료,
+       MAKE_INTERVAL(secs => ROUND(r.on_air_seconds))              AS 방송_시간_정지제외,
+       MAKE_INTERVAL(secs => ROUND(r.paused_seconds))              AS 일시정지,
+       r.platforms                                                 AS 플랫폼,
+       r.end_class                                                 AS 종료_분류,
+       r.end_detail                                                AS 종료_사유,
+       ROUND((EXTRACT(EPOCH FROM r.round_start
+             - LAG(r.round_end) OVER (PARTITION BY r.user_id ORDER BY r.round_start)) / 3600)::numeric, 1)
+                                                                   AS 직전_이후h
+FROM usage_rounds r
+LEFT JOIN users u ON u.id = r.user_id
+WHERE r.user_id IS NOT NULL
+ORDER BY r.user_id, r.round_start;
+
+-- 4. 주간 활성 스트리머 ---------------------------------------------------
+\echo '== 4. 주별 방송한 계정 (신규 / 재방문)'
+WITH weekly AS (
+    SELECT DISTINCT user_id, DATE_TRUNC('week', round_start)::date AS week
+    FROM usage_rounds
+    WHERE user_id IS NOT NULL
+),
+first_week AS (
+    SELECT user_id, MIN(week) AS first_week FROM weekly GROUP BY user_id
+)
+SELECT w.week                                          AS 주,
+       COUNT(*)                                        AS 방송한_계정,
+       COUNT(*) FILTER (WHERE w.week = f.first_week)   AS 신규,
+       COUNT(*) FILTER (WHERE w.week > f.first_week)   AS 재방문
+FROM weekly w
+JOIN first_week f USING (user_id)
+GROUP BY w.week
+ORDER BY w.week;
+
+-- 5. 플랫폼 · 동시 송출 ---------------------------------------------------
+\echo '== 5. 플랫폼 조합별 회차'
+SELECT platforms                                       AS 플랫폼,
+       COUNT(*)                                        AS 회차,
+       ROUND((SUM(on_air_seconds) / 3600)::numeric, 1) AS 방송_시간h
+FROM usage_rounds
+GROUP BY platforms
+ORDER BY 회차 DESC;
+
+-- 6. 종료 사유 -------------------------------------------------------------
+\echo '== 6. 방송 종료 분류 (정상 / 연결 끊김 / 시스템 오류)'
+SELECT end_class                                        AS 분류,
+       end_detail                                       AS 사유,
+       COUNT(*)                                         AS 회차,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS 비율
+FROM usage_rounds
+GROUP BY end_class, end_detail
+ORDER BY end_class, 회차 DESC;

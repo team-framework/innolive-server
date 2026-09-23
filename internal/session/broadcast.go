@@ -327,6 +327,9 @@ func (m *Manager) CompleteGoLive(id string, providers ...string) (aborted bool, 
 	}
 	t.phase = BroadcastPhaseLive
 	s.UpdatedAt = time.Now().UTC()
+	if t.usageID != "" {
+		m.recordUsage(UsageEvent{Kind: UsageBroadcastLive, BroadcastID: t.usageID})
+	}
 	m.logger.Info("platform broadcast is live", "session_id", s.ID)
 	return false, broadcast, nil
 }

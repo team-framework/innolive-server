@@ -76,7 +76,7 @@
   "panels": [
     {
       "type": "stat",
-      "title": "요약 (선택 기간)",
+      "title": "요약 (선택 기간, 방송 시간은 일시정지 제외)",
       "description": "방송 회차 = 송출이 있었던 세션(동시 송출은 1회차). 방송 시간은 라이브 전환부터, 일시정지 제외.",
       "targets": [
         {
@@ -88,7 +88,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT COUNT(DISTINCT user_id)                                        AS \"방송한 계정\",\n       COUNT(*)                                                        AS \"방송 회차\",\n       ROUND((SUM(sec) / 3600)::numeric, 1)                           AS \"총 방송 시간(h)\",\n       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sec) / 60)::numeric, 1) AS \"방송 중앙값(분)\",\n       (SELECT COUNT(*) FROM (\n          SELECT user_id FROM r\n          WHERE user_id IS NOT NULL AND $__timeFilter(round_start)\n          GROUP BY user_id HAVING COUNT(DISTINCT round_start::date) >= 2) t) AS \"2일 이상 방송한 계정\"\nFROM r\nWHERE $__timeFilter(round_start)"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT COUNT(DISTINCT user_id)                                        AS \"방송한 계정\",\n       COUNT(*)                                                        AS \"방송 회차\",\n       ROUND((SUM(sec) / 3600)::numeric, 1)                           AS \"총 방송 시간(h)\",\n       ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sec) / 60)::numeric, 1) AS \"방송 중앙값(분)\",\n       (SELECT COUNT(*) FROM (\n          SELECT user_id FROM r\n          WHERE user_id IS NOT NULL AND $__timeFilter(round_start)\n          GROUP BY user_id HAVING COUNT(DISTINCT round_start::date) >= 2) t) AS \"2일 이상 방송한 계정\"\nFROM r\nWHERE $__timeFilter(round_start)"
         }
       ],
       "options": {
@@ -130,7 +130,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), weekly AS (\n  SELECT DISTINCT user_id, DATE_TRUNC('week', round_start) AS week\n  FROM r WHERE user_id IS NOT NULL\n), first_week AS (\n  SELECT user_id, MIN(week) AS first_week FROM weekly GROUP BY user_id\n)\nSELECT TO_CHAR(w.week, 'YYYY-MM-DD')               AS \"주\",\n       COUNT(*) FILTER (WHERE w.week = f.first_week) AS \"신규\",\n       COUNT(*) FILTER (WHERE w.week > f.first_week) AS \"재방문\"\nFROM weekly w JOIN first_week f USING (user_id)\nWHERE $__timeFilter(w.week)\nGROUP BY w.week\nORDER BY w.week"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), weekly AS (\n  SELECT DISTINCT user_id, DATE_TRUNC('week', round_start) AS week\n  FROM r WHERE user_id IS NOT NULL\n), first_week AS (\n  SELECT user_id, MIN(week) AS first_week FROM weekly GROUP BY user_id\n)\nSELECT TO_CHAR(w.week, 'YYYY-MM-DD')               AS \"주\",\n       COUNT(*) FILTER (WHERE w.week = f.first_week) AS \"신규\",\n       COUNT(*) FILTER (WHERE w.week > f.first_week) AS \"재방문\"\nFROM weekly w JOIN first_week f USING (user_id)\nWHERE $__timeFilter(w.week)\nGROUP BY w.week\nORDER BY w.week"
         }
       ],
       "options": {
@@ -168,7 +168,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT DATE_TRUNC('day', round_start)        AS time,\n       ROUND((SUM(sec) / 3600)::numeric, 2) AS \"방송 시간(h)\",\n       COUNT(*)                              AS \"방송 회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY 1\nORDER BY 1"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT DATE_TRUNC('day', round_start)        AS time,\n       ROUND((SUM(sec) / 3600)::numeric, 2) AS \"방송 시간(h)\",\n       COUNT(*)                              AS \"방송 회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY 1\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -224,7 +224,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), gaps AS (\n  SELECT user_id, round_start,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n), sessions AS (\n  SELECT user_id, COUNT(*) AS n,\n         SUM(EXTRACT(EPOCH FROM ended_at - started_at)) / 3600 AS h\n  FROM usage_sessions\n  WHERE user_id IS NOT NULL AND $__timeFilter(started_at)\n  GROUP BY user_id\n)\nSELECT COALESCE(u.email, s.user_id::text)                                   AS \"계정\",\n       u.display_name                                                        AS \"이름\",\n       s.n                                                                   AS \"접속\",\n       ROUND(s.h::numeric, 1)                                                AS \"접속 시간(h)\",\n       COUNT(r.session_id)                                                   AS \"방송 회차\",\n       ROUND((COALESCE(SUM(r.sec), 0) / 3600)::numeric, 1)                   AS \"방송 시간(h)\",\n       ROUND((AVG(r.sec) / 60)::numeric, 1)                                  AS \"평균 방송(분)\",\n       (SELECT ROUND(AVG(g.gap_h)::numeric, 1) FROM gaps g\n         WHERE g.user_id = s.user_id AND $__timeFilter(g.round_start))       AS \"평균 방송 간격(h)\",\n       COUNT(DISTINCT r.round_start::date)                                   AS \"방송한 날\",\n       MIN(r.round_start)                                                    AS \"첫 방송\",\n       MAX(r.round_start)                                                    AS \"마지막 방송\"\nFROM sessions s\nLEFT JOIN users u ON u.id = s.user_id\nLEFT JOIN r ON r.user_id = s.user_id AND $__timeFilter(r.round_start)\nGROUP BY s.user_id, u.email, u.display_name, s.n, s.h\nORDER BY \"방송 회차\" DESC, \"접속\" DESC"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), gaps AS (\n  SELECT user_id, round_start,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n), sessions AS (\n  SELECT user_id, COUNT(*) AS n,\n         SUM(EXTRACT(EPOCH FROM ended_at - started_at)) / 3600 AS h\n  FROM usage_sessions\n  WHERE user_id IS NOT NULL AND $__timeFilter(started_at)\n  GROUP BY user_id\n)\nSELECT COALESCE(u.email, s.user_id::text)                                   AS \"계정\",\n       u.display_name                                                        AS \"이름\",\n       s.n                                                                   AS \"접속\",\n       ROUND(s.h::numeric, 1)                                                AS \"접속 시간(h)\",\n       COUNT(r.session_id)                                                   AS \"방송 회차\",\n       ROUND((COALESCE(SUM(r.sec), 0) / 3600)::numeric, 1)                   AS \"방송 시간(h, 일시정지 제외)\",\n       ROUND((COALESCE(SUM(r.paused), 0) / 60)::numeric, 1)                  AS \"일시정지(분)\",\n       ROUND((AVG(r.sec) / 60)::numeric, 1)                                  AS \"평균 방송(분)\",\n       (SELECT ROUND(AVG(g.gap_h)::numeric, 1) FROM gaps g\n         WHERE g.user_id = s.user_id AND $__timeFilter(g.round_start))       AS \"평균 방송 간격(h)\",\n       COUNT(DISTINCT r.round_start::date)                                   AS \"방송한 날\",\n       MIN(r.round_start)                                                    AS \"첫 방송\",\n       MAX(r.round_start)                                                    AS \"마지막 방송\"\nFROM sessions s\nLEFT JOIN users u ON u.id = s.user_id\nLEFT JOIN r ON r.user_id = s.user_id AND $__timeFilter(r.round_start)\nGROUP BY s.user_id, u.email, u.display_name, s.n, s.h\nORDER BY \"방송 회차\" DESC, \"접속\" DESC"
         }
       ],
       "options": {
@@ -245,7 +245,7 @@
     },
     {
       "type": "table",
-      "title": "회차별 — 직전 방송 이후 몇 시간 만인가",
+      "title": "회차별 — 접속·방송·종료 시각, 방송 시간, 직전 방송 이후 간격",
       "description": "간격이 수 분 이내면 네트워크 끊김 후 재접속일 가능성이 크다.",
       "targets": [
         {
@@ -257,12 +257,41 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), ordered AS (\n  SELECT r.*,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n)\nSELECT o.round_start                              AS \"시작\",\n       COALESCE(u.email, o.user_id::text)         AS \"계정\",\n       ROUND((o.sec / 60)::numeric, 1)            AS \"방송(분)\",\n       o.platforms                                AS \"플랫폼\",\n       ROUND(o.gap_h::numeric, 1)                 AS \"직전 방송 이후(h)\"\nFROM ordered o\nLEFT JOIN users u ON u.id = o.user_id\nWHERE $__timeFilter(o.round_start)\nORDER BY o.round_start DESC"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n), ordered AS (\n  SELECT r.*,\n         EXTRACT(EPOCH FROM round_start - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600 AS gap_h\n  FROM r WHERE user_id IS NOT NULL\n)\nSELECT COALESCE(u.email, o.user_id::text)         AS \"계정\",\n       o.session_start                            AS \"접속\",\n       o.round_start                              AS \"방송 시작\",\n       o.round_end                                AS \"방송 종료\",\n       o.session_end                              AS \"접속 종료\",\n       o.sec                                      AS \"방송 시간(일시정지 제외)\",\n       o.paused                                   AS \"일시정지\",\n       o.platforms                                AS \"플랫폼\",\n       ROUND(o.gap_h::numeric, 1)                 AS \"직전 방송 이후(h)\"\nFROM ordered o\nLEFT JOIN users u ON u.id = o.user_id\nWHERE $__timeFilter(o.round_start)\nORDER BY o.round_start DESC"
         }
       ],
       "options": {
         "showHeader": true,
         "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "방송 시간(일시정지 제외)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "일시정지"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "x": 0,
@@ -289,7 +318,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT platforms AS \"플랫폼\", COUNT(*) AS \"회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY platforms\nORDER BY 2 DESC"
+          "rawSql": "WITH b AS (\n  SELECT b.session_id, s.user_id, b.provider, b.paused_seconds,\n         s.started_at AS session_start, s.ended_at AS session_end,\n         COALESCE(b.live_at, b.started_at) AS start_at, b.ended_at,\n         GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0) AS sec\n  FROM usage_broadcasts b\n  JOIN usage_sessions s USING (session_id)\n), all_rounds AS (\n  SELECT session_id,\n         MIN(user_id::text)::uuid AS user_id,\n         MIN(start_at)            AS round_start,\n         MAX(ended_at)            AS round_end,\n         COALESCE(SUM(sec), 0)    AS sec,\n         SUM(paused_seconds)      AS paused,\n         MIN(session_start)       AS session_start,\n         MIN(session_end)         AS session_end,\n         STRING_AGG(DISTINCT provider, '+' ORDER BY provider) AS platforms\n  FROM b\n  GROUP BY session_id\n), r AS (\n  SELECT * FROM all_rounds WHERE sec >= $min_minutes * 60\n)\nSELECT platforms AS \"플랫폼\", COUNT(*) AS \"회차\"\nFROM r\nWHERE $__timeFilter(round_start)\nGROUP BY platforms\nORDER BY 2 DESC"
         }
       ],
       "options": {

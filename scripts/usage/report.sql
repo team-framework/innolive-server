@@ -2,7 +2,7 @@
 --
 -- 정의
 --   접속 시간   : 세션(앱을 켠 구간) started_at ~ ended_at
---   방송 시간   : 송출 COALESCE(live_at, started_at) ~ ended_at - paused_seconds
+--   방송 시간   : 송출 COALESCE(live_at, started_at) ~ ended_at 에서 일시정지 시간을 뺀 값
 --                 (유튜브는 준비 단계에 송출이 먼저 붙으므로 라이브 전환부터 센다)
 --   방송 회차   : 송출이 하나 이상 있었던 세션. 동시 송출(유튜브+치지직)은 한 회차다.
 --   방송 간격   : 같은 계정의 직전 회차 종료 ~ 이번 회차 시작(시간)
@@ -20,6 +20,8 @@ CREATE TEMP VIEW usage_on_air AS
 SELECT b.*,
        s.user_id,
        s.is_guest,
+       s.started_at AS session_started_at,
+       s.ended_at   AS session_ended_at,
        GREATEST(EXTRACT(EPOCH FROM b.ended_at - COALESCE(b.live_at, b.started_at)) - b.paused_seconds, 0)
            AS on_air_seconds
 FROM usage_broadcasts b
@@ -32,6 +34,9 @@ SELECT session_id,
        MIN(COALESCE(live_at, started_at))               AS round_start,
        MAX(ended_at)                                    AS round_end,
        SUM(on_air_seconds)                              AS on_air_seconds,
+       SUM(paused_seconds)                              AS paused_seconds,
+       MIN(session_started_at)                          AS session_started_at,
+       MIN(session_ended_at)                            AS session_ended_at,
        COUNT(DISTINCT provider)                         AS providers,
        STRING_AGG(DISTINCT provider, '+')               AS platforms
 FROM usage_on_air
@@ -46,7 +51,7 @@ SELECT MIN(s.started_at)::date                                          AS 기�
        COUNT(DISTINCT s.user_id)                                        AS 접속_계정,
        (SELECT COUNT(*) FROM usage_rounds)                              AS 방송_회차,
        (SELECT COUNT(DISTINCT user_id) FROM usage_rounds)               AS 방송한_계정,
-       (SELECT ROUND((SUM(on_air_seconds) / 3600)::numeric, 1) FROM usage_rounds) AS 총_방송_시간h,
+       (SELECT ROUND((SUM(on_air_seconds) / 3600)::numeric, 1) FROM usage_rounds) AS 총_방송_시간h_정지제외,
        (SELECT ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY on_air_seconds) / 60)::numeric, 1)
           FROM usage_rounds WHERE round_end IS NOT NULL)                AS 방송_중앙값_분,
        (SELECT COUNT(*) FROM usage_broadcasts WHERE ended_at_estimated) AS 추정_마감_송출
@@ -78,7 +83,8 @@ SELECT s.user_id                                                   AS 계정,
        ROUND(s.connected_hours::numeric, 1)                        AS 접속_시간h,
        COUNT(r.session_id)                                         AS 방송_회차,
        COUNT(r.session_id) FILTER (WHERE r.on_air_seconds >= 300)  AS 방송_5분이상,
-       ROUND((SUM(r.on_air_seconds) / 3600)::numeric, 1)           AS 방송_시간h,
+       ROUND((SUM(r.on_air_seconds) / 3600)::numeric, 1)           AS 방송_시간h_정지제외,
+       ROUND((SUM(r.paused_seconds) / 60)::numeric, 1)             AS 일시정지_분,
        ROUND((AVG(r.on_air_seconds) / 60)::numeric, 1)             AS 평균_방송_분,
        MIN(r.round_start)::date                                    AS 첫_방송,
        MAX(r.round_start)::date                                    AS 마지막_방송,
@@ -91,18 +97,24 @@ LEFT JOIN usage_rounds r ON r.user_id = s.user_id
 GROUP BY s.user_id, u.email, u.display_name, s.sessions, s.connected_hours
 ORDER BY 방송_회차 DESC, 접속 DESC;
 
--- 3. 회차별 방송 간격 -----------------------------------------------------
-\echo '== 3. 회차별 (계정, 시작순) — 직전 방송 이후 몇 시간 만인가'
-SELECT user_id                                                     AS 계정,
-       round_start                                                 AS 시작,
-       ROUND((on_air_seconds / 60)::numeric, 1)                    AS 방송_분,
-       platforms                                                   AS 플랫폼,
-       ROUND((EXTRACT(EPOCH FROM round_start
-             - LAG(round_end) OVER (PARTITION BY user_id ORDER BY round_start)) / 3600)::numeric, 1)
+-- 3. 회차별 -----------------------------------------------------------------
+\echo '== 3. 회차별 (계정, 시작순) — 접속·방송·종료 시각, 일시정지 제외 방송 시간, 직전 방송 이후 간격'
+SELECT r.user_id                                                   AS 계정,
+       u.email                                                     AS 이메일,
+       r.session_started_at                                        AS 접속,
+       r.round_start                                               AS 방송_시작,
+       r.round_end                                                 AS 방송_종료,
+       r.session_ended_at                                          AS 접속_종료,
+       MAKE_INTERVAL(secs => ROUND(r.on_air_seconds))              AS 방송_시간_정지제외,
+       MAKE_INTERVAL(secs => ROUND(r.paused_seconds))              AS 일시정지,
+       r.platforms                                                 AS 플랫폼,
+       ROUND((EXTRACT(EPOCH FROM r.round_start
+             - LAG(r.round_end) OVER (PARTITION BY r.user_id ORDER BY r.round_start)) / 3600)::numeric, 1)
                                                                    AS 직전_이후h
-FROM usage_rounds
-WHERE user_id IS NOT NULL
-ORDER BY user_id, round_start;
+FROM usage_rounds r
+LEFT JOIN users u ON u.id = r.user_id
+WHERE r.user_id IS NOT NULL
+ORDER BY r.user_id, r.round_start;
 
 -- 4. 주간 활성 스트리머 ---------------------------------------------------
 \echo '== 4. 주별 방송한 계정 (신규 / 재방문)'

@@ -82,26 +82,38 @@ sudo partprobe /dev/sda
 sudo mkfs.ext4 -L innolive-logs /dev/sda2
 sudo mkdir -p /srv/innolive-logs
 echo 'LABEL=innolive-logs /srv/innolive-logs ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload   # fstab 변경을 systemd에 알린다(RequiresMountsFor가 이 마운트를 본다)
 sudo mount /srv/innolive-logs
 sudo chown root:adm /srv/innolive-logs && sudo chmod 750 /srv/innolive-logs
 ```
 `nofail`이라 디스크가 고장 나도 부팅은 멈추지 않는다(그동안 보관만 실패한다).
 
 ### 설치 (PR 머지 후, root)
+1) 로컬에서 파일 네 개를 서버로 올린다.
 ```bash
+ssh -p <SSH 포트> <계정>@<서버> 'mkdir -p ~/log-archive-install'
+scp -P <SSH 포트> deploy/log-archive.sh deploy/apply-release.sh \
+  deploy/innolive-log-archive.service deploy/innolive-log-archive.timer <계정>@<서버>:~/log-archive-install/
+```
+2) 서버에서 설치한다.
+```bash
+cd ~/log-archive-install
 sudo install -o root -g root -m 755 log-archive.sh /opt/innolive/deploy/log-archive.sh
 sudo install -o root -g root -m 755 -b apply-release.sh /opt/innolive/deploy/apply-release.sh
 sudo install -o root -g root -m 644 innolive-log-archive.service innolive-log-archive.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now innolive-log-archive.timer
-sudo systemctl start innolive-log-archive.service   # 첫 실행: 과거 로그 채우기
 ```
-설치 전에 미리 떠 둔 보관본(`~hkit/innolive-log-archive-preinstall/`, 2026-09-23 생성)이 있으면
-**첫 실행 전에** 먼저 옮긴다. journald가 그사이 오래된 로그를 지웠어도 그 날짜가 보존된다.
-기존 파일은 덮어쓰지 않고(`-n`), 스크립트는 없는 날만 채우고 어제·오늘만 다시 쓴다.
+3) 설치 전에 미리 떠 둔 보관본(`~hkit/innolive-log-archive-preinstall/`, 2026-09-23 생성)이 있으면
+**첫 실행 전에** 옮긴다. journald가 그사이 오래된 로그를 지웠어도 그 날짜가 보존된다.
+기존 파일은 덮어쓰지 않고(`-n`), 이후 스크립트는 없는 날만 채우고 어제·오늘만 다시 쓴다.
 ```bash
 sudo cp -n ~hkit/innolive-log-archive-preinstall/*.log.zst /srv/innolive-logs/
 sudo chgrp adm /srv/innolive-logs/*.log.zst && sudo chmod 640 /srv/innolive-logs/*.log.zst
+```
+4) 첫 실행 후 매일 타이머를 켠다.
+```bash
+sudo systemctl start innolive-log-archive.service   # 첫 실행: 과거 로그 채우기
+sudo systemctl enable --now innolive-log-archive.timer
 ```
 
 ### 확인·열람

@@ -16,6 +16,7 @@ import (
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/plan"
 
 	"github.com/google/uuid"
 	"github.com/pion/logging"
@@ -165,6 +166,9 @@ type Session struct {
 	// 바뀌지 않으므로 mu 없이 읽는다. 값 집합은 서버 계층이 검증한다 —
 	// internal/session은 internal/auth에 의존하지 않는다.
 	Provider string
+	// Plan은 생성 시점의 소유자 요금제다(#270). 이후 바뀌지 않으므로 mu 없이
+	// 읽는다. 게스트 세션과 플랜 조회가 조립되지 않은 배포(벤치·로컬)는 빈 값이다.
+	Plan plan.Plan
 	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
 	// 공개 세션 응답에는 절대 포함하지 않는다.
 	GuestID    string
@@ -292,6 +296,7 @@ type Manager struct {
 	broadcastCleanupWithContext func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error
 	sessionCleanup              func(*Session)
 	userOperationGate           UserOperationGate
+	planResolver                func(context.Context, uuid.UUID) (plan.Plan, error)
 	// usage는 실사용 기록(#266)이다. nil이면 기록하지 않는다.
 	usage UsageRecorder
 	// A broadcast is removed from a session before its provider call. Keep a
@@ -323,6 +328,15 @@ func (m *Manager) SetSessionCleanup(cleanup func(*Session)) { m.sessionCleanup =
 
 func (m *Manager) SetUserOperationGate(gate UserOperationGate) {
 	m.userOperationGate = gate
+}
+
+// planResolveTimeout은 세션 생성 중 플랜 조회(DB 한 행)의 상한이다.
+const planResolveTimeout = 5 * time.Second
+
+// SetPlanResolver는 회원 세션 생성 시 소유자 플랜을 읽는 함수를 등록한다(#270).
+// 서버 조립 직후 한 번만 호출한다.
+func (m *Manager) SetPlanResolver(resolver func(context.Context, uuid.UUID) (plan.Plan, error)) {
+	m.planResolver = resolver
 }
 
 // cleanupPlatformBroadcast는 세션에 남은 플랫폼 방송을 치운다. 라이브였던
@@ -575,6 +589,19 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string,
 			m.mu.Unlock()
 		}()
 	}
+	// 플랜은 PeerConnection보다 먼저 읽는다 — 조회가 실패해도 정리할 자원이
+	// 없다. 조회 실패를 기본 플랜으로 덮지 않는다: 유료 사용자가 소리 없이
+	// 무료 제한을 받게 된다.
+	var ownerPlan plan.Plan
+	if userID != uuid.Nil && m.planResolver != nil {
+		planCtx, cancelPlan := context.WithTimeout(context.Background(), planResolveTimeout)
+		resolved, err := m.planResolver(planCtx, userID)
+		cancelPlan()
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve user plan: %w", err)
+		}
+		ownerPlan = resolved
+	}
 	ownerToken, ownerHash, err := newOwnerToken()
 	if err != nil {
 		return nil, "", fmt.Errorf("generate owner token: %w", err)
@@ -600,6 +627,7 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string,
 		ID:                   id,
 		UserID:               userID,
 		Provider:             provider,
+		Plan:                 ownerPlan,
 		GuestID:              guestID,
 		AIClientID:           aiClientID,
 		CreatedAt:            now,

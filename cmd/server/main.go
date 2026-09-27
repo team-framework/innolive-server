@@ -530,6 +530,8 @@ func main() {
 	// before serving requests so a session creation, YouTube callback, or face
 	// upload cannot race the final account transaction.
 	application.SetUserOperationGate(withdrawal)
+	// 세션 생성이 소유자 플랜을 싣고, 플랜 조회·관리자 지정 라우트가 붙는다(#270).
+	application.SetPlanStore(auth.NewPlanStore(databaseConnection.DB))
 	if youtubeConnect != nil {
 		youtubeConnect.SetUserOperationGate(withdrawal)
 	}

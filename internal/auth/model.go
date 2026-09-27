@@ -3,6 +3,8 @@ package auth
 import (
 	"time"
 
+	"inno-live-server/internal/plan"
+
 	"github.com/google/uuid"
 )
 
@@ -30,6 +32,9 @@ type User struct {
 	ProfileImageURL *string `gorm:"type:text"`
 
 	Status UserStatus `gorm:"type:varchar(20);not null;default:'active';index;check:chk_users_status,status IN ('active','disabled','deleted')"`
+
+	// Plan은 요금제다(#270). 기존 행은 AutoMigrate가 기본값 spark로 채운다.
+	Plan plan.Plan `gorm:"type:varchar(20);not null;default:'spark';check:chk_users_plan,plan IN ('spark','glow','beam','plasma')"`
 
 	CreatedAt time.Time `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`

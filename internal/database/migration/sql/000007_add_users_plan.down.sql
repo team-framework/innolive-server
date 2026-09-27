@@ -1,0 +1,7 @@
+BEGIN;
+
+ALTER TABLE users
+    DROP CONSTRAINT IF EXISTS chk_users_plan,
+    DROP COLUMN IF EXISTS plan;
+
+COMMIT;

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type DatabaseMigrationMode string
@@ -122,6 +124,9 @@ type Config struct {
 	DatabaseConnMaxLifetime    time.Duration
 	DatabaseConnMaxIdleTime    time.Duration
 	DatabaseMigrationMode      DatabaseMigrationMode
+	// AdminUserIDs는 사용자 플랜을 지정할 수 있는 사용자 UUID 목록이다(#270).
+	// 비어 있으면 관리자 API는 누구에게도 열리지 않는다.
+	AdminUserIDs []string
 }
 
 func Load() (Config, error) {
@@ -166,6 +171,7 @@ func Load() (Config, error) {
 		MaxEgressSlots:             envInt("MAX_EGRESS_SLOTS", 0),
 		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
+		AdminUserIDs:               splitList(env("ADMIN_USER_IDS", "")),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
 		GuestQueueRedisAddr:        strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
 		GuestQueueRedisPassword:    os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
@@ -253,6 +259,11 @@ func (c Config) Validate() error {
 	}
 	if c.MaxEgressSlots < 0 {
 		return errors.New("MAX_EGRESS_SLOTS must not be negative")
+	}
+	for _, id := range c.AdminUserIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			return fmt.Errorf("ADMIN_USER_IDS must be comma-separated user UUIDs: %q", id)
+		}
 	}
 	switch c.AIFailurePolicy {
 	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream

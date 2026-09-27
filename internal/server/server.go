@@ -50,6 +50,9 @@ type Server struct {
 	origins           origin.Config
 	streaming         map[auth.StreamingProvider]streaming.Provider
 	authenticateUser  func(context.Context, string) (uuid.UUID, error)
+	requireUser       func(http.Handler) http.Handler
+	plans             PlanStore
+	admins            map[uuid.UUID]struct{}
 	guestQueue        *GuestQueue
 	guestReference    *guestReferenceGate
 	guestCleanup      sync.WaitGroup
@@ -88,6 +91,7 @@ func New(
 		streaming:               streamingProviders,
 		guestReference:          newGuestReferenceGate(),
 		signalingTrustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies),
+		requireUser:             requireUser,
 	}
 	if len(userAuthenticators) > 0 {
 		s.authenticateUser = userAuthenticators[0]

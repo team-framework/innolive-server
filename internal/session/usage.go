@@ -29,6 +29,8 @@ type UsageEvent struct {
 	AIProcessing string
 	Provider     string
 	Reason       string
+	// Resolution은 세션 시작 사건에만 실린다(#271).
+	Resolution string
 }
 
 // UsageRecorder는 사건을 저장소로 넘긴다. 세션 잠금을 쥔 경로에서도 부르므로

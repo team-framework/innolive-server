@@ -175,6 +175,9 @@ func (r *Recorder) apply(ctx context.Context, event session.UsageEvent, pausedSe
 		if event.AIProcessing != "" {
 			row.AIProcessing = &event.AIProcessing
 		}
+		if event.Resolution != "" {
+			row.Resolution = &event.Resolution
+		}
 		result = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
 
 	case session.UsageSessionEnded:

@@ -36,6 +36,8 @@ type Session struct {
 	EndedAt      *time.Time
 	EndReason    *string `gorm:"type:varchar(64)"`
 	Source       string  `gorm:"type:varchar(10);not null;default:live;check:chk_usage_sessions_source,source IN ('live','backfill')"`
+	// Resolution은 송출 해상도(720p·fhd)다(#271). 도입 전 행과 백필은 NULL이다.
+	Resolution *string `gorm:"type:varchar(10)"`
 	// 관계는 이쪽(has-many)에 둔다. Broadcast 쪽에 belongs-to로 두면 양쪽 모두
 	// session_id 컬럼을 가져 GORM이 방향을 거꾸로 추정한다.
 	Broadcasts []Broadcast `gorm:"foreignKey:SessionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`

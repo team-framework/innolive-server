@@ -17,6 +17,8 @@ const (
 	UsageBroadcastPaused  UsageEventKind = "broadcast_paused"
 	UsageBroadcastResumed UsageEventKind = "broadcast_resumed"
 	UsageBroadcastEnded   UsageEventKind = "broadcast_ended"
+	// UsageResolutionChanged는 세션 도중 송출 해상도가 바뀐 사건이다(#283).
+	UsageResolutionChanged UsageEventKind = "resolution_changed"
 )
 
 // UsageEvent는 사건 하나다. 종류마다 쓰는 필드만 채운다.
@@ -29,7 +31,7 @@ type UsageEvent struct {
 	AIProcessing string
 	Provider     string
 	Reason       string
-	// Resolution은 세션 시작 사건에만 실린다(#271).
+	// Resolution은 세션 시작(#271)·해상도 변경(#283) 사건에만 실린다.
 	Resolution string
 }
 

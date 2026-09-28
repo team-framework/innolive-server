@@ -40,7 +40,8 @@ type Session struct {
 	Resolution *string `gorm:"type:varchar(10)"`
 	// 관계는 이쪽(has-many)에 둔다. Broadcast 쪽에 belongs-to로 두면 양쪽 모두
 	// session_id 컬럼을 가져 GORM이 방향을 거꾸로 추정한다.
-	Broadcasts []Broadcast `gorm:"foreignKey:SessionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Broadcasts        []Broadcast        `gorm:"foreignKey:SessionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	ResolutionChanges []ResolutionChange `gorm:"foreignKey:SessionID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
 
 func (Session) TableName() string { return "usage_sessions" }
@@ -77,13 +78,24 @@ type Pause struct {
 
 func (Pause) TableName() string { return "usage_pauses" }
 
+// ResolutionChange는 세션 도중 송출 해상도가 바뀐 시점이다(#283). 세션 행의
+// Resolution은 시작 해상도이고, 그 뒤 구간은 이 행들이 정한다.
+type ResolutionChange struct {
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey"`
+	SessionID  uuid.UUID `gorm:"type:uuid;not null;index"`
+	ChangedAt  time.Time `gorm:"not null"`
+	Resolution string    `gorm:"type:varchar(10);not null"`
+}
+
+func (ResolutionChange) TableName() string { return "usage_resolution_changes" }
+
 // AutoMigrate는 DATABASE_MIGRATION_MODE=auto용이다. users 테이블을 참조하므로
 // auth.AutoMigrate 뒤에 부른다.
 func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 	if db == nil {
 		return errors.New("GORM database is nil")
 	}
-	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}, &Pause{}); err != nil {
+	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}, &Pause{}, &ResolutionChange{}); err != nil {
 		return fmt.Errorf("auto migrate usage schema: %w", err)
 	}
 	return nil

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"inno-live-server/internal/session"
+
 	"github.com/google/uuid"
 )
 
@@ -59,9 +61,47 @@ func TestChargeSession(t *testing.T) {
 			[]TargetTimeline{{LiveAt: at(0), EndedAt: end(60), LegacyPausedSeconds: 600}}, 50 * time.Minute, 50 * time.Minute},
 	}
 	for _, test := range cases {
-		onAir, charged := ChargeSession(test.fhd, test.targets, from, to, now)
+		onAir, charged := ChargeSession(test.fhd, nil, test.targets, from, to, now)
 		if onAir != test.onAir || charged != test.charged {
 			t.Fatalf("%s: onAir=%v charged=%v, want %v / %v", test.name, onAir, charged, test.onAir, test.charged)
+		}
+	}
+}
+
+// 해상도 변경(#283): 바뀐 시점 앞뒤 구간이 각자 배수로 차감된다.
+func TestChargeSessionHonorsResolutionSwitches(t *testing.T) {
+	base := time.Date(2026, 9, 10, 12, 0, 0, 0, LedgerLocation)
+	at := func(minutes int) time.Time { return base.Add(time.Duration(minutes) * time.Minute) }
+	end := func(minutes int) *time.Time { value := at(minutes); return &value }
+	from, to := MonthRange(base)
+	now := at(600)
+
+	cases := []struct {
+		name     string
+		fhd      bool
+		switches []ResolutionSwitch
+		targets  []TargetTimeline
+		charged  time.Duration
+	}{
+		// 720p 30분 → (멈춤 10분 중 FHD로) → FHD 20분: 30×1 + 20×2
+		{"멈춤 중 FHD로 올림", false, []ResolutionSwitch{{At: at(35), FHD: true}},
+			[]TargetTimeline{{LiveAt: at(0), EndedAt: end(60), Pauses: []PauseSpan{{PausedAt: at(30), ResumedAt: end(40)}}}},
+			30*time.Minute + 20*time.Minute*2},
+		// FHD 동시 30분 → 720p 동시 30분: 30×3 + 30×2
+		{"동시 송출 중 720p로 내림", true, []ResolutionSwitch{{At: at(30), FHD: false}},
+			[]TargetTimeline{{LiveAt: at(0), EndedAt: end(60)}, {LiveAt: at(0), EndedAt: end(60)}},
+			30*time.Minute*3 + 30*time.Minute*2},
+		// 방송 전 변경은 시작 해상도를 덮는다. 순서가 뒤섞여 들어와도 시각 순으로 적용한다.
+		{"방송 전 두 번 변경", false, []ResolutionSwitch{{At: at(-5), FHD: false}, {At: at(-10), FHD: true}},
+			[]TargetTimeline{{LiveAt: at(0), EndedAt: end(60)}}, 60 * time.Minute},
+		// 달 시작 전 변경도 이번 달 구간의 해상도를 정한다.
+		{"조회 구간 전 변경", false, []ResolutionSwitch{{At: from.Add(-time.Hour), FHD: true}},
+			[]TargetTimeline{{LiveAt: at(0), EndedAt: end(60)}}, 120 * time.Minute},
+	}
+	for _, test := range cases {
+		onAir, charged := ChargeSession(test.fhd, test.switches, test.targets, from, to, now)
+		if charged != test.charged {
+			t.Fatalf("%s: charged=%v (onAir %v), want %v", test.name, charged, onAir, test.charged)
 		}
 	}
 }
@@ -78,8 +118,8 @@ func TestChargeSessionSplitsAtMonthBoundary(t *testing.T) {
 	if !sepTo.Equal(octFrom) || octFrom.Day() != 1 || octFrom.Hour() != 0 {
 		t.Fatalf("month ranges: sep [%v, %v) oct [%v, %v)", sepFrom, sepTo, octFrom, octTo)
 	}
-	_, september := ChargeSession(true, targets, sepFrom, sepTo, now)
-	_, october := ChargeSession(true, targets, octFrom, octTo, now)
+	_, september := ChargeSession(true, nil, targets, sepFrom, sepTo, now)
+	_, october := ChargeSession(true, nil, targets, octFrom, octTo, now)
 	if september != 2*time.Hour || october != 2*time.Hour {
 		t.Fatalf("september=%v october=%v, want 2h each", september, october)
 	}
@@ -144,5 +184,39 @@ func TestPostgresLedgerMonth(t *testing.T) {
 	octFrom, octTo := MonthRange(to)
 	if charges, err := NewLedger(db).Month(context.Background(), owner, octFrom, octTo, at(600)); err != nil || len(charges) != 0 {
 		t.Fatalf("october charges = %+v, %v", charges, err)
+	}
+}
+
+// 해상도 변경(#283)이 실사용 기록을 거쳐 원장 차감에 반영된다.
+func TestPostgresLedgerHonorsRecordedResolutionChange(t *testing.T) {
+	db := newPostgresUsageTestDB(t)
+	owner := createTestUser(t, db)
+	recorder := NewRecorder(db, discardLogger)
+	sessionID, broadcastID := uuid.NewString(), uuid.NewString()
+	start := time.Date(2026, 9, 10, 12, 0, 0, 0, LedgerLocation).UTC()
+	at := func(minutes int) time.Time { return start.Add(time.Duration(minutes) * time.Minute) }
+	// 720p 30분 → 멈춤(30~40) 중 FHD로 변경 → FHD 20분 = 30 + 40 = 70분
+	for _, event := range []session.UsageEvent{
+		{Kind: session.UsageSessionStarted, At: at(-1), SessionID: sessionID, UserID: owner, Resolution: session.Resolution720p},
+		{Kind: session.UsageBroadcastStarted, At: at(0), SessionID: sessionID, BroadcastID: broadcastID, Provider: "youtube"},
+		{Kind: session.UsageBroadcastLive, At: at(0), BroadcastID: broadcastID},
+		{Kind: session.UsageBroadcastPaused, At: at(30), BroadcastID: broadcastID},
+		{Kind: session.UsageResolutionChanged, At: at(35), SessionID: sessionID, Resolution: session.ResolutionFHD},
+		{Kind: session.UsageBroadcastResumed, At: at(40), BroadcastID: broadcastID},
+		{Kind: session.UsageBroadcastEnded, At: at(60), BroadcastID: broadcastID, Reason: "user_requested"},
+		{Kind: session.UsageSessionEnded, At: at(61), SessionID: sessionID, Reason: "peer_connection_closed"},
+	} {
+		recorder.RecordUsage(event)
+	}
+	if err := recorder.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	from, to := MonthRange(start)
+	charges, err := NewLedger(db).Month(context.Background(), owner, from, to, at(600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(charges) != 1 || charges[0].OnAir != 50*time.Minute || charges[0].Charged != 70*time.Minute {
+		t.Fatalf("charges = %+v, want on air 50m charged 70m", charges)
 	}
 }

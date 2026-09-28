@@ -48,23 +48,37 @@ type TargetTimeline struct {
 	LegacyPausedSeconds float64
 }
 
+// ResolutionSwitch는 세션 도중 해상도가 바뀐 시점이다(#283). 그 시점부터 FHD
+// 여부가 FHD 값으로 바뀐다.
+type ResolutionSwitch struct {
+	At  time.Time
+	FHD bool
+}
+
 // ChargeSession은 한 세션의 [from, to) 안 방송 시간(onAir, 하나라도 송출 중인
 // 시간)과 차감(charged, 유닛-시간)을 계산한다. 끝나지 않은 송출은 now까지 센다.
-func ChargeSession(fhd bool, targets []TargetTimeline, from, to, now time.Time) (onAir, charged time.Duration) {
+// fhd는 시작 해상도이고, switches가 그 뒤 구간의 해상도를 바꾼다.
+func ChargeSession(fhd bool, switches []ResolutionSwitch, targets []TargetTimeline, from, to, now time.Time) (onAir, charged time.Duration) {
 	type edge struct {
 		at    time.Time
 		delta int
+		// fhd가 있으면 해상도 변경 경계다(delta 0).
+		fhd *bool
 	}
 	var edges []edge
 	for _, target := range targets {
 		for _, span := range activeSpans(target, now) {
 			start, end := maxTime(span[0], from), minTime(span[1], to)
 			if end.After(start) {
-				edges = append(edges, edge{start, +1}, edge{end, -1})
+				edges = append(edges, edge{at: start, delta: +1}, edge{at: end, delta: -1})
 			}
 		}
 	}
-	sort.Slice(edges, func(i, j int) bool {
+	for _, change := range switches {
+		value := change.FHD
+		edges = append(edges, edge{at: change.At, fhd: &value})
+	}
+	sort.SliceStable(edges, func(i, j int) bool {
 		if edges[i].at.Equal(edges[j].at) {
 			return edges[i].delta < edges[j].delta // 같은 시각이면 끝을 먼저
 		}
@@ -78,6 +92,9 @@ func ChargeSession(fhd bool, targets []TargetTimeline, from, to, now time.Time) 
 			charged += dt * time.Duration(plan.Units(fhd, active))
 		}
 		active += e.delta
+		if e.fhd != nil {
+			fhd = *e.fhd
+		}
 	}
 	return onAir, charged
 }
@@ -185,6 +202,14 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 			pausesByBroadcast[p.BroadcastID] = append(pausesByBroadcast[p.BroadcastID], PauseSpan{PausedAt: p.PausedAt, ResumedAt: p.ResumedAt})
 		}
 	}
+	var changes []ResolutionChange
+	if err := db.Where("session_id IN ?", sessionIDs).Find(&changes).Error; err != nil {
+		return nil, fmt.Errorf("read usage resolution changes: %w", err)
+	}
+	switchesBySession := map[uuid.UUID][]ResolutionSwitch{}
+	for _, c := range changes {
+		switchesBySession[c.SessionID] = append(switchesBySession[c.SessionID], ResolutionSwitch{At: c.ChangedAt, FHD: c.Resolution == "fhd"})
+	}
 	bySession := map[uuid.UUID][]Broadcast{}
 	for _, b := range broadcasts {
 		bySession[b.SessionID] = append(bySession[b.SessionID], b)
@@ -212,7 +237,7 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 				providers = append(providers, b.Provider)
 			}
 		}
-		onAir, charged := ChargeSession(resolution == "fhd", timelines, from, to, now)
+		onAir, charged := ChargeSession(resolution == "fhd", switchesBySession[s.ID], timelines, from, to, now)
 		if charged <= 0 {
 			continue
 		}

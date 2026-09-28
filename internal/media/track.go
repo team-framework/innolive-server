@@ -342,7 +342,16 @@ func runTranscodedTrack(
 	processed := make(chan frame, 1)
 	encoded := make(chan frame, compressedQueueSize)
 
-	go readFrames(pipelineContext, logger, remote, compressed, registry, mode, requestKeyframe)
+	// 해상도 변경(#283)은 같은 트랙으로 파이프라인을 다시 띄운다. 이전 읽기
+	// 고루틴이 남아 있으면 두 고루틴이 한 트랙을 나눠 읽으므로, RunTrack이 돌아올
+	// 때는 읽기가 끝나 있어야 한다. 앞선 실행이 남긴 읽기 기한도 여기서 지운다.
+	_ = remote.SetReadDeadline(time.Time{})
+	var reader sync.WaitGroup
+	reader.Add(1)
+	go func() {
+		defer reader.Done()
+		readFrames(pipelineContext, logger, remote, compressed, registry, mode, requestKeyframe)
+	}()
 	var streamWorkers sync.WaitGroup
 	streamWorkers.Add(2)
 	go func() {
@@ -377,6 +386,9 @@ func runTranscodedTrack(
 	}()
 	defer func() {
 		cancel()
+		// 막혀 있는 ReadRTP를 기한으로 깨워 읽기 고루틴을 끝낸다.
+		_ = remote.SetReadDeadline(time.Now())
+		reader.Wait()
 		queueWorkers.Wait()
 		// Join the FFmpeg-owning goroutines so RunTrack's return means the
 		// process pair has actually finished its (graceful) teardown — the
@@ -518,7 +530,12 @@ func readFrames(
 ) {
 	defer close(frames)
 	packets := make(chan *rtp.Packet, rtpIngressQueueSize)
-	go readRTPPackets(ctx, logger, remote, packets, registry, mode)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		readRTPPackets(ctx, logger, remote, packets, registry, mode)
+	}()
+	defer func() { <-readerDone }()
 
 	codec := VideoCodec(remote.Codec().MimeType)
 	assembler, err := newRTPFrameAssembler(registry, mode, codec, requestKeyframe)

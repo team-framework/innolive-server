@@ -1112,3 +1112,80 @@ func TestPeerConnectionKeepsICEServersWithoutAnnouncedIP(t *testing.T) {
 		t.Fatalf("server PeerConnection ICE servers = %d, want 1 when no announced IP", got)
 	}
 }
+
+// 끊김 원인 추적용 로그(#294)는 실제로 선택된 후보 쌍의 종류를 읽어야 한다.
+func TestSelectedCandidatePairAfterConnect(t *testing.T) {
+	offerer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer offerer.Close()
+	answerer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer answerer.Close()
+	if _, err := offerer.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	connected := make(chan struct{})
+	var once sync.Once
+	answerer.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if state == webrtc.ICEConnectionStateConnected {
+			once.Do(func() { close(connected) })
+		}
+	})
+
+	offer, err := offerer.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offerGathered := webrtc.GatheringCompletePromise(offerer)
+	if err := offerer.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-offerGathered
+	if err := answerer.SetRemoteDescription(*offerer.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := answerer.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerGathered := webrtc.GatheringCompletePromise(answerer)
+	if err := answerer.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	<-answerGathered
+	if err := offerer.SetRemoteDescription(*answerer.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ICE did not connect")
+	}
+	pair := selectedCandidatePair(answerer)
+	if pair == nil {
+		t.Fatal("selectedCandidatePair() = nil after ICE connected")
+	}
+	// 원격 후보는 연결 확인이 후보 교환보다 먼저 도착하면 prflx로 잡힐 수 있다.
+	if pair.Local.Typ != webrtc.ICECandidateTypeHost {
+		t.Fatalf("local type = %s, want host on loopback", pair.Local.Typ)
+	}
+	if remote := pair.Remote.Typ; remote != webrtc.ICECandidateTypeHost && remote != webrtc.ICECandidateTypePrflx {
+		t.Fatalf("remote type = %s, want host or prflx on loopback", remote)
+	}
+}
+
+func TestSelectedCandidatePairBeforeNegotiation(t *testing.T) {
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if pair := selectedCandidatePair(pc); pair != nil {
+		t.Fatalf("selectedCandidatePair() = %v before negotiation, want nil", pair)
+	}
+}

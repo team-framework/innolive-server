@@ -1754,6 +1754,15 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 
 	s.PC.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		m.logger.Info("ICE connection state changed", "session_id", s.ID, "ice_connection_state", state.String())
+		if state == webrtc.ICEConnectionStateConnected {
+			// 끊김 원인을 경로(host/srflx/relay, udp/tcp)별로 가르려고 남긴다(#294).
+			// 주소·포트는 사용자 식별 정보라 남기지 않는다.
+			if pair := selectedCandidatePair(s.PC); pair != nil {
+				m.logger.Info("ICE selected candidate pair", "session_id", s.ID,
+					"local_type", pair.Local.Typ.String(), "local_protocol", pair.Local.Protocol.String(),
+					"remote_type", pair.Remote.Typ.String(), "remote_protocol", pair.Remote.Protocol.String())
+			}
+		}
 		if state != webrtc.ICEConnectionStateCompleted {
 			return
 		}
@@ -1767,6 +1776,21 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		}
 		s.mu.Unlock()
 	})
+}
+
+// selectedCandidatePair는 PeerConnection이 미디어에 쓰는 후보 쌍을 돌려준다.
+// 아직 선택된 쌍이 없으면 nil이다.
+func selectedCandidatePair(pc *webrtc.PeerConnection) *webrtc.ICECandidatePair {
+	for _, receiver := range pc.GetReceivers() {
+		transport := receiver.Transport()
+		if transport == nil {
+			continue
+		}
+		if pair, err := transport.ICETransport().GetSelectedCandidatePair(); err == nil && pair != nil {
+			return pair
+		}
+	}
+	return nil
 }
 
 // startVideoPipeline은 영상 트랙의 처리 파이프라인(디코더·AI·미리보기 인코더)을

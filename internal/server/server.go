@@ -480,14 +480,16 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
 	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
-	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID, string(providerName)); err != nil {
+	_, busyTargets, err := s.sessions.BeginBroadcastPrepareCounted(liveSession.ID, string(providerName))
+	if err != nil {
 		return nil, broadcastBeginError(err, liveSession.ID)
 	}
 	// 플랜 게이팅(#273)은 선점 뒤·플랫폼 호출 전에 한다. 선점 뒤라야 같은 대상
 	// 재요청이 기존 409를 받고, 동시에 들어온 두 대상이 서로를 센다(선점 전에
 	// 판정하면 둘 다 "다른 대상 0"으로 통과한다). 플랫폼 호출 전이라 거절돼도
-	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함한다.
-	if gate := planGateError(liveSession.Plan, liveSession.Resolution() == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
+	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함하고, 선점과
+	// 같은 잠금에서 센 값이라 동시 요청 중 먼저 선점한 쪽만 통과한다(#308).
+	if gate := planGateError(liveSession.Plan, liveSession.Resolution() == session.ResolutionFHD, busyTargets); gate != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
 		return nil, gate

@@ -1756,11 +1756,16 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		m.logger.Info("ICE connection state changed", "session_id", s.ID, "ice_connection_state", state.String())
 		if state == webrtc.ICEConnectionStateConnected {
 			// 끊김 원인을 경로(host/srflx/relay, udp/tcp)별로 가르려고 남긴다(#294).
-			// 주소·포트는 사용자 식별 정보라 남기지 않는다.
+			// 주소·포트는 사용자 식별 정보라 남기지 않는다. 망 전환 분석용으로
+			// IP 버전과 키 해시만 남긴다(#304).
 			if pair := selectedCandidatePair(s.PC); pair != nil {
+				localVersion, _ := candidateNetwork(pair.Local.Address)
+				remoteVersion, remoteNetwork := candidateNetwork(pair.Remote.Address)
 				m.logger.Info("ICE selected candidate pair", "session_id", s.ID,
 					"local_type", pair.Local.Typ.String(), "local_protocol", pair.Local.Protocol.String(),
-					"remote_type", pair.Remote.Typ.String(), "remote_protocol", pair.Remote.Protocol.String())
+					"local_ip_version", localVersion,
+					"remote_type", pair.Remote.Typ.String(), "remote_protocol", pair.Remote.Protocol.String(),
+					"remote_ip_version", remoteVersion, "remote_network", remoteNetwork)
 			}
 		}
 		if state != webrtc.ICEConnectionStateCompleted {

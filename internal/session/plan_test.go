@@ -104,3 +104,23 @@ func TestMediaIdleClockRestartsOnResume(t *testing.T) {
 		t.Fatalf("idle since %v, want latest frame %v", got, later)
 	}
 }
+
+func TestBroadcastRemainingIsExposedAndCleared(t *testing.T) {
+	manager := newTestManager(t, 0)
+	live, _, err := manager.CreateForUser(uuid.New(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Response().BroadcastRemainingSeconds != nil {
+		t.Fatal("not broadcasting: remaining must be null")
+	}
+	remaining := 90 * time.Minute
+	live.SetBroadcastRemaining(&remaining)
+	if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != 5400 {
+		t.Fatalf("remaining = %v, want 5400", got)
+	}
+	live.SetBroadcastRemaining(nil)
+	if live.Response().BroadcastRemainingSeconds != nil {
+		t.Fatal("cleared remaining must be null")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"inno-live-server/internal/plan"
+	"inno-live-server/internal/session"
 	"inno-live-server/internal/usage"
 
 	"github.com/google/uuid"
@@ -78,6 +79,26 @@ func decideLimits(owner plan.Plan, onAir, used time.Duration, checkIdle bool, id
 	return decision
 }
 
+// broadcastRemaining은 현재 송출 방식(units배)으로 더 방송할 수 있는 시간이다(#276).
+// 월 잔여 ÷ 배수와 1회 잔여 중 작은 값이며, 한도가 없으면 nil이다.
+func broadcastRemaining(owner plan.Plan, onAir, used time.Duration, units int) *time.Duration {
+	policy, _ := owner.Policy()
+	var remaining *time.Duration
+	consider := func(value time.Duration) {
+		value = max(value, 0)
+		if remaining == nil || value < *remaining {
+			remaining = &value
+		}
+	}
+	if policy.MonthlyBroadcast > 0 && units > 0 {
+		consider((policy.MonthlyBroadcast - used) / time.Duration(units))
+	}
+	if policy.MaxPerBroadcast > 0 {
+		consider(policy.MaxPerBroadcast - onAir)
+	}
+	return remaining
+}
+
 // RunLimitEnforcer는 ctx가 끝날 때까지 주기적으로 한도를 집행한다. 원장·플랜
 // 저장소가 조립되지 않은 배포(벤치·로컬)에서는 곧바로 돌아온다.
 func (s *Server) RunLimitEnforcer(ctx context.Context) {
@@ -103,6 +124,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		}
 		targets, unpaused := live.BroadcastActivity()
 		if len(targets) == 0 {
+			live.SetBroadcastRemaining(nil)
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
@@ -115,6 +137,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		idleSince := live.MediaIdleSince()
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
 		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
+		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.BroadcastResolution == session.ResolutionFHD, len(targets))))
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,
@@ -124,6 +147,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		if decision.stopReason == "" {
 			continue
 		}
+		live.SetBroadcastRemaining(nil)
 		for _, provider := range targets {
 			_, broadcast, phase, err := s.sessions.StopStreamWithReason(live.ID, decision.stopReason, provider)
 			if err != nil {

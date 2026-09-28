@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"inno-live-server/internal/auth"
+	"inno-live-server/internal/plan"
 	"inno-live-server/internal/usage"
 
 	"github.com/google/uuid"
@@ -37,6 +38,17 @@ type usageBroadcastResponse struct {
 	ChargedSeconds   int64 `json:"charged_seconds"`
 }
 
+// modeAvailability는 송출 방식 하나로 남은 방송 시간 동안 실제로 몇 초 방송할 수
+// 있는지다(#276). 클라이언트가 배수를 계산하지 않도록 서버가 나눠 준다.
+type modeAvailability struct {
+	Mode       plan.Mode `json:"mode"`
+	Multiplier int       `json:"multiplier"`
+	// Seconds는 남은 방송 시간 ÷ 배수다. null이면 무제한(Glow)이다.
+	Seconds *int64 `json:"seconds"`
+	// Allowed가 false면 플랜이 허용하지 않는 방식이다 — 잠금·업그레이드 안내용으로 함께 내보낸다.
+	Allowed bool `json:"allowed"`
+}
+
 type usageResponse struct {
 	Month string `json:"month"`
 	Plan  string `json:"plan"`
@@ -45,6 +57,26 @@ type usageResponse struct {
 	UsedSeconds      int64                    `json:"used_seconds"`
 	RemainingSeconds *int64                   `json:"remaining_seconds"`
 	Broadcasts       []usageBroadcastResponse `json:"broadcasts"`
+	// AvailableByMode는 송출 방식별 실제 방송 가능 시간이다(#276). 월 잔여만 반영한다.
+	AvailableByMode []modeAvailability `json:"available_by_mode"`
+	// MaxPerBroadcastSeconds는 1회 최대 방송 시간이다. 월 잔여가 많아도 한 번에 이보다
+	// 길게 방송할 수 없다. null이면 무제한이다.
+	MaxPerBroadcastSeconds *int64 `json:"max_per_broadcast_seconds"`
+}
+
+// availableByMode는 남은 방송 시간을 송출 방식별 배수로 나눈다. remaining이 nil이면
+// 무제한이다. 네 방식을 모두 내보내고 허용 여부를 표시한다.
+func availableByMode(owner plan.Plan, remaining *int64) []modeAvailability {
+	modes := make([]modeAvailability, 0, len(plan.Modes))
+	for _, mode := range plan.Modes {
+		entry := modeAvailability{Mode: mode, Multiplier: mode.Units(), Allowed: owner.Allows(mode)}
+		if remaining != nil {
+			seconds := *remaining / int64(entry.Multiplier)
+			entry.Seconds = &seconds
+		}
+		modes = append(modes, entry)
+	}
+	return modes
 }
 
 // handleGetMyUsage는 인증된 사용자 자신의 월 사용 내역만 돌려준다. 대상 사용자를
@@ -104,5 +136,10 @@ func (s *Server) handleGetMyUsage(w http.ResponseWriter, r *http.Request) {
 		response.LimitSeconds = &limit
 		response.RemainingSeconds = &remaining
 	}
+	if policy.MaxPerBroadcast > 0 {
+		perBroadcast := int64(policy.MaxPerBroadcast.Seconds())
+		response.MaxPerBroadcastSeconds = &perBroadcast
+	}
+	response.AvailableByMode = availableByMode(owner, response.RemainingSeconds)
 	writeJSON(w, http.StatusOK, response)
 }

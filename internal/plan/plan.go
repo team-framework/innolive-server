@@ -28,6 +28,24 @@ const (
 	ModeFHDMulti   Mode = "fhd_multi"
 )
 
+// Modes는 송출 방식 전체를 배수 순서로 늘어놓은 것이다. 남은 시간 안내(#276)가
+// 플랜이 허용하지 않는 방식까지 잠금으로 보여 주려고 쓴다.
+var Modes = []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti, ModeFHDMulti}
+
+// Units는 그 송출 방식의 서버 유닛, 곧 방송 시간 차감 배수다.
+func (m Mode) Units() int {
+	switch m {
+	case ModeFHDSingle:
+		return Units(true, 1)
+	case Mode720pMulti:
+		return Units(false, 2)
+	case ModeFHDMulti:
+		return Units(true, 2)
+	default:
+		return Units(false, 1)
+	}
+}
+
 // Policy는 플랜 하나의 정책 값이다. 시간 값 0은 무제한이다.
 type Policy struct {
 	MonthlyBroadcast time.Duration

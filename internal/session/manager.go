@@ -158,6 +158,10 @@ type Response struct {
 	BroadcastResolution string `json:"broadcast_resolution"`
 	// Notices는 방송 한도 알림이다(#275). 코드별로 한 번씩 쌓인다.
 	Notices []Notice `json:"notices"`
+	// BroadcastRemainingSeconds는 방송 중일 때 현재 송출 방식으로 더 방송할 수 있는
+	// 시간이다(#276). 월 잔여 ÷ 현재 배수와 1회 잔여 중 작은 값이다. 방송 중이 아니거나
+	// 무제한이면 null이다. 한도 점검 주기(15초)마다 갱신된다.
+	BroadcastRemainingSeconds *int64 `json:"broadcast_remaining_seconds"`
 }
 
 type Session struct {
@@ -240,6 +244,7 @@ type Session struct {
 	// notices는 한도 알림(#275), lastMediaFrameNano는 마지막 처리 프레임 시각이다.
 	// 후자는 프레임마다 갱신되므로 잠금 없이 원자적으로 쓴다.
 	notices            []Notice
+	broadcastRemaining *int64
 	lastMediaFrameNano atomic.Int64
 	mediaIdleResetNano atomic.Int64
 }
@@ -1855,6 +1860,10 @@ func (s *Session) Response() Response {
 	}
 	response.BroadcastResolution = s.BroadcastResolution
 	response.Notices = append([]Notice{}, s.notices...)
+	if s.broadcastRemaining != nil {
+		remaining := *s.broadcastRemaining
+		response.BroadcastRemainingSeconds = &remaining
+	}
 	response.Peer.ConnectionState = s.PC.ConnectionState().String()
 	response.Peer.ICEConnectionState = s.PC.ICEConnectionState().String()
 	response.Peer.SignalingState = s.PC.SignalingState().String()

@@ -463,3 +463,33 @@ func TestBudgetChangeResolutionHonorsTierReserves(t *testing.T) {
 		t.Fatalf("beam into plasma reserve: err=%v used=%d, want tier exhaustion and unchanged", err, budget2.Used())
 	}
 }
+
+// 방식 전환(#300) 사전 확인: 지금 쥔 유닛은 반납될 것으로 보고, 잡지는 않는다.
+func TestBudgetCheckClaim(t *testing.T) {
+	budget := NewEgressSlotBudget(4, 0)
+	budget.SetTierReserves([]int{1, 1, 2})
+	ctx := context.Background()
+	// Beam FHD 단독 2유닛 + 다른 Plasma 1유닛.
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "beam", HighRes: true, Tier: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "plasma", Tier: 2}); err != nil {
+		t.Fatal(err)
+	}
+	// Beam FHD 단독(2) → 720p 동시(2): 반납분 2를 빼면 3/4 — 된다. 잡지 않으므로 그대로 3.
+	if err := budget.CheckClaim(EgressClaim{Owner: "beam", Tier: 1}, 2); err != nil || budget.Used() != 3 {
+		t.Fatalf("720p simulcast: err=%v used=%d", err, budget.Used())
+	}
+	// Beam FHD 동시(3): 4/4지만 Plasma 빈 몫 1을 넘본다.
+	if err := budget.CheckClaim(EgressClaim{Owner: "beam", HighRes: true, Tier: 1}, 2); !errors.Is(err, ErrEgressTierUnitsExhausted) {
+		t.Fatalf("fhd simulcast: err=%v, want tier exhaustion", err)
+	}
+	// Plasma 720p 단독(1) → FHD 동시(3): 2+3=5 > 4.
+	if err := budget.CheckClaim(EgressClaim{Owner: "plasma", HighRes: true, Tier: 2}, 2); !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("over capacity: err=%v", err)
+	}
+	// 송출 중이 아닌 소유자는 전부 새로 센다.
+	if err := budget.CheckClaim(EgressClaim{Owner: "new", Tier: 2}, 1); err != nil {
+		t.Fatalf("new owner: %v", err)
+	}
+}

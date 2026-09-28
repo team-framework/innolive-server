@@ -117,6 +117,7 @@ func New(
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
 	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast-resolution", requireUser(s.requireSessionOwner(s.handlePutBroadcastResolution)))
+	mux.Handle("PUT /sessions/{session_id}/broadcast-mode", requireUser(s.requireSessionOwner(s.handlePutBroadcastMode)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
 	mux.Handle("POST /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handlePostReferenceFace))))

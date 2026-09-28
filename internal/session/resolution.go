@@ -169,10 +169,10 @@ func (m *Manager) WaitStreamEnded(ctx context.Context, id, provider string) erro
 	}
 }
 
-// ReserveResolutionUnits는 방송 중 해상도 전환(#283) 전에 새 해상도의 유닛을
-// 미리 잡는다. 자리가 없으면 방송을 끊기 전에 실패한다. 이후 대상을 끝내면
-// 유닛은 새 해상도 기준으로 반납되고, 새 방송이 다시 잡는다.
-func (m *Manager) ReserveResolutionUnits(id, value string) error {
+// CheckBroadcastUnits는 방송 중 송출 방식 전환(#283·#300) 전에, 이 세션이 resolution
+// 해상도로 count개를 송출할 자리가 되는지 본다(잡지는 않는다). 자리가 없으면 방송을
+// 끊기 전에 실패한다. 지금 쥔 유닛은 전환 중 반납되므로 빼고 센다.
+func (m *Manager) CheckBroadcastUnits(id, value string, count int) error {
 	resolution, err := normalizeResolution(value)
 	if err != nil {
 		return err
@@ -181,9 +181,7 @@ func (m *Manager) ReserveResolutionUnits(id, value string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.egressSlots.ChangeResolution(s.ID, resolution == ResolutionFHD); err != nil {
-		return err
-	}
-	m.publishEgressSlots()
-	return nil
+	claim := egressClaimFor(s)
+	claim.HighRes = resolution == ResolutionFHD
+	return m.egressSlots.CheckClaim(claim, count)
 }

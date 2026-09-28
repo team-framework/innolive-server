@@ -34,6 +34,10 @@ var errAIInputPaused = errors.New("AI input is paused")
 // re-flood an overloaded worker with every frame.
 const defaultRecoveryProbeInterval = time.Second
 
+// privacyGenerations는 익명화 설정 세대를 매긴다. 프로세스 전역에서 단조
+// 증가하므로 파이프라인이 새 Processor로 바뀌어도 이전 세대보다 크다(#311).
+var privacyGenerations atomic.Uint64
+
 type Processor struct {
 	mode                 config.PrivacyMode
 	fixedDelay           time.Duration
@@ -41,10 +45,13 @@ type Processor struct {
 	ai                   AIStream
 	aiInputPaused        bool
 	anonymizationEnabled bool
-	metrics              *metrics.Registry
-	logger               *slog.Logger
-	wireFormat           config.WireFormat
-	failurePolicy        config.AIFailurePolicy
+	// privacyGeneration은 지금 익명화 설정의 세대다. 설정이 바뀔 때마다 새로
+	// 받는다. egress는 이 세대로 정지 화면에 다시 써도 되는 프레임을 가린다.
+	privacyGeneration atomic.Uint64
+	metrics           *metrics.Registry
+	logger            *slog.Logger
+	wireFormat        config.WireFormat
+	failurePolicy     config.AIFailurePolicy
 
 	// timeoutLatchThreshold bounds how many CONSECUTIVE timeout failures are
 	// tolerated (serving a per-frame blackout, retrying the AI next frame)
@@ -98,7 +105,7 @@ func NewProcessor(
 	if timeoutLatchThreshold < 0 {
 		timeoutLatchThreshold = 0
 	}
-	return &Processor{
+	processor := &Processor{
 		mode:                  mode,
 		fixedDelay:            fixedDelay,
 		ai:                    ai,
@@ -109,7 +116,9 @@ func NewProcessor(
 		timeoutLatchThreshold: timeoutLatchThreshold,
 		recoveryProbeInterval: defaultRecoveryProbeInterval,
 		anonymizationEnabled:  mode == config.PrivacyModeReal,
-	}, nil
+	}
+	processor.privacyGeneration.Store(privacyGenerations.Add(1))
+	return processor, nil
 }
 
 func (p *Processor) Close() {
@@ -155,8 +164,18 @@ func (p *Processor) SetAnonymizationEnabled(enabled bool) {
 		return
 	}
 	p.aiMu.Lock()
+	if p.anonymizationEnabled != enabled {
+		p.privacyGeneration.Store(privacyGenerations.Add(1))
+	}
 	p.anonymizationEnabled = enabled
 	p.aiMu.Unlock()
+}
+
+// PrivacyGeneration은 지금 익명화 설정의 세대다. 설정이 바뀌면 커진다.
+// 쓰기는 aiMu 쓰기 잠금 안에서만 일어나고 처리 중에는 읽기 잠금을 쥐므로,
+// 처리 전후에 읽은 값이 같으면 그 프레임은 한 설정 아래에서 처리된 것이다.
+func (p *Processor) PrivacyGeneration() uint64 {
+	return p.privacyGeneration.Load()
 }
 
 // AnonymizationEnabled reports whether real-mode frames are currently sent to

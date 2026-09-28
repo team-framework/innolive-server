@@ -46,6 +46,12 @@ type stubStreamingProvider struct {
 	prepareRelease chan struct{}
 	goLiveEntered  chan struct{}
 	goLiveRelease  chan struct{}
+	categories     []streaming.VideoCategory
+	categoriesErr  error
+}
+
+func (s *stubStreamingProvider) Categories(context.Context, uuid.UUID) ([]streaming.VideoCategory, error) {
+	return s.categories, s.categoriesErr
 }
 
 func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {

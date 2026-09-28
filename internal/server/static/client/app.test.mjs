@@ -35,31 +35,36 @@ const buttonKeys = [
   "chzzkCompleteRow",
   "completeChzzkBtn",
   "chzzkDetail",
-  "sessionProvider",
   "broadcastResolution",
   "chzzkCategoryType",
-  "chzzkCategoryTypeRow",
   "chzzkTags",
-  "chzzkTagsRow",
-  "chzzkCategorySearchRow",
   "chzzkCategoryQuery",
   "chzzkCategorySearchBtn",
   "chzzkCategoryResults",
   "broadcastSettingsDetail",
-  "broadcastCategoryIdRow",
-  "broadcastPrivacyRow",
-  "broadcastThumbnailRow",
-  "broadcastDescriptionRow",
-  "madeForKidsRow",
-  "simulcastEnabled",
-  "simulcastProvider",
-  "simulcastProviderRow",
-  "simulcastTitle",
-  "simulcastTitleRow",
-  "simulcastMadeForKids",
-  "simulcastMadeForKidsRow",
   "targetList",
   "targetListEmpty",
+  "planSummary",
+  "planBadge",
+  "planUsage",
+  "broadcastModeHint",
+  "platformYoutube",
+  "platformChzzk",
+  "youtubeCard",
+  "chzzkCard",
+  "youtubeSettings",
+  "chzzkSettings",
+  "youtubeTitle",
+  "youtubePrivacy",
+  "youtubeCategory",
+  "youtubeThumbnail",
+  "youtubeDescription",
+  "youtubeMadeForKids",
+  "chzzkTitle",
+  "chzzkCategoryId",
+  "broadcastSettingsState",
+  "broadcastAccounts",
+  "broadcastPlatformState",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -75,7 +80,6 @@ const sessionDetailKeys = [
   "offerToIceDone",
   "answerToIceDone",
   "broadcastRtmpState",
-  "broadcastYoutubeState",
   "localTrackState",
   "remoteTrackState",
   "localVideo",
@@ -163,7 +167,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
     context,
     { filename: appPath },
   );
@@ -439,8 +443,11 @@ test("방송 종료 버튼은 /stream/stop을 호출하고 세션은 유지한�
 
   await stopBroadcast();
 
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /\/sessions\/session-1\/stream\/stop$/);
+  // 종료 뒤에는 줄어든 이번 달 방송 시간을 다시 읽는다.
+  assert.deepEqual(
+    calls.map((call) => call.url.replace("https://example.test", "")),
+    ["/sessions/session-1/stream/stop", "/users/me/usage"],
+  );
   assert.equal(calls[0].method, "POST");
   // 종료는 egress만 끝낸다 — 세션은 남아 다음 방송을 준비할 수 있어야 한다.
   assert.equal(state.session.session_id, "session-1");
@@ -561,7 +568,7 @@ test("치지직 connect 성공 후 계정 목록 조회가 실패해도 연결 �
   assert.equal(state.chzzkState, null);
 });
 
-test("치지직 세션은 방송 설정을 category_type·tags로 저장한다", async () => {
+test("치지직 카드는 방송 설정을 category_type·tags로 그 대상 앞으로 저장한다", async () => {
   const calls = [];
   const { saveBroadcastSettings, state, els } = await loadApp({
     fetchImpl: async (url, options) => {
@@ -569,42 +576,102 @@ test("치지직 세션은 방송 설정을 category_type·tags로 저장한다",
       return jsonResponse({ session_id: "s-1", provider: "chzzk", chzzk_broadcast: { title: "제목", category_type: "GAME", category_id: "LoL", tags: ["게임"] } });
     },
   });
-  for (const id of ["broadcastTitle", "chzzkCategoryType", "broadcastCategoryId", "chzzkTags", "broadcastSettingsState", "broadcastSettingsDetail"]) {
-    els[id] = { value: "", dataset: {}, textContent: "" };
-  }
   state.accessToken = "access-token";
   state.session = { session_id: "s-1", provider: "chzzk" };
-  els.sessionProvider.value = "chzzk";
-  els.broadcastTitle.value = "제목";
+  els.platformChzzk.checked = true;
+  els.chzzkTitle.value = "제목";
   els.chzzkCategoryType.value = "GAME";
-  els.broadcastCategoryId.value = "LoL";
+  els.chzzkCategoryId.value = "LoL";
   els.chzzkTags.value = "게임, 롤, ";
 
   await saveBroadcastSettings();
 
   assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/broadcast\?provider=chzzk$/);
   const body = JSON.parse(calls[0].body);
   assert.deepEqual(body, { title: "제목", category_type: "GAME", category_id: "LoL", tags: ["게임", "롤"] });
   // 유튜브 전용 키가 새어 나가면 서버가 DisallowUnknownFields로 400을 준다.
   assert.equal(body.made_for_kids, undefined);
-  assert.equal(body.privacy, undefined);
 });
 
-test("provider 폼 전환은 치지직 필드를 보이고 유튜브 전용 필드를 숨긴다", async () => {
-  const { applyProviderForm, els, state } = await loadApp();
-  els.broadcastCategoryId = { value: "20", dataset: {} };
-  state.touchedBroadcastFields.add("category_id");
-  applyProviderForm("chzzk");
-  // 공유 category_id는 플랫폼 전환 시 비워지고 touched도 해제돼야 한다.
-  assert.equal(els.broadcastCategoryId.value, "");
-  assert.equal(state.touchedBroadcastFields.has("category_id"), false);
-  assert.equal(els.chzzkCategoryTypeRow.hidden, false);
-  assert.equal(els.chzzkTagsRow.hidden, false);
-  assert.equal(els.broadcastPrivacyRow.hidden, true);
-  assert.equal(els.madeForKidsRow.hidden, true);
-  applyProviderForm("youtube");
-  assert.equal(els.chzzkTagsRow.hidden, true);
-  assert.equal(els.broadcastPrivacyRow.hidden, false);
+test("플랫폼 카드는 고른 것만 상세 설정을 펴고, 둘 다 고르면 동시 송출이다", async () => {
+  const { applyPlatformSelection, selectedPlatforms, modeAvailability, els } = await loadApp();
+  els.broadcastResolution.value = "720p";
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = false;
+  applyPlatformSelection();
+  assert.equal(els.youtubeSettings.hidden, false);
+  assert.equal(els.chzzkSettings.hidden, true);
+  assert.deepEqual(Array.from(selectedPlatforms()), ["youtube"]);
+
+  els.platformChzzk.checked = true;
+  applyPlatformSelection();
+  assert.equal(els.chzzkSettings.hidden, false);
+  assert.deepEqual(Array.from(selectedPlatforms()), ["youtube", "chzzk"]);
+  assert.match(modeAvailability().text, /720p 동시/);
+
+  // 아무것도 고르지 않으면 방송을 열 수 없다.
+  els.platformYoutube.checked = false;
+  els.platformChzzk.checked = false;
+  applyPlatformSelection();
+  assert.equal(modeAvailability().allowed, false);
+  assert.equal(els.startBtn.disabled, true);
+});
+
+test("플랜이 허용하지 않는 송출 방식은 막고, 허용된 방식은 남은 시간을 보인다", async () => {
+  const { refreshPlan, modeAvailability, applyPlatformSelection, state, els } = await loadApp({
+    fetchImpl: async () =>
+      jsonResponse({
+        plan: "beam",
+        used_seconds: 3600,
+        limit_seconds: 432000,
+        remaining_seconds: 428400,
+        available_by_mode: [
+          { mode: "720p_single", multiplier: 1, seconds: 428400, allowed: true },
+          { mode: "fhd_single", multiplier: 2, seconds: 214200, allowed: true },
+          { mode: "720p_multi", multiplier: 2, seconds: 214200, allowed: true },
+          { mode: "fhd_multi", multiplier: 3, seconds: 142800, allowed: false },
+        ],
+      }),
+  });
+  state.accessToken = "access-token";
+  els.broadcastResolution.value = "fhd";
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = true;
+
+  await refreshPlan();
+  applyPlatformSelection();
+
+  assert.equal(els.planSummary.hidden, false);
+  assert.equal(els.planBadge.textContent, "Beam 플랜");
+  assert.match(els.planUsage.textContent, /119시간 0분 \/ 120시간 0분/);
+  assert.equal(modeAvailability().allowed, false);
+  assert.match(els.broadcastModeHint.textContent, /Beam 플랜은 FHD 동시 송출을 쓸 수 없습니다/);
+  assert.equal(els.startBtn.disabled, true);
+
+  els.platformChzzk.checked = false;
+  applyPlatformSelection();
+  assert.equal(modeAvailability().allowed, true);
+  assert.match(els.broadcastModeHint.textContent, /FHD 단독 · 2배 차감 · 이 방식으로 59시간 30분 가능/);
+});
+
+test("YouTube 카테고리는 드롭다운으로 불러오고 목록 밖 값도 잃지 않는다", async () => {
+  const { loadYoutubeCategories, setYoutubeCategory, state, els } = await loadApp({
+    fetchImpl: async () => jsonResponse({ categories: [{ id: "20", title: "게임" }, { id: "22", title: "인물/블로그" }] }),
+  });
+  state.accessToken = "access-token";
+  els.youtubeCategory.value = "22";
+
+  await loadYoutubeCategories();
+
+  // 없음 + 2건, 고른 값 유지
+  assert.equal(els.youtubeCategory.children.length, 3);
+  assert.equal(els.youtubeCategory.children[1].value, "20");
+  assert.equal(els.youtubeCategory.value, "22");
+
+  setYoutubeCategory("99");
+  assert.equal(els.youtubeCategory.children.length, 4);
+  assert.equal(els.youtubeCategory.value, "99");
 });
 
 test("치지직 카테고리 검색 결과에서 고르면 종류·식별자가 쌍으로 채워진다", async () => {
@@ -627,7 +694,6 @@ test("치지직 카테고리 검색 결과에서 고르면 종류·식별자가 
     },
   });
   state.accessToken = "at";
-  els.broadcastCategoryId = { value: "", dataset: {} };
   els.chzzkCategoryQuery.value = " 리그 ";
 
   await searchChzzkCategories();
@@ -642,16 +708,16 @@ test("치지직 카테고리 검색 결과에서 고르면 종류·식별자가 
   applyChzzkCategorySelection();
 
   assert.equal(els.chzzkCategoryType.value, "GAME");
-  assert.equal(els.broadcastCategoryId.value, "Marimo_League");
+  assert.equal(els.chzzkCategoryId.value, "Marimo_League");
   // 고른 값을 기본값 주입이 덮지 않도록 touched로 표시한다.
-  assert.equal(state.touchedBroadcastFields.has("category_id"), true);
-  assert.equal(state.touchedBroadcastFields.has("category_type"), true);
+  assert.equal(state.touchedBroadcastFields.has("chzzk:category_id"), true);
+  assert.equal(state.touchedBroadcastFields.has("chzzk:category_type"), true);
 
   // 안내 항목(value="")으로 되돌리면 아무것도 바뀌지 않아야 한다 — Number("")가
   // 0이라 그대로 색인하면 고르지 않은 첫 결과가 적용된다.
   els.chzzkCategoryResults.value = "";
   applyChzzkCategorySelection();
-  assert.equal(els.broadcastCategoryId.value, "Marimo_League");
+  assert.equal(els.chzzkCategoryId.value, "Marimo_League");
 });
 
 test("검색어가 비면 치지직 카테고리 검색을 호출하지 않는다", async () => {
@@ -663,76 +729,82 @@ test("검색어가 비면 치지직 카테고리 검색을 호출하지 않는�
   assert.equal(fetchCalls(), 0);
 });
 
-test("동시 송출 추가 대상은 기본값을 채우고 제목만 덮어 저장한 뒤 준비한다", async () => {
+test("방송 준비는 고른 플랫폼마다 카드 설정을 저장하고 준비한다", async () => {
   const calls = [];
-  const { prepareSimulcastTarget, state, els } = await loadApp({
+  const { prepareBroadcast, state, els } = await loadApp({
     fetchImpl: async (url, options) => {
-      const path = String(url);
-      calls.push({ path, method: options?.method || "GET", body: options?.body });
-      if (path.includes("/broadcast/defaults")) {
-        return jsonResponse({
-          title: "직전 제목",
-          category_type: "GAME",
-          category_id: "LoL",
-          tags: ["게임"],
-        });
+      calls.push({ path: String(url), method: options?.method || "GET", body: options?.body });
+      return jsonResponse({ session_id: "s-1", provider: "youtube", broadcast_resolution: "720p", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = true;
+  els.broadcastResolution.value = "720p";
+  els.youtubeTitle.value = "유튜브 제목";
+  els.youtubeMadeForKids.checked = false;
+  els.chzzkTitle.value = "치지직 제목";
+  els.chzzkCategoryId.value = "";
+  els.chzzkTags.value = "";
+  state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" };
+
+  await prepareBroadcast({ session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" });
+
+  const paths = calls.map((call) => `${call.method} ${call.path.replace("https://example.test", "")}`);
+  assert.deepEqual(paths, [
+    "PUT /sessions/s-1/broadcast?provider=youtube",
+    "PUT /sessions/s-1/broadcast?provider=chzzk",
+    "POST /sessions/s-1/stream/prepare",
+    "POST /sessions/s-1/stream/prepare",
+  ]);
+  assert.equal(JSON.parse(calls[1].body).title, "치지직 제목");
+  assert.deepEqual(JSON.parse(calls[2].body), { provider: "youtube" });
+  assert.deepEqual(JSON.parse(calls[3].body), { provider: "chzzk" });
+});
+
+test("방송 전 해상도를 바꿨으면 준비 전에 세션 해상도를 맞춘다", async () => {
+  const calls = [];
+  const { prepareBroadcast, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method || "GET", body: options?.body });
+      return jsonResponse({ session_id: "s-1", provider: "youtube", broadcast_resolution: "fhd", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  els.platformYoutube.checked = true;
+  els.broadcastResolution.value = "fhd";
+  els.youtubeTitle.value = "";
+  state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" };
+
+  await prepareBroadcast({ session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" });
+
+  assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-resolution$/);
+  assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd" });
+});
+
+test("한 플랫폼 준비가 실패해도 나머지는 준비하고 실패를 알린다", async () => {
+  const { prepareBroadcast, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      if (String(url).endsWith("/stream/prepare") && JSON.parse(options.body).provider === "chzzk") {
+        return jsonResponse({ error: { code: "streaming_not_connected" } }, 409);
       }
       return jsonResponse({ session_id: "s-1", provider: "youtube", targets: [] });
     },
   });
   state.accessToken = "access-token";
-  state.session = { session_id: "s-1", provider: "youtube" };
-  els.simulcastTitle.value = "동시 송출 제목";
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = true;
+  els.broadcastResolution.value = "720p";
+  els.youtubeTitle.value = "";
+  els.chzzkTitle.value = "";
+  els.chzzkCategoryId.value = "";
+  els.chzzkTags.value = "";
+  state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" };
 
-  await prepareSimulcastTarget("s-1", "chzzk");
+  await prepareBroadcast({ session_id: "s-1", provider: "youtube", broadcast_resolution: "720p" });
 
-  assert.equal(calls.length, 3);
-  assert.match(calls[0].path, /\/broadcast\/defaults\?provider=chzzk$/);
-  // 설정은 그 대상 앞으로 저장해야 한다 — provider를 빼면 기본 대상에 덮어쓴다.
-  assert.match(calls[1].path, /\/broadcast\?provider=chzzk$/);
-  assert.equal(calls[1].method, "PUT");
-  assert.deepEqual(JSON.parse(calls[1].body), {
-    title: "동시 송출 제목",
-    category_type: "GAME",
-    category_id: "LoL",
-    tags: ["게임"],
-  });
-  assert.match(calls[2].path, /\/stream\/prepare$/);
-  assert.deepEqual(JSON.parse(calls[2].body), { provider: "chzzk" });
-});
-
-test("추가 대상 준비가 실패해도 기본 대상 세션은 유지된다", async () => {
-  const { prepareSimulcastTarget, state, els } = await loadApp({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/broadcast/defaults")) {
-        return jsonResponse({ title: "직전 제목" });
-      }
-      return jsonResponse({ error: { code: "streaming_not_connected" } }, 409);
-    },
-  });
-  state.accessToken = "access-token";
-  const original = { session_id: "s-1", provider: "youtube" };
-  state.session = original;
-
-  await prepareSimulcastTarget("s-1", "chzzk");
-
-  assert.equal(state.session, original);
-  assert.match(els.broadcastSettingsDetail.textContent, /추가 대상\(chzzk\) 준비 실패/);
-});
-
-test("추가 대상이 기본 대상과 같으면 동시 송출 대상이 없다", async () => {
-  const { simulcastTarget, state, els } = await loadApp();
-  els.simulcastEnabled.checked = true;
-  els.simulcastProvider.value = "youtube";
-  state.session = { session_id: "s-1", provider: "youtube" };
-  assert.equal(simulcastTarget(), "");
-
-  els.simulcastProvider.value = "chzzk";
-  assert.equal(simulcastTarget(), "chzzk");
-
-  // 체크를 끄면 단독 송출이다 — 종전 경로가 그대로여야 한다.
-  els.simulcastEnabled.checked = false;
-  assert.equal(simulcastTarget(), "");
+  assert.equal(state.session.session_id, "s-1");
+  assert.match(els.broadcastSettingsDetail.textContent, /준비 실패 — 치지직: streaming_not_connected/);
 });
 
 test("개별 제어는 그 대상에만 건다", async () => {
@@ -837,25 +909,6 @@ test("준비를 거친 대상이 하나뿐이면 상단 버튼은 종전처럼 p
   assert.deepEqual(Array.from(broadcastControlTargets()), ["chzzk", "youtube"]);
 });
 
-test("추가 대상 경고는 조건이 풀리면 지워진다", async () => {
-  const { applySimulcastForm, state, els } = await loadApp();
-  state.session = { session_id: "s-1", provider: "youtube" };
-  els.simulcastEnabled.checked = true;
-  els.simulcastProvider.value = "youtube";
-
-  applySimulcastForm();
-  assert.match(els.broadcastSettingsDetail.textContent, /기본 대상과 같습니다/);
-
-  els.simulcastProvider.value = "chzzk";
-  applySimulcastForm();
-  assert.equal(els.broadcastSettingsDetail.textContent, "");
-
-  // 다른 메시지는 건드리지 않는다 — 이 영역은 저장 결과와 공유한다.
-  els.broadcastSettingsDetail.textContent = "저장됨";
-  applySimulcastForm();
-  assert.equal(els.broadcastSettingsDetail.textContent, "저장됨");
-});
-
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {
   const calls = [];
   const { createSession, state, els } = await loadApp({
@@ -868,14 +921,19 @@ test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보
     els[id] = { value: "", checked: false, dataset: {} };
   }
   state.accessToken = "access-token";
-  els.sessionProvider.value = "youtube";
+  els.platformYoutube.checked = false;
+  els.platformChzzk.checked = true;
   els.broadcastResolution.value = "fhd";
 
   await createSession();
 
   const create = calls.find((call) => call.method === "POST" && call.url.endsWith("/sessions"));
   assert.ok(create, "POST /sessions must be sent");
-  assert.equal(JSON.parse(create.body).broadcast_resolution, "fhd");
+  // 첫 번째로 고른 플랫폼이 세션의 기본 대상이다.
+  assert.deepEqual(
+    { provider: JSON.parse(create.body).provider, resolution: JSON.parse(create.body).broadcast_resolution },
+    { provider: "chzzk", resolution: "fhd" },
+  );
 });
 
 test("FHD 캡처는 1920x1080을 요청한다", async () => {
@@ -885,27 +943,6 @@ test("FHD 캡처는 1920x1080을 요청한다", async () => {
   const video = buildVideoConstraints();
   assert.equal(video.width.ideal, 1920);
   assert.equal(video.height.ideal, 1080);
-});
-
-test("방송 전 송출 방식 변경은 고른 해상도만 broadcast-resolution으로 보낸다", async () => {
-  const calls = [];
-  const { changeBroadcastMode, state, els } = await loadApp({
-    fetchImpl: async (url, options) => {
-      calls.push({ path: String(url), method: options?.method, body: options?.body });
-      return jsonResponse({ session_id: "s-1", broadcast_resolution: "fhd", targets: [] });
-    },
-  });
-  state.accessToken = "access-token";
-  state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p", targets: [] };
-  els.broadcastResolution.value = "fhd";
-
-  await changeBroadcastMode();
-
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-resolution$/);
-  assert.equal(calls[0].method, "PUT");
-  assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd" });
-  assert.equal(state.session.broadcast_resolution, "fhd");
 });
 
 test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast-mode로 보낸다", async () => {
@@ -928,9 +965,11 @@ test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast
     targets: [{ provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } }],
   };
   els.broadcastResolution.value = "720p";
-  els.simulcastEnabled.checked = true;
-  els.simulcastProvider.value = "chzzk";
-  els.simulcastTitle.value = "";
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = true;
+  els.chzzkTitle.value = "치지직 제목";
+  els.chzzkCategoryId.value = "";
+  els.chzzkTags.value = "";
 
   await changeBroadcastMode();
 
@@ -938,7 +977,43 @@ test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast
   assert.ok(modeCall, `broadcast-mode not called: ${calls.map((call) => call.path).join(", ")}`);
   assert.equal(modeCall.method, "PUT");
   assert.deepEqual(JSON.parse(modeCall.body), { resolution: "720p", targets: ["youtube", "chzzk"] });
-  // 새로 추가되는 치지직은 설정을 먼저 저장한다.
-  assert.ok(calls.findIndex((call) => call.path.includes("/broadcast?provider=chzzk")) < calls.indexOf(modeCall));
+  // 새로 추가되는 치지직은 카드 설정을 먼저 저장하고, 이미 라이브인 유튜브는 건드리지 않는다.
+  const chzzkSave = calls.find((call) => call.path.includes("/broadcast?provider=chzzk"));
+  assert.ok(chzzkSave && calls.indexOf(chzzkSave) < calls.indexOf(modeCall));
+  assert.equal(JSON.parse(chzzkSave.body).title, "치지직 제목");
+  assert.equal(calls.some((call) => call.path.includes("/broadcast?provider=youtube")), false);
   assert.equal(state.session.resolution_switch.status, "switching");
+});
+
+test("송출 방식 변경 버튼은 라이브 중에만 열린다", async () => {
+  const { updateButtons, state, els } = await loadApp();
+  state.accessToken = "access-token";
+  els.platformYoutube.checked = true;
+  els.broadcastResolution.value = "720p";
+  state.session = { session_id: "s-1", targets: [{ provider: "youtube", stream: { status: "streaming", broadcast_phase: "prepared" } }] };
+  updateButtons();
+  assert.equal(els.changeResolutionBtn.disabled, true);
+
+  state.session.targets[0].stream.broadcast_phase = "live";
+  updateButtons();
+  assert.equal(els.changeResolutionBtn.disabled, false);
+
+  // 전환 중에는 다시 누를 수 없다.
+  state.session.resolution_switch = { status: "switching" };
+  updateButtons();
+  assert.equal(els.changeResolutionBtn.disabled, true);
+});
+
+test("송출 방식 전환 진행은 상태가 바뀔 때만 알린다", async () => {
+  const { renderSwitchStatus, els } = await loadApp({ fetchImpl: async () => jsonResponse({ plan: "plasma" }) });
+  const switching = { status: "switching", resolution: "fhd", targets: ["youtube", "chzzk"], started_at: "t1" };
+  renderSwitchStatus({ resolution_switch: switching });
+  assert.match(els.broadcastSettingsDetail.textContent, /YouTube·치지직 FHD로 바꾸는 중/);
+
+  els.broadcastSettingsDetail.textContent = "다른 메시지";
+  renderSwitchStatus({ resolution_switch: switching });
+  assert.equal(els.broadcastSettingsDetail.textContent, "다른 메시지");
+
+  renderSwitchStatus({ resolution_switch: { ...switching, status: "done", failed_targets: [{ provider: "chzzk", code: "streaming_rate_limited" }] } });
+  assert.match(els.broadcastSettingsDetail.textContent, /실패: 치지직: streaming_rate_limited/);
 });

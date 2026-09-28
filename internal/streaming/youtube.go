@@ -37,6 +37,10 @@ var (
 	// ErrBroadcastNotReady: 라이브 전환 요건이 아직 안 갖춰진 상태.
 	// transition(live)는 바인딩된 스트림이 active여야 허용된다.
 	ErrBroadcastNotReady = errors.New("the YouTube broadcast is not ready to go live")
+	// ErrPlatformRateLimited: 사용자(채널)별 요청 한도에 걸린 상태. 짧은 시간에
+	// 방송을 많이 만들면 liveBroadcasts.insert가 403 "User requests exceed the rate
+	// limit."으로 거절한다(2026-09-28 실측, 하루 40여 개). 시간이 지나야 풀린다.
+	ErrPlatformRateLimited = errors.New("the streaming platform rate limit for this user was exceeded")
 	// ErrMadeForKidsRequired: 시청자층(아동용 여부)은 YouTube가 요구하는
 	// 법적 신고 항목이라 서버가 대신 추정하지 않는다 — 미선택이면 거절한다.
 	ErrMadeForKidsRequired = errors.New("made_for_kids must be specified by the user")
@@ -285,6 +289,41 @@ func (p *YouTubeProvider) videoCategory(ctx context.Context, accessToken, videoI
 		return ""
 	}
 	return response.Items[0].Snippet.CategoryID
+}
+
+// VideoCategory는 방송에 고를 수 있는 YouTube 카테고리다.
+type VideoCategory struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// Categories는 한국 지역에서 방송(동영상)에 지정할 수 있는 카테고리 목록이다.
+// videoCategories.list는 1 unit이고, 지정할 수 없는(assignable=false) 항목은 뺀다.
+func (p *YouTubeProvider) Categories(ctx context.Context, userID uuid.UUID) ([]VideoCategory, error) {
+	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Snippet struct {
+				Title      string `json:"title"`
+				Assignable bool   `json:"assignable"`
+			} `json:"snippet"`
+		} `json:"items"`
+	}
+	if err := p.do(ctx, accessToken, http.MethodGet,
+		p.apiBase+"/videoCategories?part=snippet&regionCode=KR&hl=ko", "", nil, &response); err != nil {
+		return nil, err
+	}
+	categories := make([]VideoCategory, 0, len(response.Items))
+	for _, item := range response.Items {
+		if item.Snippet.Assignable {
+			categories = append(categories, VideoCategory{ID: item.ID, Title: item.Snippet.Title})
+		}
+	}
+	return categories, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -619,6 +658,8 @@ func decodeYouTubeAPIError(response *http.Response) error {
 		switch item.Reason {
 		case "livePermissionBlocked":
 			return ErrLiveStreamingBlocked
+		case "userRequestsExceedRateLimit", "rateLimitExceeded":
+			return ErrPlatformRateLimited
 		case "errorStreamInactive", "invalidTransition":
 			// 스트림에 프레임이 아직 도착하지 않았거나 방송이 전환 가능한
 			// 상태가 아니다 — 재시도로 풀리는 상태라 별도 에러로 구분한다.

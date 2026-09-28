@@ -117,6 +117,7 @@ func New(
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
 	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast-resolution", requireUser(s.requireSessionOwner(s.handlePutBroadcastResolution)))
+	mux.Handle("GET /auth/youtube/categories", requireUser(http.HandlerFunc(s.handleGetYouTubeCategories)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast-mode", requireUser(s.requireSessionOwner(s.handlePutBroadcastMode)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
@@ -881,6 +882,9 @@ func (s *Server) prepareError(err error, sessionID string, providerName auth.Str
 		// 재시도로 복구되지 않는 상태 — "잠시 후 재시도"가 아니라
 		// "재연결"을 안내해야 하므로 일반 준비 실패(502)와 구분한다.
 		return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
+	case errors.Is(err, streaming.ErrPlatformRateLimited):
+		// 재시도로 곧바로 풀리지 않는다 — 일반 준비 실패(502)와 구분해 "잠시 뒤"를 안내한다.
+		return &apiError{Status: http.StatusTooManyRequests, Code: "streaming_rate_limited", Message: "The streaming platform is limiting requests from this account. Try again later.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, streaming.ErrLiveStreamingBlocked):
 		return &apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}}
 	default:

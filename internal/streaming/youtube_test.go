@@ -527,3 +527,45 @@ func TestPrepareRequiresConnection(t *testing.T) {
 		t.Fatalf("error = %v, want ErrStreamingNotConnected", err)
 	}
 }
+
+func TestYouTubeCategoriesKeepsAssignableOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/videoCategories" || r.URL.Query().Get("regionCode") != "KR" || r.Header.Get("Authorization") != "Bearer at-value" {
+			t.Errorf("unexpected request %s %s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"items":[
+			{"id":"20","snippet":{"title":"게임","assignable":true}},
+			{"id":"18","snippet":{"title":"단편 영화","assignable":false}},
+			{"id":"22","snippet":{"title":"인물/블로그","assignable":true}}]}`))
+	}))
+	defer server.Close()
+	provider, err := NewYouTubeProvider(stubTokens{token: "at-value"}, newMemoryStore(), testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+	categories, err := provider.Categories(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(categories) != 2 || categories[0] != (VideoCategory{ID: "20", Title: "게임"}) || categories[1].ID != "22" {
+		t.Fatalf("categories = %+v, want assignable 20, 22", categories)
+	}
+}
+
+// 방송을 짧은 시간에 많이 만들면 사용자별 요청 한도로 거절된다(2026-09-28 실측).
+func TestYouTubeRateLimitIsDistinguished(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":403,"message":"User requests exceed the rate limit.","errors":[{"reason":"userRequestsExceedRateLimit"}]}}`))
+	}))
+	defer server.Close()
+	provider, err := NewYouTubeProvider(stubTokens{token: "at-value"}, newMemoryStore(), testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+	if _, err := provider.Categories(context.Background(), uuid.New()); !errors.Is(err, ErrPlatformRateLimited) {
+		t.Fatalf("error = %v, want ErrPlatformRateLimited", err)
+	}
+}

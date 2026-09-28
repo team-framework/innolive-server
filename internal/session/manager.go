@@ -1165,7 +1165,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		return nil, ErrStreamActive
 	}
 	egressCtx, egressCancel := context.WithCancel(s.baseCtx)
-	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
+	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID, "provider", provider), m.metrics, media.TranscoderOptions{
 		Gate:               m.spawnGate,
 		WireFormat:         m.cfg.AIWireFormat,
 		EgressVideoEncoder: m.cfg.EgressVideoEncoder,

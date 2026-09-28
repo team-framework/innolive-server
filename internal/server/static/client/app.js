@@ -122,6 +122,7 @@ function bindElements() {
     "startBtn",
     "goLiveBtn",
     "pauseBroadcastBtn",
+    "changeResolutionBtn",
     "resumeBroadcastBtn",
     "stopBroadcastBtn",
     "healthBtn",
@@ -270,6 +271,7 @@ function bindEvents() {
   els.startBtn.addEventListener("click", () => void startWebRtc());
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
+  els.changeResolutionBtn.addEventListener("click", () => void changeResolution());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
@@ -1915,6 +1917,27 @@ async function pauseBroadcast() {
   });
 }
 
+// changeResolution은 "송출 해상도" 선택값으로 세션 해상도를 바꾼다(#283). 서버는
+// 모든 송출이 멈춘 동안에만 받고, 재개할 때 새 해상도로 다시 연결한다.
+async function changeResolution() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("해상도를 바꿀 세션이 없습니다.");
+  }
+  await runBusy(async () => {
+    const resolution = els.broadcastResolution.value;
+    const session = await apiFetch(`/sessions/${sessionId}/broadcast-resolution`, {
+      method: "PUT",
+      body: JSON.stringify({ resolution }),
+    });
+    setCurrentSession(session);
+    logEvent("ok", "Broadcast resolution changed", {
+      session_id: sessionId,
+      broadcast_resolution: session.broadcast_resolution,
+    });
+  });
+}
+
 // stopBroadcast는 YouTube 송출만 끝낸다. 세션과 WebRTC 미리보기는 그대로
 // 남으므로, 설정을 고쳐 곧바로 다음 방송을 준비할 수 있다.
 async function stopBroadcast() {
@@ -3354,6 +3377,8 @@ function updateButtons() {
     state.busy ||
     !state.session?.session_id ||
     streamStatus !== "paused";
+  // 해상도 변경은 세션이 있으면 열어 둔다 — 송출 중이면 서버가 409로 막는다.
+  els.changeResolutionBtn.disabled = state.busy || !state.session?.session_id;
   // 종료는 egress가 살아 있는 모든 상태에서 열어 둔다 — 재연결·일시 중지
   // 중에도 방송을 끝낼 수 있어야 한다. 서버가 ErrStreamNotActive로 보는
   // idle·stopped만 막는다.

@@ -13,6 +13,7 @@ const buttonKeys = [
   "startBtn",
   "goLiveBtn",
   "pauseBroadcastBtn",
+  "changeResolutionBtn",
   "resumeBroadcastBtn",
   "stopBroadcastBtn",
   "healthBtn",
@@ -162,7 +163,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeResolution, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
     context,
     { filename: appPath },
   );
@@ -884,4 +885,25 @@ test("FHD 캡처는 1920x1080을 요청한다", async () => {
   const video = buildVideoConstraints();
   assert.equal(video.width.ideal, 1920);
   assert.equal(video.height.ideal, 1080);
+});
+
+test("해상도 변경 버튼은 고른 송출 해상도를 PUT으로 보내고 세션을 갱신한다", async () => {
+  const calls = [];
+  const { changeResolution, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method, body: options?.body });
+      return jsonResponse({ session_id: "s-1", broadcast_resolution: "fhd", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p", targets: [] };
+  els.broadcastResolution.value = "fhd";
+
+  await changeResolution();
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-resolution$/);
+  assert.equal(calls[0].method, "PUT");
+  assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd" });
+  assert.equal(state.session.broadcast_resolution, "fhd");
 });

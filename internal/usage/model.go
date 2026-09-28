@@ -64,13 +64,26 @@ type Broadcast struct {
 
 func (Broadcast) TableName() string { return "usage_broadcasts" }
 
+// Pause는 송출 하나의 일시정지 구간이다(#274). 방송 시간 차감은 시점별로 "송출
+// 중이고 멈추지 않은 대상 수"로 유닛을 정하므로, 합계(PausedSeconds)가 아니라
+// 구간이 필요하다. ResumedAt이 비어 있으면 아직 멈춰 있다.
+type Pause struct {
+	ID          uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	BroadcastID uuid.UUID  `gorm:"type:uuid;not null;index"`
+	Broadcast   *Broadcast `gorm:"foreignKey:BroadcastID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	PausedAt    time.Time  `gorm:"not null"`
+	ResumedAt   *time.Time
+}
+
+func (Pause) TableName() string { return "usage_pauses" }
+
 // AutoMigrate는 DATABASE_MIGRATION_MODE=auto용이다. users 테이블을 참조하므로
 // auth.AutoMigrate 뒤에 부른다.
 func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 	if db == nil {
 		return errors.New("GORM database is nil")
 	}
-	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}); err != nil {
+	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}, &Pause{}); err != nil {
 		return fmt.Errorf("auto migrate usage schema: %w", err)
 	}
 	return nil

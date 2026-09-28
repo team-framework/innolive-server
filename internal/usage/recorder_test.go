@@ -82,6 +82,20 @@ func TestPostgresRecorderLifecycle(t *testing.T) {
 		gotBroadcast.PausedSeconds != 15 || gotBroadcast.Source != SourceLive {
 		t.Fatalf("broadcast row = %+v", gotBroadcast)
 	}
+	// 일시정지 구간(#274): 재개로 닫힌 구간 하나, 멈춘 채 끝나 종료 시각으로 닫힌 구간 하나.
+	var pauses []Pause
+	if err := db.Order("paused_at").Find(&pauses, "broadcast_id = ?", broadcastID).Error; err != nil {
+		t.Fatal(err)
+	}
+	want := [][2]time.Duration{{30 * time.Second, 40 * time.Second}, {50 * time.Second, 55 * time.Second}}
+	if len(pauses) != len(want) {
+		t.Fatalf("pause rows = %+v, want %d", pauses, len(want))
+	}
+	for i, pause := range pauses {
+		if !pause.PausedAt.Equal(start.Add(want[i][0])) || pause.ResumedAt == nil || !pause.ResumedAt.Equal(start.Add(want[i][1])) {
+			t.Fatalf("pause %d = %+v, want %v", i, pause, want[i])
+		}
+	}
 }
 
 // TestPostgresRecorderGuestAndWithdrawal: 게스트는 user_id 없이 남고, 회원이

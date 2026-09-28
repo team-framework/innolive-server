@@ -841,3 +841,82 @@ dd {
   white-space: nowrap;
   color: rgba(100, 116, 139, 1);
 }
+
+/* 송출 구성(#302) — 플랫폼을 동등한 카드로 두고, 고른 카드만 상세 설정을 편다. */
+.plan-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.broadcast-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.broadcast-mode-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding-bottom: 8px;
+}
+
+.broadcast-mode-hint[data-state="error"] {
+  color: var(--danger);
+}
+
+.broadcast-settings-copy .broadcast-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.platform-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.platform-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-strong);
+}
+
+.platform-card[data-selected="true"] {
+  border-color: var(--accent);
+}
+
+.platform-toggle {
+  font-size: 1rem;
+}
+
+.platform-settings {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.platform-settings textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 11px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+@media (max-width: 900px) {
+  .platform-cards {
+    grid-template-columns: 1fr;
+  }
+}

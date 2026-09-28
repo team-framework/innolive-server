@@ -79,6 +79,14 @@ const state = {
   // 방송 설정을 한 번이라도 저장했는지. 미협상 세션이 회수돼 새 세션으로 이어갈
   // 때(#147) 저장했던 설정도 함께 사라지므로 폼 값을 다시 보내야 한다.
   broadcastSettingsSaved: false,
+  // 요금제·이번 달 사용량(GET /users/me/usage). 송출 방식별 허용·남은 시간을 쓴다.
+  usage: null,
+  // 이 세션에서 직전 방송 기본값을 채운 플랫폼. 나중에 고른 플랫폼도 한 번 채운다.
+  platformDefaultsLoaded: new Set(),
+  // YouTube 카테고리 드롭다운에 실린 id. 기본값이 목록 밖이면 항목을 더한다.
+  youtubeCategoryIds: [],
+  // 마지막으로 알린 송출 방식 전환(status·시작 시각). 폴링마다 같은 알림을 반복하지 않는다.
+  lastSwitchNotice: "",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -86,8 +94,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeDefaults();
   initializeRuntimeNotice();
   bindEvents();
-  applyProviderForm(els.sessionProvider.value);
-  applySimulcastForm();
+  applyPlatformSelection();
   resetRemoteStream();
   renderAuth();
   updatePeerUi();
@@ -117,7 +124,6 @@ function bindElements() {
     "cameraSelect",
     "resolutionSelect",
     "sendAudio",
-    "madeForKids",
     "autoPoll",
     "startBtn",
     "goLiveBtn",
@@ -133,11 +139,6 @@ function bindElements() {
     "deleteSessionBtn",
     "broadcastSettingsState",
     "broadcastSettingsDetail",
-    "broadcastTitle",
-    "broadcastPrivacy",
-    "broadcastCategoryId",
-    "broadcastThumbnail",
-    "broadcastDescription",
     "saveBroadcastBtn",
     "runtimeNotice",
     "servedClientLink",
@@ -183,34 +184,36 @@ function bindElements() {
     "chzzkCompleteRow",
     "completeChzzkBtn",
     "chzzkDetail",
-    "sessionProvider",
     "broadcastResolution",
     "chzzkCategoryType",
-    "chzzkCategoryTypeRow",
     "chzzkTags",
-    "chzzkTagsRow",
-    "chzzkCategorySearchRow",
     "chzzkCategoryQuery",
     "chzzkCategorySearchBtn",
     "chzzkCategoryResults",
-    "broadcastCategoryIdRow",
-    "broadcastPrivacyRow",
-    "broadcastThumbnailRow",
-    "broadcastDescriptionRow",
-    "madeForKidsRow",
-    "simulcastEnabled",
-    "simulcastProvider",
-    "simulcastProviderRow",
-    "simulcastTitle",
-    "simulcastTitleRow",
-    "simulcastMadeForKids",
-    "simulcastMadeForKidsRow",
     "targetList",
     "targetListEmpty",
-    "broadcastYoutubeAccount",
+    "planSummary",
+    "planBadge",
+    "planUsage",
+    "broadcastModeHint",
+    "platformYoutube",
+    "platformChzzk",
+    "youtubeCard",
+    "chzzkCard",
+    "youtubeSettings",
+    "chzzkSettings",
+    "youtubeTitle",
+    "youtubePrivacy",
+    "youtubeCategory",
+    "youtubeThumbnail",
+    "youtubeDescription",
+    "youtubeMadeForKids",
+    "chzzkTitle",
+    "chzzkCategoryId",
+    "broadcastAccounts",
+    "broadcastPlatformState",
     "broadcastVideoInput",
     "broadcastRtmpState",
-    "broadcastYoutubeState",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -246,12 +249,19 @@ function bindEvents() {
   els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
-  els.sessionProvider.addEventListener("change", () => {
-    applyProviderForm(els.sessionProvider.value);
-    applySimulcastForm();
+  for (const provider of PLATFORMS) {
+    platformToggle(provider).addEventListener("change", () => {
+      applyPlatformSelection();
+      // 세션이 있는 채로 새로 고른 플랫폼은 그 플랫폼의 직전 방송 값으로 채운다.
+      if (platformToggle(provider).checked && state.session?.session_id) {
+        void applyPlatformDefaults(state.session.session_id, provider);
+      }
+    });
+  }
+  els.broadcastResolution.addEventListener("change", () => {
+    renderModeHint();
+    updateButtons();
   });
-  els.simulcastEnabled.addEventListener("change", () => applySimulcastForm());
-  els.simulcastProvider.addEventListener("change", () => applySimulcastForm());
   els.chzzkCategorySearchBtn.addEventListener("click", () =>
     void searchChzzkCategories().catch(() => null),
   );
@@ -292,10 +302,12 @@ function bindEvents() {
   );
   // select·checkbox는 값이 늘 차 있어 "비었는지"로 사용자 입력을 가려낼 수
   // 없다 — 건드린 필드를 직접 표시해둔다.
-  for (const [field, element] of Object.entries(broadcastFormFields())) {
-    const markTouched = () => state.touchedBroadcastFields.add(field);
-    element.addEventListener("input", markTouched);
-    element.addEventListener("change", markTouched);
+  for (const provider of PLATFORMS) {
+    for (const [field, element] of Object.entries(platformFormFields(provider))) {
+      const markTouched = () => state.touchedBroadcastFields.add(`${provider}:${field}`);
+      element.addEventListener("input", markTouched);
+      element.addEventListener("change", markTouched);
+    }
   }
   els.clearLogBtn.addEventListener("click", () => {
     els.eventLog.replaceChildren();
@@ -666,7 +678,7 @@ async function signIn() {
       renderAuth();
       logEvent("ok", "Signed in", { email, expires_in: pair?.expires_in });
       await refreshReferenceFace({ quiet: true }).catch(() => null);
-      await refreshChzzkAccount().catch(() => null);
+      await afterSignIn();
     } catch (error) {
       clearAuthState();
       // runBusy가 실패를 기록하므로, 한 번만 표시되게 다시 던진다.
@@ -804,6 +816,8 @@ function renderAuth() {
   els.connectChzzkBtn.hidden = !signedIn;
   if (!signedIn) {
     els.youtubeDetail.hidden = true;
+    state.usage = null;
+    els.planSummary.hidden = true;
     resetChzzkUi();
     resetBroadcastStatus();
   }
@@ -827,10 +841,10 @@ function setBroadcastStatus(element, text, visualState = "idle") {
 }
 
 function resetBroadcastStatus() {
-  setBroadcastStatus(els.broadcastYoutubeAccount, "연결 전");
+  setBroadcastStatus(els.broadcastAccounts, "연결 전");
   setBroadcastStatus(els.broadcastVideoInput, "WebRTC 시작 전");
   setBroadcastStatus(els.broadcastRtmpState, "시작 전");
-  setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
+  setBroadcastStatus(els.broadcastPlatformState, "확인 전");
   setBroadcastStatus(els.broadcastSettingsState, "저장 전");
   els.broadcastSettingsDetail.textContent = "세션을 만든 뒤 저장할 수 있습니다.";
 }
@@ -841,7 +855,7 @@ function renderBroadcastStreamStatus(stream) {
   const reconnectDetail = attempts > 0 ? ` · ${attempts}회 재시도` : "";
   if (!status) {
     setBroadcastStatus(els.broadcastRtmpState, "시작 전");
-    setBroadcastStatus(els.broadcastYoutubeState, "확인 전");
+    setBroadcastStatus(els.broadcastPlatformState, "확인 전");
     return;
   }
 
@@ -850,17 +864,17 @@ function renderBroadcastStreamStatus(stream) {
     // broadcast_phase는 egress가 알 수 없는 YouTube 쪽 위치다(#142) —
     // 송출 중이어도 라이브 전환 전이면 시청자에게 보이지 않는다.
     if (stream?.broadcast_phase === "live") {
-      setBroadcastStatus(els.broadcastYoutubeState, "라이브 중", "ok");
+      setBroadcastStatus(els.broadcastPlatformState, "라이브 중", "ok");
     } else if (stream?.broadcast_phase === "going_live") {
-      setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+      setBroadcastStatus(els.broadcastPlatformState, "라이브 전환 중", "warn");
     } else {
-      setBroadcastStatus(els.broadcastYoutubeState, "준비됨 · 라이브 전환 대기", "warn");
+      setBroadcastStatus(els.broadcastPlatformState, "준비됨 · 라이브 전환 대기", "warn");
     }
     return;
   }
   if (status === "reconfiguring") {
     setBroadcastStatus(els.broadcastRtmpState, "입력 규격 변경 중", "warn");
-    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 재구성 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "RTMP 재구성 중", "warn");
     return;
   }
   if (status === "idle" || status === "reconnecting") {
@@ -870,7 +884,7 @@ function renderBroadcastStreamStatus(stream) {
       "warn",
     );
     setBroadcastStatus(
-      els.broadcastYoutubeState,
+      els.broadcastPlatformState,
       status === "reconnecting" ? "RTMP 재연결 대기" : "RTMP 연결 대기",
       "warn",
     );
@@ -878,36 +892,36 @@ function renderBroadcastStreamStatus(stream) {
   }
   if (status === "paused") {
     setBroadcastStatus(els.broadcastRtmpState, "일시 중지됨", "warn");
-    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 연결 유지 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "RTMP 연결 유지 중", "warn");
     return;
   }
   if (status === "paused_reconfiguring") {
     setBroadcastStatus(els.broadcastRtmpState, "일시 중지 준비 중", "warn");
-    setBroadcastStatus(els.broadcastYoutubeState, "새 규격으로 RTMP 재구성 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "새 규격으로 RTMP 재구성 중", "warn");
     return;
   }
   if (status === "paused_reconnecting") {
     setBroadcastStatus(els.broadcastRtmpState, `일시 중지 화면 재연결 중${reconnectDetail}`, "warn");
-    setBroadcastStatus(els.broadcastYoutubeState, "RTMP 재연결 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "RTMP 재연결 중", "warn");
     return;
   }
   if (status === "stopped") {
     if (stream?.stop_reason === "rtmp_reconnect_exhausted") {
       setBroadcastStatus(els.broadcastRtmpState, "RTMP 재연결 실패로 종료됨", "error");
-      setBroadcastStatus(els.broadcastYoutubeState, "다시 송출할 수 있습니다", "error");
+      setBroadcastStatus(els.broadcastPlatformState, "다시 송출할 수 있습니다", "error");
       return;
     }
     if (stream?.stop_reason === "reconnect_input_timeout") {
       setBroadcastStatus(els.broadcastRtmpState, "입력 프레임 대기 시간 초과로 종료됨", "error");
-      setBroadcastStatus(els.broadcastYoutubeState, "다시 송출할 수 있습니다", "error");
+      setBroadcastStatus(els.broadcastPlatformState, "다시 송출할 수 있습니다", "error");
       return;
     }
     setBroadcastStatus(els.broadcastRtmpState, "중지됨");
-    setBroadcastStatus(els.broadcastYoutubeState, "종료 반영 대기");
+    setBroadcastStatus(els.broadcastPlatformState, "종료 반영 대기");
     return;
   }
   setBroadcastStatus(els.broadcastRtmpState, status, "warn");
-  setBroadcastStatus(els.broadcastYoutubeState, "상태 확인 중", "warn");
+  setBroadcastStatus(els.broadcastPlatformState, "상태 확인 중", "warn");
 }
 
 // connectYoutube는 GIS 팝업으로 인가 코드를 받아 서버에 전달해 YouTube 계정을
@@ -915,12 +929,12 @@ function renderBroadcastStreamStatus(stream) {
 // 코드 교환·토큰 보관은 전부 서버 몫이라 브라우저에는 인가 코드만 스친다.
 async function connectYoutube() {
   if (!state.accessToken) {
-    setBroadcastStatus(els.broadcastYoutubeAccount, "로그인 필요", "error");
+    setBroadcastStatus(els.broadcastAccounts, "로그인 필요", "error");
     setYoutubeDetail("먼저 로그인하세요.", true);
     return;
   }
   if (!window.google?.accounts?.oauth2) {
-    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
+    setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
     setYoutubeDetail("Google 스크립트를 아직 불러오지 못했습니다. 잠시 후 다시 시도하세요.", true);
     return;
   }
@@ -928,11 +942,11 @@ async function connectYoutube() {
   try {
     config = await apiFetch("/auth/youtube/config");
   } catch (error) {
-    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 설정 실패", "error");
+    setBroadcastStatus(els.broadcastAccounts, "연결 설정 실패", "error");
     setYoutubeDetail(`서버에서 YouTube 연동 설정을 받지 못했습니다: ${error.message}`, true);
     return;
   }
-  setBroadcastStatus(els.broadcastYoutubeAccount, "연결 중", "warn");
+  setBroadcastStatus(els.broadcastAccounts, "연결 중", "warn");
   setYoutubeDetail("Google 팝업에서 계정을 선택하고 동의해 주세요...");
   const codeClient = window.google.accounts.oauth2.initCodeClient({
     client_id: config.web_client_id,
@@ -940,7 +954,7 @@ async function connectYoutube() {
     ux_mode: "popup",
     callback: (response) => {
       if (!response.code) {
-        setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
+        setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
         setYoutubeDetail("Google이 인가 코드를 돌려주지 않았습니다.", true);
         return;
       }
@@ -955,17 +969,17 @@ async function connectYoutube() {
           });
           const title = result?.channel?.title || result?.channel?.id || "알 수 없는 채널";
           setYoutubeDetail(`YouTube 연결됨: ${title}`);
-          setBroadcastStatus(els.broadcastYoutubeAccount, title, "ok");
           logEvent("ok", "YouTube account connected", result);
+          await refreshStreamingAccounts().catch(() => null);
         } catch (error) {
-          setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
+          setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
           setYoutubeDetail(`연결 실패: ${error.message}`, true);
           logEvent("error", "YouTube connect failed", { message: error.message });
         }
       })();
     },
     error_callback: (error) => {
-      setBroadcastStatus(els.broadcastYoutubeAccount, "연결 실패", "error");
+      setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
       setYoutubeDetail(`Google 팝업 오류: ${error?.type || JSON.stringify(error)}`, true);
     },
   });
@@ -1080,26 +1094,37 @@ async function completeChzzkConnect() {
     return;
   }
   // 연결은 이미 끝났다 — 목록 갱신 실패를 연결 실패로 보이게 하지 않는다.
-  await refreshChzzkAccount().catch(() => null);
+  await refreshStreamingAccounts().catch(() => null);
 }
 
-// refreshChzzkAccount는 연결 목록에서 치지직 항목만 읽어 표시한다. 유튜브 표시는
-// prepare 결과로 채워지는 기존 경로 그대로 둔다.
-async function refreshChzzkAccount() {
+// refreshStreamingAccounts는 연결된 플랫폼 계정을 읽어 방송 상태에 표시하고, 치지직
+// 연결 UI와 YouTube 카테고리 목록을 맞춘다.
+async function refreshStreamingAccounts() {
   const accounts = await apiFetch("/auth/streaming/accounts");
   if (!state.accessToken) {
     return; // 응답을 기다리는 사이 로그아웃됐다.
   }
-  const chzzk = Array.isArray(accounts) ? accounts.find((a) => a?.provider === "chzzk") : null;
-  els.disconnectChzzkBtn.hidden = !chzzk;
-  if (!chzzk) {
-    return;
-  }
-  const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
-  setChzzkDetail(
-    chzzk.reconnect_required ? `치지직 연결됨: ${title} (재연결 필요)` : `치지직 연결됨: ${title}`,
-    Boolean(chzzk.reconnect_required),
+  const list = Array.isArray(accounts) ? accounts : [];
+  const describe = (account) =>
+    `${platformLabel(account.provider)}: ${account.channel_title || account.channel_id || "연결됨"}` +
+    (account.reconnect_required ? " (재연결 필요)" : "");
+  setBroadcastStatus(
+    els.broadcastAccounts,
+    list.length ? list.map(describe).join(" · ") : "연결된 계정 없음",
+    list.length ? "ok" : "warn",
   );
+  const chzzk = list.find((account) => account?.provider === "chzzk");
+  els.disconnectChzzkBtn.hidden = !chzzk;
+  if (chzzk) {
+    const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
+    setChzzkDetail(
+      chzzk.reconnect_required ? `치지직 연결됨: ${title} (재연결 필요)` : `치지직 연결됨: ${title}`,
+      Boolean(chzzk.reconnect_required),
+    );
+  }
+  if (list.some((account) => account?.provider === "youtube")) {
+    await loadYoutubeCategories();
+  }
 }
 
 async function disconnectChzzk() {
@@ -1114,132 +1139,156 @@ async function disconnectChzzk() {
   }
 }
 
-// applyProviderForm은 선택한 플랫폼에 맞춰 방송 설정 폼을 전환한다. 치지직은
-// category_type·tags를 쓰고 유튜브 전용 필드(공개범위·카테고리ID·썸네일·설명·
-// 아동용)는 숨긴다.
-function applyProviderForm(provider) {
-  const chzzk = provider === "chzzk";
-  // category_id 입력은 두 플랫폼이 공유한다. 플랫폼을 바꾸면 이전 플랫폼용
-  // 값(유튜브 숫자 id ↔ 치지직 문자열 id)이 남아 저장 시 어긋나므로 비우고
-  // touched 표식도 지운다 — 새 기본값이 다시 채우게 한다.
-  els.broadcastCategoryId.value = "";
-  state.touchedBroadcastFields.delete("category_id");
-  els.chzzkCategoryTypeRow.hidden = !chzzk;
-  els.chzzkCategorySearchRow.hidden = !chzzk;
-  els.chzzkTagsRow.hidden = !chzzk;
-  // 카테고리 ID의 모양이 플랫폼마다 다르다 — 유튜브는 숫자, 치지직은 검색으로만
-  // 얻는 영문 식별자다. 안내 문구도 같이 바꾼다.
-  els.broadcastCategoryId.placeholder = chzzk
-    ? "검색해서 고르세요 (예: League_of_Legends)"
-    : "예: 20 (Gaming)";
-  clearChzzkCategoryResults();
-  // category_id는 양쪽 다 쓰므로 건드리지 않는다.
-  els.broadcastPrivacyRow.hidden = chzzk;
-  els.broadcastThumbnailRow.hidden = chzzk;
-  els.broadcastDescriptionRow.hidden = chzzk;
-  els.madeForKidsRow.hidden = chzzk;
+// ── 송출 구성(#302) ───────────────────────────────────────────────
+// 플랫폼은 동등한 카드다. 고른 플랫폼마다 prepare를 한 번씩 부르고 golive를 한 번
+// 부르는 것이 곧 단독·동시 송출이다(#233). 순서는 고정(YouTube, 치지직)이고 첫
+// 번째가 세션의 기본 대상이 된다 — 서버는 세션마다 기본 대상 하나를 요구한다.
+const PLATFORMS = ["youtube", "chzzk"];
+const PLATFORM_LABELS = { youtube: "YouTube", chzzk: "치지직" };
+const MODE_LABELS = {
+  "720p_single": "720p 단독",
+  fhd_single: "FHD 단독",
+  "720p_multi": "720p 동시",
+  fhd_multi: "FHD 동시",
+};
+
+function platformLabel(provider) {
+  return PLATFORM_LABELS[provider] || provider;
 }
 
-// ── 동시 송출(#260) ───────────────────────────────────────────────
-// 서버는 대상마다 prepare를 한 번씩 부르고 golive를 한 번 부르는 것으로
-// 동시 송출을 표현한다(#233). 클라이언트도 같은 모양으로 맞춘다.
+function platformToggle(provider) {
+  return provider === "chzzk" ? els.platformChzzk : els.platformYoutube;
+}
 
-// simulcastTargets는 기본 대상과 추가 대상이 겹치지 않을 때만 추가 대상을
-// 돌려준다 — 같은 플랫폼을 두 번 준비하면 서버가 409로 거절한다.
-function simulcastTarget() {
-  if (!els.simulcastEnabled.checked) {
-    return "";
+function selectedPlatforms() {
+  return PLATFORMS.filter((provider) => platformToggle(provider).checked);
+}
+
+// applyPlatformSelection은 고른 카드만 상세 설정을 펴고 송출 방식 안내를 갱신한다.
+function applyPlatformSelection() {
+  for (const provider of PLATFORMS) {
+    const selected = platformToggle(provider).checked;
+    (provider === "chzzk" ? els.chzzkSettings : els.youtubeSettings).hidden = !selected;
+    (provider === "chzzk" ? els.chzzkCard : els.youtubeCard).dataset.selected = String(selected);
   }
-  const secondary = els.simulcastProvider.value;
-  return secondary === sessionProviderValue() ? "" : secondary;
+  renderModeHint();
+  updateButtons();
 }
 
-function sessionProviderValue() {
-  return state.session?.provider || els.sessionProvider.value;
+function broadcastModeFor(resolution, count) {
+  return `${resolution === "fhd" ? "fhd" : "720p"}_${count > 1 ? "multi" : "single"}`;
 }
 
-// applySimulcastForm은 추가 대상 입력을 상황에 맞게 보인다. 추가 대상이
-// 유튜브일 때만 made_for_kids를 묻는다 — 법적 신고 항목이라 서버가 대신
-// 정하지 않으므로, 비워두면 그 대상의 prepare가 400으로 막힌다.
-function applySimulcastForm() {
-  const enabled = els.simulcastEnabled.checked;
-  els.simulcastProviderRow.hidden = !enabled;
-  els.simulcastTitleRow.hidden = !enabled;
-  const secondary = simulcastTarget();
-  els.simulcastMadeForKidsRow.hidden = !enabled || secondary !== "youtube";
-  if (enabled && !secondary) {
-    els.broadcastSettingsDetail.textContent = SIMULCAST_SAME_PROVIDER_NOTICE;
+// modeAvailability는 고른 구성이 플랜에서 허용되는지와 안내 문구다. 사용량을 아직
+// 못 읽었으면 막지 않는다 — 서버가 최종 판정한다(403).
+function modeAvailability() {
+  const platforms = selectedPlatforms();
+  if (!platforms.length) {
+    return { allowed: false, text: "플랫폼을 하나 이상 고르세요." };
+  }
+  const mode = broadcastModeFor(els.broadcastResolution.value, platforms.length);
+  const label = MODE_LABELS[mode];
+  const entry = state.usage?.available_by_mode?.find((item) => item.mode === mode);
+  if (!entry) {
+    return { allowed: true, text: `${label} 송출` };
+  }
+  if (!entry.allowed) {
+    return { allowed: false, text: `${planLabel(state.usage.plan)} 플랜은 ${label} 송출을 쓸 수 없습니다.` };
+  }
+  const remaining = entry.seconds == null ? "무제한" : `${formatDuration(entry.seconds)} 가능`;
+  return { allowed: true, text: `${label} · ${entry.multiplier}배 차감 · 이 방식으로 ${remaining}` };
+}
+
+function renderModeHint() {
+  const { allowed, text } = modeAvailability();
+  els.broadcastModeHint.textContent = text;
+  els.broadcastModeHint.dataset.state = allowed ? "idle" : "error";
+}
+
+function planLabel(plan) {
+  return plan ? plan.charAt(0).toUpperCase() + plan.slice(1) : "알 수 없음";
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.max(0, Math.floor(Number(seconds || 0) / 60));
+  const hours = Math.floor(minutes / 60);
+  return hours ? `${hours}시간 ${minutes % 60}분` : `${minutes}분`;
+}
+
+// afterSignIn은 로그인 직후 계정에 딸린 표시(플랜·연결 계정·카테고리)를 채운다.
+async function afterSignIn() {
+  await refreshStreamingAccounts().catch(() => null);
+  await refreshPlan();
+}
+
+// refreshPlan은 요금제와 이번 달 방송 시간을 읽어 표시한다.
+async function refreshPlan() {
+  if (!state.accessToken) {
     return;
   }
-  // 조건이 풀렸는데 경고가 남으면 설정이 정상인데도 잘못된 것으로 읽힌다.
-  // 이 영역은 저장 결과·준비 실패 메시지와 공유하므로 자기 문구일 때만 지운다.
-  if (els.broadcastSettingsDetail.textContent === SIMULCAST_SAME_PROVIDER_NOTICE) {
-    els.broadcastSettingsDetail.textContent = "";
-  }
-}
-
-const SIMULCAST_SAME_PROVIDER_NOTICE =
-  "추가 대상이 세션의 기본 대상과 같습니다 — 다른 플랫폼을 고르세요.";
-
-// saveSimulcastSettings는 추가 대상의 방송 설정을 저장한다. 상세 설정은
-// 직전 방송 기본값을 그대로 쓰고 제목만 덮는다 — 이 클라이언트는 검증용이고,
-// 추가 대상의 상세 설정이 필요하면 그 플랫폼을 기본 대상으로 세션을 만든다.
-async function saveSimulcastSettings(sessionId, provider) {
-  let defaults = {};
   try {
-    defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}`);
+    state.usage = await apiFetch("/users/me/usage");
   } catch (error) {
-    logEvent("warn", "Simulcast defaults load failed", {
-      session_id: sessionId,
-      provider,
-      message: error?.message,
-    });
+    state.usage = null;
+    logEvent("warn", "Usage load failed", { message: error?.message });
   }
-  const title = els.simulcastTitle.value.trim() || defaults.title || "";
-  const payload =
-    provider === "chzzk"
-      ? {
-          title,
-          category_type: defaults.category_type || "",
-          category_id: defaults.category_id || "",
-          tags: defaults.tags || [],
-        }
-      : {
-          title,
-          description: defaults.description || "",
-          privacy: defaults.privacy || "private",
-          made_for_kids: els.simulcastMadeForKids.checked,
-          category_id: defaults.category_id || "",
-        };
-  return apiFetch(`/sessions/${sessionId}/broadcast?provider=${provider}`, {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
+  renderPlan();
+  renderModeHint();
+  updateButtons();
 }
 
-// prepareSimulcastTarget은 추가 대상을 세션에 더한다. 실패해도 기본 대상의
-// 준비는 이미 끝나 있으므로 세션을 되돌리지 않고 사유만 남긴다 — 한쪽 실패가
-// 나머지를 끌어내리지 않는 서버 정책과 같은 태도다.
-async function prepareSimulcastTarget(sessionId, provider) {
+function renderPlan() {
+  const usage = state.usage;
+  els.planSummary.hidden = !state.accessToken || !usage;
+  if (!usage) {
+    return;
+  }
+  els.planBadge.textContent = `${planLabel(usage.plan)} 플랜`;
+  els.planUsage.textContent =
+    usage.limit_seconds == null
+      ? `이번 달 ${formatDuration(usage.used_seconds)} 방송 · 무제한`
+      : `이번 달 남은 방송 시간 ${formatDuration(usage.remaining_seconds)} / ${formatDuration(usage.limit_seconds)}`;
+}
+
+// loadYoutubeCategories는 연결된 YouTube 계정으로 고를 수 있는 카테고리를 불러온다.
+async function loadYoutubeCategories() {
   try {
-    await saveSimulcastSettings(sessionId, provider);
-    const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
-      method: "POST",
-      body: JSON.stringify({ provider }),
-    });
-    setCurrentSession(prepared);
-    logEvent("ok", "Simulcast target prepared", { session_id: sessionId, provider });
+    const payload = await apiFetch("/auth/youtube/categories");
+    renderYoutubeCategories(payload?.categories || [], els.youtubeCategory.value);
   } catch (error) {
-    logEvent("error", "Simulcast target prepare failed", {
-      session_id: sessionId,
-      provider,
-      code: error?.payload?.error?.code,
-      message: error?.message,
-      status: error?.status,
-    });
-    els.broadcastSettingsDetail.textContent = `추가 대상(${provider}) 준비 실패: ${error?.message || "알 수 없는 오류"}`;
+    logEvent("warn", "YouTube categories load failed", { message: error?.message });
   }
 }
+
+function renderYoutubeCategories(categories, selected) {
+  els.youtubeCategory.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "카테고리 없음";
+  els.youtubeCategory.append(none);
+  for (const category of categories) {
+    const option = document.createElement("option");
+    option.value = category.id;
+    option.textContent = category.title;
+    els.youtubeCategory.append(option);
+  }
+  state.youtubeCategoryIds = categories.map((category) => category.id);
+  setYoutubeCategory(selected);
+}
+
+// setYoutubeCategory는 id를 고른다. 목록에 없는 id(목록 조회 전·지역 밖)는 항목을
+// 더해 값이 사라지지 않게 한다.
+function setYoutubeCategory(id) {
+  if (id && !state.youtubeCategoryIds.includes(id)) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = `카테고리 ${id}`;
+    els.youtubeCategory.append(option);
+    state.youtubeCategoryIds.push(id);
+  }
+  els.youtubeCategory.value = id || "";
+}
+
 
 // renderTargets는 대상별 상태와 개별 제어를 그린다. 서버 응답의 targets[]는
 // provider 이름 정렬이라 순서가 흔들리지 않는다.
@@ -1252,10 +1301,10 @@ function renderTargets(session) {
     row.className = "target-row";
     const name = document.createElement("span");
     name.className = "target-name";
-    name.textContent = target.provider;
+    name.textContent = platformLabel(target.provider);
     const stateText = document.createElement("span");
     stateText.className = "target-state";
-    stateText.textContent = `${target.stream?.status || "idle"} · ${target.stream?.broadcast_phase || "idle"}`;
+    stateText.textContent = describeTargetState(target.stream);
     row.append(name, stateText);
     for (const [action, label] of [
       ["pause", "일시 중지"],
@@ -1271,6 +1320,32 @@ function renderTargets(session) {
     }
     els.targetList.append(row);
   }
+}
+
+const TARGET_PHASE_LABELS = {
+  idle: "대기",
+  preparing: "준비 중",
+  prepared: "준비됨",
+  going_live: "라이브 전환 중",
+  live: "라이브",
+};
+const TARGET_STREAM_LABELS = {
+  idle: "연결 준비",
+  streaming: "송출 중",
+  reconnecting: "재연결 중",
+  reconfiguring: "재구성 중",
+  paused: "일시 중지",
+  paused_reconfiguring: "일시 중지",
+  paused_reconnecting: "일시 중지 · 재연결 중",
+  stopped: "종료",
+};
+
+// describeTargetState는 대상 하나의 방송 단계와 송출 상태를 한 줄로 쓴다.
+function describeTargetState(stream) {
+  const phase = stream?.broadcast_phase || "idle";
+  const status = stream?.status || "idle";
+  const phaseText = TARGET_PHASE_LABELS[phase] || phase;
+  return phase === "idle" ? phaseText : `${phaseText} · ${TARGET_STREAM_LABELS[status] || status}`;
 }
 
 // broadcastControlTargets는 상단 제어 버튼이 걸어야 할 대상이다. 준비를 거친
@@ -1389,17 +1464,11 @@ function applyChzzkCategorySelection() {
     return;
   }
   els.chzzkCategoryType.value = selected.category_type;
-  els.broadcastCategoryId.value = selected.category_id;
+  els.chzzkCategoryId.value = selected.category_id;
   // 직접 고른 값이므로 기본값 주입이 덮지 않도록 표식을 남긴다.
-  state.touchedBroadcastFields.add("category_type");
-  state.touchedBroadcastFields.add("category_id");
+  state.touchedBroadcastFields.add("chzzk:category_type");
+  state.touchedBroadcastFields.add("chzzk:category_id");
   els.broadcastSettingsDetail.textContent = `카테고리를 ${selected.category_value}로 골랐습니다. 저장하세요.`;
-}
-
-// sessionIsChzzk는 현재 세션의 송출 플랫폼이 치지직인지다. 세션이 없으면
-// 선택된 provider를 본다(세션 생성 전 폼 전환용).
-function sessionIsChzzk() {
-  return (state.session?.provider || els.sessionProvider.value) === "chzzk";
 }
 
 async function createSessionOnly() {
@@ -1415,9 +1484,10 @@ async function createSession() {
   const metadata = buildSessionMetadata();
   const session = await apiFetch("/sessions", {
     method: "POST",
-    // 송출 해상도는 세션 생성에서만 정해지고 세션 중 바뀌지 않는다(#271).
+    // 첫 번째로 고른 플랫폼이 세션의 기본 대상이다. 해상도는 방송 전이면 준비
+    // 직전에 다시 맞추고(#283), 방송 중이면 송출 방식 변경으로 바꾼다(#300).
     body: JSON.stringify({
-      provider: els.sessionProvider.value,
+      provider: selectedPlatforms()[0] || "youtube",
       broadcast_resolution: els.broadcastResolution.value,
       metadata,
     }),
@@ -1425,6 +1495,7 @@ async function createSession() {
   // owner_token은 여기서 정확히 한 번만 반환된다. 이후 세션 범위 요청과 signaling이
   // 소유권을 증명하도록 메모리에 보관하며, 세션 새로고침 응답에는 다시 오지 않는다.
   state.ownerToken = session.owner_token || null;
+  state.platformDefaultsLoaded = new Set();
   logEvent("ok", "Session created", {
     session_id: session.session_id,
     broadcast_resolution: session.broadcast_resolution,
@@ -1434,33 +1505,48 @@ async function createSession() {
   return session;
 }
 
-// broadcastFormFields는 직전 방송 기본값이 채우는 폼 필드다. 이벤트 등록과
-// 값 주입이 같은 목록을 보도록 한 곳에 둔다.
-function broadcastFormFields() {
-  return {
-    title: els.broadcastTitle,
-    description: els.broadcastDescription,
-    category_id: els.broadcastCategoryId,
-    privacy: els.broadcastPrivacy,
-    made_for_kids: els.madeForKids,
-    category_type: els.chzzkCategoryType,
-    tags: els.chzzkTags,
-  };
+// platformFormFields는 플랫폼 카드의 입력이다. 직전 방송 기본값 주입과 사용자가
+// 건드린 필드 표시가 같은 목록을 본다.
+function platformFormFields(provider) {
+  return provider === "chzzk"
+    ? {
+        title: els.chzzkTitle,
+        category_type: els.chzzkCategoryType,
+        category_id: els.chzzkCategoryId,
+        tags: els.chzzkTags,
+      }
+    : {
+        title: els.youtubeTitle,
+        description: els.youtubeDescription,
+        category_id: els.youtubeCategory,
+        privacy: els.youtubePrivacy,
+        made_for_kids: els.youtubeMadeForKids,
+      };
 }
 
-// applyBroadcastDefaults는 직전 방송 값을 폼에 채운다(#143). 사용자가 건드린
-// 필드는 덮지 않고, 조회가 실패해도 서버가 폴백값을 주므로 폼은 그대로 쓴다.
+// applyBroadcastDefaults는 고른 플랫폼마다 직전 방송 값을 카드에 채운다(#143).
 async function applyBroadcastDefaults(sessionId) {
-  const untouched = (field) => !state.touchedBroadcastFields.has(field);
-  const provider = els.sessionProvider.value;
+  for (const provider of selectedPlatforms()) {
+    await applyPlatformDefaults(sessionId, provider);
+  }
+}
+
+// applyPlatformDefaults는 한 플랫폼의 직전 방송 값을 채운다. 사용자가 건드린
+// 필드는 덮지 않고, 조회가 실패해도 폼은 그대로 쓴다.
+async function applyPlatformDefaults(sessionId, provider) {
+  if (state.platformDefaultsLoaded.has(provider)) {
+    return;
+  }
+  const untouched = (field) => !state.touchedBroadcastFields.has(`${provider}:${field}`);
   try {
     const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}`);
-    if (untouched("title")) {
-      els.broadcastTitle.value = defaults.title || "";
-    }
+    state.platformDefaultsLoaded.add(provider);
     if (provider === "chzzk") {
+      if (untouched("title")) {
+        els.chzzkTitle.value = defaults.title || "";
+      }
       if (untouched("category_id")) {
-        els.broadcastCategoryId.value = defaults.category_id || "";
+        els.chzzkCategoryId.value = defaults.category_id || "";
       }
       if (untouched("category_type")) {
         els.chzzkCategoryType.value = defaults.category_type || "";
@@ -1468,30 +1554,30 @@ async function applyBroadcastDefaults(sessionId) {
       if (untouched("tags")) {
         els.chzzkTags.value = (defaults.tags || []).join(",");
       }
-      els.broadcastSettingsDetail.textContent =
-        "치지직 채널의 현재 설정을 불러왔습니다. 확인 후 저장하세요.";
-      logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
-      return;
+    } else {
+      if (untouched("title")) {
+        els.youtubeTitle.value = defaults.title || "";
+      }
+      if (untouched("description")) {
+        els.youtubeDescription.value = defaults.description || "";
+      }
+      if (untouched("category_id")) {
+        setYoutubeCategory(defaults.category_id || "");
+      }
+      if (untouched("privacy") && defaults.privacy) {
+        els.youtubePrivacy.value = defaults.privacy;
+      }
+      // 아동용 여부는 미선택(null)이면 사용자가 직접 골라야 하므로 두고 본다.
+      if (untouched("made_for_kids") && typeof defaults.made_for_kids === "boolean") {
+        els.youtubeMadeForKids.checked = defaults.made_for_kids;
+      }
     }
-    if (untouched("description")) {
-      els.broadcastDescription.value = defaults.description || "";
-    }
-    if (untouched("category_id")) {
-      els.broadcastCategoryId.value = defaults.category_id || "";
-    }
-    if (untouched("privacy") && defaults.privacy) {
-      els.broadcastPrivacy.value = defaults.privacy;
-    }
-    // 아동용 여부는 미선택(null)이면 사용자가 직접 골라야 하므로 두고 본다.
-    if (untouched("made_for_kids") && typeof defaults.made_for_kids === "boolean") {
-      els.madeForKids.checked = defaults.made_for_kids;
-    }
-    els.broadcastSettingsDetail.textContent =
-      "직전 방송 값을 불러왔습니다. 확인 후 저장하세요.";
-    logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, defaults });
+    els.broadcastSettingsDetail.textContent = `${platformLabel(provider)} 직전 방송 값을 불러왔습니다. 확인 후 저장하세요.`;
+    logEvent("ok", "Broadcast defaults loaded", { session_id: sessionId, provider, defaults });
   } catch (error) {
     logEvent("warn", "Broadcast defaults load failed", {
       session_id: sessionId,
+      provider,
       message: error?.message,
       status: error?.status,
     });
@@ -1618,11 +1704,11 @@ async function startWebRtc() {
       await healthCheck({ quiet: true });
 
       if (canStartYouTubeBroadcastFromCurrentConnection()) {
-        logEvent("ok", "Reusing active WebRTC connection for YouTube broadcast", {
+        logEvent("ok", "Reusing active WebRTC connection for broadcast", {
           session_id: state.session.session_id,
         });
         const readySession = await waitForVideoTrack();
-        await prepareYouTubeBroadcast(readySession);
+        await prepareBroadcast(readySession);
         return;
       }
 
@@ -1649,14 +1735,14 @@ async function startWebRtc() {
       }
       setBroadcastStatus(els.broadcastVideoInput, "WebRTC 연결 중", "warn");
       setBroadcastStatus(els.broadcastRtmpState, "영상 입력 대기", "warn");
-      setBroadcastStatus(els.broadcastYoutubeState, "방송 준비 대기", "warn");
+      setBroadcastStatus(els.broadcastPlatformState, "방송 준비 대기", "warn");
       await connectPeer(state.session.session_id);
       startPolling();
       await refreshCurrentSession({ quiet: true });
       await refreshSessions({ quiet: true });
 
       const readySession = await waitForVideoTrack();
-      await prepareYouTubeBroadcast(readySession);
+      await prepareBroadcast(readySession);
     } catch (error) {
       await cleanupConnection({ keepSession: Boolean(state.session) });
       throw error;
@@ -1715,7 +1801,7 @@ async function waitForVideoTrack() {
 // readBroadcastThumbnail은 선택한 이미지를 base64로 바꾼다. PUT /broadcast가
 // JSON 계약이라 바이너리를 그대로 실을 수 없다.
 async function readBroadcastThumbnail() {
-  const [file] = els.broadcastThumbnail.files;
+  const file = els.youtubeThumbnail.files?.[0];
   if (!file) {
     return null;
   }
@@ -1728,55 +1814,72 @@ async function readBroadcastThumbnail() {
   return { mime: file.type, data_base64: btoa(binary) };
 }
 
-// saveBroadcastSettings는 폼 값을 PUT /sessions/{id}/broadcast로 저장한다.
-// PUT은 전체 교체라 비운 필드는 서버에서도 비워진다.
+// platformSettingsPayload는 플랫폼 카드의 값을 PUT /broadcast 본문으로 옮긴다.
+async function platformSettingsPayload(provider) {
+  if (provider === "chzzk") {
+    return {
+      title: els.chzzkTitle.value.trim(),
+      category_type: els.chzzkCategoryType.value,
+      category_id: els.chzzkCategoryId.value.trim(),
+      // 빈 태그는 제거하고 배열로 보낸다. 빈 문자열 하나를 보내면 서버가
+      // tags[0] 비어 있음으로 거절한다.
+      tags: els.chzzkTags.value
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag !== ""),
+    };
+  }
+  return {
+    title: els.youtubeTitle.value.trim(),
+    description: els.youtubeDescription.value,
+    privacy: els.youtubePrivacy.value,
+    made_for_kids: els.youtubeMadeForKids.checked,
+    category_id: els.youtubeCategory.value,
+    thumbnail: await readBroadcastThumbnail(),
+  };
+}
+
+// savePlatformSettings는 한 플랫폼의 방송 설정을 저장한다. 대상은 쿼리로 고른다 —
+// 빼면 세션의 기본 대상에 덮어쓴다.
+async function savePlatformSettings(sessionId, provider) {
+  return apiFetch(`/sessions/${sessionId}/broadcast?provider=${provider}`, {
+    method: "PUT",
+    body: JSON.stringify(await platformSettingsPayload(provider)),
+  });
+}
+
+// saveBroadcastSettings는 고른 플랫폼마다 방송 설정을 저장한다. PUT은 전체 교체라
+// 비운 필드는 서버에서도 비워진다.
 async function saveBroadcastSettings() {
   const sessionId = state.session?.session_id;
   if (!sessionId) {
     throw new Error("방송 설정을 저장할 세션이 없습니다.");
   }
-  const payload = sessionIsChzzk()
-    ? {
-        title: els.broadcastTitle.value.trim(),
-        category_type: els.chzzkCategoryType.value,
-        category_id: els.broadcastCategoryId.value.trim(),
-        // 빈 태그는 제거하고, 저장은 배열로 보낸다. 빈 문자열 하나를 보내면
-        // 서버가 tags[0] 비어 있음으로 거절한다.
-        tags: els.chzzkTags.value
-          .split(",")
-          .map((tag) => tag.trim())
-          .filter((tag) => tag !== ""),
-      }
-    : {
-        title: els.broadcastTitle.value.trim(),
-        description: els.broadcastDescription.value,
-        privacy: els.broadcastPrivacy.value,
-        made_for_kids: els.madeForKids.checked,
-        category_id: els.broadcastCategoryId.value.trim(),
-        thumbnail: await readBroadcastThumbnail(),
-      };
+  const platforms = selectedPlatforms();
+  if (!platforms.length) {
+    throw new Error("송출할 플랫폼을 하나 이상 고르세요.");
+  }
+  let provider = platforms[0];
   try {
-    const updated = await apiFetch(`/sessions/${sessionId}/broadcast`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
+    let updated = null;
+    for (provider of platforms) {
+      updated = await savePlatformSettings(sessionId, provider);
+    }
     setCurrentSession(updated);
     state.broadcastSettingsSaved = true;
     setBroadcastStatus(els.broadcastSettingsState, "저장됨", "ok");
-    els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated.broadcast, updated.chzzk_broadcast);
-    logEvent("ok", "Broadcast settings saved", {
-      session_id: sessionId,
-      broadcast: updated.broadcast,
-    });
+    els.broadcastSettingsDetail.textContent = describeBroadcastSettings(updated, platforms);
+    logEvent("ok", "Broadcast settings saved", { session_id: sessionId, platforms });
     return updated;
   } catch (error) {
     const details = error?.payload?.error?.details;
     setBroadcastStatus(els.broadcastSettingsState, "저장 실패", "error");
-    els.broadcastSettingsDetail.textContent = details?.field
-      ? `${details.field}: ${details.reason || error.message}`
-      : error.message;
+    els.broadcastSettingsDetail.textContent = `${platformLabel(provider)} — ${
+      details?.field ? `${details.field}: ${details.reason || error.message}` : error.message
+    }`;
     logEvent("error", "Broadcast settings save failed", {
       session_id: sessionId,
+      provider,
       field: details?.field,
       message: error?.message,
       status: error?.status,
@@ -1785,70 +1888,90 @@ async function saveBroadcastSettings() {
   }
 }
 
-function describeBroadcastSettings(broadcast, chzzkBroadcast) {
-  if (sessionIsChzzk()) {
-    const chzzk = chzzkBroadcast;
-    if (!chzzk) {
-      return "저장된 설정이 없습니다.";
-    }
-    return [
-      chzzk.title || "제목 없음",
-      chzzk.category_type ? `${chzzk.category_type}/${chzzk.category_id || ""}` : "카테고리 없음",
-      chzzk.tags?.length ? `태그 ${chzzk.tags.join(",")}` : "태그 없음",
-    ].join(" · ");
-  }
-  if (!broadcast) {
-    return "저장된 설정이 없습니다.";
-  }
-  const parts = [
-    broadcast.title || "제목 없음",
-    broadcast.privacy || "privacy 미설정",
-    broadcast.category_id ? `카테고리 ${broadcast.category_id}` : "카테고리 없음",
-    broadcast.thumbnail ? `썸네일 ${formatBytes(broadcast.thumbnail.bytes)}` : "썸네일 없음",
-  ];
-  return parts.join(" · ");
+function describeBroadcastSettings(session, platforms) {
+  return platforms
+    .map((provider) => {
+      if (provider === "chzzk") {
+        const chzzk = session?.chzzk_broadcast;
+        if (!chzzk) {
+          return "치지직: 저장된 설정 없음";
+        }
+        return `치지직: ${[
+          chzzk.title || "제목 없음",
+          chzzk.category_type ? `${chzzk.category_type}/${chzzk.category_id || ""}` : "카테고리 없음",
+          chzzk.tags?.length ? `태그 ${chzzk.tags.join(",")}` : "태그 없음",
+        ].join(" · ")}`;
+      }
+      const broadcast = session?.broadcast;
+      if (!broadcast) {
+        return "YouTube: 저장된 설정 없음";
+      }
+      return `YouTube: ${[
+        broadcast.title || "제목 없음",
+        broadcast.privacy || "privacy 미설정",
+        broadcast.category_id ? `카테고리 ${broadcast.category_id}` : "카테고리 없음",
+        broadcast.thumbnail ? `썸네일 ${formatBytes(broadcast.thumbnail.bytes)}` : "썸네일 없음",
+      ].join(" · ")}`;
+    })
+    .join(" / ");
 }
 
-async function prepareYouTubeBroadcast(session) {
+// prepareBroadcast는 고른 플랫폼마다 방송을 준비한다. 한 플랫폼이 실패해도 나머지는
+// 계속한다(서버의 동시 발사 규칙과 같다). 세션 해상도가 폼과 다르면 먼저 맞춘다 —
+// 방송 전이라 해상도만 바뀐다(#283).
+async function prepareBroadcast(session) {
   const sessionId = session?.session_id;
   if (!sessionId) {
-    throw new Error("YouTube 방송을 준비할 세션이 없습니다.");
+    throw new Error("방송을 준비할 세션이 없습니다.");
   }
-
+  const platforms = selectedPlatforms();
   setBroadcastStatus(els.broadcastRtmpState, "방송 준비 중", "warn");
-  setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 중", "warn");
-  logEvent("ok", "YouTube broadcast prepare requested", { session_id: sessionId });
+  setBroadcastStatus(els.broadcastPlatformState, `${platforms.map(platformLabel).join("·")} 준비 중`, "warn");
+  logEvent("ok", "Broadcast prepare requested", { session_id: sessionId, platforms });
   try {
+    const resolution = els.broadcastResolution.value;
+    if (session.broadcast_resolution && session.broadcast_resolution !== resolution) {
+      setCurrentSession(
+        await apiFetch(`/sessions/${sessionId}/broadcast-resolution`, {
+          method: "PUT",
+          body: JSON.stringify({ resolution }),
+        }),
+      );
+    }
     // 준비 옵션은 저장된 설정이 단일 출처이므로 준비 직전에 폼을 반영한다.
     await saveBroadcastSettings();
-    const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
-      method: "POST",
-      // provider는 세션이 들고 있으므로 생략한다 — 보내면 세션 값과 대조만 하고,
-      // 유튜브를 하드코딩하면 치지직 세션에서 400 mismatch가 난다.
-      body: JSON.stringify({}),
-    });
-    setCurrentSession(prepared);
-    renderBroadcastStreamStatus(prepared.stream);
-    renderBroadcastWarnings(prepared.warnings);
-    logEvent("ok", "YouTube broadcast prepared", {
-      session_id: sessionId,
-      stream: prepared.stream,
-    });
-    // 동시 송출은 대상마다 prepare를 한 번씩 부르는 것으로 표현한다(#233).
-    // 기본 대상이 준비된 뒤에 더한다 — 순서가 곧 발사 순서는 아니지만,
-    // 기본 대상의 실패를 추가 대상이 가리지 않게 한다.
-    const secondary = simulcastTarget();
-    if (secondary) {
-      await prepareSimulcastTarget(sessionId, secondary);
-    }
   } catch (error) {
     renderBroadcastStartError(error);
-    logEvent("error", "YouTube broadcast prepare failed", {
-      session_id: sessionId,
-      code: error?.payload?.error?.code,
-      message: error?.message,
-      status: error?.status,
-    });
+    logEvent("error", "Broadcast prepare failed", { session_id: sessionId, message: error?.message });
+    return;
+  }
+  const failures = [];
+  for (const provider of platforms) {
+    try {
+      const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
+        method: "POST",
+        body: JSON.stringify({ provider }),
+      });
+      setCurrentSession(prepared);
+      renderBroadcastStreamStatus(prepared.stream);
+      renderBroadcastWarnings(prepared.warnings);
+      logEvent("ok", "Broadcast prepared", { session_id: sessionId, provider });
+    } catch (error) {
+      failures.push(`${platformLabel(provider)}: ${error?.payload?.error?.code || error?.message}`);
+      logEvent("error", "Broadcast prepare failed", {
+        session_id: sessionId,
+        provider,
+        code: error?.payload?.error?.code,
+        message: error?.message,
+        status: error?.status,
+      });
+      if (failures.length === platforms.length) {
+        renderBroadcastStartError(error);
+      }
+    }
+  }
+  if (failures.length) {
+    els.broadcastSettingsDetail.textContent = `준비 실패 — ${failures.join(" · ")}`;
   }
 }
 
@@ -1860,21 +1983,21 @@ async function goLiveBroadcast() {
     throw new Error("라이브로 전환할 세션이 없습니다.");
   }
   await runBusy(async () => {
-    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "라이브 전환 중", "warn");
     try {
       const stream = await apiFetch(`/sessions/${sessionId}/stream/golive`, {
         method: "POST",
       });
       renderBroadcastStreamStatus(stream);
-      setBroadcastStatus(els.broadcastYoutubeState, "라이브", "ok");
-      logEvent("ok", "YouTube broadcast is live", { session_id: sessionId, stream });
+      setBroadcastStatus(els.broadcastPlatformState, "라이브", "ok");
+      logEvent("ok", "Broadcast is live", { session_id: sessionId, stream });
       // 동시 송출에서 한쪽만 실패하면 요청은 200이고 사유만 실려 온다 —
       // 나머지 대상은 라이브로 남는다(#233). 조용히 지나가면 안 된다.
       if (stream?.failed_targets?.length) {
         const summary = stream.failed_targets
           .map((failure) => `${failure.provider}: ${failure.code}`)
           .join(" · ");
-        setBroadcastStatus(els.broadcastYoutubeState, "일부 대상 실패", "warn");
+        setBroadcastStatus(els.broadcastPlatformState, "일부 대상 실패", "warn");
         els.broadcastSettingsDetail.textContent = `라이브 전환 실패한 대상 — ${summary}`;
         logEvent("warn", "Some simulcast targets failed to go live", {
           session_id: sessionId,
@@ -1884,7 +2007,7 @@ async function goLiveBroadcast() {
       await refreshCurrentSession({ quiet: true });
     } catch (error) {
       renderBroadcastStartError(error);
-      logEvent("error", "YouTube go live failed", {
+      logEvent("error", "Go live failed", {
         session_id: sessionId,
         code: error?.payload?.error?.code,
         message: error?.message,
@@ -1910,42 +2033,32 @@ async function pauseBroadcast() {
       method: "POST",
     });
     updateCurrentSessionStream(paused);
-    logEvent("ok", "YouTube broadcast pause requested", {
+    logEvent("ok", "Broadcast pause requested", {
       session_id: sessionId,
       stream: paused,
     });
   });
 }
 
-// changeBroadcastMode는 폼의 송출 해상도와 동시 송출 선택으로 송출 방식을 바꾼다.
-// 방송 중이 아니면 해상도만 바꾸고(#283), 방송 중이면 서버가 방송을 끝내고 새
-// 구성으로 다시 연다(#300, 202) — 진행은 세션 응답의 resolution_switch로 폴링된다.
-// 새로 추가되는 대상은 준비 때처럼 기본값 설정을 먼저 저장한다.
+// changeBroadcastMode는 방송 중에 송출 구성의 해상도·플랫폼으로 송출 방식을 바꾼다
+// (#300, 202). 해상도가 바뀌면 서버가 방송을 끝내고 새 구성으로 다시 연다. 진행은
+// 세션 응답의 resolution_switch로 폴링된다. 새로 더하는 플랫폼은 카드의 설정을
+// 먼저 저장한다.
 async function changeBroadcastMode() {
   const sessionId = state.session?.session_id;
   if (!sessionId) {
     throw new Error("송출 방식을 바꿀 세션이 없습니다.");
   }
   await runBusy(async () => {
-    const resolution = els.broadcastResolution.value;
-    const liveTargets = (state.session?.targets || [])
-      .filter((target) => target.stream?.broadcast_phase === "live")
-      .map((target) => target.provider);
-    let path = `/sessions/${sessionId}/broadcast-resolution`;
-    let body = { resolution };
-    if (liveTargets.length > 0) {
-      const targets = [sessionProviderValue()];
-      const secondary = simulcastTarget();
-      if (secondary) {
-        if (!liveTargets.includes(secondary)) {
-          await saveSimulcastSettings(sessionId, secondary);
-        }
-        targets.push(secondary);
+    const liveTargets = liveTargetProviders();
+    const targets = selectedPlatforms();
+    for (const provider of targets) {
+      if (!liveTargets.includes(provider)) {
+        await savePlatformSettings(sessionId, provider);
       }
-      path = `/sessions/${sessionId}/broadcast-mode`;
-      body = { resolution, targets };
     }
-    const session = await apiFetch(path, {
+    const body = { resolution: els.broadcastResolution.value, targets };
+    const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
       method: "PUT",
       body: JSON.stringify(body),
     });
@@ -1956,6 +2069,42 @@ async function changeBroadcastMode() {
       resolution_switch: session.resolution_switch,
     });
   });
+}
+
+function liveTargetProviders() {
+  return (state.session?.targets || [])
+    .filter((target) => target.stream?.broadcast_phase === "live")
+    .map((target) => target.provider);
+}
+
+// renderSwitchStatus는 송출 방식 전환의 진행을 송출 구성 영역에 알린다. 같은 전환의
+// 같은 상태는 한 번만 알린다 — 폴링마다 다른 메시지를 덮으면 안 된다.
+function renderSwitchStatus(session) {
+  const change = session?.resolution_switch;
+  if (!change) {
+    return;
+  }
+  const key = `${change.started_at}:${change.status}`;
+  if (key === state.lastSwitchNotice) {
+    return;
+  }
+  state.lastSwitchNotice = key;
+  const failed = (change.failed_targets || [])
+    .map((failure) => `${platformLabel(failure.provider)}: ${failure.code}`)
+    .join(" · ");
+  const target = `${(change.targets || []).map(platformLabel).join("·")} ${change.resolution === "fhd" ? "FHD" : "720p"}`;
+  const views = {
+    switching: ["전환 중", "warn", `${target}로 바꾸는 중입니다. 해상도가 바뀌면 새 방송으로 다시 열립니다.`],
+    done: [failed ? "일부 실패" : "전환 완료", failed ? "warn" : "ok", failed ? `${target} — 실패: ${failed}` : `${target}로 바꿨습니다.`],
+    failed: ["전환 실패", "error", `${target} — ${failed || "새 방송을 열지 못했습니다."}`],
+    canceled: ["전환 취소", "warn", "방송 종료로 전환을 멈췄습니다."],
+  };
+  const [label, visual, detail] = views[change.status] || [change.status, "warn", ""];
+  setBroadcastStatus(els.broadcastSettingsState, label, visual);
+  els.broadcastSettingsDetail.textContent = detail;
+  if (change.status !== "switching") {
+    void refreshPlan();
+  }
 }
 
 // stopBroadcast는 YouTube 송출만 끝낸다. 세션과 WebRTC 미리보기는 그대로
@@ -1970,16 +2119,18 @@ async function stopBroadcast() {
     const providers = broadcastControlTargets();
     if (providers.length > 0) {
       await applyToEveryTarget("stop", providers, sessionId);
-      return;
+    } else {
+      const stopped = await apiFetch(`/sessions/${sessionId}/stream/stop`, {
+        method: "POST",
+      });
+      updateCurrentSessionStream(stopped);
+      logEvent("ok", "Broadcast stop requested", {
+        session_id: sessionId,
+        stream: stopped,
+      });
     }
-    const stopped = await apiFetch(`/sessions/${sessionId}/stream/stop`, {
-      method: "POST",
-    });
-    updateCurrentSessionStream(stopped);
-    logEvent("ok", "YouTube broadcast stop requested", {
-      session_id: sessionId,
-      stream: stopped,
-    });
+    // 끝난 방송만큼 이번 달 남은 시간이 줄었다.
+    await refreshPlan();
   });
 }
 
@@ -1999,7 +2150,7 @@ async function resumeBroadcast() {
       method: "POST",
     });
     updateCurrentSessionStream(resumed);
-    logEvent("ok", "YouTube broadcast resume requested", {
+    logEvent("ok", "Broadcast resume requested", {
       session_id: sessionId,
       stream: resumed,
     });
@@ -2022,47 +2173,52 @@ function renderBroadcastWarnings(warnings) {
 function renderBroadcastStartError(error) {
   const code = error?.payload?.error?.code;
   if (code === "streaming_not_connected") {
-    setBroadcastStatus(els.broadcastYoutubeAccount, "연결 필요", "warn");
+    setBroadcastStatus(els.broadcastAccounts, "연결 필요", "warn");
     setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
-    setBroadcastStatus(els.broadcastYoutubeState, "YouTube 계정 연결 필요", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "플랫폼 계정 연결 필요", "warn");
     return;
   }
   if (code === "streaming_reconnect_required") {
-    setBroadcastStatus(els.broadcastYoutubeAccount, "재연결 필요", "warn");
+    setBroadcastStatus(els.broadcastAccounts, "재연결 필요", "warn");
     setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
-    setBroadcastStatus(els.broadcastYoutubeState, "YouTube 재연결 필요", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "플랫폼 계정 재연결 필요", "warn");
+    return;
+  }
+  if (code === "streaming_rate_limited") {
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastPlatformState, "플랫폼 요청 한도 초과 · 잠시 후 다시", "error");
     return;
   }
   if (code === "live_streaming_blocked") {
     setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
-    setBroadcastStatus(els.broadcastYoutubeState, "채널 라이브 권한 없음", "error");
+    setBroadcastStatus(els.broadcastPlatformState, "채널 라이브 권한 없음", "error");
     return;
   }
   if (code === "broadcast_not_ready") {
-    // 송출 프레임이 YouTube에 아직 도착하지 않은 상태 — 잠시 후 재시도.
-    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 대기 · 잠시 후 재시도", "warn");
+    // 송출 프레임이 플랫폼에 아직 도착하지 않은 상태 — 잠시 후 재시도.
+    setBroadcastStatus(els.broadcastPlatformState, "라이브 전환 대기 · 잠시 후 재시도", "warn");
     return;
   }
   if (code === "broadcast_prepared" || code === "broadcast_live") {
-    setBroadcastStatus(els.broadcastYoutubeState, "이미 준비된 방송이 있음", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "이미 준비된 방송이 있음", "warn");
     return;
   }
   if (code === "broadcast_going_live") {
-    setBroadcastStatus(els.broadcastYoutubeState, "라이브 전환 중", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "라이브 전환 중", "warn");
     return;
   }
   if (code === "broadcast_stopped") {
     // 전환 왕복 중에 중지가 들어와 중지가 이긴 경우다(#142).
-    setBroadcastStatus(els.broadcastYoutubeState, "중지되어 라이브 취소됨", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "중지되어 라이브 취소됨", "warn");
     return;
   }
   if (code === "stream_already_active") {
     setBroadcastStatus(els.broadcastRtmpState, "이미 송출 중", "warn");
-    setBroadcastStatus(els.broadcastYoutubeState, "기존 방송 사용 중 · live 확인 전", "warn");
+    setBroadcastStatus(els.broadcastPlatformState, "기존 방송 사용 중 · live 확인 전", "warn");
     return;
   }
   setBroadcastStatus(els.broadcastRtmpState, "시작 실패", "error");
-  setBroadcastStatus(els.broadcastYoutubeState, "YouTube 준비 실패", "error");
+  setBroadcastStatus(els.broadcastPlatformState, "방송 준비 실패", "error");
 }
 
 function delay(milliseconds) {
@@ -3105,6 +3261,7 @@ function setCurrentSession(session) {
   state.lastSessionJson = session;
   renderSessionDetails(session);
   renderTargets(session);
+  renderSwitchStatus(session);
   updateButtons();
 }
 
@@ -3382,7 +3539,9 @@ function updateButtons() {
   els.verifyBtn.disabled = state.busy;
   els.signOutBtn.disabled = state.busy;
   // 세션 API는 RequireUser 뒤에 있으므로 로그인한 사용자에게만 열어 둔다.
-  els.startBtn.disabled = state.busy || fileProtocol || !signedIn;
+  const mode = modeAvailability();
+  const switching = state.session?.resolution_switch?.status === "switching";
+  els.startBtn.disabled = state.busy || fileProtocol || !signedIn || !mode.allowed;
   // 라이브 전환은 준비된 방송에만 열어 둔다 — 서버도 409로 막지만 버튼이
   // 흐름(준비 → 라이브)을 그대로 보여줘야 한다.
   els.goLiveBtn.disabled =
@@ -3397,8 +3556,10 @@ function updateButtons() {
     state.busy ||
     !state.session?.session_id ||
     streamStatus !== "paused";
-  // 해상도 변경은 세션이 있으면 열어 둔다 — 송출 중이면 서버가 409로 막는다.
-  els.changeResolutionBtn.disabled = state.busy || !state.session?.session_id;
+  // 송출 방식 변경은 라이브 중에만 연다. 방송 전 해상도·플랫폼은 "방송 준비"가
+  // 송출 구성을 그대로 쓴다.
+  els.changeResolutionBtn.disabled =
+    state.busy || !mode.allowed || switching || liveTargetProviders().length === 0;
   // 종료는 egress가 살아 있는 모든 상태에서 열어 둔다 — 재연결·일시 중지
   // 중에도 방송을 끝낼 수 있어야 한다. 서버가 ErrStreamNotActive로 보는
   // idle·stopped만 막는다.

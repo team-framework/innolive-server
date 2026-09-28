@@ -41,6 +41,10 @@
           <button id="signOutBtn" class="button" type="button" hidden>로그아웃</button>
         </div>
         <span id="authDetail" class="field-wide">로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.</span>
+        <div class="plan-summary field-wide" id="planSummary" hidden>
+          <span class="status-pill" data-state="ok" id="planBadge">플랜</span>
+          <span id="planUsage"></span>
+        </div>
         <div class="button-row">
           <button id="connectYoutubeBtn" class="button" type="button" hidden>YouTube 계정 연결</button>
         </div>
@@ -69,20 +73,6 @@
           <input id="sessionLabel" autocomplete="off" placeholder="demo" />
         </label>
         <label class="field">
-          <span>송출 플랫폼</span>
-          <select id="sessionProvider">
-            <option value="youtube" selected>YouTube</option>
-            <option value="chzzk">치지직</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>송출 해상도</span>
-          <select id="broadcastResolution">
-            <option value="720p" selected>720p</option>
-            <option value="fhd">FHD</option>
-          </select>
-        </label>
-        <label class="field">
           <span>Camera</span>
           <select id="cameraSelect">
             <option value="">Default camera</option>
@@ -101,10 +91,6 @@
           <input id="sendAudio" type="checkbox" />
           <span>Send audio track</span>
         </label>
-        <label class="check-row" id="madeForKidsRow">
-          <input id="madeForKids" type="checkbox" />
-          <span>아동용 콘텐츠로 신고</span>
-        </label>
         <label class="check-row">
           <input id="autoPoll" type="checkbox" checked />
           <span>Poll session</span>
@@ -116,7 +102,6 @@
         <button id="goLiveBtn" class="button button-primary" type="button" disabled>라이브 시작</button>
         <button id="pauseBroadcastBtn" class="button" type="button" disabled>방송 일시 중지</button>
         <button id="resumeBroadcastBtn" class="button" type="button" disabled>방송 재개</button>
-        <button id="changeResolutionBtn" class="button" type="button" disabled>송출 방식 변경</button>
         <button id="stopBroadcastBtn" class="button button-danger" type="button" disabled>방송 종료</button>
         <button id="healthBtn" class="button" type="button">Health Check</button>
         <button id="createSessionBtn" class="button" type="button">Create Session</button>
@@ -128,16 +113,17 @@
 
       <section class="broadcast-status" aria-labelledby="broadcastStatusTitle" aria-live="polite">
         <div class="broadcast-status-copy">
-          <p class="eyebrow">YouTube broadcasting</p>
+          <p class="eyebrow">Broadcasting</p>
           <h2 id="broadcastStatusTitle">방송 상태</h2>
           <p>
-            YouTube 계정을 연결한 뒤 Start WebRTC를 누르면, 영상 트랙 준비와 YouTube 송출 단계를 표시합니다. 송출 중에는 일시 중지로 취소 화면을 보내고, 재개로 카메라 영상 송출로 돌아갈 수 있습니다. 방송 종료는 YouTube 방송을 즉시 끝내고 세션과 미리보기는 유지합니다.
+            송출 구성에서 고른 플랫폼으로 방송을 준비하고 라이브로 전환합니다. 일시 중지는 대기 화면을 보내고,
+            방송 종료는 플랫폼 방송을 끝내되 세션과 미리보기는 유지합니다. 플랫폼별 상태와 개별 제어는 아래 목록에 있습니다.
           </p>
         </div>
         <dl class="broadcast-status-grid">
           <div>
-            <dt>YouTube 계정</dt>
-            <dd id="broadcastYoutubeAccount" data-state="idle">연결 전</dd>
+            <dt>플랫폼 계정</dt>
+            <dd id="broadcastAccounts" data-state="idle">연결 전</dd>
           </div>
           <div>
             <dt>영상 입력</dt>
@@ -148,8 +134,8 @@
             <dd id="broadcastRtmpState" data-state="idle">시작 전</dd>
           </div>
           <div>
-            <dt>YouTube 상태</dt>
-            <dd id="broadcastYoutubeState" data-state="idle">확인 전</dd>
+            <dt>방송 상태</dt>
+            <dd id="broadcastPlatformState" data-state="idle">확인 전</dd>
           </div>
         </dl>
         <div class="target-list-wrap">
@@ -161,89 +147,109 @@
 
       <section class="broadcast-settings" aria-labelledby="broadcastSettingsTitle">
         <div class="broadcast-settings-copy">
-          <p class="eyebrow">Broadcast details</p>
-          <h2 id="broadcastSettingsTitle">방송 설정</h2>
+          <p class="eyebrow">Broadcast setup</p>
+          <h2 id="broadcastSettingsTitle">송출 구성</h2>
           <p>
-            제목·설명·카테고리·썸네일은 저장만 하고, 실제 YouTube 반영은 송출 시작 시점에 이뤄집니다.
-            Start WebRTC를 누르면 이 값이 자동으로 저장된 뒤 방송이 준비됩니다.
+            해상도와 송출할 플랫폼을 고르고, 고른 플랫폼의 방송 정보를 채웁니다. 방송 전에는 "방송 준비"가 이 구성으로
+            방송을 열고, 방송 중에는 "송출 방식 변경"으로 해상도·플랫폼을 바꿉니다(해상도가 바뀌면 새 방송으로 다시 열립니다).
           </p>
+          <div class="broadcast-mode-row">
+            <label class="field">
+              <span>송출 해상도</span>
+              <select id="broadcastResolution">
+                <option value="720p" selected>720p</option>
+                <option value="fhd">FHD</option>
+              </select>
+            </label>
+            <span id="broadcastModeHint" class="broadcast-mode-hint">플랫폼을 하나 이상 고르세요.</span>
+          </div>
+          <div class="broadcast-settings-actions">
+            <button id="saveBroadcastBtn" class="button" type="button" disabled>방송 설정 저장</button>
+            <button id="changeResolutionBtn" class="button button-primary" type="button" disabled>송출 방식 변경</button>
+          </div>
           <div class="broadcast-settings-status" aria-live="polite">
             <span class="status-pill" data-state="idle" id="broadcastSettingsState">저장 전</span>
             <span id="broadcastSettingsDetail">세션을 만든 뒤 저장할 수 있습니다.</span>
           </div>
         </div>
-        <div class="broadcast-settings-form">
-          <label class="field">
-            <span>제목 (100자)</span>
-            <input id="broadcastTitle" maxlength="100" autocomplete="off" placeholder="InnoLive 방송" />
-          </label>
-          <label class="field" id="broadcastPrivacyRow">
-            <span>공개 범위</span>
-            <select id="broadcastPrivacy">
-              <option value="private" selected>비공개 (private)</option>
-              <option value="unlisted">일부 공개 (unlisted)</option>
-              <option value="public">공개 (public)</option>
-            </select>
-          </label>
-          <label class="field" id="broadcastCategoryIdRow">
-            <span>카테고리 ID</span>
-            <input id="broadcastCategoryId" inputmode="numeric" autocomplete="off" placeholder="예: 20 (Gaming)" />
-          </label>
-          <label class="field" id="chzzkCategoryTypeRow" hidden>
-            <span>치지직 카테고리 종류</span>
-            <select id="chzzkCategoryType">
-              <option value="" selected>미설정</option>
-              <option value="GAME">GAME</option>
-              <option value="SPORTS">SPORTS</option>
-              <option value="ETC">ETC</option>
-            </select>
-          </label>
-          <div class="field field-wide" id="chzzkCategorySearchRow" hidden>
-            <span>치지직 카테고리 검색</span>
-            <div class="broadcast-settings-actions">
-              <input id="chzzkCategoryQuery" autocomplete="off" placeholder="예: 리그 오브 레전드" />
-              <button id="chzzkCategorySearchBtn" class="button" type="button">카테고리 검색</button>
+        <div class="platform-cards">
+          <article class="platform-card" id="youtubeCard">
+            <label class="check-row platform-toggle">
+              <input id="platformYoutube" type="checkbox" checked />
+              <strong>YouTube</strong>
+            </label>
+            <div class="platform-settings" id="youtubeSettings">
+              <label class="field field-wide">
+                <span>제목 (100자)</span>
+                <input id="youtubeTitle" maxlength="100" autocomplete="off" placeholder="InnoLive 방송" />
+              </label>
+              <label class="field">
+                <span>공개 범위</span>
+                <select id="youtubePrivacy">
+                  <option value="private" selected>비공개 (private)</option>
+                  <option value="unlisted">일부 공개 (unlisted)</option>
+                  <option value="public">공개 (public)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>카테고리</span>
+                <select id="youtubeCategory">
+                  <option value="" selected>YouTube 계정을 연결하면 불러옵니다</option>
+                </select>
+              </label>
+              <label class="field field-wide">
+                <span>썸네일 (JPEG·PNG, 최대 2MB)</span>
+                <input id="youtubeThumbnail" type="file" accept="image/jpeg,image/png" />
+              </label>
+              <label class="field field-wide">
+                <span>설명 (5000자)</span>
+                <textarea id="youtubeDescription" maxlength="5000" rows="3" placeholder="방송 설명 · 해시태그 포함"></textarea>
+              </label>
+              <label class="check-row field-wide">
+                <input id="youtubeMadeForKids" type="checkbox" />
+                <span>아동용 콘텐츠로 신고</span>
+              </label>
             </div>
-            <select id="chzzkCategoryResults">
-              <option value="" selected>검색 결과에서 고르세요</option>
-            </select>
-          </div>
-          <label class="field field-wide" id="chzzkTagsRow" hidden>
-            <span>치지직 태그 (쉼표 구분, 최대 5개·각 15자, 공백·특수문자 불가)</span>
-            <input id="chzzkTags" autocomplete="off" placeholder="예: 게임,롤" />
-          </label>
-          <label class="field" id="broadcastThumbnailRow">
-            <span>썸네일 (JPEG·PNG, 최대 2MB)</span>
-            <input id="broadcastThumbnail" type="file" accept="image/jpeg,image/png" />
-          </label>
-          <label class="field field-wide" id="broadcastDescriptionRow">
-            <span>설명 (5000자)</span>
-            <textarea id="broadcastDescription" maxlength="5000" rows="4" placeholder="방송 설명 · 해시태그 포함"></textarea>
-          </label>
-          <label class="check-row field-wide" id="simulcastRow">
-            <input id="simulcastEnabled" type="checkbox" />
-            <span>동시 송출 — 아래 플랫폼으로도 함께 내보낸다</span>
-          </label>
-          <label class="field" id="simulcastProviderRow" hidden>
-            <span>추가 송출 대상</span>
-            <select id="simulcastProvider">
-              <option value="chzzk" selected>치지직</option>
-              <option value="youtube">YouTube</option>
-            </select>
-          </label>
-          <label class="field" id="simulcastTitleRow" hidden>
-            <span>추가 대상 제목 (비우면 직전 방송 값)</span>
-            <input id="simulcastTitle" maxlength="100" autocomplete="off" placeholder="추가 대상 방송 제목" />
-          </label>
-          <label class="check-row" id="simulcastMadeForKidsRow" hidden>
-            <input id="simulcastMadeForKids" type="checkbox" />
-            <span>추가 대상(YouTube)을 아동용 콘텐츠로 신고</span>
-          </label>
-          <div class="broadcast-settings-actions">
-            <button id="saveBroadcastBtn" class="button button-primary" type="button" disabled>
-              방송 설정 저장
-            </button>
-          </div>
+          </article>
+          <article class="platform-card" id="chzzkCard">
+            <label class="check-row platform-toggle">
+              <input id="platformChzzk" type="checkbox" />
+              <strong>치지직</strong>
+            </label>
+            <div class="platform-settings" id="chzzkSettings" hidden>
+              <label class="field field-wide">
+                <span>제목 (100자)</span>
+                <input id="chzzkTitle" maxlength="100" autocomplete="off" placeholder="InnoLive 방송" />
+              </label>
+              <div class="field field-wide">
+                <span>카테고리 검색</span>
+                <div class="broadcast-settings-actions">
+                  <input id="chzzkCategoryQuery" autocomplete="off" placeholder="예: 리그 오브 레전드" />
+                  <button id="chzzkCategorySearchBtn" class="button" type="button">검색</button>
+                </div>
+                <select id="chzzkCategoryResults">
+                  <option value="" selected>검색 결과에서 고르세요</option>
+                </select>
+              </div>
+              <label class="field">
+                <span>카테고리 종류</span>
+                <select id="chzzkCategoryType">
+                  <option value="" selected>미설정</option>
+                  <option value="GAME">GAME</option>
+                  <option value="SPORTS">SPORTS</option>
+                  <option value="ETC">ETC</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>카테고리 ID</span>
+                <input id="chzzkCategoryId" autocomplete="off" placeholder="검색해서 고르세요" />
+              </label>
+              <label class="field field-wide">
+                <span>태그 (쉼표 구분, 최대 5개·각 15자)</span>
+                <input id="chzzkTags" autocomplete="off" placeholder="예: 게임,롤" />
+              </label>
+            </div>
+          </article>
         </div>
       </section>
 

@@ -183,6 +183,7 @@ function bindElements() {
     "completeChzzkBtn",
     "chzzkDetail",
     "sessionProvider",
+    "broadcastResolution",
     "chzzkCategoryType",
     "chzzkCategoryTypeRow",
     "chzzkTags",
@@ -1412,13 +1413,19 @@ async function createSession() {
   const metadata = buildSessionMetadata();
   const session = await apiFetch("/sessions", {
     method: "POST",
-    body: JSON.stringify({ provider: els.sessionProvider.value, metadata }),
+    // 송출 해상도는 세션 생성에서만 정해지고 세션 중 바뀌지 않는다(#271).
+    body: JSON.stringify({
+      provider: els.sessionProvider.value,
+      broadcast_resolution: els.broadcastResolution.value,
+      metadata,
+    }),
   });
   // owner_token은 여기서 정확히 한 번만 반환된다. 이후 세션 범위 요청과 signaling이
   // 소유권을 증명하도록 메모리에 보관하며, 세션 새로고침 응답에는 다시 오지 않는다.
   state.ownerToken = session.owner_token || null;
   logEvent("ok", "Session created", {
     session_id: session.session_id,
+    broadcast_resolution: session.broadcast_resolution,
     metadata: session.metadata,
   });
   await applyBroadcastDefaults(session.session_id);
@@ -2076,12 +2083,10 @@ function buildVideoConstraints() {
   if (selectedCamera) {
     video.deviceId = { exact: selectedCamera };
   }
-  // FHD는 AI FHD 지원(innolive-ai#4) 전까지 비활성화한다. index.html option과
-  // 함께 지원 배포 뒤 다시 활성화한다.
-  // if (resolution === "fhd") {
-  //   video.width = { ideal: 1920 };
-  //   video.height = { ideal: 1080 };
-  // }
+  if (resolution === "fhd") {
+    video.width = { ideal: 1920 };
+    video.height = { ideal: 1080 };
+  }
   if (resolution === "hd") {
     video.width = { ideal: 1280 };
     video.height = { ideal: 720 };

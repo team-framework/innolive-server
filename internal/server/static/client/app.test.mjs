@@ -35,6 +35,7 @@ const buttonKeys = [
   "completeChzzkBtn",
   "chzzkDetail",
   "sessionProvider",
+  "broadcastResolution",
   "chzzkCategoryType",
   "chzzkCategoryTypeRow",
   "chzzkTags",
@@ -161,7 +162,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
     context,
     { filename: appPath },
   );
@@ -852,4 +853,35 @@ test("추가 대상 경고는 조건이 풀리면 지워진다", async () => {
   els.broadcastSettingsDetail.textContent = "저장됨";
   applySimulcastForm();
   assert.equal(els.broadcastSettingsDetail.textContent, "저장됨");
+});
+
+test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {
+  const calls = [];
+  const { createSession, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), method: options?.method, body: options?.body });
+      return jsonResponse({ session_id: "s-1", provider: "youtube", broadcast_resolution: "fhd", owner_token: "owner" });
+    },
+  });
+  for (const id of ["sessionLabel", "resolutionSelect", "cameraSelect", "sendAudio"]) {
+    els[id] = { value: "", checked: false, dataset: {} };
+  }
+  state.accessToken = "access-token";
+  els.sessionProvider.value = "youtube";
+  els.broadcastResolution.value = "fhd";
+
+  await createSession();
+
+  const create = calls.find((call) => call.method === "POST" && call.url.endsWith("/sessions"));
+  assert.ok(create, "POST /sessions must be sent");
+  assert.equal(JSON.parse(create.body).broadcast_resolution, "fhd");
+});
+
+test("FHD 캡처는 1920x1080을 요청한다", async () => {
+  const { buildVideoConstraints, els } = await loadApp();
+  els.cameraSelect = { value: "" };
+  els.resolutionSelect = { value: "fhd" };
+  const video = buildVideoConstraints();
+  assert.equal(video.width.ideal, 1920);
+  assert.equal(video.height.ideal, 1080);
 });

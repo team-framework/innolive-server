@@ -49,8 +49,12 @@ type frame struct {
 	// ingest→pipe-write latency (the blur pipeline delay that A/V sync must
 	// compensate for). Unlike stageAt it is never reset.
 	ingestAt time.Time
-	width    uint16
-	height   uint16
+	// privacyGeneration은 이 프레임을 처리한 익명화 설정 세대다. 처리 도중
+	// 설정이 바뀌었으면 0이다. egress는 0이거나 무효화된 세대의 프레임을
+	// 정지 화면으로 다시 쓰지 않는다(#311).
+	privacyGeneration uint64
+	width             uint16
+	height            uint16
 }
 
 // EgressFanout은 실행 중인 파이프라인에 egress를 나중에 꽂거나 뗄 수 있게 하는
@@ -492,6 +496,7 @@ func processImages(
 			}
 			registry.AddQueue(-1)
 			registry.IncFrameReceived(string(mode))
+			generation := processor.PrivacyGeneration()
 			output, processedByAI, err := processor.ProcessIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
 			if !processedByAI {
 				registry.IncAIInputPausedFrame(string(mode))
@@ -504,6 +509,10 @@ func processImages(
 			registry.IncFrameProcessed(string(mode))
 			item.data = output
 			item.stageAt = time.Now()
+			item.privacyGeneration = 0
+			if processor.PrivacyGeneration() == generation {
+				item.privacyGeneration = generation
+			}
 			for _, sink := range egress.Sinks() {
 				sink.Enqueue(item)
 			}

@@ -476,16 +476,20 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, *gate)
 		return
 	}
-	// 월 방송 시간을 다 쓰면 다음 방송을 막는다(#275). 진행 중 방송은 끊지 않지만
-	// 대상 추가는 새 송출이라 여기서 함께 막힌다.
-	if exhausted, err := s.monthlyLimitError(r.Context(), liveSession.Plan, liveSession.UserID); err != nil || exhausted != nil {
+	// 한도에 닿으면 다음 방송을 막는다(#275): 이 세션의 1회 최대, 이번 달 방송 시간.
+	// 진행 중 방송은 끊지 않지만 대상 추가는 새 송출이라 여기서 함께 막힌다.
+	exhausted, err := s.broadcastLimitError(r.Context(), liveSession.Plan, liveSession.UserID, liveSession.ID, liveSession.CreatedAt)
+	if err == nil && exhausted == nil {
+		exhausted, err = s.monthlyLimitError(r.Context(), liveSession.Plan, liveSession.UserID)
+	}
+	if err != nil || exhausted != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		if err != nil {
 			s.logger.Error("read monthly usage failed", "session_id", liveSession.ID, "error", err)
 			writeError(w, internalError())
 			return
 		}
-		s.logger.Info("stream prepare rejected by monthly limit", "session_id", liveSession.ID, "provider", providerName, "details", exhausted.Details)
+		s.logger.Info("stream prepare rejected by broadcast limit", "session_id", liveSession.ID, "provider", providerName, "code", exhausted.Code, "details", exhausted.Details)
 		writeError(w, *exhausted)
 		return
 	}

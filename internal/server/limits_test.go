@@ -108,3 +108,36 @@ func TestPrepareBlockedWhenMonthlyLimitExhausted(t *testing.T) {
 		})
 	}
 }
+
+type sessionOnAirLedger struct {
+	sessionID uuid.UUID
+	onAir     time.Duration
+}
+
+func (l *sessionOnAirLedger) Month(context.Context, uuid.UUID, time.Time, time.Time, time.Time) ([]usage.SessionCharge, error) {
+	return []usage.SessionCharge{{SessionID: l.sessionID, OnAir: l.onAir, Charged: l.onAir}}, nil
+}
+
+// 1회 최대에 닿아 끝난 세션에서 다시 준비하면, 잠깐 송출됐다가 다음 점검에서
+// 또 끊긴다 — 준비 단계에서 막아야 한다.
+func TestPrepareBlockedWhenSessionReachedBroadcastLimit(t *testing.T) {
+	youtube := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
+	server, manager, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: youtube,
+	})
+	manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return plan.Spark, nil })
+	live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.Resolution720p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Spark 1회 최대 2시간을 이 세션이 이미 썼다(월 사용량은 2시간 < 5시간).
+	application.usageLedger = &sessionOnAirLedger{sessionID: uuid.MustParse(live.ID), onAir: 2 * time.Hour}
+	putBroadcast(t, server.URL, live.ID, ownerToken, `{"made_for_kids":false}`)
+	response, payload := prepareStream(t, server.URL, live.ID, ownerToken, `{}`)
+	if response.StatusCode != http.StatusForbidden || streamErrorCode(payload) != "broadcast_limit_reached" {
+		t.Fatalf("status=%d code=%q, want 403 broadcast_limit_reached", response.StatusCode, streamErrorCode(payload))
+	}
+	if youtube.prepareCalls != 0 || live.BusyTargetCount() != 0 {
+		t.Fatalf("prepare calls=%d busy=%d, want no platform call and released preparation", youtube.prepareCalls, live.BusyTargetCount())
+	}
+}

@@ -112,9 +112,9 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			s.logger.Error("limit check failed", "session_id", live.ID, "error", err)
 			continue
 		}
-		lastFrame := live.LastMediaFrameAt()
-		checkIdle := unpaused > 0 && !lastFrame.IsZero()
-		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(lastFrame), s.cfg.BroadcastIdleTimeout)
+		idleSince := live.MediaIdleSince()
+		checkIdle := unpaused > 0 && !idleSince.IsZero()
+		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,
@@ -164,6 +164,30 @@ func (s *Server) monthlyUsed(ctx context.Context, userID uuid.UUID, now time.Tim
 		used += charge.Charged
 	}
 	return used, nil
+}
+
+// broadcastLimitError는 1회 최대에 이미 닿은 세션의 방송 준비를 막는다(#275).
+// 막지 않으면 잠깐 송출됐다가 다음 점검에서 다시 끊긴다. 1회는 세션 단위다.
+func (s *Server) broadcastLimitError(ctx context.Context, owner plan.Plan, userID uuid.UUID, sessionID string, sessionStart time.Time) (*apiError, error) {
+	if s.usageLedger == nil || owner == "" || userID == uuid.Nil {
+		return nil, nil
+	}
+	policy, _ := owner.Policy()
+	if policy.MaxPerBroadcast <= 0 {
+		return nil, nil
+	}
+	now := time.Now()
+	charges, err := s.usageLedger.Month(ctx, userID, sessionStart, now.Add(time.Second), now)
+	if err != nil {
+		return nil, err
+	}
+	for _, charge := range charges {
+		if charge.SessionID.String() == sessionID && charge.OnAir >= policy.MaxPerBroadcast {
+			return &apiError{Status: http.StatusForbidden, Code: noticeBroadcastLimitReached, Message: "This broadcast reached its maximum length. Start a new session.",
+				Details: map[string]any{"plan": owner, "on_air_seconds": int64(charge.OnAir.Seconds()), "limit_seconds": int64(policy.MaxPerBroadcast.Seconds())}}, nil
+		}
+	}
+	return nil, nil
 }
 
 // monthlyLimitError는 월 방송 시간을 다 쓴 사용자의 다음 방송 준비를 막는다(#275).

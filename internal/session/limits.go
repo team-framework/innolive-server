@@ -28,13 +28,21 @@ func (s *Session) AddNotice(code string, at time.Time) bool {
 	return true
 }
 
-// LastMediaFrameAt은 AI 처리까지 끝난 마지막 프레임 시각이다. 아직 없으면 zero다.
-func (s *Session) LastMediaFrameAt() time.Time {
-	unix := s.lastMediaFrameNano.Load()
-	if unix == 0 {
+// MediaIdleSince는 입력 없음 시계의 시작점이다 — 마지막 처리 프레임과, 송출 시작·
+// 재개 중 늦은 쪽이다. 모두 멈춘 동안에는 AI 입력이 멈춰 프레임이 없으므로, 재개
+// 시각에서 다시 세지 않으면 오래 멈췄다 재개한 직후 곧바로 입력 없음이 된다.
+// 둘 다 없으면 zero다.
+func (s *Session) MediaIdleSince() time.Time {
+	latest := max(s.lastMediaFrameNano.Load(), s.mediaIdleResetNano.Load())
+	if latest == 0 {
 		return time.Time{}
 	}
-	return time.Unix(0, unix)
+	return time.Unix(0, latest)
+}
+
+// restartMediaIdleClock은 송출 시작·재개에서 입력 없음 시계를 다시 시작한다.
+func (s *Session) restartMediaIdleClock(at time.Time) {
+	s.mediaIdleResetNano.Store(at.UnixNano())
 }
 
 // BroadcastActivity는 라이브인 송출 대상과 그중 멈추지 않은 수다. 모든 대상이

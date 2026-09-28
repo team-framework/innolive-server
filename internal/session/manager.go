@@ -241,6 +241,7 @@ type Session struct {
 	// 후자는 프레임마다 갱신되므로 잠금 없이 원자적으로 쓴다.
 	notices            []Notice
 	lastMediaFrameNano atomic.Int64
+	mediaIdleResetNano atomic.Int64
 }
 
 // pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
@@ -1149,6 +1150,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	// 자리는 egress 한 세대의 수명 전체를 점유한다. 프로세스 단위로 잡으면
 	// 재연결 때 반납·재획득이 일어나고, 만석이면 그 재연결이 실패한다.
 	started = true
+	s.restartMediaIdleClock(time.Now())
 	go func() {
 		defer close(egressDone)
 		defer func() {
@@ -1405,6 +1407,7 @@ func (m *Manager) ResumeStream(id string, providers ...string) (*Session, error)
 	}
 	m.recordUsage(UsageEvent{Kind: UsageBroadcastResumed, BroadcastID: t.usageID})
 	s.setAIInputPaused(false)
+	s.restartMediaIdleClock(time.Now())
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("RTMP egress resumed", "session_id", s.ID)
 	return s, nil

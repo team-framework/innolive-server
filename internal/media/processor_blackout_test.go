@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image/jpeg"
 	"testing"
 
@@ -297,5 +298,52 @@ func TestRealProcessorLatchedProbeIntervalThrottlesAI(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("AI calls during sub-interval latched frames = %d, want still 1", calls)
+	}
+}
+
+// 파이프라인을 내리면(해상도 전환·세션 종료) 진행 중이던 AI 요청은
+// context.Canceled로 끝난다. 서버가 스스로 끊은 것이라 AI 실패로 latch하면
+// 안 된다(#297).
+func TestRealProcessorCanceledRequestDoesNotLatch(t *testing.T) {
+	ai := &fakeAIStream{process: func([]byte, int64) (*aiv1.ProcessedVideoChunk, error) {
+		return nil, fmt.Errorf("receive AI video frame: %w", context.Canceled)
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := processor.Process(context.Background(), []byte("frame"), 1, 64, 48)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Process() error = %v, want context.Canceled", err)
+	}
+	if output != nil {
+		t.Fatal("canceled request should not serve a blackout frame")
+	}
+	if processor.FallbackActive() {
+		t.Fatal("FallbackActive() = true after cancellation, want no latch")
+	}
+}
+
+func TestRealProcessorLatchesRealFailureAfterCancellation(t *testing.T) {
+	canceled := true
+	ai := &fakeAIStream{process: func([]byte, int64) (*aiv1.ProcessedVideoChunk, error) {
+		if canceled {
+			return nil, fmt.Errorf("receive AI video frame: %w", context.Canceled)
+		}
+		return nil, errors.New("ai unavailable")
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = processor.Process(context.Background(), []byte("frame"), 1, 64, 48)
+
+	canceled = false
+	if _, err := processor.Process(context.Background(), []byte("frame"), 2, 64, 48); err != nil {
+		t.Fatalf("Process() after real AI failure error = %v, want blackout frame", err)
+	}
+	if !processor.FallbackActive() {
+		t.Fatal("real AI failure after a cancellation should still latch")
 	}
 }

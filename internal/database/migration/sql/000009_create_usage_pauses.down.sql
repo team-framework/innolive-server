@@ -1,0 +1,5 @@
+BEGIN;
+
+DROP TABLE IF EXISTS usage_pauses;
+
+COMMIT;

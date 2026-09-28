@@ -105,17 +105,22 @@ func (r *Recorder) run() {
 }
 
 func (r *Recorder) write(event session.UsageEvent) {
-	// 메모리 상태 전이는 재시도와 무관하게 한 번만 한다.
+	// 메모리 상태 전이는 재시도와 무관하게 한 번만 한다. 일시정지 구간 행의 ID도
+	// 여기서 정해 재시도가 같은 행을 쓰게 한다.
 	var pausedSeconds float64
+	var pauseID uuid.UUID
 	switch event.Kind {
 	case session.UsageBroadcastPaused:
-		if _, paused := r.pausedAt[event.BroadcastID]; !paused {
-			r.pausedAt[event.BroadcastID] = event.At
+		if _, paused := r.pausedAt[event.BroadcastID]; paused {
+			return
 		}
-		return
+		r.pausedAt[event.BroadcastID] = event.At
+		pauseID = uuid.New()
 	case session.UsageBroadcastResumed:
+		if _, paused := r.pausedAt[event.BroadcastID]; !paused {
+			return
+		}
 		r.pausedTotal[event.BroadcastID] += r.takePaused(event)
-		return
 	case session.UsageBroadcastEnded:
 		pausedSeconds = r.pausedTotal[event.BroadcastID] + r.takePaused(event)
 		delete(r.pausedTotal, event.BroadcastID)
@@ -123,7 +128,7 @@ func (r *Recorder) write(event session.UsageEvent) {
 
 	for attempt := 0; ; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
-		rows, err := r.apply(ctx, event, pausedSeconds)
+		rows, err := r.apply(ctx, event, pausedSeconds, pauseID)
 		cancel()
 		if err == nil {
 			// 재시도에서의 0행은 앞선 시도가 실제로는 커밋된 경우라 경고하지 않는다.
@@ -159,7 +164,7 @@ func permanentError(err error) bool {
 
 // apply는 사건 하나를 쓰고 영향받은 행 수를 돌려준다. 재시도해도 결과가 같아야
 // 한다 — 삽입은 ON CONFLICT DO NOTHING, 갱신은 아직 비어 있는 칸만 채운다.
-func (r *Recorder) apply(ctx context.Context, event session.UsageEvent, pausedSeconds float64) (int64, error) {
+func (r *Recorder) apply(ctx context.Context, event session.UsageEvent, pausedSeconds float64, pauseID uuid.UUID) (int64, error) {
 	db := r.db.WithContext(ctx)
 	var result *gorm.DB
 	switch event.Kind {
@@ -200,7 +205,22 @@ func (r *Recorder) apply(ctx context.Context, event session.UsageEvent, pausedSe
 		result = db.Model(&Broadcast{}).Where("id = ? AND live_at IS NULL", event.BroadcastID).
 			Update("live_at", event.At)
 
+	case session.UsageBroadcastPaused:
+		broadcastID, err := uuid.Parse(event.BroadcastID)
+		if err != nil {
+			return 0, fmt.Errorf("%w: broadcast id: %v", errInvalidEvent, err)
+		}
+		row := Pause{ID: pauseID, BroadcastID: broadcastID, PausedAt: event.At}
+		result = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+
+	case session.UsageBroadcastResumed:
+		result = closeOpenPause(db, event.BroadcastID, event.At)
+
 	case session.UsageBroadcastEnded:
+		// 멈춘 채로 끝난 송출은 종료 시각에서 구간을 닫는다. 멈춘 적이 없으면 0행이다.
+		if err := closeOpenPause(db, event.BroadcastID, event.At).Error; err != nil {
+			return 0, err
+		}
 		result = db.Model(&Broadcast{}).Where("id = ? AND ended_at IS NULL", event.BroadcastID).
 			Updates(map[string]any{"ended_at": event.At, "end_reason": event.Reason, "paused_seconds": pausedSeconds})
 
@@ -208,6 +228,12 @@ func (r *Recorder) apply(ctx context.Context, event session.UsageEvent, pausedSe
 		return 0, fmt.Errorf("%w: unknown kind %q", errInvalidEvent, event.Kind)
 	}
 	return result.RowsAffected, result.Error
+}
+
+// closeOpenPause는 송출의 열린 일시정지 구간을 at에서 닫는다. 이미 닫혔으면 0행이라
+// 재시도해도 결과가 같다.
+func closeOpenPause(db *gorm.DB, broadcastID string, at time.Time) *gorm.DB {
+	return db.Model(&Pause{}).Where("broadcast_id = ? AND resumed_at IS NULL", broadcastID).Update("resumed_at", at)
 }
 
 // takePaused는 진행 중인 일시정지를 event 시각에서 끊고 그 길이(초)를 돌려준다.

@@ -76,6 +76,19 @@ func ModeFor(fhd bool, targets int) Mode {
 	}
 }
 
+// Units는 송출 대상 targets개를 동시에 내보낼 때의 서버 유닛이다(노션 BM §2).
+// 720p 한 곳 1 · FHD 한 곳 2 · 720p 동시 2 · FHD 동시 3 — 720p는 대상 수,
+// FHD는 대상 수 + 1이다. 방송 시간 1시간 = 유닛 1개를 1시간 쓴 것이다.
+func Units(fhd bool, targets int) int {
+	if targets <= 0 {
+		return 0
+	}
+	if fhd {
+		return targets + 1
+	}
+	return targets
+}
+
 // Allows는 플랜이 그 송출 방식을 허용하는지다.
 func (p Plan) Allows(mode Mode) bool {
 	for _, allowed := range policies[p].AllowedModes {

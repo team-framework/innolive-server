@@ -53,6 +53,7 @@ type Server struct {
 	requireUser       func(http.Handler) http.Handler
 	plans             PlanStore
 	admins            map[uuid.UUID]struct{}
+	usageLedger       UsageLedger
 	guestQueue        *GuestQueue
 	guestReference    *guestReferenceGate
 	guestCleanup      sync.WaitGroup

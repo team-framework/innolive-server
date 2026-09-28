@@ -343,3 +343,46 @@ func TestValidateAdminUserIDs(t *testing.T) {
 		t.Fatal("non-UUID admin ID must be rejected")
 	}
 }
+
+func TestEgressTierReserves(t *testing.T) {
+	cfg := validConfig()
+	cfg.MaxEgressSlots = 13
+	cfg.EgressSparkUnits = 2
+	cfg.EgressPlasmaUnits = 4
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid reserves rejected: %v", err)
+	}
+	got := cfg.EgressTierReserves()
+	if len(got) != 3 || got[0] != 2 || got[1] != 7 || got[2] != 4 {
+		t.Fatalf("reserves = %v, want [2 7 4]", got)
+	}
+	cfg.EgressPlasmaUnits = 12
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("reserves above the unit total must be rejected")
+	}
+	cfg.EgressPlasmaUnits = 4
+	cfg.MaxEgressSlots = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("reserves without a unit total must be rejected")
+	}
+	cfg.EgressSparkUnits, cfg.EgressPlasmaUnits = 0, 0
+	if cfg.EgressTierReserves() != nil {
+		t.Fatal("no reserves configured must mean no tier rule")
+	}
+}
+
+func TestGuestSessionLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.MaxSessions = 12
+	if got := cfg.GuestSessionLimit(); got != 6 {
+		t.Fatalf("default guest limit = %d, want MAX_SESSIONS/2 = 6", got)
+	}
+	cfg.GuestMaxSessions = 3
+	if got := cfg.GuestSessionLimit(); got != 3 {
+		t.Fatalf("configured guest limit = %d, want 3", got)
+	}
+	cfg.GuestMaxSessions = 13
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest limit above MAX_SESSIONS must be rejected")
+	}
+}

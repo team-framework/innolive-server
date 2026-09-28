@@ -22,3 +22,17 @@ func TestEgressSlotsExhaustedMapsTo503(t *testing.T) {
 		t.Fatalf("body = %s, want the egress_slots_exhausted code", body)
 	}
 }
+
+// 남은 자리가 상위 플랜 전용인 경우도 계약은 같은 503이고, 사유로 구분한다(#272).
+func TestTierUnitsExhaustedKeeps503WithReason(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).writeStartStreamError(recorder, media.ErrEgressTierUnitsExhausted, "session-1")
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "egress_slots_exhausted") || !strings.Contains(body, "plan_slots_full") {
+		t.Fatalf("body = %s, want egress_slots_exhausted with plan_slots_full reason", body)
+	}
+}

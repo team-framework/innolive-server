@@ -200,7 +200,7 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.MaxSessions / 2}, nil
+	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.GuestSessionLimit()}, nil
 }
 
 func (q *GuestQueue) Close() error {

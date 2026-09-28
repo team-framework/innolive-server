@@ -141,3 +141,36 @@ func TestPrepareBlockedWhenSessionReachedBroadcastLimit(t *testing.T) {
 		t.Fatalf("prepare calls=%d busy=%d, want no platform call and released preparation", youtube.prepareCalls, live.BusyTargetCount())
 	}
 }
+
+func TestBroadcastRemaining(t *testing.T) {
+	h := time.Hour
+	cases := []struct {
+		name  string
+		plan  plan.Plan
+		onAir time.Duration
+		used  time.Duration
+		units int
+		want  time.Duration // -1 = nil
+	}{
+		// Plasma 월 240h 중 198h 사용 → 잔여 42h. FHD 동시(3배)면 14h, 1회 잔여(12h−1h=11h)가 더 작다.
+		{"1회 잔여가 더 작음", plan.Plasma, h, 198 * h, 3, 11 * h},
+		// 잔여 42h를 FHD 동시로 쓰면 14h. 방송 막 시작(1회 잔여 12h)이면 12h.
+		{"1회 잔여가 제한", plan.Plasma, 0, 198 * h, 3, 12 * h},
+		// Beam 잔여 5h, FHD(2배) → 2.5h. 1회 잔여 7h보다 작다.
+		{"월 잔여 ÷ 배수가 제한", plan.Beam, h, 115 * h, 2, 150 * time.Minute},
+		{"다 쓰면 0(음수 아님)", plan.Spark, 30 * time.Minute, 6 * h, 1, 0},
+		{"Glow는 무제한", plan.Glow, 10 * h, 100 * h, 1, -1},
+	}
+	for _, test := range cases {
+		got := broadcastRemaining(test.plan, test.onAir, test.used, test.units)
+		if test.want < 0 {
+			if got != nil {
+				t.Fatalf("%s: got %v, want nil", test.name, *got)
+			}
+			continue
+		}
+		if got == nil || *got != test.want {
+			t.Fatalf("%s: got %v, want %v", test.name, got, test.want)
+		}
+	}
+}

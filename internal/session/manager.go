@@ -178,8 +178,9 @@ type Session struct {
 	// Plan은 생성 시점의 소유자 요금제다(#270). 이후 바뀌지 않으므로 mu 없이
 	// 읽는다. 게스트 세션과 플랜 조회가 조립되지 않은 배포(벤치·로컬)는 빈 값이다.
 	Plan plan.Plan
-	// BroadcastResolution은 송출 해상도(720p·fhd)다(#271). 생성 시점에 정해지고
-	// 이후 바뀌지 않으므로 mu 없이 읽는다. pinLongEdge는 그 해상도의 디코더 장변이다.
+	// BroadcastResolution은 송출 해상도(720p·fhd)다(#271). 일시정지 중 바뀔 수
+	// 있으므로(#283) mu로 보호하고, 다른 패키지는 Resolution()으로 읽는다.
+	// pinLongEdge는 그 해상도의 디코더 장변이다.
 	BroadcastResolution string
 	pinLongEdge         int
 	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
@@ -247,6 +248,12 @@ type Session struct {
 	broadcastRemaining *int64
 	lastMediaFrameNano atomic.Int64
 	mediaIdleResetNano atomic.Int64
+	// videoTrack·pipelineDone은 해상도 변경(#283)이 같은 트랙으로 파이프라인을
+	// 다시 띄우는 데 쓴다. pipelineDone은 현재 파이프라인이 끝나면 닫힌다.
+	// resolutionMu는 변경 요청을 하나씩 처리한다.
+	videoTrack   *webrtc.TrackRemote
+	pipelineDone chan struct{}
+	resolutionMu sync.Mutex
 }
 
 // pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
@@ -1093,7 +1100,8 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	// 자리는 세션 잠금 밖에서 잡는다 — 만석이면 짧게 기다리는데, 그동안 잠금을
 	// 쥐고 있으면 같은 세션의 다른 요청까지 멈춘다. 뒤이은 검증이 실패하면
 	// 아래 defer가 되돌린다.
-	lease, err := m.egressSlots.AcquireClaim(context.Background(), egressClaimFor(s))
+	claim := egressClaimFor(s)
+	lease, err := m.egressSlots.AcquireClaim(context.Background(), claim)
 	if err != nil {
 		return nil, err
 	}
@@ -1113,6 +1121,12 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	t := s.target(provider)
 	if s.closed {
 		return nil, ErrNotFound
+	}
+	// 자리를 잡는 사이 해상도가 바뀌었으면(#283) 유닛을 지금 해상도로 맞춘다.
+	if fhd := s.BroadcastResolution == ResolutionFHD; fhd != claim.HighRes {
+		if err := m.egressSlots.ChangeResolution(s.ID, fhd); err != nil {
+			return nil, err
+		}
 	}
 	// 트랙 먼저, 시작 나중 — 종전 501 스텁 시절부터의 계약(409)을 유지한다.
 	if s.rawTrackID == "" {
@@ -1181,7 +1195,7 @@ func egressClaimFor(s *Session) media.EgressClaim {
 	}
 	return media.EgressClaim{
 		Owner:   s.ID,
-		HighRes: s.BroadcastResolution == ResolutionFHD,
+		HighRes: s.Resolution() == ResolutionFHD,
 		Tier:    egressTierFor(s.Plan),
 		Group:   group,
 	}
@@ -1681,106 +1695,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			m.logger.Warn("ignoring video track outside negotiated codec", "session_id", s.ID, "codec", track.Codec().MimeType, "expected_codec", expectedCodec)
 			return
 		}
-		s.mu.Lock()
-		if s.rawTrackID != "" && s.trackCancel != nil {
-			// 교체 트랙(예: 카메라 전환)이면 기존 파이프라인을 중지하고 새 트랙을
-			// 같은 출력 트랙으로 다시 감싼다. 무시하지 않고 Python의 실시간 영상
-			// 트랙 교체 동작과 맞춘다.
-			m.logger.Info("replacing video track", "session_id", s.ID, "previous_track_id", s.rawTrackID, "new_track_id", track.ID())
-			s.trackCancel()
-		}
-		trackCtx, trackCancel := context.WithCancel(ctx)
-		s.trackCancel = trackCancel
-		s.rawTrackID = track.ID()
-		if s.Output != nil {
-			s.processedTrackID = s.Output.ID()
-		}
-		s.UpdatedAt = time.Now().UTC()
-		s.mu.Unlock()
-
-		var aiStream media.AIStream
-		if s.privacyMode == config.PrivacyModeReal {
-			client := m.ai.Next()
-			m.metrics.IncAITargetSession(client.Address())
-			// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
-			// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
-			// 스트림 식별자를 선택할 수 없게 한다.
-			aiStream = client.NewStream(trackCtx, s.AIClientID)
-		}
-		transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
-			Gate:           m.spawnGate,
-			EncoderThreads: m.cfg.FFmpegEncoderThreads,
-			WireFormat:     m.cfg.AIWireFormat,
-			VideoCodec:     codec,
-			PinLongEdge:    uint16(s.pinLongEdge),
-		})
-		processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
-		if err != nil {
-			m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
-			return
-		}
-		s.mu.Lock()
-		// 새 Processor를 세션에 공개하기 전에 현재 제어 상태를 먼저 적용한다.
-		// 그렇지 않으면 토글 요청이 이 새 Processor를 갱신한 직후, 여기서 읽은
-		// 오래된 상태가 다시 덮어쓰는 경합이 생길 수 있다.
-		if s.aiInputPaused {
-			processor.SuspendAIInput()
-		}
-		processor.SetAnonymizationEnabled(s.anonymizationEnabled)
-		s.processor = processor
-		// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
-		// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
-		// Enqueue 경로가 끊기지 않는다.
-		egressFanout := s.egressFanout
-		s.mu.Unlock()
-		m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode)
-		trackID := track.ID()
-		// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
-		// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
-		// 이후 재인코딩 프레임마다 손상이 이어지기 때문이다.
-		requestKeyframe := func() {
-			if err := s.PC.WriteRTCP([]rtcp.Packet{
-				&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
-			}); err != nil {
-				m.logger.Warn("keyframe request failed", "session_id", s.ID, "error", err)
-			}
-		}
-		go func() {
-			m.mu.Lock()
-			m.pipelines[s.ID] = struct{}{}
-			m.mu.Unlock()
-			defer func() {
-				m.mu.Lock()
-				delete(m.pipelines, s.ID)
-				m.mu.Unlock()
-			}()
-			media.RunTrack(
-				trackCtx,
-				m.logger.With("session_id", s.ID),
-				track,
-				s.Output,
-				processor,
-				transcoder,
-				egressFanout,
-				m.metrics,
-				s.privacyMode,
-				m.cfg.FrameQueueSize,
-				requestKeyframe,
-				func() {
-					s.lastMediaFrameNano.Store(time.Now().UnixNano())
-					m.noteProcessedMediaFrame(s)
-				},
-			)
-			s.mu.Lock()
-			// 아직 활성 트랙일 때만 비운다. 이전 파이프라인을 비우는 사이 새
-			// 교체 트랙이 활성화됐을 수 있다.
-			if s.rawTrackID == trackID {
-				s.rawTrackID = ""
-				s.processedTrackID = ""
-				s.UpdatedAt = time.Now().UTC()
-			}
-			s.mu.Unlock()
-		}()
+		m.startVideoPipeline(ctx, s, track, codec)
 	})
 
 	s.PC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -1841,6 +1756,118 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 		}
 		s.mu.Unlock()
 	})
+}
+
+// startVideoPipeline은 영상 트랙의 처리 파이프라인(디코더·AI·미리보기 인코더)을
+// 띄운다. 트랙 도착과 해상도 변경(#283)이 같은 경로를 쓴다. 이미 파이프라인이
+// 있으면 그것을 멈추고 교체한다.
+func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *webrtc.TrackRemote, codec media.VideoCodec) {
+	s.mu.Lock()
+	if s.rawTrackID != "" && s.trackCancel != nil {
+		// 교체 트랙(예: 카메라 전환)이면 기존 파이프라인을 중지하고 새 트랙을
+		// 같은 출력 트랙으로 다시 감싼다. 무시하지 않고 Python의 실시간 영상
+		// 트랙 교체 동작과 맞춘다.
+		m.logger.Info("replacing video track", "session_id", s.ID, "previous_track_id", s.rawTrackID, "new_track_id", track.ID())
+		s.trackCancel()
+	}
+	trackCtx, trackCancel := context.WithCancel(ctx)
+	s.trackCancel = trackCancel
+	s.rawTrackID = track.ID()
+	if s.Output != nil {
+		s.processedTrackID = s.Output.ID()
+	}
+	s.videoTrack = track
+	pipelineDone := make(chan struct{})
+	s.pipelineDone = pipelineDone
+	pinLongEdge := s.pinLongEdge
+	s.UpdatedAt = time.Now().UTC()
+	s.mu.Unlock()
+
+	var aiStream media.AIStream
+	if s.privacyMode == config.PrivacyModeReal {
+		client := m.ai.Next()
+		m.metrics.IncAITargetSession(client.Address())
+		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
+		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
+		// 스트림 식별자를 선택할 수 없게 한다.
+		aiStream = client.NewStream(trackCtx, s.AIClientID)
+	}
+	transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
+		Gate:           m.spawnGate,
+		EncoderThreads: m.cfg.FFmpegEncoderThreads,
+		WireFormat:     m.cfg.AIWireFormat,
+		VideoCodec:     codec,
+		PinLongEdge:    uint16(pinLongEdge),
+	})
+	processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
+	if err != nil {
+		m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
+		close(pipelineDone)
+		return
+	}
+	s.mu.Lock()
+	// 새 Processor를 세션에 공개하기 전에 현재 제어 상태를 먼저 적용한다.
+	// 그렇지 않으면 토글 요청이 이 새 Processor를 갱신한 직후, 여기서 읽은
+	// 오래된 상태가 다시 덮어쓰는 경합이 생길 수 있다.
+	if s.aiInputPaused {
+		processor.SuspendAIInput()
+	}
+	processor.SetAnonymizationEnabled(s.anonymizationEnabled)
+	s.processor = processor
+	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
+	// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
+	// Enqueue 경로가 끊기지 않는다.
+	egressFanout := s.egressFanout
+	s.mu.Unlock()
+	m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode)
+	trackID := track.ID()
+	// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
+	// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
+	// 이후 재인코딩 프레임마다 손상이 이어지기 때문이다.
+	requestKeyframe := func() {
+		if err := s.PC.WriteRTCP([]rtcp.Packet{
+			&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
+		}); err != nil {
+			m.logger.Warn("keyframe request failed", "session_id", s.ID, "error", err)
+		}
+	}
+	go func() {
+		defer close(pipelineDone)
+		m.mu.Lock()
+		m.pipelines[s.ID] = struct{}{}
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			delete(m.pipelines, s.ID)
+			m.mu.Unlock()
+		}()
+		media.RunTrack(
+			trackCtx,
+			m.logger.With("session_id", s.ID),
+			track,
+			s.Output,
+			processor,
+			transcoder,
+			egressFanout,
+			m.metrics,
+			s.privacyMode,
+			m.cfg.FrameQueueSize,
+			requestKeyframe,
+			func() {
+				s.lastMediaFrameNano.Store(time.Now().UnixNano())
+				m.noteProcessedMediaFrame(s)
+			},
+		)
+		s.mu.Lock()
+		// 아직 활성 트랙일 때만 비운다. 이전 파이프라인을 비우는 사이 새
+		// 교체 트랙이 활성화됐을 수 있다.
+		if s.rawTrackID == trackID {
+			s.rawTrackID = ""
+			s.processedTrackID = ""
+			s.UpdatedAt = time.Now().UTC()
+		}
+		s.mu.Unlock()
+	}()
 }
 
 func (s *Session) Response() Response {

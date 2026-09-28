@@ -137,7 +137,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		idleSince := live.MediaIdleSince()
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
 		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
-		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.BroadcastResolution == session.ResolutionFHD, len(targets))))
+		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,

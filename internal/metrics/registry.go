@@ -55,6 +55,7 @@ type Registry struct {
 	aiFallbackFrames    map[string]uint64
 	aiInputPausedFrames map[string]uint64
 	aiTargetSessions    map[string]uint64
+	egressUnitsByPlan   map[string]int64
 	aiTargetReady       map[string]int64
 	nvencSessions       map[string]int64
 	nvencSlotsPerCard   map[string]int64
@@ -109,6 +110,17 @@ func (r *Registry) SetActiveSessions(value int) { r.activeSessions.Store(int64(v
 func (r *Registry) SetEgressSlots(used, capacity int) {
 	r.egressSlotsUsed.Store(int64(used))
 	r.egressSlotsCapacity.Store(int64(capacity))
+}
+
+// SetEgressUnitsByPlan은 플랜별 송출 유닛 점유다(#272). 스냅샷으로 통째 교체한다.
+func (r *Registry) SetEgressUnitsByPlan(units map[string]int) {
+	snapshot := make(map[string]int64, len(units))
+	for plan, value := range units {
+		snapshot[plan] = int64(value)
+	}
+	r.mu.Lock()
+	r.egressUnitsByPlan = snapshot
+	r.mu.Unlock()
 }
 func (r *Registry) IncConnections()                { r.connections.Add(1) }
 func (r *Registry) IncConnectionFailures()         { r.connectionFailure.Add(1) }
@@ -285,8 +297,16 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeFloatCounter(w, "innolive_process_tree_cpu_seconds_total", "Total CPU time spent by the server and its FFmpeg child processes.", processTreeCPUSeconds)
 	writeGauge(w, "innolive_process_tree_resident_memory_bytes", "Resident memory used by the server and its active FFmpeg child processes.", int64(processTreeRSSBytes))
 	writeGauge(w, "innolive_active_sessions", "Number of active WebRTC sessions.", r.activeSessions.Load())
-	writeGauge(w, "innolive_egress_slots_used", "Egress slots currently held by running broadcasts.", r.egressSlotsUsed.Load())
-	writeGauge(w, "innolive_egress_slots_capacity", "Configured egress slot limit (0 means unlimited).", r.egressSlotsCapacity.Load())
+	// #272부터 자리는 유닛이다(720p 한 곳 1 · FHD 한 곳 2 · 720p 동시 2 · FHD 동시 3).
+	writeGauge(w, "innolive_egress_slots_used", "Egress units currently held by running broadcasts.", r.egressSlotsUsed.Load())
+	writeGauge(w, "innolive_egress_slots_capacity", "Configured egress unit limit (0 means unlimited).", r.egressSlotsCapacity.Load())
+	r.mu.RLock()
+	egressUnitsByPlan := make(map[string]int64, len(r.egressUnitsByPlan))
+	for plan, value := range r.egressUnitsByPlan {
+		egressUnitsByPlan[plan] = value
+	}
+	r.mu.RUnlock()
+	writeLabeledGaugesWithKey(w, "innolive_egress_units_used_by_plan", "Egress units held per subscription plan (none = no plan, e.g. auth disabled).", "plan", egressUnitsByPlan)
 	writeCounter(w, "innolive_connection_total", "Number of WebRTC sessions created.", r.connections.Load())
 	writeCounter(w, "innolive_connection_failures_total", "Number of WebRTC connections that reached a failed state.", r.connectionFailure.Load())
 	writeCounter(w, "innolive_reconnect_total", "Number of WebRTC sessions that recovered after disconnecting.", r.reconnects.Load())

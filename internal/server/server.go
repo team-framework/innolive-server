@@ -850,6 +850,10 @@ func startStreamError(err error, sessionID string) *apiError {
 		return &apiError{Status: http.StatusConflict, Code: "conflict", Message: "Cannot start stream before a video track is available.", Details: map[string]any{"session_id": sessionID}}
 	case errors.Is(err, session.ErrStreamActive):
 		return &apiError{Status: http.StatusConflict, Code: "stream_already_active", Message: "The stream is already active.", Details: map[string]any{"session_id": sessionID}}
+	case errors.Is(err, media.ErrEgressCappedUnitsExhausted):
+		// 계약은 기존 만석과 같다(503 egress_slots_exhausted). 무료 몫만 찬
+		// 경우를 클라이언트가 구분할 수 있게 사유를 싣는다(#272).
+		return &apiError{Status: http.StatusServiceUnavailable, Code: "egress_slots_exhausted", Message: "No streaming slot is available. Try again after another broadcast ends.", Details: map[string]any{"session_id": sessionID, "reason": "plan_slots_full"}}
 	case errors.Is(err, media.ErrEgressSlotsExhausted):
 		// 자리는 다른 방송이 끝나야 난다 — 즉시 재시도해도 풀리지 않으므로
 		// 사용자에게 알릴 실패로 내린다.

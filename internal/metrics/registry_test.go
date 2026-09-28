@@ -97,3 +97,18 @@ func TestAITargetReadyGauge(t *testing.T) {
 		t.Error("recovered target did not return to 1")
 	}
 }
+
+func TestEgressUnitsByPlanGauge(t *testing.T) {
+	registry := New()
+	registry.SetEgressUnitsByPlan(map[string]int{"spark": 2, "plasma": 3})
+	var output strings.Builder
+	registry.WritePrometheus(&output)
+	for _, want := range []string{
+		`innolive_egress_units_used_by_plan{plan="plasma"} 3`,
+		`innolive_egress_units_used_by_plan{plan="spark"} 2`,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("metrics missing %q", want)
+		}
+	}
+}

@@ -444,6 +444,8 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
 		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
 	}
+	// Spark 몫 상한(#272). 하위 플랜을 막는 것만으로 유료 몫이 지켜진다.
+	manager.egressSlots.SetCappedLimit(cfg.EgressSparkUnits)
 	// 자리 상한은 첫 송출을 기다리지 않고 지금 낸다. 이 게이지에서 0은
 	// "제한 없음"이라, 설정해 둔 상한이 첫 방송 전까지 0으로 보이면
 	// 운영자는 설정이 안 먹은 것으로 읽는다.
@@ -1078,7 +1080,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 	// 자리는 세션 잠금 밖에서 잡는다 — 만석이면 짧게 기다리는데, 그동안 잠금을
 	// 쥐고 있으면 같은 세션의 다른 요청까지 멈춘다. 뒤이은 검증이 실패하면
 	// 아래 defer가 되돌린다.
-	lease, err := m.egressSlots.Acquire(context.Background())
+	lease, err := m.egressSlots.AcquireClaim(context.Background(), egressClaimFor(s))
 	if err != nil {
 		return nil, err
 	}
@@ -1124,7 +1126,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		egress.SetReconnectMaxElapsed(options[0].ReconnectMaxElapsed)
 	}
 	egress.SetNVENCDevice(lease.Device())
-	m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
+	m.publishEgressSlots()
 	// 오디오 mute는 스트림마다 독립이므로(#232) 이전 방송이 남긴 상태가 없다.
 	// 새 egress가 Attach할 때 자기 mute 의도를 싣고 시작한다.
 	s.setAIInputPaused(false)
@@ -1144,7 +1146,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		defer close(egressDone)
 		defer func() {
 			lease.Release()
-			m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
+			m.publishEgressSlots()
 		}()
 		m.runEgress(s, provider, egress, egressCtx, usageID)
 	}()
@@ -1153,6 +1155,27 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		"reconnect_max_elapsed", egress.ReconnectMaxElapsed(), "nvenc_device", egress.NVENCDevice(),
 		"egress_slots_used", m.egressSlots.Used())
 	return s, nil
+}
+
+// egressClaimFor는 세션의 송출 회계 정보다(#272). 유닛은 세션 단위로 합산되고
+// (해상도·송출 수), Spark만 상한 그룹이다. 플랜이 없는 세션(인증을 끈 벤치)은
+// 상한 없이 "none"으로 센다.
+func egressClaimFor(s *Session) media.EgressClaim {
+	group := string(s.Plan)
+	if group == "" {
+		group = "none"
+	}
+	return media.EgressClaim{
+		Owner:   s.ID,
+		HighRes: s.BroadcastResolution == ResolutionFHD,
+		Capped:  s.Plan == plan.Spark,
+		Group:   group,
+	}
+}
+
+func (m *Manager) publishEgressSlots() {
+	m.metrics.SetEgressSlots(m.egressSlots.Used(), m.egressSlots.Capacity())
+	m.metrics.SetEgressUnitsByPlan(m.egressSlots.UsedByGroup())
 }
 
 // EgressSlots는 자리 예산이다. 누수 감시가 카드별 회계를 읽는다.

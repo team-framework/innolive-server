@@ -221,3 +221,58 @@ func TestConcurrentPrepareCannotBypassSimulcastGate(t *testing.T) {
 		manager.CloseAll()
 	}
 }
+
+// 역순(치지직 먼저)이고 첫 대상이 "준비됨"까지 끝난 상태에서 유튜브를 더하는
+// 경우다. 치지직은 준비 단계에서 egress를 붙이지 않아 HTTP만으로 준비를 끝낼 수
+// 있다. Spark는 두 번째 대상이 플랫폼에 닿지 않고, Plasma는 닿는다.
+func TestPrepareGatesSecondTargetAfterFirstIsPrepared(t *testing.T) {
+	for _, test := range []struct {
+		plan      plan.Plan
+		wantCode  string
+		wantCalls int
+	}{
+		{plan.Spark, "plan_simulcast_not_allowed", 0},
+		{plan.Plasma, "", 1},
+	} {
+		t.Run(string(test.plan), func(t *testing.T) {
+			chzzk := &stubStreamingProvider{prepared: chzzkPrepared()}
+			youtube := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
+			server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
+				auth.StreamingProviderYouTube: youtube,
+				auth.StreamingProviderChzzk:   chzzk,
+			})
+			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
+			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), string(auth.StreamingProviderChzzk), "", session.Resolution720p, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			putBroadcast(t, server.URL, live.ID, ownerToken, `{"title":"t","category_type":"ETC","category_id":"talk"}`)
+			if response, payload := prepareStream(t, server.URL, live.ID, ownerToken, `{"provider":"chzzk"}`); response.StatusCode != http.StatusOK {
+				t.Fatalf("first target (chzzk) prepare status = %d (payload %v)", response.StatusCode, payload)
+			}
+			if got := live.PreparedTargets(); len(got) != 1 || got[0] != "chzzk" {
+				t.Fatalf("prepared targets = %v, want [chzzk]", got)
+			}
+
+			// 치지직 세션의 PUT /broadcast는 치지직 설정에 저장되므로 유튜브 설정은 직접 넣는다.
+			madeForKids := false
+			if _, err := manager.SetBroadcastSettings(live.ID, session.YouTubeBroadcastSettings{MadeForKids: &madeForKids}, "youtube"); err != nil {
+				t.Fatal(err)
+			}
+			response, payload := prepareStream(t, server.URL, live.ID, ownerToken, `{"provider":"youtube"}`)
+			if test.wantCode != "" && (response.StatusCode != http.StatusForbidden || streamErrorCode(payload) != test.wantCode) {
+				t.Fatalf("status=%d code=%q, want 403 %s", response.StatusCode, streamErrorCode(payload), test.wantCode)
+			}
+			if test.wantCode == "" && response.StatusCode == http.StatusForbidden {
+				t.Fatalf("plasma second target gated: %v", payload)
+			}
+			if youtube.prepareCalls != test.wantCalls {
+				t.Fatalf("youtube prepare calls = %d, want %d (status %d payload %v)", youtube.prepareCalls, test.wantCalls, response.StatusCode, payload)
+			}
+			// 거절돼도 먼저 준비된 치지직은 그대로다.
+			if got := live.PreparedTargets(); len(got) != 1 || got[0] != "chzzk" {
+				t.Fatalf("prepared targets after second attempt = %v, want [chzzk]", got)
+			}
+		})
+	}
+}

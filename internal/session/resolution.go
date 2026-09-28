@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -11,7 +12,9 @@ import (
 
 // 송출 해상도는 세션 생성 시 정해진다(#271). 디코더가 트랙 도착 즉시 이
 // 해상도로 핀을 걸고 뜨므로, 방송 준비(prepare) 시점에는 이미 늦다. 세션 중
-// 변경(#283)은 모든 송출이 멈춘 동안에만 받고, 파이프라인을 새 핀으로 다시 띄운다.
+// 변경(#283)은 송출 대상이 하나도 없을 때만 받고, 파이프라인을 새 핀으로 다시
+// 띄운다. 유튜브·치지직 모두 같은 방송 안의 해상도 변경을 반영하지 않아
+// (2026-09-28 실측) 방송 중 변경은 서버가 방송을 끝내고 새로 여는 것으로 한다.
 const (
 	Resolution720p = "720p"
 	ResolutionFHD  = "fhd"
@@ -22,10 +25,9 @@ const (
 
 var ErrInvalidResolution = errors.New("broadcast_resolution must be 720p or fhd")
 
-// ErrResolutionChangeWhileLive는 멈추지 않은 송출이 있어 해상도를 바꿀 수 없는
-// 경우다. 해상도는 세션에 하나라, 한 대상만 멈춘 채 바꾸면 방송 중인 대상의
-// 화질이 바뀐다.
-var ErrResolutionChangeWhileLive = errors.New("every stream must be paused to change the resolution")
+// ErrResolutionChangeWhileLive는 준비·송출 중인 대상이 있어 해상도를 바꿀 수 없는
+// 경우다. 플랫폼은 같은 방송 안의 해상도 변경을 반영하지 않는다.
+var ErrResolutionChangeWhileLive = errors.New("stop every broadcast before changing the resolution")
 
 // normalizeResolution은 빈 값을 720p로 채우고 미지원 값을 거절한다 — 해상도를
 // 보내지 않는 기존 클라이언트는 종전대로 720p다.
@@ -60,10 +62,9 @@ func (s *Session) Resolution() string {
 	return s.BroadcastResolution
 }
 
-// ChangeBroadcastResolution은 세션의 송출 해상도를 바꾼다(#283). 송출 중인 대상이
-// 있으면 전부 멈춰 있어야 한다. 유닛을 먼저 다시 잡고(자리가 없으면 기존 해상도
-// 유지), 영상 파이프라인을 새 디코더 핀으로 다시 띄운다. egress는 재개 뒤 들어오는
-// 새 치수의 프레임을 보고 같은 스트림 키로 ffmpeg만 다시 띄운다.
+// ChangeBroadcastResolution은 세션의 송출 해상도를 바꾸고(#283) 영상 파이프라인을
+// 새 디코더 핀으로 다시 띄운다. 준비·송출 중인 대상이 있으면 거절한다 — 방송 중
+// 변경은 서버가 대상을 먼저 끝낸 뒤 이 함수를 부른다.
 func (m *Manager) ChangeBroadcastResolution(id, value string) (*Session, error) {
 	resolution, err := normalizeResolution(value)
 	if err != nil {
@@ -85,7 +86,7 @@ func (m *Manager) ChangeBroadcastResolution(id, value string) (*Session, error) 
 		s.mu.Unlock()
 		return s, nil
 	}
-	if hasUnpausedTargetLocked(s) {
+	if hasActiveTargetLocked(s) {
 		s.mu.Unlock()
 		return nil, ErrResolutionChangeWhileLive
 	}
@@ -131,29 +132,58 @@ func (m *Manager) ChangeBroadcastResolution(id, value string) (*Session, error) 
 	return s, nil
 }
 
-// hasUnpausedTargetLocked는 멈추지 않은 채 송출 중인 대상이 있는지다. Session.mu를
+// hasActiveTargetLocked는 준비·송출 중이거나 egress가 아직 살아 있는 대상이
+// 있는지다. 중지가 요청된 egress는 끝나는 중이므로 세지 않는다. Session.mu를
 // 가진 호출자만 쓴다.
-func hasUnpausedTargetLocked(s *Session) bool {
-	phases := make([]media.EgressPhase, 0, len(s.targets))
+func hasActiveTargetLocked(s *Session) bool {
 	for _, t := range s.targets {
-		if t.egress == nil || t.stopReason != nil {
-			continue
+		if t.phase != BroadcastPhaseIdle {
+			return true
 		}
-		phases = append(phases, t.egress.Status().Phase)
-	}
-	return anyTargetUnpaused(phases)
-}
-
-// anyTargetUnpaused는 대상 단계 중 멈추지도 끝나지도 않은 것이 있는지다. 송출 전
-// (대상 없음)이면 false다 — 해상도를 바꿔도 방송 화질이 바뀌지 않는다.
-func anyTargetUnpaused(phases []media.EgressPhase) bool {
-	for _, phase := range phases {
-		switch phase {
-		case media.EgressPhaseStopped, media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
-			continue
-		default:
+		if t.egress != nil && t.stopReason == nil && t.egress.Status().Phase != media.EgressPhaseStopped {
 			return true
 		}
 	}
 	return false
+}
+
+// WaitStreamEnded는 대상의 마지막 egress 세대가 끝날 때까지 기다린다. 중지는
+// egress 종료를 요청만 하고, 끝난 egress의 정리(단계·방송 정리)는 그 뒤에 온다 —
+// 곧바로 같은 대상을 다시 준비하면 늦게 온 정리가 새 준비를 지운다.
+func (m *Manager) WaitStreamEnded(ctx context.Context, id, provider string) error {
+	s, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	done := s.readTarget(provider).done
+	s.mu.RUnlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ReserveResolutionUnits는 방송 중 해상도 전환(#283) 전에 새 해상도의 유닛을
+// 미리 잡는다. 자리가 없으면 방송을 끊기 전에 실패한다. 이후 대상을 끝내면
+// 유닛은 새 해상도 기준으로 반납되고, 새 방송이 다시 잡는다.
+func (m *Manager) ReserveResolutionUnits(id, value string) error {
+	resolution, err := normalizeResolution(value)
+	if err != nil {
+		return err
+	}
+	s, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := m.egressSlots.ChangeResolution(s.ID, resolution == ResolutionFHD); err != nil {
+		return err
+	}
+	m.publishEgressSlots()
+	return nil
 }

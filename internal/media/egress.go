@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -42,6 +43,14 @@ const (
 	// egressStableFrames는 이후 실패 시 재연결 backoff를 최솟값으로 되돌리려면
 	// 프로세스가 받아야 하는 프레임 수다.
 	egressStableFrames = 300
+	// egressGapFillAfter는 카메라 프레임이 이만큼 없으면 egress가 스스로 공백을
+	// 채우기 시작하는 시간이다. 입력 복구(슬레이트)는 ICE 판정 5초 + 디바운스
+	// 2초 뒤에야 시작되는데, 그동안 FFmpeg 입력이 비면 치지직 인제스트가 연결을
+	// 끊는다(#311).
+	egressGapFillAfter = time.Second
+	// egressFreezeMax는 마지막 프레임 반복(정지 화면)을 허용하는 공백 상한이다.
+	// 넘으면 슬레이트로 바꾼다.
+	egressFreezeMax = 3 * time.Second
 )
 
 var errReconnectInputTimeout = errors.New("timed out waiting for input frames while reconfiguring RTMP egress")
@@ -266,11 +275,22 @@ type RTMPEgress struct {
 	// startProcess는 FFmpeg egress 프로세스를 만든다. 운영에서는 start를 쓰고,
 	// 테스트에서는 시작·쓰기 실패를 외부 FFmpeg 없이 재현하는 double로 바꾼다.
 	startProcess func(context.Context, uint16, uint16, int) (*ffmpegProcess, error)
+	// gapFillAfter·freezeMax는 입력 공백 채우기 시간이다. 기본값은 코드 상수고
+	// 테스트에서 짧게 바꾼다.
+	gapFillAfter time.Duration
+	freezeMax    time.Duration
+	// minHeldGeneration은 정지 화면으로 다시 써도 되는 프레임의 최소 익명화
+	// 설정 세대다. 설정이 바뀌면 새 세대로 올려, 바뀌기 전에 처리된 프레임을
+	// 다시 내보내지 않게 한다.
+	minHeldGeneration atomic.Uint64
 
 	statusMu sync.Mutex
 	status   EgressStatus
-	slateMu  sync.Mutex
-	slate    *cachedCancellationSlate
+	// inputStalled는 입력 공백을 채우느라 오디오를 무음으로 돌린 상태다.
+	// pause·입력 복구와 별개인 원인이라 status와 따로 두고 statusMu로 보호한다.
+	inputStalled bool
+	slateMu      sync.Mutex
+	slate        *cachedCancellationSlate
 }
 
 func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions, outputURL string, audio *AudioPipe, latencyLog bool, audioOffset time.Duration, videoBitrate, videoSize string) *RTMPEgress {
@@ -295,6 +315,8 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		nvencDevice:     -1,
 		input:           make(chan frame, egressQueueSize),
 		reconnectPolicy: defaultReconnectPolicy,
+		gapFillAfter:    egressGapFillAfter,
+		freezeMax:       egressFreezeMax,
 		status: EgressStatus{
 			Phase:     EgressPhaseIdle,
 			TargetURL: maskStreamKey(outputURL),
@@ -498,7 +520,7 @@ func (e *RTMPEgress) Resume() bool {
 	if !e.transition(egressTransition{event: egressTransitionResume}) {
 		return false
 	}
-	if e.audio != nil && !e.inputRecovering() {
+	if e.audio != nil && !e.inputRecovering() && !e.inputStalledNow() {
 		e.audio.SetMuted(e.currentAudioWriteEnd(), false)
 	}
 	return true
@@ -533,10 +555,61 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 	e.status.InputRecovering = false
 	e.status.UpdatedAt = time.Now().UTC()
 	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), userPausePhase(e.status.Phase))
+		e.audio.SetMuted(e.currentAudioWriteEnd(), userPausePhase(e.status.Phase) || e.inputStalled)
 	}
 	e.statusMu.Unlock()
 	return true
+}
+
+// InvalidateHeldFrame은 지금까지 쓴 프레임을 공백 채우기에 다시 쓰지 못하게
+// 한다. 익명화 설정이 바뀔 때 부른다 — 익명화를 켠 뒤 그 전에 나간 원본
+// 프레임이 정지 화면으로 다시 나가면 안 된다. 이후 공백은 새 프레임이 올
+// 때까지 슬레이트로 채운다.
+//
+// 세대는 Processor.PrivacyGeneration이다. 큐·파이프라인에 남아 있던 이전
+// 세대 프레임이 뒤늦게 쓰여도 세대로 걸러진다.
+func (e *RTMPEgress) InvalidateHeldFrame(generation uint64) {
+	for {
+		current := e.minHeldGeneration.Load()
+		if generation <= current || e.minHeldGeneration.CompareAndSwap(current, generation) {
+			return
+		}
+	}
+}
+
+// holdable은 이 세대로 처리된 프레임을 정지 화면으로 다시 써도 되는지다.
+// 세대가 0이면(처리 중 설정 변경·세대 없는 경로) 쓰지 않는다.
+func (e *RTMPEgress) holdable(generation uint64) bool {
+	return generation != 0 && generation >= e.minHeldGeneration.Load()
+}
+
+// beginInputStall은 입력 공백을 채우는 동안 오디오를 무음으로 돌린다. 마이크
+// 입력도 멈췄는데 무음을 채우지 않으면 FFmpeg가 오디오를 기다리며 영상 출력을
+// 붙잡아 공백이 그대로 남는다.
+func (e *RTMPEgress) beginInputStall() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.inputStalled = true
+	if e.audio != nil {
+		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
+	}
+}
+
+// endInputStall은 카메라 프레임이 돌아왔을 때 공백 무음을 푼다. pause나 입력
+// 복구가 여전히 진행 중이면 무음을 유지한다.
+func (e *RTMPEgress) endInputStall() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.inputStalled = false
+	if e.audio != nil {
+		e.audio.SetMuted(e.currentAudioWriteEnd(), e.status.InputRecovering || userPausePhase(e.status.Phase))
+	}
+}
+
+func (e *RTMPEgress) inputStalledNow() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.inputStalled
 }
 
 // userPausePhase는 사용자가 명시적으로 일시 중지를 요청한 의도가 유지되는
@@ -813,6 +886,14 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			onStable()
 		}
 	}
+	// 입력 공백 채우기(#311): held는 이 프로세스에 이미 쓴 마지막 카메라
+	// 프레임이다. 이미 송출된 프레임만 반복하므로 새로 노출되는 데이터가 없다.
+	// 반복할 수 없는 경우(없음·슬레이트 이후·익명화 설정 변경·공백 상한 초과)는
+	// 슬레이트로 채운다.
+	var held []byte
+	var heldGeneration uint64
+	lastInputAt := time.Now()
+	stalled := e.inputStalledNow()
 	writeCamera := func(item frame) (*frame, error) {
 		if resolutionChanged(item, width, height) {
 			return &item, nil
@@ -826,6 +907,13 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		}
 		noteWritten()
 		e.latency.observe(item.ingestAt)
+		held, heldGeneration = item.data, item.privacyGeneration
+		if stalled {
+			stalled = false
+			e.endInputStall()
+			e.logger.Info("RTMP egress input resumed", "gap", time.Since(lastInputAt))
+		}
+		lastInputAt = time.Now()
 		return nil, nil
 	}
 	writeSlate := func() error {
@@ -837,7 +925,28 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			return err
 		}
 		noteWritten()
+		// 슬레이트를 낸 뒤에는 그 이전 프레임으로 돌아가지 않는다.
+		held = nil
 		return nil
+	}
+	fillGap := func() error {
+		gap := time.Since(lastInputAt)
+		if gap < e.gapFillAfter {
+			return nil
+		}
+		if !stalled {
+			stalled = true
+			e.beginInputStall()
+			e.logger.Warn("RTMP egress input stalled; filling gap", "gap", gap, "holding_last_frame", held != nil)
+		}
+		if held != nil && gap < e.freezeMax && e.holdable(heldGeneration) {
+			if _, err := process.stdin.Write(held); err != nil {
+				return err
+			}
+			noteWritten()
+			return nil
+		}
+		return writeSlate()
 	}
 	for _, item := range pending {
 		if e.shouldWriteCancellationSlate() {
@@ -874,6 +983,10 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 				if err := writeSlate(); err != nil {
 					return written, nil, err
 				}
+				continue
+			}
+			if err := fillGap(); err != nil {
+				return written, nil, err
 			}
 		}
 	}
@@ -936,7 +1049,7 @@ func (e *RTMPEgress) setAudioWriteEnd(writeEnd *os.File) {
 func (e *RTMPEgress) audioShouldMute() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
-	return e.status.InputRecovering || userPausePhase(e.status.Phase)
+	return e.status.InputRecovering || userPausePhase(e.status.Phase) || e.inputStalled
 }
 
 func (e *RTMPEgress) shouldWriteCancellationSlate() bool {

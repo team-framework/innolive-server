@@ -767,13 +767,10 @@ func TestReapUnnegotiatedAfterFailedOffer(t *testing.T) {
 // 정상적으로 answer를 받은 세션은 회수되지 않는다. 협상 이후의 수명은 ICE 연결
 // 실패 경로가 책임진다.
 func TestReapUnnegotiatedKeepsNegotiatedSession(t *testing.T) {
-	const timeout = 50 * time.Millisecond
+	// 세션 생성부터 answer 완료까지가 정리 시간 안에 끝나야 한다. race 모드의
+	// 느린 CI에서도 넉넉하게 두고, offer는 세션을 만들기 전에 준비한다(#313).
+	const timeout = 300 * time.Millisecond
 	manager := newReapTestManager(t, timeout)
-
-	s, ownerToken, err := manager.Create(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -790,11 +787,16 @@ func TestReapUnnegotiatedKeepsNegotiatedSession(t *testing.T) {
 	if err := client.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
+
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
 		t.Fatalf("CreateAnswer() error = %v", err)
 	}
 
-	time.Sleep(10 * timeout)
+	time.Sleep(3 * timeout)
 	if _, err := manager.Get(s.ID); err != nil {
 		t.Fatalf("negotiated session was reaped: %v", err)
 	}

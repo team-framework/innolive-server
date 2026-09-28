@@ -1165,7 +1165,7 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		return nil, ErrStreamActive
 	}
 	egressCtx, egressCancel := context.WithCancel(s.baseCtx)
-	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
+	egress := media.NewRTMPEgress(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID, "provider", provider), m.metrics, media.TranscoderOptions{
 		Gate:               m.spawnGate,
 		WireFormat:         m.cfg.AIWireFormat,
 		EgressVideoEncoder: m.cfg.EgressVideoEncoder,
@@ -1175,6 +1175,10 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		egress.SetReconnectMaxElapsed(options[0].ReconnectMaxElapsed)
 	}
 	egress.SetNVENCDevice(lease.Device())
+	if s.processor != nil {
+		// 지금 설정보다 앞서 처리돼 큐에 남은 프레임은 정지 화면에 쓰지 않는다(#311).
+		egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
+	}
 	m.publishEgressSlots()
 	// 오디오 mute는 스트림마다 독립이므로(#232) 이전 방송이 남긴 상태가 없다.
 	// 새 egress가 Attach할 때 자기 mute 의도를 싣고 시작한다.
@@ -1473,6 +1477,11 @@ func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, er
 	s.anonymizationEnabled = enabled
 	if s.processor != nil {
 		s.processor.SetAnonymizationEnabled(enabled)
+		// 바뀌기 전에 처리된 프레임이 입력 공백 때 정지 화면으로 다시
+		// 나가지 않게 한다(#311).
+		for _, egress := range activeEgressesLocked(s) {
+			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
+		}
 	}
 	s.UpdatedAt = time.Now().UTC()
 	m.logger.Info("anonymization changed", "session_id", s.ID, "enabled", enabled)

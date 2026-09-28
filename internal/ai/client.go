@@ -133,7 +133,7 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 	}
 	if err := runWithContext(callCtx, func() error { return s.stream.Send(request) }); err != nil {
 		s.reset()
-		return nil, fmt.Errorf("send AI video frame: %w", err)
+		return nil, s.wrapStreamError("send AI video frame", err)
 	}
 
 	var response *aiv1.ProcessedVideoChunk
@@ -143,7 +143,7 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 		return err
 	}); err != nil {
 		s.reset()
-		return nil, fmt.Errorf("receive AI video frame: %w", err)
+		return nil, s.wrapStreamError("receive AI video frame", err)
 	}
 	return response, nil
 }
@@ -162,11 +162,21 @@ func (s *Stream) ensureStream() error {
 	stream, err := s.client.ProcessVideo(streamCtx)
 	if err != nil {
 		cancel()
-		return fmt.Errorf("open AI ProcessVideo stream: %w", err)
+		return s.wrapStreamError("open AI ProcessVideo stream", err)
 	}
 	s.stream = stream
 	s.streamCancel = cancel
 	return nil
+}
+
+// wrapStreamError는 세션 ctx가 이미 취소됐으면 gRPC status 대신 ctx 오류를
+// 감싼다. gRPC는 취소를 status Canceled로 돌려줘 errors.Is(context.Canceled)가
+// 맞지 않고, 호출부는 서버가 스스로 끊은 요청을 AI 실패와 구분해야 한다(#297).
+func (s *Stream) wrapStreamError(operation string, err error) error {
+	if ctxErr := s.ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w", operation, ctxErr)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func (s *Stream) reset() {

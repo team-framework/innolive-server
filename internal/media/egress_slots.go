@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -13,10 +14,13 @@ import (
 // 대기가 아니라 사용자에게 알릴 실패로 다뤄야 한다.
 var ErrEgressSlotsExhausted = errors.New("no egress slot is available")
 
-// ErrEgressCappedUnitsExhausted는 상한 그룹(Spark)의 몫이 찬 경우다. 총량은
-// 남아 있을 수 있다. 기존 만석 처리와 같게 다루도록 ErrEgressSlotsExhausted로도
-// 판정된다.
-var ErrEgressCappedUnitsExhausted = fmt.Errorf("%w: capped group is full", ErrEgressSlotsExhausted)
+// ErrEgressTierUnitsExhausted는 총량은 남았지만 그 자리가 상위 등급의 비어 있는
+// 전용 몫이라 쓸 수 없는 경우다. 기존 만석 처리와 같게 다루도록
+// ErrEgressSlotsExhausted로도 판정된다.
+var ErrEgressTierUnitsExhausted = fmt.Errorf("%w: remaining units are reserved for higher tiers", ErrEgressSlotsExhausted)
+
+// EgressTierUnrestricted는 전용 몫 규칙을 받지 않는 등급이다(플랜이 없는 세션).
+const EgressTierUnrestricted = math.MaxInt
 
 // EgressClaim은 자리를 잡는 송출 하나의 회계 정보다(#272). media는 플랜을
 // 모른다 — 서버·세션 계층이 해석해 넘긴다.
@@ -26,8 +30,9 @@ type EgressClaim struct {
 	Owner string
 	// HighRes는 FHD 송출이다. 유닛은 720p 송출 n개가 n, FHD 송출 n개가 n+1이다.
 	HighRes bool
-	// Capped는 상한 그룹(Spark)에 속하는지다.
-	Capped bool
+	// Tier는 플랜 등급이다(0이 가장 낮다). 각 등급은 자기 전용 몫과 하위 등급의
+	// 비어 있는 몫을 쓸 수 있고, 상위 등급의 비어 있는 몫은 쓸 수 없다.
+	Tier int
 	// Group은 메트릭용 이름(플랜)이다.
 	Group string
 }
@@ -73,13 +78,12 @@ const (
 type EgressSlotBudget struct {
 	capacity int
 	devices  int
-	// cappedLimit는 상한 그룹이 함께 쓸 수 있는 유닛이다. 0이면 상한이 없다.
-	// 하위 플랜을 막는 것만으로 상위 플랜 몫이 지켜진다.
-	cappedLimit int
+	// tierReserves는 등급별 전용 몫이다(인덱스 = 등급). 비어 있으면 규칙이 없다.
+	tierReserves []int
 
 	mu          sync.Mutex
 	used        int
-	cappedUsed  int
+	usedByTier  map[int]int
 	perCard     []int
 	owners      map[string]*egressOwner
 	anonymous   int
@@ -94,7 +98,7 @@ func NewEgressSlotBudget(capacity, devices int) *EgressSlotBudget {
 	if capacity <= 0 && devices <= 0 {
 		return nil
 	}
-	budget := &EgressSlotBudget{capacity: capacity, devices: devices, owners: map[string]*egressOwner{}, usedByGroup: map[string]int{}}
+	budget := &EgressSlotBudget{capacity: capacity, devices: devices, owners: map[string]*egressOwner{}, usedByGroup: map[string]int{}, usedByTier: map[int]int{}}
 	if devices > 0 {
 		budget.perCard = make([]int, devices)
 	}
@@ -180,8 +184,8 @@ func (b *EgressSlotBudget) tryAcquire(claim EgressClaim) (*EgressLease, chan str
 	if b.capacity > 0 && b.used+delta > b.capacity {
 		return nil, b.appendWaiterLocked(), ErrEgressSlotsExhausted
 	}
-	if owner.claim.Capped && b.cappedLimit > 0 && b.cappedUsed+delta > b.cappedLimit {
-		return nil, b.appendWaiterLocked(), ErrEgressCappedUnitsExhausted
+	if b.capacity > 0 && b.used+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
+		return nil, b.appendWaiterLocked(), ErrEgressTierUnitsExhausted
 	}
 	device := -1
 	if b.devices > 0 {
@@ -195,9 +199,7 @@ func (b *EgressSlotBudget) tryAcquire(claim EgressClaim) (*EgressLease, chan str
 	owner.count++
 	owner.held += delta
 	b.used += delta
-	if owner.claim.Capped {
-		b.cappedUsed += delta
-	}
+	b.usedByTier[owner.claim.Tier] += delta
 	b.usedByGroup[owner.claim.Group] += delta
 	key := claim.Owner
 	if key == "" {
@@ -261,9 +263,7 @@ func (b *EgressSlotBudget) release(device int, key string) {
 		freed := owner.held - egressUnits(owner.claim.HighRes, owner.count)
 		owner.held -= freed
 		b.used -= freed
-		if owner.claim.Capped {
-			b.cappedUsed -= freed
-		}
+		b.usedByTier[owner.claim.Tier] -= freed
 		b.usedByGroup[owner.claim.Group] -= freed
 		if b.usedByGroup[owner.claim.Group] <= 0 {
 			delete(b.usedByGroup, owner.claim.Group)
@@ -311,15 +311,27 @@ func (b *EgressSlotBudget) Capacity() int {
 	return b.capacity
 }
 
-// SetCappedLimit는 상한 그룹(Spark)이 함께 쓸 수 있는 유닛을 정한다. 0이면
-// 상한이 없다. 서버 조립 단계에서 한 번 부른다.
-func (b *EgressSlotBudget) SetCappedLimit(units int) {
+// SetTierReserves는 등급별 전용 몫을 정한다(인덱스 = 등급, 0이 가장 낮다).
+// nil이면 규칙이 없다. 서버 조립 단계에서 한 번 부른다.
+func (b *EgressSlotBudget) SetTierReserves(reserves []int) {
 	if b == nil {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.cappedLimit = units
+	b.tierReserves = append([]int(nil), reserves...)
+}
+
+// higherTierVacancyLocked는 tier보다 상위 등급의 전용 몫 중 비어 있는 유닛이다.
+// 그 자리는 tier가 쓸 수 없다 — 상위 등급이 오면 바로 앉아야 한다.
+func (b *EgressSlotBudget) higherTierVacancyLocked(tier int) int {
+	vacancy := 0
+	for higher := tier + 1; higher >= 0 && higher < len(b.tierReserves); higher++ {
+		if unused := b.tierReserves[higher] - b.usedByTier[higher]; unused > 0 {
+			vacancy += unused
+		}
+	}
+	return vacancy
 }
 
 // UsedByGroup은 그룹(플랜)별 점유 유닛 스냅샷이다.

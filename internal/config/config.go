@@ -127,15 +127,26 @@ type Config struct {
 	// AdminUserIDs는 사용자 플랜을 지정할 수 있는 사용자 UUID 목록이다(#270).
 	// 비어 있으면 관리자 API는 누구에게도 열리지 않는다.
 	AdminUserIDs []string
-	// EgressSparkUnits는 Spark 플랜이 함께 쓸 수 있는 송출 유닛 상한이다(#272).
-	// 0이면 상한이 없다. MAX_EGRESS_SLOTS(유닛 총량)가 있어야 의미가 있다.
-	EgressSparkUnits int
+	// EgressSparkUnits·EgressPlasmaUnits는 플랜별 전용 송출 유닛이다(#272).
+	// Beam은 나머지(MAX_EGRESS_SLOTS − 둘)다. 각 플랜은 자기 몫과 하위 플랜의
+	// 빈 몫을 쓰고, 상위 플랜의 빈 몫은 쓰지 않는다. 둘 다 0이면 규칙이 없다.
+	EgressSparkUnits  int
+	EgressPlasmaUnits int
 	// GuestMaxSessions는 게스트 세션 상한이다. 0(미설정)이면 MAX_SESSIONS/2다.
 	GuestMaxSessions int
 }
 
 // GuestSessionLimit은 게스트 세션 상한의 실효값이다. 종전에는 코드에
 // MAX_SESSIONS/2로 박혀 있었다(#272).
+// EgressTierReserves는 등급별 전용 유닛이다(Spark, Beam, Plasma 순). 규칙이
+// 없으면 nil이다.
+func (c Config) EgressTierReserves() []int {
+	if c.EgressSparkUnits == 0 && c.EgressPlasmaUnits == 0 {
+		return nil
+	}
+	return []int{c.EgressSparkUnits, c.MaxEgressSlots - c.EgressSparkUnits - c.EgressPlasmaUnits, c.EgressPlasmaUnits}
+}
+
 func (c Config) GuestSessionLimit() int {
 	if c.GuestMaxSessions > 0 {
 		return c.GuestMaxSessions
@@ -187,6 +198,7 @@ func Load() (Config, error) {
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		AdminUserIDs:               splitList(env("ADMIN_USER_IDS", "")),
 		EgressSparkUnits:           envInt("EGRESS_SPARK_UNITS", 0),
+		EgressPlasmaUnits:          envInt("EGRESS_PLASMA_UNITS", 0),
 		GuestMaxSessions:           envInt("GUEST_MAX_SESSIONS", 0),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
 		GuestQueueRedisAddr:        strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
@@ -279,11 +291,13 @@ func (c Config) Validate() error {
 	if c.GuestMaxSessions < 0 || (c.MaxSessions > 0 && c.GuestMaxSessions > c.MaxSessions) {
 		return errors.New("GUEST_MAX_SESSIONS must be between 0 and MAX_SESSIONS")
 	}
-	if c.EgressSparkUnits < 0 {
-		return errors.New("EGRESS_SPARK_UNITS must not be negative")
+	if c.EgressSparkUnits < 0 || c.EgressPlasmaUnits < 0 {
+		return errors.New("EGRESS_SPARK_UNITS and EGRESS_PLASMA_UNITS must not be negative")
 	}
-	if c.EgressSparkUnits > 0 && c.MaxEgressSlots <= 0 {
-		return errors.New("EGRESS_SPARK_UNITS requires MAX_EGRESS_SLOTS")
+	if reserved := c.EgressSparkUnits + c.EgressPlasmaUnits; reserved > 0 {
+		if c.MaxEgressSlots <= 0 || reserved > c.MaxEgressSlots {
+			return errors.New("EGRESS_SPARK_UNITS + EGRESS_PLASMA_UNITS require MAX_EGRESS_SLOTS and must not exceed it")
+		}
 	}
 	for _, id := range c.AdminUserIDs {
 		if _, err := uuid.Parse(id); err != nil {

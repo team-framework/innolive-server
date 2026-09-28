@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -297,31 +298,68 @@ func TestBudgetChargesUnitsPerOwner(t *testing.T) {
 	b.Release()
 }
 
-func TestBudgetCapsSparkButNotPaid(t *testing.T) {
+func TestBudgetTierReserves(t *testing.T) {
+	// Spark 2 · Beam 7 · Plasma 4 = 13.
 	budget := NewEgressSlotBudget(13, 0)
-	budget.SetCappedLimit(2)
+	budget.SetTierReserves([]int{2, 7, 4})
 	ctx := context.Background()
-	spark := func(owner string) EgressClaim { return EgressClaim{Owner: owner, Capped: true, Group: "spark"} }
+	claim := func(owner string, tier int) EgressClaim { return EgressClaim{Owner: owner, Tier: tier} }
 
-	first, err := budget.AcquireClaim(ctx, spark("s1"))
+	// Spark는 자기 몫 2까지만 — 상위 몫이 비어 있어도 쓰지 못한다.
+	spark1, err := budget.AcquireClaim(ctx, claim("s1", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := budget.AcquireClaim(ctx, spark("s2")); err != nil {
+	if _, err := budget.AcquireClaim(ctx, claim("s2", 0)); err != nil {
 		t.Fatal(err)
 	}
-	_, err = budget.AcquireClaim(ctx, spark("s3"))
-	if !errors.Is(err, ErrEgressCappedUnitsExhausted) || !errors.Is(err, ErrEgressSlotsExhausted) {
-		t.Fatalf("third spark: err=%v, want capped exhaustion", err)
+	_, err = budget.AcquireClaim(ctx, claim("s3", 0))
+	if !errors.Is(err, ErrEgressTierUnitsExhausted) || !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("third spark: err=%v, want tier exhaustion", err)
 	}
-	// 유료는 Spark 몫과 무관하게 시작한다.
-	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "p1", HighRes: true, Group: "plasma"}); err != nil {
-		t.Fatalf("paid blocked by spark cap: %v", err)
+
+	// Beam은 자기 몫 7을 채운 뒤 Plasma 몫(4)은 쓰지 못한다.
+	var beams []*EgressLease
+	for i := 0; i < 7; i++ {
+		lease, err := budget.AcquireClaim(ctx, claim(fmt.Sprintf("b%d", i), 1))
+		if err != nil {
+			t.Fatalf("beam %d: %v", i, err)
+		}
+		beams = append(beams, lease)
 	}
-	// Spark 하나가 끝나면 다음 Spark가 들어온다.
-	first.Release()
-	if _, err := budget.AcquireClaim(ctx, spark("s3")); err != nil {
-		t.Fatalf("spark after release: %v", err)
+	if _, err := budget.AcquireClaim(ctx, claim("b7", 1)); !errors.Is(err, ErrEgressTierUnitsExhausted) {
+		t.Fatalf("beam into plasma reserve: err=%v", err)
+	}
+	// Plasma는 자기 몫 4를 그대로 쓴다.
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "p1", Tier: 2, HighRes: true}); err != nil {
+		t.Fatalf("plasma FHD: %v", err)
+	}
+	// Spark 자리가 비면 Beam이 빌려 쓸 수 있다(하위 몫).
+	spark1.Release()
+	if _, err := budget.AcquireClaim(ctx, claim("b7", 1)); err != nil {
+		t.Fatalf("beam borrowing free spark unit: %v", err)
+	}
+	for _, lease := range beams {
+		lease.Release()
+	}
+}
+
+func TestBudgetPlasmaBorrowsLowerTiers(t *testing.T) {
+	budget := NewEgressSlotBudget(13, 0)
+	budget.SetTierReserves([]int{2, 7, 4})
+	ctx := context.Background()
+	// 아무도 없으면 Plasma는 총량 전부를 쓸 수 있다.
+	for i := 0; i < 6; i++ {
+		if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: fmt.Sprintf("p%d", i), Tier: 2, HighRes: true}); err != nil {
+			t.Fatalf("plasma FHD %d: %v", i, err)
+		}
+	}
+	if budget.Used() != 12 {
+		t.Fatalf("plasma used %d units, want 12 (borrowing beyond its own 4)", budget.Used())
+	}
+	// 플랜이 없는 세션(벤치)은 등급 규칙을 받지 않는다.
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "bench", Tier: EgressTierUnrestricted}); err != nil {
+		t.Fatalf("unrestricted: %v", err)
 	}
 }
 

@@ -344,21 +344,30 @@ func TestValidateAdminUserIDs(t *testing.T) {
 	}
 }
 
-func TestValidateEgressSparkUnits(t *testing.T) {
+func TestEgressTierReserves(t *testing.T) {
 	cfg := validConfig()
 	cfg.MaxEgressSlots = 13
 	cfg.EgressSparkUnits = 2
+	cfg.EgressPlasmaUnits = 4
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("valid spark cap rejected: %v", err)
+		t.Fatalf("valid reserves rejected: %v", err)
 	}
+	got := cfg.EgressTierReserves()
+	if len(got) != 3 || got[0] != 2 || got[1] != 7 || got[2] != 4 {
+		t.Fatalf("reserves = %v, want [2 7 4]", got)
+	}
+	cfg.EgressPlasmaUnits = 12
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("reserves above the unit total must be rejected")
+	}
+	cfg.EgressPlasmaUnits = 4
 	cfg.MaxEgressSlots = 0
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("spark cap without a unit total must be rejected")
+		t.Fatal("reserves without a unit total must be rejected")
 	}
-	cfg.MaxEgressSlots = 13
-	cfg.EgressSparkUnits = -1
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("negative spark cap must be rejected")
+	cfg.EgressSparkUnits, cfg.EgressPlasmaUnits = 0, 0
+	if cfg.EgressTierReserves() != nil {
+		t.Fatal("no reserves configured must mean no tier rule")
 	}
 }
 

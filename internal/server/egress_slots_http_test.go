@@ -23,10 +23,10 @@ func TestEgressSlotsExhaustedMapsTo503(t *testing.T) {
 	}
 }
 
-// Spark 몫만 찬 경우도 계약은 같은 503이고, 사유로 구분한다(#272).
-func TestCappedUnitsExhaustedKeeps503WithReason(t *testing.T) {
+// 남은 자리가 상위 플랜 전용인 경우도 계약은 같은 503이고, 사유로 구분한다(#272).
+func TestTierUnitsExhaustedKeeps503WithReason(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	(&Server{}).writeStartStreamError(recorder, media.ErrEgressCappedUnitsExhausted, "session-1")
+	(&Server{}).writeStartStreamError(recorder, media.ErrEgressTierUnitsExhausted, "session-1")
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", recorder.Code)

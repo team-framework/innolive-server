@@ -444,8 +444,8 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
 		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
 	}
-	// Spark 몫 상한(#272). 하위 플랜을 막는 것만으로 유료 몫이 지켜진다.
-	manager.egressSlots.SetCappedLimit(cfg.EgressSparkUnits)
+	// 플랜별 전용 몫(#272). 각 플랜은 자기 몫과 하위 플랜의 빈 몫을 쓴다.
+	manager.egressSlots.SetTierReserves(cfg.EgressTierReserves())
 	// 자리 상한은 첫 송출을 기다리지 않고 지금 낸다. 이 게이지에서 0은
 	// "제한 없음"이라, 설정해 둔 상한이 첫 방송 전까지 0으로 보이면
 	// 운영자는 설정이 안 먹은 것으로 읽는다.
@@ -1158,8 +1158,8 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 }
 
 // egressClaimFor는 세션의 송출 회계 정보다(#272). 유닛은 세션 단위로 합산되고
-// (해상도·송출 수), Spark만 상한 그룹이다. 플랜이 없는 세션(인증을 끈 벤치)은
-// 상한 없이 "none"으로 센다.
+// (해상도·송출 수), 등급은 Spark < Beam < Plasma다. 플랜이 없는 세션(인증을 끈
+// 벤치)은 등급 규칙 없이 "none"으로 센다.
 func egressClaimFor(s *Session) media.EgressClaim {
 	group := string(s.Plan)
 	if group == "" {
@@ -1168,8 +1168,23 @@ func egressClaimFor(s *Session) media.EgressClaim {
 	return media.EgressClaim{
 		Owner:   s.ID,
 		HighRes: s.BroadcastResolution == ResolutionFHD,
-		Capped:  s.Plan == plan.Spark,
+		Tier:    egressTierFor(s.Plan),
 		Group:   group,
+	}
+}
+
+// egressTierFor는 config.EgressTierReserves의 순서(Spark, Beam, Plasma)와 같다.
+// Glow는 서버 송출 대상이 아니지만(#273이 막는다) 새어 들어오면 가장 낮게 센다.
+func egressTierFor(value plan.Plan) int {
+	switch value {
+	case plan.Spark, plan.Glow:
+		return 0
+	case plan.Beam:
+		return 1
+	case plan.Plasma:
+		return 2
+	default:
+		return media.EgressTierUnrestricted
 	}
 }
 

@@ -88,3 +88,24 @@ func TestUnitsMatchBM(t *testing.T) {
 		}
 	}
 }
+
+func TestModeUnitsFollowModeFor(t *testing.T) {
+	want := map[Mode]int{Mode720pSingle: 1, ModeFHDSingle: 2, Mode720pMulti: 2, ModeFHDMulti: 3}
+	if len(Modes) != len(want) {
+		t.Fatalf("Modes = %v", Modes)
+	}
+	for _, mode := range Modes {
+		if mode.Units() != want[mode] {
+			t.Fatalf("%s.Units() = %d, want %d", mode, mode.Units(), want[mode])
+		}
+	}
+	// ModeFor와 같은 배수여야 한다 — 차감과 안내가 어긋나면 안 된다.
+	for _, c := range []struct {
+		fhd     bool
+		targets int
+	}{{false, 1}, {true, 1}, {false, 2}, {true, 2}} {
+		if got := ModeFor(c.fhd, c.targets).Units(); got != Units(c.fhd, c.targets) {
+			t.Fatalf("ModeFor(%v,%d).Units() = %d, want %d", c.fhd, c.targets, got, Units(c.fhd, c.targets))
+		}
+	}
+}

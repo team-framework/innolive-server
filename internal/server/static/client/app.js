@@ -1917,8 +1917,9 @@ async function pauseBroadcast() {
   });
 }
 
-// changeResolution은 "송출 해상도" 선택값으로 세션 해상도를 바꾼다(#283). 서버는
-// 모든 송출이 멈춘 동안에만 받고, 재개할 때 새 해상도로 다시 연결한다.
+// changeResolution은 "송출 해상도" 선택값으로 세션 해상도를 바꾼다(#283). 방송
+// 중이면 서버가 방송을 끝내고 새 해상도로 다시 연다(202) — 진행은 세션 응답의
+// resolution_switch로 폴링된다.
 async function changeResolution() {
   const sessionId = state.session?.session_id;
   if (!sessionId) {
@@ -1931,9 +1932,10 @@ async function changeResolution() {
       body: JSON.stringify({ resolution }),
     });
     setCurrentSession(session);
-    logEvent("ok", "Broadcast resolution changed", {
+    logEvent("ok", "Broadcast resolution change requested", {
       session_id: sessionId,
       broadcast_resolution: session.broadcast_resolution,
+      resolution_switch: session.resolution_switch,
     });
   });
 }

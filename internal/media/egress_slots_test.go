@@ -400,3 +400,66 @@ func TestBudgetWakesLargeWaiterAfterSmallRelease(t *testing.T) {
 		t.Fatalf("FHD waiter not admitted after two releases: %v", err)
 	}
 }
+
+// 해상도 변경(#283): 늘어나는 유닛만 판정하고, 자리가 없으면 기존 해상도를 유지한다.
+func TestBudgetChangeResolution(t *testing.T) {
+	budget := NewEgressSlotBudget(4, 0)
+	ctx := context.Background()
+	// 720p 동시 송출 2유닛 + 다른 세션 1유닛.
+	for i := 0; i < 2; i++ {
+		if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", Group: "beam"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "b", Group: "beam"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FHD 동시는 3유닛 — 1이 늘어 4, 총량 안이다.
+	if err := budget.ChangeResolution("a", true); err != nil || budget.Used() != 4 || budget.UsedByGroup()["beam"] != 4 {
+		t.Fatalf("upgrade: err=%v used=%d groups=%v, want 4", err, budget.Used(), budget.UsedByGroup())
+	}
+	// 다른 세션이 FHD로 가려면 1이 더 필요하다 — 만석이라 거절하고 그대로 둔다.
+	if err := budget.ChangeResolution("b", true); !errors.Is(err, ErrEgressSlotsExhausted) || budget.Used() != 4 {
+		t.Fatalf("full upgrade: err=%v used=%d, want exhausted and unchanged", err, budget.Used())
+	}
+	// 거절된 뒤 반납하면 720p 기준(1)만 돌아와야 한다.
+	other.Release()
+	if budget.Used() != 3 {
+		t.Fatalf("after release used=%d, want 3", budget.Used())
+	}
+	// 낮추면 바로 반납한다. 이후 송출 추가는 바뀐 해상도로 센다.
+	if err := budget.ChangeResolution("a", false); err != nil || budget.Used() != 2 {
+		t.Fatalf("downgrade: err=%v used=%d, want 2", err, budget.Used())
+	}
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", HighRes: true, Group: "beam"}); err != nil || budget.Used() != 3 {
+		t.Fatalf("third target after downgrade: err=%v used=%d, want 3 (720p ×3)", err, budget.Used())
+	}
+	// 송출 중이 아닌 소유자는 바꿀 것이 없다.
+	if err := budget.ChangeResolution("idle", true); err != nil || budget.Used() != 3 {
+		t.Fatalf("idle owner: err=%v used=%d", err, budget.Used())
+	}
+}
+
+func TestBudgetChangeResolutionHonorsTierReserves(t *testing.T) {
+	// Spark 2 · Beam 1 · Plasma 1 = 4. Spark 720p 1유닛이 FHD(2)로 가는 건 자기 몫 안이다.
+	budget := NewEgressSlotBudget(4, 0)
+	budget.SetTierReserves([]int{2, 1, 1})
+	if _, err := budget.AcquireClaim(context.Background(), EgressClaim{Owner: "s", Tier: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.ChangeResolution("s", true); err != nil {
+		t.Fatalf("within own reserve: %v", err)
+	}
+	// Beam 720p 동시 2유닛(자기 1 + Spark 빈 몫 1) → FHD 동시 3은 Plasma 빈 몫을 넘본다.
+	budget2 := NewEgressSlotBudget(4, 0)
+	budget2.SetTierReserves([]int{1, 1, 2})
+	for i := 0; i < 2; i++ {
+		if _, err := budget2.AcquireClaim(context.Background(), EgressClaim{Owner: "b", Tier: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := budget2.ChangeResolution("b", true); !errors.Is(err, ErrEgressTierUnitsExhausted) || budget2.Used() != 2 {
+		t.Fatalf("beam into plasma reserve: err=%v used=%d, want tier exhaustion and unchanged", err, budget2.Used())
+	}
+}

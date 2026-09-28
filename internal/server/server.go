@@ -453,19 +453,33 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if providerName == "" {
 		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
+	warnings, failure := s.prepareTarget(r.Context(), liveSession, providerName)
+	if failure != nil {
+		writeError(w, *failure)
+		return
+	}
+	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
+	writeJSON(w, http.StatusOK, struct {
+		session.Response
+		Warnings []streaming.Warning `json:"warnings,omitempty"`
+	}{Response: liveSession.Response(), Warnings: warnings})
+}
+
+// prepareTarget은 대상 하나의 방송을 준비한다. 성공하면 플랫폼 경고를, 실패하면
+// 그 대상의 사유를 돌려준다. 방송 준비 요청과 방송 중 해상도 전환(#283)이 같은
+// 경로를 쓴다.
+func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session, providerName auth.StreamingProvider) ([]streaming.Warning, *apiError) {
 	provider := s.streaming[providerName]
 	if provider == nil {
 		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
 		// 계약(501)을 유지한다.
-		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
-		return
+		return nil, &apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}}
 	}
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
 	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
 	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID, string(providerName)); err != nil {
-		writeBroadcastBeginError(w, err, liveSession.ID)
-		return
+		return nil, broadcastBeginError(err, liveSession.ID)
 	}
 	// 플랜 게이팅(#273)은 선점 뒤·플랫폼 호출 전에 한다. 선점 뒤라야 같은 대상
 	// 재요청이 기존 409를 받고, 동시에 들어온 두 대상이 서로를 센다(선점 전에
@@ -474,25 +488,23 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if gate := planGateError(liveSession.Plan, liveSession.Resolution() == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
-		writeError(w, *gate)
-		return
+		return nil, gate
 	}
 	// 한도에 닿으면 다음 방송을 막는다(#275): 이 세션의 1회 최대, 이번 달 방송 시간.
 	// 진행 중 방송은 끊지 않지만 대상 추가는 새 송출이라 여기서 함께 막힌다.
-	exhausted, err := s.broadcastLimitError(r.Context(), liveSession.Plan, liveSession.UserID, liveSession.ID, liveSession.CreatedAt)
+	exhausted, err := s.broadcastLimitError(ctx, liveSession.Plan, liveSession.UserID, liveSession.ID, liveSession.CreatedAt)
 	if err == nil && exhausted == nil {
-		exhausted, err = s.monthlyLimitError(r.Context(), liveSession.Plan, liveSession.UserID)
+		exhausted, err = s.monthlyLimitError(ctx, liveSession.Plan, liveSession.UserID)
 	}
 	if err != nil || exhausted != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		if err != nil {
 			s.logger.Error("read monthly usage failed", "session_id", liveSession.ID, "error", err)
-			writeError(w, internalError())
-			return
+			internal := internalError()
+			return nil, &internal
 		}
 		s.logger.Info("stream prepare rejected by broadcast limit", "session_id", liveSession.ID, "provider", providerName, "code", exhausted.Code, "details", exhausted.Details)
-		writeError(w, *exhausted)
-		return
+		return nil, exhausted
 	}
 	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.
 	// 방송 설정 모델이 플랫폼별이므로(#229) 읽는 곳도 갈린다.
@@ -511,11 +523,11 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// 검증이 되어 그 계약이 깨진다.
 		if options.MadeForKids == nil {
 			s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
-			writeError(w, badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"}))
-			return
+			invalid := badRequest("made_for_kids must be specified in the broadcast settings.", map[string]any{"field": "made_for_kids"})
+			return nil, &invalid
 		}
 	}
-	prepared, err := provider.Prepare(r.Context(), liveSession.UserID, options)
+	prepared, err := provider.Prepare(ctx, liveSession.UserID, options)
 	preparedRecord := session.PlatformBroadcast{
 		Provider:    string(prepared.Provider),
 		BroadcastID: prepared.BroadcastID,
@@ -523,8 +535,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	}
 	if err != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
-		s.writePrepareError(w, err, liveSession.ID, providerName)
-		return
+		return nil, s.prepareError(err, liveSession.ID, providerName)
 	}
 	if egressAttachesAtGoLive(providerName) {
 		// 치지직은 RTMP 연결이 곧 공개 방송이다(D1). 준비 단계에서 egress를
@@ -535,22 +546,16 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
-		s.writeStartStreamError(w, err, liveSession.ID)
-		return
+		return nil, startStreamError(err, liveSession.ID)
 	}
 	if _, err := s.sessions.MarkBroadcastPrepared(liveSession.ID, preparedRecord, string(providerName)); err != nil {
 		// 세션이 방금 닫힌 경우 등 — 기록하지 못한 방송은 남겨두지 않는다.
 		s.discardPreparedBroadcast(liveSession, preparedRecord)
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Error("record prepared broadcast failed", "session_id", liveSession.ID, "error", err)
-		writeSessionError(w, err, liveSession.ID)
-		return
+		return nil, sessionError(err, liveSession.ID)
 	}
-	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
-	writeJSON(w, http.StatusOK, struct {
-		session.Response
-		Warnings []streaming.Warning `json:"warnings,omitempty"`
-	}{Response: liveSession.Response(), Warnings: prepared.Warnings})
+	return prepared.Warnings, nil
 }
 
 // handleGoLive는 준비된 방송을 시청자에게 공개되는 라이브로 전환한다.
@@ -569,7 +574,7 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	var firstFailure *apiError
 	for _, name := range providers {
 		providerName := auth.StreamingProvider(name)
-		failure := s.goLiveTarget(r, liveSession, providerName)
+		failure := s.goLiveTarget(r.Context(), liveSession, providerName)
 		if failure == nil {
 			continue
 		}
@@ -602,7 +607,7 @@ type goLiveFailure struct {
 
 // goLiveTarget은 대상 하나를 라이브로 전환한다. 성공하면 nil, 실패하면
 // 그 대상의 사유를 돌려준다 — 호출자가 대상 전체의 결과를 모아 판단한다.
-func (s *Server) goLiveTarget(r *http.Request, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
+func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
 	broadcast, _ := liveSession.PlatformBroadcast(string(providerName))
 	if _, err := s.sessions.BeginGoLive(liveSession.ID, string(providerName)); err != nil {
 		return goLiveBeginError(err, liveSession.ID)
@@ -617,7 +622,7 @@ func (s *Server) goLiveTarget(r *http.Request, liveSession *session.Session, pro
 		BroadcastID: broadcast.BroadcastID,
 		StreamID:    broadcast.StreamID,
 	}
-	if err := provider.GoLive(r.Context(), liveSession.UserID, prepared); err != nil {
+	if err := provider.GoLive(ctx, liveSession.UserID, prepared); err != nil {
 		// 전환에 실패했으면 준비 상태로 되돌린다. 그 사이 중지가 들어왔다면
 		// 되돌릴 곳이 없으므로 방송을 지운다.
 		if stopped, abandoned := s.sessions.AbortGoLive(liveSession.ID, string(providerName)); stopped {
@@ -837,16 +842,16 @@ func (s *Server) discardBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 	}
 }
 
-// writeBroadcastBeginError는 준비 선점 실패를 응답으로 옮긴다. 세션이 사라진
+// broadcastBeginError는 준비 선점 실패를 응답 오류로 옮긴다. 세션이 사라진
 // 경우와 단계 위반을 구분한다.
-func writeBroadcastBeginError(w http.ResponseWriter, err error, sessionID string) {
+func broadcastBeginError(err error, sessionID string) *apiError {
 	switch {
 	case errors.Is(err, session.ErrBroadcastLive):
-		writeBroadcastPhaseError(w, session.BroadcastPhaseLive, sessionID)
+		return broadcastPhaseError(session.BroadcastPhaseLive, sessionID)
 	case errors.Is(err, session.ErrBroadcastPrepared):
-		writeBroadcastPhaseError(w, session.BroadcastPhasePrepared, sessionID)
+		return broadcastPhaseError(session.BroadcastPhasePrepared, sessionID)
 	default:
-		writeSessionError(w, err, sessionID)
+		return sessionError(err, sessionID)
 	}
 }
 
@@ -866,20 +871,20 @@ func broadcastPhaseError(phase session.BroadcastPhase, sessionID string) *apiErr
 	}
 }
 
-// writePrepareError는 플랫폼 준비 실패를 응답으로 옮긴다.
-func (s *Server) writePrepareError(w http.ResponseWriter, err error, sessionID string, providerName auth.StreamingProvider) {
+// prepareError는 플랫폼 준비 실패를 응답 오류로 옮긴다.
+func (s *Server) prepareError(err error, sessionID string, providerName auth.StreamingProvider) *apiError {
 	switch {
 	case errors.Is(err, auth.ErrStreamingNotConnected):
-		writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}})
+		return &apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, auth.ErrStreamingReconnectRequired):
 		// 재시도로 복구되지 않는 상태 — "잠시 후 재시도"가 아니라
 		// "재연결"을 안내해야 하므로 일반 준비 실패(502)와 구분한다.
-		writeError(w, apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}})
+		return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, streaming.ErrLiveStreamingBlocked):
-		writeError(w, apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}})
+		return &apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}}
 	default:
 		s.logger.Error("prepare platform broadcast failed", "session_id", sessionID, "provider", providerName, "error", err)
-		writeError(w, apiError{Status: http.StatusBadGateway, Code: "streaming_prepare_failed", Message: "The streaming platform could not prepare the broadcast."})
+		return &apiError{Status: http.StatusBadGateway, Code: "streaming_prepare_failed", Message: "The streaming platform could not prepare the broadcast."}
 	}
 }
 
@@ -1087,6 +1092,9 @@ func (s *Server) handleStopStream(w http.ResponseWriter, r *http.Request, liveSe
 		writeError(w, *invalid)
 		return
 	}
+	// 진행 중인 해상도 전환(#283)이 있으면 새 방송을 열지 않게 한다 — 사용자가
+	// 끝내려는 방송을 서버가 다시 여는 일이 없어야 한다.
+	liveSession.CancelResolutionSwitch()
 	_, broadcast, phase, err := s.sessions.StopStream(liveSession.ID, string(providerName))
 	if err != nil {
 		if errors.Is(err, session.ErrStreamNotActive) {
@@ -1161,37 +1169,6 @@ func (s *Server) handlePatchAnonymization(w http.ResponseWriter, r *http.Request
 	}
 	if _, err := s.sessions.SetAnonymizationEnabled(liveSession.ID, *request.Enabled); err != nil {
 		writeSessionError(w, err, liveSession.ID)
-		return
-	}
-	writeJSON(w, http.StatusOK, liveSession.Response())
-}
-
-// handlePutBroadcastResolution은 일시정지 중 송출 해상도를 바꾼다(#283). 플랜
-// 게이팅은 지금 송출 중인 대상 수로 판정한다 — 송출 전이면 단독으로 본다.
-func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
-	request := struct {
-		Resolution string `json:"resolution"`
-	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-	if err := decodeOptionalJSON(r.Body, &request); err != nil {
-		writeError(w, badRequest("Invalid resolution request.", map[string]any{"error": err.Error()}))
-		return
-	}
-	resolution := strings.TrimSpace(request.Resolution)
-	if resolution != session.Resolution720p && resolution != session.ResolutionFHD {
-		writeError(w, badRequest("resolution must be 720p or fhd.", map[string]any{"resolution": request.Resolution}))
-		return
-	}
-	if gate := planGateError(liveSession.Plan, resolution == session.ResolutionFHD, max(liveSession.BusyTargetCount(), 1)); gate != nil {
-		writeError(w, *gate)
-		return
-	}
-	if _, err := s.sessions.ChangeBroadcastResolution(liveSession.ID, resolution); err != nil {
-		if errors.Is(err, session.ErrResolutionChangeWhileLive) {
-			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_paused", Message: "Pause every stream before changing the resolution.", Details: map[string]any{"session_id": liveSession.ID}})
-			return
-		}
-		writeError(w, *startStreamError(err, liveSession.ID))
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response())

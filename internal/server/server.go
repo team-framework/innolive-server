@@ -116,6 +116,7 @@ func New(
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
 	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
+	mux.Handle("PUT /sessions/{session_id}/broadcast-resolution", requireUser(s.requireSessionOwner(s.handlePutBroadcastResolution)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
 	mux.Handle("POST /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handlePostReferenceFace))))
@@ -470,7 +471,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	// 재요청이 기존 409를 받고, 동시에 들어온 두 대상이 서로를 센다(선점 전에
 	// 판정하면 둘 다 "다른 대상 0"으로 통과한다). 플랫폼 호출 전이라 거절돼도
 	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함한다.
-	if gate := planGateError(liveSession.Plan, liveSession.BroadcastResolution == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
+	if gate := planGateError(liveSession.Plan, liveSession.Resolution() == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
 		writeError(w, *gate)
@@ -1160,6 +1161,37 @@ func (s *Server) handlePatchAnonymization(w http.ResponseWriter, r *http.Request
 	}
 	if _, err := s.sessions.SetAnonymizationEnabled(liveSession.ID, *request.Enabled); err != nil {
 		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response())
+}
+
+// handlePutBroadcastResolution은 일시정지 중 송출 해상도를 바꾼다(#283). 플랜
+// 게이팅은 지금 송출 중인 대상 수로 판정한다 — 송출 전이면 단독으로 본다.
+func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Resolution string `json:"resolution"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil {
+		writeError(w, badRequest("Invalid resolution request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	resolution := strings.TrimSpace(request.Resolution)
+	if resolution != session.Resolution720p && resolution != session.ResolutionFHD {
+		writeError(w, badRequest("resolution must be 720p or fhd.", map[string]any{"resolution": request.Resolution}))
+		return
+	}
+	if gate := planGateError(liveSession.Plan, resolution == session.ResolutionFHD, max(liveSession.BusyTargetCount(), 1)); gate != nil {
+		writeError(w, *gate)
+		return
+	}
+	if _, err := s.sessions.ChangeBroadcastResolution(liveSession.ID, resolution); err != nil {
+		if errors.Is(err, session.ErrResolutionChangeWhileLive) {
+			writeError(w, apiError{Status: http.StatusConflict, Code: "stream_not_paused", Message: "Pause every stream before changing the resolution.", Details: map[string]any{"session_id": liveSession.ID}})
+			return
+		}
+		writeError(w, *startStreamError(err, liveSession.ID))
 		return
 	}
 	writeJSON(w, http.StatusOK, liveSession.Response())

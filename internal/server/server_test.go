@@ -474,13 +474,71 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	httpServer := httptest.NewServer(application.Handler())
 	defer httpServer.Close()
 	liveSession, ownerToken := createTestSession(t, httpServer.URL, nil)
+	track, received := connectTestPublisher(t, httpServer.URL, liveSession.SessionID, ownerToken)
 
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
+	// SampleBuilder retains the newest incomplete sample until it sees a later
+	// RTP timestamp. Send a short stream rather than a single GOP so the final
+	// frames are also released to the decoder while the peer remains connected.
+	for _, input := range generateVP8Frames(t, 30) {
+		if err := track.WriteSample(media.Sample{Data: input, Duration: time.Second / 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case output := <-received:
+		if len(output) < 10 || output[0]&1 != 0 || !bytes.Equal(output[3:6], []byte{0x9d, 0x01, 0x2a}) {
+			t.Fatalf("received frame is not a complete VP8 keyframe: %x", output)
+		}
+	case <-time.After(10 * time.Second):
+		metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
+		metricsBody, _ := io.ReadAll(metricsResponse.Body)
+		metricsResponse.Body.Close()
+		t.Fatalf("did not receive transcoded bypass video frame:\n%s", metricsBody)
+	}
+
+	metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
+	metricsBody, _ := io.ReadAll(metricsResponse.Body)
+	metricsResponse.Body.Close()
+	for _, name := range []string{`innolive_frame_received_total{mode="bypass"}`, `innolive_frame_processed_total{mode="bypass"}`} {
+		if value := prometheusValue(t, string(metricsBody), name); value < 1 {
+			t.Errorf("metric %s = %v, want at least 1\n%s", name, value, metricsBody)
+		}
+	}
+
+	deleteResponse := mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+liveSession.SessionID, nil, bearer(ownerToken))
+	deleteResponse.Body.Close()
+	if deleteResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE session status = %d", deleteResponse.StatusCode)
+	}
+
+	cleanupDeadline := time.Now().Add(5 * time.Second)
+	for {
+		cleanupResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
+		cleanupBody, _ := io.ReadAll(cleanupResponse.Body)
+		cleanupResponse.Body.Close()
+		cleanupMetrics := string(cleanupBody)
+		if prometheusValue(t, cleanupMetrics, "innolive_active_sessions") == 0 &&
+			prometheusValue(t, cleanupMetrics, "innolive_processing_queue_size") == 0 {
+			break
+		}
+		if time.Now().After(cleanupDeadline) {
+			t.Fatalf("session cleanup did not reach active_sessions=0 and queue_size=0:\n%s", cleanupMetrics)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// connectTestPublisher는 세션에 VP8 송출 피어를 붙이고 ICE 연결까지 마친다.
+// 반환하는 채널에는 서버가 되돌려 보내는 미리보기 프레임이 하나씩 들어온다.
+func connectTestPublisher(t *testing.T, baseURL, sessionID, ownerToken string) (*webrtc.TrackLocalStaticSample, <-chan []byte) {
+	t.Helper()
+
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/signaling"
 	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	t.Cleanup(func() { connection.Close() })
 	var writeMu sync.Mutex
 	writeSignal := func(value any) error {
 		writeMu.Lock()
@@ -492,10 +550,10 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer peerConnection.Close()
+	t.Cleanup(func() { peerConnection.Close() })
 	negotiationID := uuid.NewString()
 	connected := make(chan struct{}, 1)
-	received := make(chan []byte, 1)
+	received := make(chan []byte, 64)
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateConnected {
 			select {
@@ -505,7 +563,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 		}
 	})
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		message := map[string]any{"type": "ice_candidate", "session_id": liveSession.SessionID, "owner_token": ownerToken, "negotiation_id": negotiationID, "candidate": nil}
+		message := map[string]any{"type": "ice_candidate", "session_id": sessionID, "owner_token": ownerToken, "negotiation_id": negotiationID, "candidate": nil}
 		if candidate != nil {
 			jsonCandidate := candidate.ToJSON()
 			message["candidate"] = jsonCandidate.Candidate
@@ -529,8 +587,11 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 				}
 				assembled = append(assembled, payload...)
 				if packet.Marker {
-					received <- assembled
-					return
+					select {
+					case received <- assembled:
+					default:
+					}
+					assembled = nil
 				}
 			}
 		}()
@@ -563,7 +624,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSignal(map[string]any{"type": "offer", "session_id": liveSession.SessionID, "owner_token": ownerToken, "sdp": offer.SDP, "negotiation_id": negotiationID, "ice_restart": false}); err != nil {
+	if err := writeSignal(map[string]any{"type": "offer", "session_id": sessionID, "owner_token": ownerToken, "sdp": offer.SDP, "negotiation_id": negotiationID, "ice_restart": false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,57 +699,7 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("PeerConnection did not reach connected state")
 	}
-
-	// SampleBuilder retains the newest incomplete sample until it sees a later
-	// RTP timestamp. Send a short stream rather than a single GOP so the final
-	// frames are also released to the decoder while the peer remains connected.
-	for _, input := range generateVP8Frames(t, 30) {
-		if err := track.WriteSample(media.Sample{Data: input, Duration: time.Second / 30}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	select {
-	case output := <-received:
-		if len(output) < 10 || output[0]&1 != 0 || !bytes.Equal(output[3:6], []byte{0x9d, 0x01, 0x2a}) {
-			t.Fatalf("received frame is not a complete VP8 keyframe: %x", output)
-		}
-	case <-time.After(10 * time.Second):
-		metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
-		metricsBody, _ := io.ReadAll(metricsResponse.Body)
-		metricsResponse.Body.Close()
-		t.Fatalf("did not receive transcoded bypass video frame:\n%s", metricsBody)
-	}
-
-	metricsResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
-	metricsBody, _ := io.ReadAll(metricsResponse.Body)
-	metricsResponse.Body.Close()
-	for _, name := range []string{`innolive_frame_received_total{mode="bypass"}`, `innolive_frame_processed_total{mode="bypass"}`} {
-		if value := prometheusValue(t, string(metricsBody), name); value < 1 {
-			t.Errorf("metric %s = %v, want at least 1\n%s", name, value, metricsBody)
-		}
-	}
-
-	deleteResponse := mustRequest(t, http.MethodDelete, httpServer.URL+"/sessions/"+liveSession.SessionID, nil, bearer(ownerToken))
-	deleteResponse.Body.Close()
-	if deleteResponse.StatusCode != http.StatusNoContent {
-		t.Fatalf("DELETE session status = %d", deleteResponse.StatusCode)
-	}
-
-	cleanupDeadline := time.Now().Add(5 * time.Second)
-	for {
-		cleanupResponse := mustRequest(t, http.MethodGet, httpServer.URL+"/metrics", nil, nil)
-		cleanupBody, _ := io.ReadAll(cleanupResponse.Body)
-		cleanupResponse.Body.Close()
-		cleanupMetrics := string(cleanupBody)
-		if prometheusValue(t, cleanupMetrics, "innolive_active_sessions") == 0 &&
-			prometheusValue(t, cleanupMetrics, "innolive_processing_queue_size") == 0 {
-			break
-		}
-		if time.Now().After(cleanupDeadline) {
-			t.Fatalf("session cleanup did not reach active_sessions=0 and queue_size=0:\n%s", cleanupMetrics)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	return track, received
 }
 
 func generateVP8Frames(t *testing.T, count int) [][]byte {

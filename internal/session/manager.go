@@ -162,6 +162,9 @@ type Response struct {
 	// 시간이다(#276). 월 잔여 ÷ 현재 배수와 1회 잔여 중 작은 값이다. 방송 중이 아니거나
 	// 무제한이면 null이다. 한도 점검 주기(15초)마다 갱신된다.
 	BroadcastRemainingSeconds *int64 `json:"broadcast_remaining_seconds"`
+	// ResolutionSwitch는 방송 중 해상도 전환(#283)의 진행 상태다. 전환한 적이
+	// 없으면 null이다.
+	ResolutionSwitch *ResolutionSwitchState `json:"resolution_switch"`
 }
 
 type Session struct {
@@ -251,9 +254,10 @@ type Session struct {
 	// videoTrack·pipelineDone은 해상도 변경(#283)이 같은 트랙으로 파이프라인을
 	// 다시 띄우는 데 쓴다. pipelineDone은 현재 파이프라인이 끝나면 닫힌다.
 	// resolutionMu는 변경 요청을 하나씩 처리한다.
-	videoTrack   *webrtc.TrackRemote
-	pipelineDone chan struct{}
-	resolutionMu sync.Mutex
+	videoTrack       *webrtc.TrackRemote
+	pipelineDone     chan struct{}
+	resolutionMu     sync.Mutex
+	resolutionSwitch *ResolutionSwitchState
 }
 
 // pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
@@ -1886,6 +1890,7 @@ func (s *Session) Response() Response {
 		Stream:       s.Stream,
 	}
 	response.BroadcastResolution = s.BroadcastResolution
+	response.ResolutionSwitch = s.resolutionSwitchSnapshotLocked()
 	response.Notices = append([]Notice{}, s.notices...)
 	if s.broadcastRemaining != nil {
 		remaining := *s.broadcastRemaining

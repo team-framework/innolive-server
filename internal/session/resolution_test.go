@@ -108,9 +108,9 @@ func TestChangeBroadcastResolution(t *testing.T) {
 	}
 }
 
-// 멈추지 않은 송출이 있으면 거절하고 유닛·해상도를 그대로 둔다. 이 테스트의 egress는
-// 프레임이 없어 idle이다 — 멈춘 상태가 아니다.
-func TestChangeBroadcastResolutionRejectsUnpausedStream(t *testing.T) {
+// 송출 중인 대상이 있으면 거절하고 유닛·해상도를 그대로 둔다 — 방송 중 변경은
+// 서버가 대상을 먼저 끝낸다.
+func TestChangeBroadcastResolutionRejectsActiveStream(t *testing.T) {
 	manager := newTestManager(t, 0)
 	manager.egressSlots = media.NewEgressSlotBudget(4, 0)
 	live := startableSession(t, manager)
@@ -139,25 +139,5 @@ func TestChangedResolutionAppliesToNextStream(t *testing.T) {
 	}
 	if used := manager.egressSlots.Used(); used != 0 {
 		t.Fatalf("units after failed start = %d, want 0", used)
-	}
-}
-
-func TestAnyTargetUnpaused(t *testing.T) {
-	cases := []struct {
-		name   string
-		phases []media.EgressPhase
-		want   bool
-	}{
-		{"송출 전", nil, false},
-		{"전부 멈춤", []media.EgressPhase{media.EgressPhasePaused, media.EgressPhasePausedReconnecting}, false},
-		{"멈춤 + 끝남", []media.EgressPhase{media.EgressPhasePausedReconfiguring, media.EgressPhaseStopped}, false},
-		{"한쪽만 멈춤", []media.EgressPhase{media.EgressPhasePaused, media.EgressPhaseStreaming}, true},
-		{"재연결 중", []media.EgressPhase{media.EgressPhaseReconnecting}, true},
-		{"프레임 대기(idle)", []media.EgressPhase{media.EgressPhaseIdle}, true},
-	}
-	for _, test := range cases {
-		if got := anyTargetUnpaused(test.phases); got != test.want {
-			t.Fatalf("%s: got %v, want %v", test.name, got, test.want)
-		}
 	}
 }

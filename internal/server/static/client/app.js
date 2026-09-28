@@ -271,7 +271,7 @@ function bindEvents() {
   els.startBtn.addEventListener("click", () => void startWebRtc());
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
-  els.changeResolutionBtn.addEventListener("click", () => void changeResolution());
+  els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
@@ -1917,24 +1917,42 @@ async function pauseBroadcast() {
   });
 }
 
-// changeResolution은 "송출 해상도" 선택값으로 세션 해상도를 바꾼다(#283). 방송
-// 중이면 서버가 방송을 끝내고 새 해상도로 다시 연다(202) — 진행은 세션 응답의
-// resolution_switch로 폴링된다.
-async function changeResolution() {
+// changeBroadcastMode는 폼의 송출 해상도와 동시 송출 선택으로 송출 방식을 바꾼다.
+// 방송 중이 아니면 해상도만 바꾸고(#283), 방송 중이면 서버가 방송을 끝내고 새
+// 구성으로 다시 연다(#300, 202) — 진행은 세션 응답의 resolution_switch로 폴링된다.
+// 새로 추가되는 대상은 준비 때처럼 기본값 설정을 먼저 저장한다.
+async function changeBroadcastMode() {
   const sessionId = state.session?.session_id;
   if (!sessionId) {
-    throw new Error("해상도를 바꿀 세션이 없습니다.");
+    throw new Error("송출 방식을 바꿀 세션이 없습니다.");
   }
   await runBusy(async () => {
     const resolution = els.broadcastResolution.value;
-    const session = await apiFetch(`/sessions/${sessionId}/broadcast-resolution`, {
+    const liveTargets = (state.session?.targets || [])
+      .filter((target) => target.stream?.broadcast_phase === "live")
+      .map((target) => target.provider);
+    let path = `/sessions/${sessionId}/broadcast-resolution`;
+    let body = { resolution };
+    if (liveTargets.length > 0) {
+      const targets = [sessionProviderValue()];
+      const secondary = simulcastTarget();
+      if (secondary) {
+        if (!liveTargets.includes(secondary)) {
+          await saveSimulcastSettings(sessionId, secondary);
+        }
+        targets.push(secondary);
+      }
+      path = `/sessions/${sessionId}/broadcast-mode`;
+      body = { resolution, targets };
+    }
+    const session = await apiFetch(path, {
       method: "PUT",
-      body: JSON.stringify({ resolution }),
+      body: JSON.stringify(body),
     });
     setCurrentSession(session);
-    logEvent("ok", "Broadcast resolution change requested", {
+    logEvent("ok", "Broadcast mode change requested", {
       session_id: sessionId,
-      broadcast_resolution: session.broadcast_resolution,
+      request: body,
       resolution_switch: session.resolution_switch,
     });
   });

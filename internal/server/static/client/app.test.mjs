@@ -163,7 +163,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeResolution, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applySimulcastForm, simulcastTarget, prepareSimulcastTarget, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, applyProviderForm, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
     context,
     { filename: appPath },
   );
@@ -887,9 +887,9 @@ test("FHD 캡처는 1920x1080을 요청한다", async () => {
   assert.equal(video.height.ideal, 1080);
 });
 
-test("해상도 변경 버튼은 고른 송출 해상도를 PUT으로 보내고 세션을 갱신한다", async () => {
+test("방송 전 송출 방식 변경은 고른 해상도만 broadcast-resolution으로 보낸다", async () => {
   const calls = [];
-  const { changeResolution, state, els } = await loadApp({
+  const { changeBroadcastMode, state, els } = await loadApp({
     fetchImpl: async (url, options) => {
       calls.push({ path: String(url), method: options?.method, body: options?.body });
       return jsonResponse({ session_id: "s-1", broadcast_resolution: "fhd", targets: [] });
@@ -899,11 +899,46 @@ test("해상도 변경 버튼은 고른 송출 해상도를 PUT으로 보내고 
   state.session = { session_id: "s-1", provider: "youtube", broadcast_resolution: "720p", targets: [] };
   els.broadcastResolution.value = "fhd";
 
-  await changeResolution();
+  await changeBroadcastMode();
 
   assert.equal(calls.length, 1);
   assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-resolution$/);
   assert.equal(calls[0].method, "PUT");
   assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd" });
   assert.equal(state.session.broadcast_resolution, "fhd");
+});
+
+test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast-mode로 보낸다", async () => {
+  const calls = [];
+  const { changeBroadcastMode, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url);
+      calls.push({ path, method: options?.method, body: options?.body });
+      if (path.includes("/broadcast/defaults")) {
+        return jsonResponse({ title: "직전 제목", category_type: "GAME", category_id: "LoL", tags: [] });
+      }
+      return jsonResponse({ session_id: "s-1", broadcast_resolution: "720p", targets: [], resolution_switch: { status: "switching" } });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    provider: "youtube",
+    broadcast_resolution: "fhd",
+    targets: [{ provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } }],
+  };
+  els.broadcastResolution.value = "720p";
+  els.simulcastEnabled.checked = true;
+  els.simulcastProvider.value = "chzzk";
+  els.simulcastTitle.value = "";
+
+  await changeBroadcastMode();
+
+  const modeCall = calls.find((call) => call.path.endsWith("/sessions/s-1/broadcast-mode"));
+  assert.ok(modeCall, `broadcast-mode not called: ${calls.map((call) => call.path).join(", ")}`);
+  assert.equal(modeCall.method, "PUT");
+  assert.deepEqual(JSON.parse(modeCall.body), { resolution: "720p", targets: ["youtube", "chzzk"] });
+  // 새로 추가되는 치지직은 설정을 먼저 저장한다.
+  assert.ok(calls.findIndex((call) => call.path.includes("/broadcast?provider=chzzk")) < calls.indexOf(modeCall));
+  assert.equal(state.session.resolution_switch.status, "switching");
 });

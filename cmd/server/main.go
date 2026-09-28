@@ -532,6 +532,8 @@ func main() {
 	application.SetUserOperationGate(withdrawal)
 	// 세션 생성이 소유자 플랜을 싣고, 플랜 조회·관리자 지정 라우트가 붙는다(#270).
 	application.SetPlanStore(auth.NewPlanStore(databaseConnection.DB))
+	// 월 방송 시간 사용 내역(#274). 월 한도가 플랜에서 오므로 플랜 저장소 뒤에 붙인다.
+	application.SetUsageLedger(usage.NewLedger(databaseConnection.DB))
 	if youtubeConnect != nil {
 		youtubeConnect.SetUserOperationGate(withdrawal)
 	}

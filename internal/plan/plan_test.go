@@ -73,3 +73,18 @@ func TestModeForAndAllows(t *testing.T) {
 		}
 	}
 }
+
+func TestUnitsMatchBM(t *testing.T) {
+	cases := []struct {
+		fhd     bool
+		targets int
+		want    int
+	}{
+		{false, 1, 1}, {true, 1, 2}, {false, 2, 2}, {true, 2, 3}, {false, 0, 0}, {true, 0, 0},
+	}
+	for _, test := range cases {
+		if got := Units(test.fhd, test.targets); got != test.want {
+			t.Fatalf("Units(%v, %d) = %d, want %d", test.fhd, test.targets, got, test.want)
+		}
+	}
+}

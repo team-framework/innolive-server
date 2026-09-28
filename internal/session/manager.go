@@ -615,6 +615,10 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 			m.mu.Unlock()
 		}()
 	}
+	// reserved는 이 생성이 m.pending에 잡은 자리다. 등록과 같은 m.mu 구간에서
+	// 풀어야 한다 — defer까지 미루면 그 사이 세션이 sessions·pending 양쪽에
+	// 집계돼 다른 생성이 부당하게 거부된다(#306).
+	var reserved bool
 	if limit := m.cfg.MaxSessions; limit > 0 {
 		m.mu.Lock()
 		if m.capacityInUseLocked() >= limit {
@@ -624,10 +628,13 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 			return nil, "", fmt.Errorf("%w: active=%d limit=%d", ErrCapacityExceeded, active, limit)
 		}
 		m.pending++
+		reserved = true
 		m.mu.Unlock()
 		defer func() {
 			m.mu.Lock()
-			m.pending--
+			if reserved {
+				m.pending--
+			}
 			m.mu.Unlock()
 		}()
 	}
@@ -721,6 +728,10 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 		return nil, "", fmt.Errorf("%w: user_id=%s", ErrUserSignedOut, userID)
 	}
 	m.sessions[id] = s
+	if reserved {
+		m.pending--
+		reserved = false
+	}
 	count := len(m.sessions)
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(count)

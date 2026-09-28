@@ -355,6 +355,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if gate := planGateError(owner, true, 1); gate != nil {
+			s.logger.Info("session creation rejected by plan", "user_id", userID, "code", gate.Code, "details", gate.Details)
 			writeError(w, *gate)
 			return
 		}
@@ -457,17 +458,21 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
 		return
 	}
-	// 플랜 게이팅(#273)은 플랫폼을 부르기 전에 한다 — 거절된 요청이 채널에 빈
-	// 방송을 남기면 안 된다. 이 대상을 더한 뒤의 송출 수로 방식을 정한다.
-	if gate := planGateError(liveSession.Plan, liveSession.BroadcastResolution == session.ResolutionFHD, liveSession.BusyTargetCount()+1); gate != nil {
-		writeError(w, *gate)
-		return
-	}
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
 	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
 	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID, string(providerName)); err != nil {
 		writeBroadcastBeginError(w, err, liveSession.ID)
+		return
+	}
+	// 플랜 게이팅(#273)은 선점 뒤·플랫폼 호출 전에 한다. 선점 뒤라야 같은 대상
+	// 재요청이 기존 409를 받고, 동시에 들어온 두 대상이 서로를 센다(선점 전에
+	// 판정하면 둘 다 "다른 대상 0"으로 통과한다). 플랫폼 호출 전이라 거절돼도
+	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함한다.
+	if gate := planGateError(liveSession.Plan, liveSession.BroadcastResolution == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
+		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
+		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
+		writeError(w, *gate)
 		return
 	}
 	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.

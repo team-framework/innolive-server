@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/ai"
@@ -155,6 +156,8 @@ type Response struct {
 	ChzzkBroadcast *ChzzkBroadcastResponse `json:"chzzk_broadcast,omitempty"`
 	// BroadcastResolution은 세션 생성 시 정한 송출 해상도다(#271).
 	BroadcastResolution string `json:"broadcast_resolution"`
+	// Notices는 방송 한도 알림이다(#275). 코드별로 한 번씩 쌓인다.
+	Notices []Notice `json:"notices"`
 }
 
 type Session struct {
@@ -234,6 +237,10 @@ type Session struct {
 	// lastActivityAt은 소유자가 마지막으로 세션을 사용한 시각이다. 미협상 회수는
 	// 이 시각을 기준으로 다시 재므로, 방송 설정을 채우는 동안에는 회수되지 않는다(#147).
 	lastActivityAt time.Time
+	// notices는 한도 알림(#275), lastMediaFrameNano는 마지막 처리 프레임 시각이다.
+	// 후자는 프레임마다 갱신되므로 잠금 없이 원자적으로 쓴다.
+	notices            []Notice
+	lastMediaFrameNano atomic.Int64
 }
 
 // pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
@@ -1271,6 +1278,12 @@ func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgres
 // 않고 여기서 끝낸다 — 그 사이에 다음 방송을 시작하면 재사용 스트림 키를 통해
 // 라이브가 둘이 되기 때문이다.
 func (m *Manager) StopStream(id string, providers ...string) (*Session, PlatformBroadcast, BroadcastPhase, error) {
+	return m.StopStreamWithReason(id, "user_requested", providers...)
+}
+
+// StopStreamWithReason은 사유를 남기고 송출을 멈춘다. 한도 집행(#275)이 실사용
+// 기록에 종료 사유를 구분해 남기려고 쓴다.
+func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (*Session, PlatformBroadcast, BroadcastPhase, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, PlatformBroadcast{}, BroadcastPhaseIdle, err
@@ -1295,7 +1308,6 @@ func (m *Manager) StopStream(id string, providers ...string) (*Session, Platform
 	s.egressFanout.Remove(provider)
 	t.egress.Stop()
 	t.cancel()
-	reason := "user_requested"
 	t.stopReason = &reason
 	// stop은 egress만 끝내고 WebRTC 처리 파이프라인은 유지하는 기존 계약을
 	// 보존한다. pause 상태에서 stop한 경우에도 이후 처리 프레임은 다시 AI로
@@ -1746,7 +1758,10 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 				s.privacyMode,
 				m.cfg.FrameQueueSize,
 				requestKeyframe,
-				func() { m.noteProcessedMediaFrame(s) },
+				func() {
+					s.lastMediaFrameNano.Store(time.Now().UnixNano())
+					m.noteProcessedMediaFrame(s)
+				},
 			)
 			s.mu.Lock()
 			// 아직 활성 트랙일 때만 비운다. 이전 파이프라인을 비우는 사이 새
@@ -1836,6 +1851,7 @@ func (s *Session) Response() Response {
 		Stream:       s.Stream,
 	}
 	response.BroadcastResolution = s.BroadcastResolution
+	response.Notices = append([]Notice{}, s.notices...)
 	response.Peer.ConnectionState = s.PC.ConnectionState().String()
 	response.Peer.ICEConnectionState = s.PC.ICEConnectionState().String()
 	response.Peer.SignalingState = s.PC.SignalingState().String()

@@ -256,6 +256,11 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 			p.consecutiveTimeouts.Store(0)
 			return output, nil
 		}
+		// 파이프라인을 내리며(해상도 전환·세션 종료) 서버가 스스로 끊은 요청이다.
+		// AI 실패가 아니므로 latch·카운터 없이 돌려준다(#297).
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
 		if p.failurePolicy == config.FailurePolicyFreeze {
 			return nil, err
 		}

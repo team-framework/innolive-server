@@ -201,25 +201,33 @@ type PlatformBroadcast struct {
 // 플랫폼 왕복은 수 초가 걸리고, 그동안 설정이 바뀌면 만들어진 방송과 저장값이
 // 어긋나므로 phase를 먼저 preparing으로 옮겨 설정 변경과 중복 준비를 막는다.
 func (m *Manager) BeginBroadcastPrepare(id string, providers ...string) (*Session, error) {
+	s, _, err := m.BeginBroadcastPrepareCounted(id, providers...)
+	return s, err
+}
+
+// BeginBroadcastPrepareCounted는 BeginBroadcastPrepare와 같고, 선점한 대상을
+// 포함한 점유 대상 수를 같은 잠금 구간에서 함께 돌려준다. 선점 뒤 따로 세면
+// 동시에 들어온 두 대상이 서로를 세어 둘 다 플랜 게이트에 거절된다(#308).
+func (m *Manager) BeginBroadcastPrepareCounted(id string, providers ...string) (*Session, int, error) {
 	s, err := m.Get(id)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.target(s.targetProvider(providers))
 	if s.closed {
-		return nil, ErrNotFound
+		return nil, 0, ErrNotFound
 	}
 	switch t.phase {
 	case BroadcastPhasePreparing, BroadcastPhasePrepared:
-		return nil, ErrBroadcastPrepared
+		return nil, 0, ErrBroadcastPrepared
 	case BroadcastPhaseLive:
-		return nil, ErrBroadcastLive
+		return nil, 0, ErrBroadcastLive
 	}
 	t.phase = BroadcastPhasePreparing
 	s.UpdatedAt = time.Now().UTC()
-	return s, nil
+	return s, s.busyTargetCountLocked(), nil
 }
 
 // ResetBroadcastPreparation은 선점한 준비 구간을 되돌린다. 플랫폼 준비가
@@ -370,6 +378,10 @@ func (m *Manager) AbortGoLive(id string, providers ...string) (stopped bool, bro
 func (s *Session) BusyTargetCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.busyTargetCountLocked()
+}
+
+func (s *Session) busyTargetCountLocked() int {
 	count := 0
 	for _, t := range s.targets {
 		if t.phase != BroadcastPhaseIdle {

@@ -345,6 +345,20 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		request.AIProcessing = request.Metadata["ai_processing"]
 	}
 	userID, _ := auth.UserIDFromContext(r.Context())
+	// FHD를 허용하지 않는 플랜은 세션을 만들기 전에 거절한다(#273) — 해상도는
+	// 여기서만 고르므로 prepare까지 가서 알리면 늦다.
+	if strings.TrimSpace(request.BroadcastResolution) == session.ResolutionFHD && s.plans != nil && userID != uuid.Nil {
+		owner, err := s.plans.UserPlan(r.Context(), userID)
+		if err != nil {
+			s.logger.Error("read user plan failed", "user_id", userID, "error", err)
+			writeError(w, internalError())
+			return
+		}
+		if gate := planGateError(owner, true, 1); gate != nil {
+			writeError(w, *gate)
+			return
+		}
+	}
 	liveSession, ownerToken, err := s.sessions.CreateForUserWithResolution(userID, string(providerName), request.AIProcessing, strings.TrimSpace(request.BroadcastResolution), request.Metadata)
 	if errors.Is(err, session.ErrInvalidResolution) {
 		writeError(w, badRequest("broadcast_resolution must be 720p or fhd.", map[string]any{"field": "broadcast_resolution"}))
@@ -441,6 +455,12 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// 플랫폼 송출이 조립되지 않은 배포(자격증명 미설정·벤치)에서는 종전
 		// 계약(501)을 유지한다.
 		writeError(w, apiError{Status: http.StatusNotImplemented, Code: "not_supported", Message: "Streaming to this platform is not configured on the server.", Details: map[string]any{"provider": providerName}})
+		return
+	}
+	// 플랜 게이팅(#273)은 플랫폼을 부르기 전에 한다 — 거절된 요청이 채널에 빈
+	// 방송을 남기면 안 된다. 이 대상을 더한 뒤의 송출 수로 방식을 정한다.
+	if gate := planGateError(liveSession.Plan, liveSession.BroadcastResolution == session.ResolutionFHD, liveSession.BusyTargetCount()+1); gate != nil {
+		writeError(w, *gate)
 		return
 	}
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면

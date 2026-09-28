@@ -127,6 +127,20 @@ type Config struct {
 	// AdminUserIDs는 사용자 플랜을 지정할 수 있는 사용자 UUID 목록이다(#270).
 	// 비어 있으면 관리자 API는 누구에게도 열리지 않는다.
 	AdminUserIDs []string
+	// EgressSparkUnits는 Spark 플랜이 함께 쓸 수 있는 송출 유닛 상한이다(#272).
+	// 0이면 상한이 없다. MAX_EGRESS_SLOTS(유닛 총량)가 있어야 의미가 있다.
+	EgressSparkUnits int
+	// GuestMaxSessions는 게스트 세션 상한이다. 0(미설정)이면 MAX_SESSIONS/2다.
+	GuestMaxSessions int
+}
+
+// GuestSessionLimit은 게스트 세션 상한의 실효값이다. 종전에는 코드에
+// MAX_SESSIONS/2로 박혀 있었다(#272).
+func (c Config) GuestSessionLimit() int {
+	if c.GuestMaxSessions > 0 {
+		return c.GuestMaxSessions
+	}
+	return c.MaxSessions / 2
 }
 
 func Load() (Config, error) {
@@ -172,6 +186,8 @@ func Load() (Config, error) {
 		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		AdminUserIDs:               splitList(env("ADMIN_USER_IDS", "")),
+		EgressSparkUnits:           envInt("EGRESS_SPARK_UNITS", 0),
+		GuestMaxSessions:           envInt("GUEST_MAX_SESSIONS", 0),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
 		GuestQueueRedisAddr:        strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
 		GuestQueueRedisPassword:    os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
@@ -259,6 +275,15 @@ func (c Config) Validate() error {
 	}
 	if c.MaxEgressSlots < 0 {
 		return errors.New("MAX_EGRESS_SLOTS must not be negative")
+	}
+	if c.GuestMaxSessions < 0 || (c.MaxSessions > 0 && c.GuestMaxSessions > c.MaxSessions) {
+		return errors.New("GUEST_MAX_SESSIONS must be between 0 and MAX_SESSIONS")
+	}
+	if c.EgressSparkUnits < 0 {
+		return errors.New("EGRESS_SPARK_UNITS must not be negative")
+	}
+	if c.EgressSparkUnits > 0 && c.MaxEgressSlots <= 0 {
+		return errors.New("EGRESS_SPARK_UNITS requires MAX_EGRESS_SLOTS")
 	}
 	for _, id := range c.AdminUserIDs {
 		if _, err := uuid.Parse(id); err != nil {

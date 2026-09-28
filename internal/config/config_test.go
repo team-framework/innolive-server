@@ -343,3 +343,37 @@ func TestValidateAdminUserIDs(t *testing.T) {
 		t.Fatal("non-UUID admin ID must be rejected")
 	}
 }
+
+func TestValidateEgressSparkUnits(t *testing.T) {
+	cfg := validConfig()
+	cfg.MaxEgressSlots = 13
+	cfg.EgressSparkUnits = 2
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid spark cap rejected: %v", err)
+	}
+	cfg.MaxEgressSlots = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("spark cap without a unit total must be rejected")
+	}
+	cfg.MaxEgressSlots = 13
+	cfg.EgressSparkUnits = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative spark cap must be rejected")
+	}
+}
+
+func TestGuestSessionLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.MaxSessions = 12
+	if got := cfg.GuestSessionLimit(); got != 6 {
+		t.Fatalf("default guest limit = %d, want MAX_SESSIONS/2 = 6", got)
+	}
+	cfg.GuestMaxSessions = 3
+	if got := cfg.GuestSessionLimit(); got != 3 {
+		t.Fatalf("configured guest limit = %d, want 3", got)
+	}
+	cfg.GuestMaxSessions = 13
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("guest limit above MAX_SESSIONS must be rejected")
+	}
+}

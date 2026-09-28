@@ -61,6 +61,31 @@ var policies = map[Plan]Policy{
 	},
 }
 
+// ModeFor는 해상도와 송출 대상 수로 송출 방식을 정한다. 대상이 둘 이상이면
+// 동시 송출이다.
+func ModeFor(fhd bool, targets int) Mode {
+	switch {
+	case fhd && targets > 1:
+		return ModeFHDMulti
+	case fhd:
+		return ModeFHDSingle
+	case targets > 1:
+		return Mode720pMulti
+	default:
+		return Mode720pSingle
+	}
+}
+
+// Allows는 플랜이 그 송출 방식을 허용하는지다.
+func (p Plan) Allows(mode Mode) bool {
+	for _, allowed := range policies[p].AllowedModes {
+		if allowed == mode {
+			return true
+		}
+	}
+	return false
+}
+
 // Valid는 알려진 플랜인지 확인한다.
 func (p Plan) Valid() bool {
 	_, ok := policies[p]

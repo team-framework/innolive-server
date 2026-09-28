@@ -52,3 +52,24 @@ func TestPolicyReturnsCopyOfModes(t *testing.T) {
 		t.Fatal("Policy must not expose the shared slice")
 	}
 }
+
+func TestModeForAndAllows(t *testing.T) {
+	if ModeFor(false, 1) != Mode720pSingle || ModeFor(true, 1) != ModeFHDSingle ||
+		ModeFor(false, 2) != Mode720pMulti || ModeFor(true, 2) != ModeFHDMulti {
+		t.Fatal("ModeFor mapping is wrong")
+	}
+	cases := []struct {
+		plan Plan
+		mode Mode
+		want bool
+	}{
+		{Spark, Mode720pSingle, true}, {Spark, ModeFHDSingle, false}, {Spark, Mode720pMulti, false},
+		{Beam, ModeFHDSingle, true}, {Beam, Mode720pMulti, true}, {Beam, ModeFHDMulti, false},
+		{Plasma, ModeFHDMulti, true}, {Glow, Mode720pSingle, false}, {"", Mode720pSingle, false},
+	}
+	for _, test := range cases {
+		if got := test.plan.Allows(test.mode); got != test.want {
+			t.Fatalf("%q.Allows(%s) = %v, want %v", test.plan, test.mode, got, test.want)
+		}
+	}
+}

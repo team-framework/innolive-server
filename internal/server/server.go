@@ -345,6 +345,21 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		request.AIProcessing = request.Metadata["ai_processing"]
 	}
 	userID, _ := auth.UserIDFromContext(r.Context())
+	// FHD를 허용하지 않는 플랜은 세션을 만들기 전에 거절한다(#273) — 해상도는
+	// 여기서만 고르므로 prepare까지 가서 알리면 늦다.
+	if strings.TrimSpace(request.BroadcastResolution) == session.ResolutionFHD && s.plans != nil && userID != uuid.Nil {
+		owner, err := s.plans.UserPlan(r.Context(), userID)
+		if err != nil {
+			s.logger.Error("read user plan failed", "user_id", userID, "error", err)
+			writeError(w, internalError())
+			return
+		}
+		if gate := planGateError(owner, true, 1); gate != nil {
+			s.logger.Info("session creation rejected by plan", "user_id", userID, "code", gate.Code, "details", gate.Details)
+			writeError(w, *gate)
+			return
+		}
+	}
 	liveSession, ownerToken, err := s.sessions.CreateForUserWithResolution(userID, string(providerName), request.AIProcessing, strings.TrimSpace(request.BroadcastResolution), request.Metadata)
 	if errors.Is(err, session.ErrInvalidResolution) {
 		writeError(w, badRequest("broadcast_resolution must be 720p or fhd.", map[string]any{"field": "broadcast_resolution"}))
@@ -448,6 +463,16 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
 	if _, err := s.sessions.BeginBroadcastPrepare(liveSession.ID, string(providerName)); err != nil {
 		writeBroadcastBeginError(w, err, liveSession.ID)
+		return
+	}
+	// 플랜 게이팅(#273)은 선점 뒤·플랫폼 호출 전에 한다. 선점 뒤라야 같은 대상
+	// 재요청이 기존 409를 받고, 동시에 들어온 두 대상이 서로를 센다(선점 전에
+	// 판정하면 둘 다 "다른 대상 0"으로 통과한다). 플랫폼 호출 전이라 거절돼도
+	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함한다.
+	if gate := planGateError(liveSession.Plan, liveSession.BroadcastResolution == session.ResolutionFHD, liveSession.BusyTargetCount()); gate != nil {
+		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
+		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
+		writeError(w, *gate)
 		return
 	}
 	// 설정은 선점 이후에 읽는다 — 이 시점부터 저장값은 바뀌지 않는다.

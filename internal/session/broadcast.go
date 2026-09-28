@@ -365,6 +365,20 @@ func (m *Manager) AbortGoLive(id string, providers ...string) (stopped bool, bro
 // PreparedTargets는 라이브 전환을 기다리는 대상을 provider 정렬 순으로
 // 돌려준다. 동시 발사의 대상 목록이다(#233) — 발사 순서가 응답마다 흔들리면
 // 대상 사이의 시작 시점 차이를 잴 수 없다.
+// BusyTargetCount는 준비 중이거나 그 이후 단계(준비됨·라이브 전환·라이브)에 있는
+// 송출 대상 수다. 플랜 게이팅(#273)이 "이 대상을 더하면 동시 송출인가"를 판단한다.
+func (s *Session) BusyTargetCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, t := range s.targets {
+		if t.phase != BroadcastPhaseIdle {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *Session) PreparedTargets() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

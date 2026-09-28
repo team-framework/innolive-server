@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 )
 
 // liveSwitchFixture는 실제 영상 트랙이 붙은 세션에서 유튜브·치지직을 라이브로
-// 세운다. 송출 주소는 닫힌 로컬 포트라 egress는 재연결 중으로 남는다(끝나지 않는다).
+// 세운다. 송출 주소는 임시 파일이라 egress가 실제로 송출 단계까지 간다(일시정지 가능).
 type liveSwitchFixture struct {
 	baseURL    string
 	sessionID  string
@@ -30,8 +31,9 @@ func newLiveSwitchFixture(t *testing.T, chzzkWait time.Duration) liveSwitchFixtu
 	resolutionSwitchChzzkWait, resolutionSwitchRetryInterval = chzzkWait, 20*time.Millisecond
 	t.Cleanup(func() { resolutionSwitchChzzkWait, resolutionSwitchRetryInterval = previousWait, previousRetry })
 
-	youtube := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderYouTube, BroadcastID: "yt-1", IngestURL: "rtmp://127.0.0.1:9/live2/yt-key"}}
-	chzzk := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderChzzk, IngestURL: "rtmp://127.0.0.1:9/chzzk/ch-key"}}
+	output := t.TempDir()
+	youtube := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderYouTube, BroadcastID: "yt-1", IngestURL: filepath.Join(output, "youtube.flv")}}
+	chzzk := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderChzzk, IngestURL: filepath.Join(output, "chzzk.flv")}}
 	server, _ := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: youtube,
 		auth.StreamingProviderChzzk:   chzzk,
@@ -210,5 +212,57 @@ func TestResolutionChangeRejectsPreparedTarget(t *testing.T) {
 	fixture := liveSwitchFixture{baseURL: server.URL, sessionID: created.SessionID, ownerToken: ownerToken}
 	if status, payload := fixture.putResolution(t, "fhd"); status != http.StatusConflict || streamErrorCode(payload) != "broadcast_busy" {
 		t.Fatalf("status = %d %q, want 409 broadcast_busy", status, streamErrorCode(payload))
+	}
+}
+
+func targetStreamStatus(payload map[string]any, provider string) string {
+	targets, _ := payload["targets"].([]any)
+	for _, entry := range targets {
+		target, _ := entry.(map[string]any)
+		if target["provider"] == provider {
+			stream, _ := target["stream"].(map[string]any)
+			status, _ := stream["status"].(string)
+			return status
+		}
+	}
+	return ""
+}
+
+// 멈춰 있던 대상은 새 방송을 연 뒤 다시 멈춘다. 멈추지 않았던 대상은 그대로 송출한다.
+func TestResolutionSwitchKeepsPausedTargetPaused(t *testing.T) {
+	fixture := newLiveSwitchFixture(t, 50*time.Millisecond)
+	// egress가 첫 프레임을 받아 송출 단계에 들어가야 멈출 수 있다.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		response, _ := postStream(t, fixture.baseURL, fixture.sessionID, fixture.ownerToken, "pause?provider=youtube", "")
+		if response.StatusCode == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("could not pause youtube before the switch: %d", response.StatusCode)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if status, payload := fixture.putResolution(t, "fhd"); status != http.StatusAccepted {
+		t.Fatalf("status = %d %v", status, payload)
+	}
+	if _, state := fixture.waitSwitch(t); state["status"] != "done" {
+		t.Fatalf("state = %v, want done", state)
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		payload := getSessionPayload(t, fixture.baseURL, fixture.sessionID, fixture.ownerToken)
+		youtube, chzzk := targetStreamStatus(payload, "youtube"), targetStreamStatus(payload, "chzzk")
+		if youtube == "paused" {
+			if chzzk == "paused" {
+				t.Fatal("chzzk was not paused before the switch and must keep streaming")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("youtube stream = %q after the switch, want paused again", youtube)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

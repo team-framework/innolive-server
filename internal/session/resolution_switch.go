@@ -1,6 +1,10 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"inno-live-server/internal/media"
+)
 
 // 방송 중 해상도 전환(#283)의 진행 상태. 서버가 대상을 끝내고 새 해상도로 다시
 // 준비·라이브 전환하는 동안(수십 초) 클라이언트는 세션 응답의 이 값으로 진행을 본다.
@@ -107,4 +111,22 @@ func (s *Session) resolutionSwitchSnapshotLocked() *ResolutionSwitchState {
 	snapshot.Targets = append([]string(nil), snapshot.Targets...)
 	snapshot.FailedTargets = append([]ResolutionSwitchFailure(nil), snapshot.FailedTargets...)
 	return &snapshot
+}
+
+// PausedTargets는 라이브 대상 중 일시정지된 대상이다. 해상도 전환(#283)은 새 방송을
+// 연 뒤 이 대상들을 다시 멈춘다 — 멈춰 둔 화면이 전환 뒤 저절로 나가면 안 된다.
+func (s *Session) PausedTargets() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var paused []string
+	for provider, t := range s.targets {
+		if t.phase != BroadcastPhaseLive || t.egress == nil || t.stopReason != nil {
+			continue
+		}
+		switch t.egress.Status().Phase {
+		case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
+			paused = append(paused, provider)
+		}
+	}
+	return paused
 }

@@ -25,6 +25,10 @@ var (
 	// 유튜브는 송출이 플랫폼에 도착하기 전까지 전환을 거절한다(broadcast_not_ready).
 	resolutionSwitchGoLiveTimeout = 60 * time.Second
 	resolutionSwitchRetryInterval = 2 * time.Second
+	// resolutionSwitchPauseTimeout은 새 방송을 다시 멈추기까지 기다리는 한도다.
+	// egress는 첫 프레임으로 출력 형식을 정한 뒤에야 슬레이트로 바꿀 수 있다.
+	resolutionSwitchPauseTimeout  = 15 * time.Second
+	resolutionSwitchPauseInterval = 100 * time.Millisecond
 	// resolutionSwitchTimeout은 전환 작업 전체의 상한이다.
 	resolutionSwitchTimeout = 3 * time.Minute
 )
@@ -87,7 +91,7 @@ func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Req
 		writeError(w, *startStreamError(err, liveSession.ID))
 		return
 	}
-	go s.runResolutionSwitch(liveSession, resolution, liveTargets)
+	go s.runResolutionSwitch(liveSession, resolution, liveTargets, liveSession.PausedTargets())
 	writeJSON(w, http.StatusAccepted, liveSession.Response())
 }
 
@@ -98,11 +102,12 @@ func broadcastBusyError(sessionID string) apiError {
 // runResolutionSwitch는 라이브 대상을 끝내고, 해상도를 바꾼 뒤, 대상마다 새 방송을
 // 준비해 라이브로 전환한다. 한 대상이 실패해도 나머지는 계속한다(동시 발사와 같은
 // 규칙). 유튜브를 먼저 열고, 치지직은 이전 방송이 닫힐 때까지 기다렸다가 연다.
-func (s *Server) runResolutionSwitch(liveSession *session.Session, resolution string, providers []string) {
+// 멈춰 있던 대상(paused)은 새 방송을 연 뒤 다시 멈춘다.
+func (s *Server) runResolutionSwitch(liveSession *session.Session, resolution string, providers, paused []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), resolutionSwitchTimeout)
 	defer cancel()
 	started := time.Now()
-	s.logger.Info("resolution switch started", "session_id", liveSession.ID, "to", resolution, "targets", providers)
+	s.logger.Info("resolution switch started", "session_id", liveSession.ID, "to", resolution, "targets", providers, "paused", paused)
 	var failures []session.ResolutionSwitchFailure
 	fail := func(provider, code string) {
 		failures = append(failures, session.ResolutionSwitchFailure{Provider: provider, Code: code})
@@ -137,13 +142,13 @@ func (s *Server) runResolutionSwitch(liveSession *session.Session, resolution st
 			delayed = append(delayed, provider)
 			continue
 		}
-		if failure := s.reopenTarget(ctx, liveSession, provider); failure != nil {
+		if failure := s.reopenTarget(ctx, liveSession, provider, slices.Contains(paused, provider)); failure != nil {
 			fail(provider, failure.Code)
 		}
 	}
 	if len(delayed) > 0 && s.waitResolutionSwitch(ctx, liveSession, time.Until(stoppedAt.Add(resolutionSwitchChzzkWait))) {
 		for _, provider := range delayed {
-			if failure := s.reopenTarget(ctx, liveSession, provider); failure != nil {
+			if failure := s.reopenTarget(ctx, liveSession, provider, slices.Contains(paused, provider)); failure != nil {
 				fail(provider, failure.Code)
 			}
 		}
@@ -159,7 +164,8 @@ func (s *Server) runResolutionSwitch(liveSession *session.Session, resolution st
 
 // reopenTarget은 대상 하나의 새 방송을 준비하고 라이브로 전환한다. 전환에 실패하면
 // 준비한 방송을 치운다 — 준비 상태로 남기면 사용자가 모르는 방송이 채널에 남는다.
-func (s *Server) reopenTarget(ctx context.Context, liveSession *session.Session, provider string) *apiError {
+// pause면 라이브가 된 뒤 다시 멈춘다.
+func (s *Server) reopenTarget(ctx context.Context, liveSession *session.Session, provider string, pause bool) *apiError {
 	canceled := &apiError{Status: http.StatusConflict, Code: "resolution_switch_canceled", Message: "The resolution switch was canceled."}
 	if liveSession.ResolutionSwitchCanceled() {
 		return canceled
@@ -172,6 +178,9 @@ func (s *Server) reopenTarget(ctx context.Context, liveSession *session.Session,
 	for {
 		failure := s.goLiveTarget(ctx, liveSession, providerName)
 		if failure == nil {
+			if pause {
+				s.pauseReopenedTarget(ctx, liveSession, provider)
+			}
 			return nil
 		}
 		retry := failure.Code == "broadcast_not_ready" && time.Now().Before(deadline)
@@ -183,6 +192,23 @@ func (s *Server) reopenTarget(ctx context.Context, liveSession *session.Session,
 				s.disposeBroadcast(liveSession.UserID, broadcast, phase)
 			}
 			return failure
+		}
+	}
+}
+
+// pauseReopenedTarget은 새 방송을 다시 멈춘다. egress가 첫 프레임으로 출력 형식을
+// 정하기 전에는 멈출 수 없으므로(stream_not_active) 짧게 재시도한다. 끝내 못 멈추면
+// 경고만 남긴다 — 방송은 열린 채로 둔다.
+func (s *Server) pauseReopenedTarget(ctx context.Context, liveSession *session.Session, provider string) {
+	deadline := time.Now().Add(resolutionSwitchPauseTimeout)
+	for {
+		_, err := s.sessions.PauseStream(liveSession.ID, provider)
+		if err == nil || errors.Is(err, session.ErrStreamPaused) {
+			return
+		}
+		if !errors.Is(err, session.ErrStreamNotActive) || time.Now().After(deadline) || !s.waitResolutionSwitch(ctx, liveSession, resolutionSwitchPauseInterval) {
+			s.logger.Warn("resolution switch could not pause the reopened broadcast", "session_id", liveSession.ID, "provider", provider, "error", err)
+			return
 		}
 	}
 }

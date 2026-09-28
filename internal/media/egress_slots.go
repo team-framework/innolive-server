@@ -318,6 +318,29 @@ func (b *EgressSlotBudget) ChangeResolution(key string, highRes bool) error {
 	return nil
 }
 
+// CheckClaim은 소유자가 claim.HighRes 해상도로 count개를 송출하게 됐을 때 자리가
+// 되는지만 본다(잡지는 않는다). 송출 방식 전환(#300)은 방송을 끊기 전에 이것으로
+// 확인한다 — 지금 쥔 유닛은 전환 중 반납되므로 빼고 센다.
+func (b *EgressSlotBudget) CheckClaim(claim EgressClaim, count int) error {
+	if b == nil || b.capacity <= 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	held := 0
+	if owner := b.owners[claim.Owner]; claim.Owner != "" && owner != nil {
+		held = owner.held
+	}
+	used := b.used - held + egressUnits(claim.HighRes, count)
+	if used > b.capacity {
+		return ErrEgressSlotsExhausted
+	}
+	if used > b.capacity-b.higherTierVacancyLocked(claim.Tier) {
+		return ErrEgressTierUnitsExhausted
+	}
+	return nil
+}
+
 // wakeOneLocked는 대기자 하나에게 자리가 났음을 알린다. 호출자가 mu를 쥐고 있어야 한다.
 func (b *EgressSlotBudget) wakeOneLocked() {
 	if len(b.waiters) == 0 {

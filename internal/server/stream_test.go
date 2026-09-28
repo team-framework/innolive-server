@@ -127,6 +127,14 @@ func newStreamTestApplication(t *testing.T, providers map[auth.StreamingProvider
 // 확인해야 하는 테스트가 쓴다.
 func newStreamTestApplicationWithManager(t *testing.T, providers map[auth.StreamingProvider]streaming.Provider) (*httptest.Server, *session.Manager) {
 	t.Helper()
+	server, manager, _ := newStreamTestApplicationWithServer(t, providers)
+	return server, manager
+}
+
+// newStreamTestApplicationWithServer는 서버 객체까지 돌려준다. 조립 후에 붙는
+// 의존성(원장 등)을 테스트가 끼워 넣을 때 쓴다.
+func newStreamTestApplicationWithServer(t *testing.T, providers map[auth.StreamingProvider]streaming.Provider) (*httptest.Server, *session.Manager, *Server) {
+	t.Helper()
 	cfg := config.Config{
 		HTTPAddr:                ":0",
 		PrivacyMode:             config.PrivacyModeBypass,
@@ -150,9 +158,10 @@ func newStreamTestApplicationWithManager(t *testing.T, providers map[auth.Stream
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(New(cfg, logger, registry, manager, nil, origins, nil, providers).Handler())
+	application := New(cfg, logger, registry, manager, nil, origins, nil, providers)
+	server := httptest.NewServer(application.Handler())
 	t.Cleanup(server.Close)
-	return server, manager
+	return server, manager, application
 }
 
 func prepareStream(t *testing.T, baseURL, sessionID, ownerToken, body string) (*http.Response, map[string]any) {

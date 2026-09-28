@@ -134,6 +134,9 @@ type Config struct {
 	EgressPlasmaUnits int
 	// GuestMaxSessions는 게스트 세션 상한이다. 0(미설정)이면 MAX_SESSIONS/2다.
 	GuestMaxSessions int
+	// BroadcastIdleTimeout은 처리된 영상 프레임이 이만큼 없으면 방송을 끝내는
+	// 시간이다(#275). 0이면 끄지 않는다.
+	BroadcastIdleTimeout time.Duration
 }
 
 // GuestSessionLimit은 게스트 세션 상한의 실효값이다. 종전에는 코드에
@@ -200,6 +203,7 @@ func Load() (Config, error) {
 		EgressSparkUnits:           envInt("EGRESS_SPARK_UNITS", 0),
 		EgressPlasmaUnits:          envInt("EGRESS_PLASMA_UNITS", 0),
 		GuestMaxSessions:           envInt("GUEST_MAX_SESSIONS", 0),
+		BroadcastIdleTimeout:       envDuration("BROADCAST_IDLE_TIMEOUT", 5*time.Minute),
 		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
 		GuestQueueRedisAddr:        strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
 		GuestQueueRedisPassword:    os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
@@ -287,6 +291,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxEgressSlots < 0 {
 		return errors.New("MAX_EGRESS_SLOTS must not be negative")
+	}
+	if c.BroadcastIdleTimeout < 0 {
+		return errors.New("BROADCAST_IDLE_TIMEOUT must not be negative")
 	}
 	if c.GuestMaxSessions < 0 || (c.MaxSessions > 0 && c.GuestMaxSessions > c.MaxSessions) {
 		return errors.New("GUEST_MAX_SESSIONS must be between 0 and MAX_SESSIONS")

@@ -386,3 +386,15 @@ func TestGuestSessionLimit(t *testing.T) {
 		t.Fatal("guest limit above MAX_SESSIONS must be rejected")
 	}
 }
+
+func TestValidateBroadcastIdleTimeout(t *testing.T) {
+	cfg := validConfig()
+	cfg.BroadcastIdleTimeout = -time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative idle timeout must be rejected")
+	}
+	cfg.BroadcastIdleTimeout = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("0 disables the idle stop and must be valid: %v", err)
+	}
+}

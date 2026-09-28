@@ -281,6 +281,43 @@ func (b *EgressSlotBudget) release(device int, key string) {
 	}
 }
 
+// ChangeResolution은 소유자의 송출 해상도를 바꾸고 유닛을 다시 계산한다(#283).
+// 늘어나는 유닛은 새로 잡는 것과 같은 규칙(총량·상위 등급 전용 몫)으로 판정하며,
+// 자리가 없으면 기다리지 않고 실패한다 — 호출자는 기존 해상도를 유지한다. 줄면
+// 바로 반납한다. 송출 수는 그대로라 카드별 NVENC 회계는 바뀌지 않는다. 송출 중이
+// 아닌 소유자는 쥔 유닛이 없으므로 바꿀 것이 없다.
+func (b *EgressSlotBudget) ChangeResolution(key string, highRes bool) error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	owner := b.owners[key]
+	if key == "" || owner == nil {
+		return nil
+	}
+	delta := egressUnits(highRes, owner.count) - owner.held
+	if delta > 0 && b.capacity > 0 {
+		if b.used+delta > b.capacity {
+			return ErrEgressSlotsExhausted
+		}
+		if b.used+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
+			return ErrEgressTierUnitsExhausted
+		}
+	}
+	owner.claim.HighRes = highRes
+	owner.held += delta
+	b.used += delta
+	b.usedByTier[owner.claim.Tier] += delta
+	b.usedByGroup[owner.claim.Group] += delta
+	if delta < 0 {
+		for len(b.waiters) > 0 {
+			b.wakeOneLocked()
+		}
+	}
+	return nil
+}
+
 // wakeOneLocked는 대기자 하나에게 자리가 났음을 알린다. 호출자가 mu를 쥐고 있어야 한다.
 func (b *EgressSlotBudget) wakeOneLocked() {
 	if len(b.waiters) == 0 {

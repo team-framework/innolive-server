@@ -1044,3 +1044,71 @@ func TestAIProcessingIsFixedPerSessionAndDefaultsToServer(t *testing.T) {
 		t.Fatal("invalid mode consumed a session")
 	}
 }
+
+// 서버는 공인 IP를 host 후보로 직접 알린다. 클라이언트용 STUN/TURN까지 서버
+// PeerConnection이 수집하면, 응답 없는 서버 하나에 non-trickle answer가 매번
+// STUN 대기 시간(5초)만큼 늦는다(#292).
+func newICETestManager(t *testing.T, announcedIP string) *Manager {
+	t.Helper()
+	cfg := config.Config{
+		PrivacyMode:    config.PrivacyModeBypass,
+		FFmpegPath:     "ffmpeg",
+		UDPPortMin:     42000,
+		UDPPortMax:     42100,
+		FrameQueueSize: 2,
+		AnnouncedIP:    announcedIP,
+		// TEST-NET-1(RFC 5737)은 응답하지 않아 STUN 수집이 타임아웃까지 걸린다.
+		STUNURLs: []string{"stun:192.0.2.1:3478"},
+	}
+	manager, err := NewManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+	return manager
+}
+
+func TestCreateAnswerSkipsICEServersWithAnnouncedIP(t *testing.T) {
+	manager := newICETestManager(t, "127.0.0.1")
+	s, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if _, err := manager.CreateAnswer(s.ID, ownerToken, offer.SDP); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("CreateAnswer took %v, want under 2s without waiting for STUN", elapsed)
+	}
+	if got := len(manager.ICEServers()); got != 1 {
+		t.Fatalf("ICEServers() for clients = %d entries, want 1", got)
+	}
+}
+
+func TestPeerConnectionKeepsICEServersWithoutAnnouncedIP(t *testing.T) {
+	manager := newICETestManager(t, "")
+	s, _, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s.PC.GetConfiguration().ICEServers); got != 1 {
+		t.Fatalf("server PeerConnection ICE servers = %d, want 1 when no announced IP", got)
+	}
+}

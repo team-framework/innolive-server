@@ -648,7 +648,14 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 	if err != nil {
 		return nil, "", fmt.Errorf("generate owner token: %w", err)
 	}
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{ICEServers: m.ice})
+	// 공인 IP를 host 후보로 알리면 서버는 srflx/relay가 필요 없다. 클라이언트용
+	// STUN/TURN을 여기서도 쓰면 non-trickle answer가 수집 완료(응답 없는
+	// 서버는 5초 타임아웃)를 기다리고 TURN relay 포트도 서버가 차지한다(#292).
+	var serverICE []webrtc.ICEServer
+	if m.cfg.AnnouncedIP == "" {
+		serverICE = m.ice
+	}
+	pc, err := m.api.NewPeerConnection(webrtc.Configuration{ICEServers: serverICE})
 	if err != nil {
 		return nil, "", fmt.Errorf("create PeerConnection: %w", err)
 	}

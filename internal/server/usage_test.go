@@ -123,3 +123,61 @@ func TestGetMyUsageRejectsBadMonthAndHandlesUnlimited(t *testing.T) {
 		t.Fatalf("glow usage = %+v, want unlimited (null limit)", got)
 	}
 }
+
+// 남은 방송 시간을 방식별 배수로 나눠 주고, 플랜이 허용하지 않는 방식도 잠금으로 함께 준다(#276).
+func TestGetMyUsageAvailableByMode(t *testing.T) {
+	cases := []struct {
+		plan    plan.Plan
+		used    time.Duration
+		seconds map[plan.Mode]int64 // -1 = null(무제한)
+		allowed map[plan.Mode]bool
+		perOnce int64 // -1 = null
+	}{
+		// BM 예시: 남은 방송 시간 42시간 → 720p 42 · FHD 21 · 720p 동시 21 · FHD 동시 14
+		{plan.Plasma, (240 - 42) * time.Hour,
+			map[plan.Mode]int64{plan.Mode720pSingle: 42 * 3600, plan.ModeFHDSingle: 21 * 3600, plan.Mode720pMulti: 21 * 3600, plan.ModeFHDMulti: 14 * 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: true}, 12 * 3600},
+		{plan.Beam, 115 * time.Hour,
+			map[plan.Mode]int64{plan.Mode720pSingle: 5 * 3600, plan.ModeFHDSingle: 9000, plan.Mode720pMulti: 9000, plan.ModeFHDMulti: 6000},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 8 * 3600},
+		// 다 쓰면 모두 0이다(음수가 아니다).
+		{plan.Spark, 6 * time.Hour,
+			map[plan.Mode]int64{plan.Mode720pSingle: 0, plan.ModeFHDSingle: 0, plan.Mode720pMulti: 0, plan.ModeFHDMulti: 0},
+			map[plan.Mode]bool{plan.Mode720pSingle: true}, 2 * 3600},
+		{plan.Glow, 10 * time.Hour,
+			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
+			map[plan.Mode]bool{}, -1},
+	}
+	for _, test := range cases {
+		t.Run(string(test.plan), func(t *testing.T) {
+			ledger := &fakeUsageLedger{charges: map[uuid.UUID][]usage.SessionCharge{}}
+			plans := map[uuid.UUID]plan.Plan{}
+			baseURL, header, userID := newUsageTestServer(t, plans, ledger)
+			plans[userID] = test.plan
+			ledger.charges[userID] = []usage.SessionCharge{{SessionID: uuid.New(), Charged: test.used, OnAir: test.used}}
+
+			response := mustRequest(t, http.MethodGet, baseURL+"/users/me/usage", nil, header)
+			var got usageResponse
+			if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if len(got.AvailableByMode) != 4 {
+				t.Fatalf("available_by_mode = %+v, want all 4 modes", got.AvailableByMode)
+			}
+			for _, entry := range got.AvailableByMode {
+				want := test.seconds[entry.Mode]
+				if want < 0 && entry.Seconds != nil || want >= 0 && (entry.Seconds == nil || *entry.Seconds != want) {
+					t.Fatalf("%s seconds = %v, want %d", entry.Mode, entry.Seconds, want)
+				}
+				if entry.Allowed != test.allowed[entry.Mode] || entry.Multiplier != entry.Mode.Units() {
+					t.Fatalf("%s = %+v, want allowed %v", entry.Mode, entry, test.allowed[entry.Mode])
+				}
+			}
+			if test.perOnce < 0 && got.MaxPerBroadcastSeconds != nil ||
+				test.perOnce >= 0 && (got.MaxPerBroadcastSeconds == nil || *got.MaxPerBroadcastSeconds != test.perOnce) {
+				t.Fatalf("max_per_broadcast_seconds = %v, want %d", got.MaxPerBroadcastSeconds, test.perOnce)
+			}
+		})
+	}
+}

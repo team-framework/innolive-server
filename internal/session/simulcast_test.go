@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -167,5 +169,47 @@ func TestWithdrawalClearsEveryTargetBroadcast(t *testing.T) {
 	}
 	if len(cleaned) != 2 || cleaned["youtube"] != BroadcastPhasePrepared || cleaned["chzzk"] != BroadcastPhasePrepared {
 		t.Fatalf("cleaned = %v, want both targets released", cleaned)
+	}
+}
+
+// TestBeginBroadcastPrepareCountedOrdersConcurrentTargets: 동시에 선점한 두
+// 대상 중 정확히 하나만 "대상 1개"를 봐야 플랜 게이트가 한쪽만 통과시킨다(#308).
+func TestBeginBroadcastPrepareCountedOrdersConcurrentTargets(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		manager := newTestManager(t, 0)
+		created := trackedSession(t, manager)
+		counts := make(chan int, 2)
+		var wg sync.WaitGroup
+		for _, provider := range []string{"youtube", "chzzk"} {
+			wg.Add(1)
+			go func(provider string) {
+				defer wg.Done()
+				_, busy, err := manager.BeginBroadcastPrepareCounted(created.ID, provider)
+				if err != nil {
+					t.Errorf("%s BeginBroadcastPrepareCounted() error = %v", provider, err)
+				}
+				counts <- busy
+			}(provider)
+		}
+		wg.Wait()
+		close(counts)
+		seen := map[int]bool{}
+		for busy := range counts {
+			seen[busy] = true
+		}
+		if !seen[1] || !seen[2] {
+			t.Fatalf("round %d: busy counts = %v, want one 1 and one 2", round, seen)
+		}
+	}
+}
+
+func TestBeginBroadcastPrepareCountedRejectsBusyTarget(t *testing.T) {
+	manager := newTestManager(t, 0)
+	created := trackedSession(t, manager)
+	if _, _, err := manager.BeginBroadcastPrepareCounted(created.ID, "youtube"); err != nil {
+		t.Fatal(err)
+	}
+	if _, busy, err := manager.BeginBroadcastPrepareCounted(created.ID, "youtube"); !errors.Is(err, ErrBroadcastPrepared) || busy != 0 {
+		t.Fatalf("second prepare = %d, %v, want ErrBroadcastPrepared", busy, err)
 	}
 }

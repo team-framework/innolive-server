@@ -48,7 +48,7 @@ func TestPostgresRecorderLifecycle(t *testing.T) {
 	sessionID, broadcastID := uuid.NewString(), uuid.NewString()
 	start := time.Now().UTC().Truncate(time.Microsecond)
 	for _, event := range []session.UsageEvent{
-		{Kind: session.UsageSessionStarted, At: start, SessionID: sessionID, UserID: user, AIProcessing: session.AIProcessingServer},
+		{Kind: session.UsageSessionStarted, At: start, SessionID: sessionID, UserID: user, AIProcessing: session.AIProcessingServer, Resolution: session.ResolutionFHD},
 		{Kind: session.UsageBroadcastStarted, At: start.Add(10 * time.Second), SessionID: sessionID, BroadcastID: broadcastID, Provider: "youtube"},
 		{Kind: session.UsageBroadcastLive, At: start.Add(20 * time.Second), BroadcastID: broadcastID},
 		{Kind: session.UsageBroadcastPaused, At: start.Add(30 * time.Second), BroadcastID: broadcastID},
@@ -69,7 +69,8 @@ func TestPostgresRecorderLifecycle(t *testing.T) {
 	}
 	if gotSession.UserID == nil || *gotSession.UserID != user || gotSession.IsGuest ||
 		gotSession.EndedAt == nil || !gotSession.EndedAt.Equal(start.Add(60*time.Second)) ||
-		*gotSession.EndReason != "peer_connection_closed" || *gotSession.AIProcessing != "server" {
+		*gotSession.EndReason != "peer_connection_closed" || *gotSession.AIProcessing != "server" ||
+		gotSession.Resolution == nil || *gotSession.Resolution != "fhd" {
 		t.Fatalf("session row = %+v", gotSession)
 	}
 	var gotBroadcast Broadcast

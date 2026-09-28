@@ -153,6 +153,8 @@ type Response struct {
 	// ChzzkBroadcast는 치지직 세션에서만 실린다. omitempty라 유튜브 응답은
 	// 이 필드가 생기기 전과 바이트 단위로 같다.
 	ChzzkBroadcast *ChzzkBroadcastResponse `json:"chzzk_broadcast,omitempty"`
+	// BroadcastResolution은 세션 생성 시 정한 송출 해상도다(#271).
+	BroadcastResolution string `json:"broadcast_resolution"`
 }
 
 type Session struct {
@@ -169,6 +171,10 @@ type Session struct {
 	// Plan은 생성 시점의 소유자 요금제다(#270). 이후 바뀌지 않으므로 mu 없이
 	// 읽는다. 게스트 세션과 플랜 조회가 조립되지 않은 배포(벤치·로컬)는 빈 값이다.
 	Plan plan.Plan
+	// BroadcastResolution은 송출 해상도(720p·fhd)다(#271). 생성 시점에 정해지고
+	// 이후 바뀌지 않으므로 mu 없이 읽는다. pinLongEdge는 그 해상도의 디코더 장변이다.
+	BroadcastResolution string
+	pinLongEdge         int
 	// GuestID는 비인증 체험 세션에 서버가 발급하는 불투명 식별자다.
 	// 공개 세션 응답에는 절대 포함하지 않는다.
 	GuestID    string
@@ -520,13 +526,23 @@ func (m *Manager) CreateForUserWithProvider(userID uuid.UUID, provider string, m
 
 // CreateForUserWithAIProcessing fixes the processing location for this session.
 func (m *Manager) CreateForUserWithAIProcessing(userID uuid.UUID, provider, processing string, metadata map[string]string) (*Session, string, error) {
+	return m.CreateForUserWithResolution(userID, provider, processing, "", metadata)
+}
+
+// CreateForUserWithResolution은 송출 해상도까지 정해 세션을 만든다(#271). 빈
+// resolution은 720p다.
+func (m *Manager) CreateForUserWithResolution(userID uuid.UUID, provider, processing, resolution string, metadata map[string]string) (*Session, string, error) {
+	resolution, err := normalizeResolution(resolution)
+	if err != nil {
+		return nil, "", err
+	}
 	if processing == "" {
 		processing = AIProcessingServer
 	}
 	if processing != AIProcessingServer && processing != AIProcessingOnDevice {
 		return nil, "", ErrInvalidAIProcessing
 	}
-	return m.create(userID, "", provider, processing, metadata)
+	return m.create(userID, "", provider, processing, resolution, metadata)
 }
 
 // CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
@@ -536,10 +552,10 @@ func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*S
 	if strings.TrimSpace(guestID) == "" {
 		return nil, "", errors.New("guest ID is required")
 	}
-	return m.create(uuid.Nil, guestID, DefaultProvider, AIProcessingServer, metadata)
+	return m.create(uuid.Nil, guestID, DefaultProvider, AIProcessingServer, Resolution720p, metadata)
 }
 
-func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string, metadata map[string]string) (*Session, string, error) {
+func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolution string, metadata map[string]string) (*Session, string, error) {
 	if strings.TrimSpace(provider) == "" {
 		provider = DefaultProvider
 	}
@@ -628,6 +644,8 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string,
 		UserID:               userID,
 		Provider:             provider,
 		Plan:                 ownerPlan,
+		BroadcastResolution:  resolution,
+		pinLongEdge:          pinLongEdgeFor(resolution, m.cfg.DecoderPinLongEdge),
 		GuestID:              guestID,
 		AIClientID:           aiClientID,
 		CreatedAt:            now,
@@ -678,7 +696,7 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing string,
 		time.AfterFunc(timeout, func() { m.reapUnnegotiated(id) })
 	}
 	m.logger.Info("created live session", "session_id", id, "user_id", userID)
-	m.recordUsage(UsageEvent{Kind: UsageSessionStarted, At: now, SessionID: id, UserID: userID, AIProcessing: processing})
+	m.recordUsage(UsageEvent{Kind: UsageSessionStarted, At: now, SessionID: id, UserID: userID, AIProcessing: processing, Resolution: resolution})
 	return s, ownerToken, nil
 }
 
@@ -1636,7 +1654,7 @@ func (m *Manager) installHandlers(ctx context.Context, s *Session) {
 			EncoderThreads: m.cfg.FFmpegEncoderThreads,
 			WireFormat:     m.cfg.AIWireFormat,
 			VideoCodec:     codec,
-			PinLongEdge:    uint16(m.cfg.DecoderPinLongEdge),
+			PinLongEdge:    uint16(s.pinLongEdge),
 		})
 		processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 		if err != nil {
@@ -1779,6 +1797,7 @@ func (s *Session) Response() Response {
 		Timing:       s.Timing,
 		Stream:       s.Stream,
 	}
+	response.BroadcastResolution = s.BroadcastResolution
 	response.Peer.ConnectionState = s.PC.ConnectionState().String()
 	response.Peer.ICEConnectionState = s.PC.ICEConnectionState().String()
 	response.Peer.SignalingState = s.PC.SignalingState().String()

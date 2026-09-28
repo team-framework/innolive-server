@@ -154,3 +154,30 @@ func TestDecoderPinOffKeepsFirstFrameDimensions(t *testing.T) {
 	assertPinned(t, frames, 320, 180)
 	assertLogged(t, output, "H.264 decoder output locked", "width=320", "height=180", "pin_long_edge=0")
 }
+
+// TestDecoderPinPerSessionResolution은 세션별 해상도(#271)를 본다. 같은 FHD
+// 소스라도 720p 세션(핀 1280)과 FHD 세션(핀 1920)이 각자의 규격으로 디코드되고,
+// 그 규격이 egress 비트레이트 티어(2500k·5000k)를 가른다.
+func TestDecoderPinPerSessionResolution(t *testing.T) {
+	requireTool(t, "ffmpeg")
+
+	units := splitAccessUnits(t, annexBStream(t, t.TempDir(), "fhd.h264", 1920, 1080))
+	cases := []struct {
+		pin           uint16
+		width, height uint16
+		bitrate       string
+	}{
+		{1280, 1280, 720, egressVideoBitrate},
+		{1920, 1920, 1080, egressVideoBitrateFHD},
+	}
+	for _, test := range cases {
+		transcoder := NewFFmpegTranscoder("ffmpeg", nil, metrics.New(), TranscoderOptions{
+			VideoCodec: VideoCodecH264, WireFormat: config.WireFormatJPEG, PinLongEdge: test.pin,
+		})
+		_, frames := drainDecoderFrames(t, transcoder, units)
+		assertPinned(t, frames, test.width, test.height)
+		if got := (&RTMPEgress{}).videoBitrateFor(test.width, test.height); got != test.bitrate {
+			t.Fatalf("pin %d: bitrate = %s, want %s", test.pin, got, test.bitrate)
+		}
+	}
+}

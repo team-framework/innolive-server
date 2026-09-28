@@ -248,3 +248,117 @@ func TestBudgetForwardsSignalFromTimedOutWaiter(t *testing.T) {
 		t.Fatal("the free slot was never handed to the remaining waiter")
 	}
 }
+
+func TestEgressUnitsMatchBM(t *testing.T) {
+	cases := []struct {
+		highRes bool
+		count   int
+		want    int
+	}{
+		{false, 1, 1}, {true, 1, 2}, {false, 2, 2}, {true, 2, 3}, {true, 0, 0},
+	}
+	for _, test := range cases {
+		if got := egressUnits(test.highRes, test.count); got != test.want {
+			t.Fatalf("egressUnits(%v, %d) = %d, want %d", test.highRes, test.count, got, test.want)
+		}
+	}
+}
+
+func TestBudgetChargesUnitsPerOwner(t *testing.T) {
+	budget := NewEgressSlotBudget(13, 0)
+	ctx := context.Background()
+	fhd := EgressClaim{Owner: "fhd-session", HighRes: true, Group: "plasma"}
+
+	first, err := budget.AcquireClaim(ctx, fhd)
+	if err != nil || budget.Used() != 2 {
+		t.Fatalf("FHD single: used=%d err=%v, want 2", budget.Used(), err)
+	}
+	second, err := budget.AcquireClaim(ctx, fhd)
+	if err != nil || budget.Used() != 3 {
+		t.Fatalf("FHD simulcast: used=%d err=%v, want 3", budget.Used(), err)
+	}
+	// 한쪽이 먼저 끝나면 FHD 단독(2)으로 돌아가야 한다 — 1이 되면 과소 계산이다.
+	first.Release()
+	if budget.Used() != 2 {
+		t.Fatalf("after first target ended: used=%d, want 2", budget.Used())
+	}
+	second.Release()
+	if budget.Used() != 0 || len(budget.UsedByGroup()) != 0 {
+		t.Fatalf("after all ended: used=%d groups=%v", budget.Used(), budget.UsedByGroup())
+	}
+
+	hd := EgressClaim{Owner: "hd-session", Group: "beam"}
+	a, _ := budget.AcquireClaim(ctx, hd)
+	b, _ := budget.AcquireClaim(ctx, hd)
+	if budget.Used() != 2 || budget.UsedByGroup()["beam"] != 2 {
+		t.Fatalf("720p simulcast: used=%d groups=%v, want 2", budget.Used(), budget.UsedByGroup())
+	}
+	a.Release()
+	b.Release()
+}
+
+func TestBudgetCapsSparkButNotPaid(t *testing.T) {
+	budget := NewEgressSlotBudget(13, 0)
+	budget.SetCappedLimit(2)
+	ctx := context.Background()
+	spark := func(owner string) EgressClaim { return EgressClaim{Owner: owner, Capped: true, Group: "spark"} }
+
+	first, err := budget.AcquireClaim(ctx, spark("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.AcquireClaim(ctx, spark("s2")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = budget.AcquireClaim(ctx, spark("s3"))
+	if !errors.Is(err, ErrEgressCappedUnitsExhausted) || !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("third spark: err=%v, want capped exhaustion", err)
+	}
+	// 유료는 Spark 몫과 무관하게 시작한다.
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "p1", HighRes: true, Group: "plasma"}); err != nil {
+		t.Fatalf("paid blocked by spark cap: %v", err)
+	}
+	// Spark 하나가 끝나면 다음 Spark가 들어온다.
+	first.Release()
+	if _, err := budget.AcquireClaim(ctx, spark("s3")); err != nil {
+		t.Fatalf("spark after release: %v", err)
+	}
+}
+
+func TestBudgetRejectsUnitsOverCapacity(t *testing.T) {
+	budget := NewEgressSlotBudget(3, 0)
+	ctx := context.Background()
+	hold, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", HighRes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 남은 1유닛에 FHD(2)는 들어가지 않는다.
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "b", HighRes: true}); !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("FHD over capacity: err=%v", err)
+	}
+	if budget.Used() != 2 {
+		t.Fatalf("rejected claim changed usage: %d", budget.Used())
+	}
+	hold.Release()
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "b", HighRes: true}); err != nil {
+		t.Fatalf("reacquire after release: %v", err)
+	}
+}
+
+func TestBudgetWakesLargeWaiterAfterSmallRelease(t *testing.T) {
+	budget := NewEgressSlotBudget(2, 0)
+	ctx := context.Background()
+	a, _ := budget.AcquireClaim(ctx, EgressClaim{Owner: "a"})
+	b, _ := budget.AcquireClaim(ctx, EgressClaim{Owner: "b"})
+	done := make(chan error, 1)
+	go func() {
+		_, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "fhd", HighRes: true})
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	a.Release()
+	b.Release()
+	if err := <-done; err != nil {
+		t.Fatalf("FHD waiter not admitted after two releases: %v", err)
+	}
+}

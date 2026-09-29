@@ -193,6 +193,9 @@ func pausedAfterSwitch(live, paused, to []string) []string {
 func (s *Server) runBroadcastSwitch(liveSession *session.Session, resolution string, from, to, paused []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), resolutionSwitchTimeout)
 	defer cancel()
+	// 화질 올리기 제안을 승낙한 전환이면 새 송출이 보류분을 먼저 쓴다. 남은 것은
+	// 전환이 끝나면 돌려준다(#278).
+	defer s.sessions.ReleaseUpgradeHold(liveSession.ID)
 	started := time.Now()
 	changeResolution := resolution != liveSession.Resolution()
 	stop, open := from, to

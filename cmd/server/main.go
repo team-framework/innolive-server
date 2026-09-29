@@ -441,6 +441,7 @@ func main() {
 		streamingDisconnectHooks[auth.StreamingProviderYouTube] = auth.StreamingDisconnectHooks{
 			CleanupResources: youtubeProvider.CleanupStreamingResources,
 			RevokeToken:      youtubeOAuthClient.RevokeToken,
+			ClearTokenCache:  youtubeTokens.ClearCachedToken,
 		}
 	}
 	// 치지직 송출 연동(#228 계정 연결, #230 송출 프로바이더).
@@ -482,7 +483,8 @@ func main() {
 		// 해제 시 정리 훅: 치지직은 재사용 스트림 같은 원격 리소스를 만들지
 		// 않으므로 CleanupResources가 없고 권한 취소만 한다.
 		streamingDisconnectHooks[auth.StreamingProviderChzzk] = auth.StreamingDisconnectHooks{
-			RevokeToken: chzzkOAuthClient.RevokeToken,
+			RevokeToken:     chzzkOAuthClient.RevokeToken,
+			ClearTokenCache: chzzkTokens.ClearCachedToken,
 		}
 	}
 	// 조회·해제 서비스는 플랫폼 중립이라 훅 구성 뒤 한 번만 조립한다.

@@ -63,6 +63,11 @@ func disconnectFixture(t *testing.T, cleanupErr, revokeErr error) (*StreamingAcc
 				mu.Unlock()
 				return revokeErr
 			},
+			ClearTokenCache: func(uuid.UUID) {
+				mu.Lock()
+				order = append(order, "clear-cache")
+				mu.Unlock()
+			},
 		},
 	}
 	service, err := NewStreamingAccountService(
@@ -85,7 +90,7 @@ func TestDisconnectRunsStepsInOrder(t *testing.T) {
 	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cleanup", "revoke:rt-secret", "delete"}
+	want := []string{"cleanup", "revoke:rt-secret", "delete", "clear-cache"}
 	if len(*order) != len(want) {
 		t.Fatalf("order = %v, want %v", *order, want)
 	}
@@ -120,8 +125,9 @@ func TestDisconnectContinuesWhenPlatformStepsFail(t *testing.T) {
 			if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
 				t.Fatal("account row must be deleted even when platform steps fail")
 			}
-			if (*order)[len(*order)-1] != "delete" {
-				t.Fatalf("order = %v, want delete last", *order)
+			// 플랫폼 단계가 실패해도 행 삭제 뒤 캐시를 비운다(#340).
+			if tail := (*order)[len(*order)-2:]; tail[0] != "delete" || tail[1] != "clear-cache" {
+				t.Fatalf("order = %v, want delete then clear-cache last", *order)
 			}
 		})
 	}

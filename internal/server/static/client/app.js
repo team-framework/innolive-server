@@ -2098,10 +2098,7 @@ async function prepareBroadcast(session) {
   const failures = [];
   for (const provider of platforms) {
     try {
-      const prepared = await apiFetch(`/sessions/${sessionId}/stream/prepare`, {
-        method: "POST",
-        body: JSON.stringify({ provider }),
-      });
+      const prepared = await prepareTargetWithConfirm(sessionId, provider);
       setCurrentSession(prepared);
       renderBroadcastStreamStatus(prepared.stream);
       renderBroadcastWarnings(prepared.warnings);
@@ -2122,6 +2119,31 @@ async function prepareBroadcast(session) {
   }
   if (failures.length) {
     els.broadcastSettingsDetail.textContent = `준비 실패 — ${failures.join(" · ")}`;
+  }
+}
+
+// prepareTargetWithConfirm은 대상 하나를 준비한다. 채널이 이미 다른 도구로 라이브면
+// 서버가 409 channel_already_live로 묻는다 — 사용자가 동의하면 방송을 하나 더
+// 연다(#361).
+async function prepareTargetWithConfirm(sessionId, provider, confirmConcurrent = (message) => window.confirm(message)) {
+  const request = (allowConcurrent) =>
+    apiFetch(`/sessions/${sessionId}/stream/prepare`, {
+      method: "POST",
+      body: JSON.stringify(allowConcurrent ? { provider, allow_concurrent: true } : { provider }),
+    });
+  try {
+    return await request(false);
+  } catch (error) {
+    if (error.payload?.error?.code !== "channel_already_live") {
+      throw error;
+    }
+    const message =
+      `${platformLabel(provider)} 채널이 이미 다른 도구로 라이브 중입니다.\n` +
+      "계속하면 라이브가 하나 더 열려 시청자가 나뉠 수 있습니다. 계속할까요?";
+    if (!confirmConcurrent(message)) {
+      throw error;
+    }
+    return request(true);
   }
 }
 

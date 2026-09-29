@@ -176,7 +176,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, refreshStreamingAccounts };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts };`,
     context,
     { filename: appPath },
   );
@@ -1023,6 +1023,17 @@ test("유튜브 연결 해제 버튼은 연결돼 있을 때만 보이고 DELETE
   await disconnectYoutube();
   assert.ok(calls.includes("DELETE /auth/streaming/accounts/youtube"));
   assert.equal(els.disconnectYoutubeBtn.hidden, true);
+});
+
+test("방송 중인 플랫폼 연결 해제가 409면 방송을 먼저 끝내라고 안내한다", async () => {
+  const { disconnectChzzk, state, els } = await loadApp({
+    fetchImpl: async () => jsonResponse({ error: { code: "streaming_account_in_use", message: "in use" } }, 409),
+  });
+  state.accessToken = "access-token";
+  els.disconnectChzzkBtn.hidden = false;
+  await disconnectChzzk();
+  assert.equal(els.disconnectChzzkBtn.hidden, false);
+  assert.match(els.chzzkDetail.textContent, /방송을 먼저 종료하세요/);
 });
 
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {

@@ -517,7 +517,9 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	// 방송 설정 모델이 플랫폼별이므로(#229) 읽는 곳도 갈린다.
 	var options streaming.PrepareOptions
 	if providerName == auth.StreamingProviderChzzk {
-		options = chzzkPrepareOptionsFrom(liveSession.ChzzkBroadcastSettings())
+		// 치지직 설정은 채널 전역값이라 송출이 받아들여진 뒤에 적용한다(#361) —
+		// 준비에서는 스트림 키만 받는다.
+		options = streaming.PrepareOptions{}
 	} else {
 		options = prepareOptionsFrom(liveSession.BroadcastSettings())
 		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
@@ -674,6 +676,9 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 	if err != nil {
 		s.logger.Error("record live broadcast failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
 		return sessionError(err, liveSession.ID)
+	}
+	if providerName == auth.StreamingProviderChzzk {
+		go s.applyChzzkSettingsWhenAccepted(liveSession, liveSession.ChzzkBroadcastSettings())
 	}
 	return nil
 }
@@ -935,20 +940,6 @@ func prepareOptionsFrom(settings session.YouTubeBroadcastSettings) streaming.Pre
 		options.Thumbnail = &streaming.Thumbnail{MIME: settings.Thumbnail.MIME, Data: settings.Thumbnail.Data}
 	}
 	return options
-}
-
-// chzzkPrepareOptionsFrom은 저장된 치지직 설정을 준비 옵션으로 옮긴다.
-// 치지직에는 설명·공개범위·썸네일·아동용 신고가 없으므로 비운 채로 둔다.
-// 설정을 저장했는데 카테고리가 비었으면 사용자가 카테고리 없이 고른 것이라
-// 채널에 남은 카테고리를 지운다. 저장한 적이 없으면 건드리지 않는다(#352).
-func chzzkPrepareOptionsFrom(settings session.ChzzkBroadcastSettings) streaming.PrepareOptions {
-	return streaming.PrepareOptions{
-		Title:         settings.Title,
-		CategoryType:  settings.CategoryType,
-		CategoryID:    settings.CategoryID,
-		Tags:          settings.Tags,
-		ClearCategory: !settings.UpdatedAt.IsZero() && settings.CategoryType == "" && settings.CategoryID == "",
-	}
 }
 
 // handlePutBroadcast는 방송 설정을 저장·검증만 한다. 플랫폼 호출은 송출

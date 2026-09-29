@@ -118,6 +118,8 @@ func (s *Server) RunLimitEnforcer(ctx context.Context) {
 }
 
 func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
+	var upgrades []upgradeCandidate
+	defer func() { s.offerUpgrades(upgrades, now) }()
 	for _, live := range s.sessions.List() {
 		if live.Plan == "" || live.UserID == uuid.Nil {
 			continue
@@ -145,6 +147,9 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			}
 		}
 		if decision.stopReason == "" {
+			if candidate, ok := upgradeCandidateFor(live, len(targets), onAir, used); ok {
+				upgrades = append(upgrades, candidate)
+			}
 			continue
 		}
 		live.SetBroadcastRemaining(nil)

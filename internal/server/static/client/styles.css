@@ -314,6 +314,25 @@ h2 {
   grid-column: 1 / -1;
 }
 
+.upgrade-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.upgrade-offer[hidden] {
+  display: none;
+}
+
+.upgrade-offer span {
+  flex: 1 1 240px;
+}
+
 .broadcast-settings-form textarea {
   width: 100%;
   min-height: 92px;

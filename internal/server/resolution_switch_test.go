@@ -27,6 +27,7 @@ type liveSwitchFixture struct {
 	ownerToken string
 	youtube    *stubStreamingProvider
 	chzzk      *stubStreamingProvider
+	manager    *session.Manager
 }
 
 func newLiveSwitchFixture(t *testing.T, chzzkWait time.Duration) liveSwitchFixture {
@@ -94,7 +95,7 @@ func newModeSwitchFixture(t *testing.T, chzzkWait time.Duration, owner plan.Plan
 	if response, payload := goLive(t, server.URL, created.SessionID, ownerToken); response.StatusCode != http.StatusOK {
 		t.Fatalf("go live = %d %v", response.StatusCode, payload)
 	}
-	return liveSwitchFixture{baseURL: server.URL, sessionID: created.SessionID, ownerToken: ownerToken, youtube: youtube, chzzk: chzzk}
+	return liveSwitchFixture{baseURL: server.URL, sessionID: created.SessionID, ownerToken: ownerToken, youtube: youtube, chzzk: chzzk, manager: manager}
 }
 
 func (f liveSwitchFixture) putResolution(t *testing.T, resolution string) (int, map[string]any) {

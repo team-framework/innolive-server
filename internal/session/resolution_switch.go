@@ -39,6 +39,11 @@ func (s *Session) BeginResolutionSwitch(resolution string, targets []string) boo
 	if s.resolutionSwitch != nil && s.resolutionSwitch.Status == ResolutionSwitchSwitching {
 		return false
 	}
+	// 걸려 있던 화질 올리기 제안은 전환으로 답한 것으로 본다. 보류는 남겨 새
+	// 송출이 먼저 쓰게 하고, 전환이 끝나면 호출자가 남은 것을 반납한다(#278).
+	if s.upgradeOffer != nil {
+		s.clearUpgradeOfferLocked()
+	}
 	s.resolutionSwitch = &ResolutionSwitchState{
 		Status:     ResolutionSwitchSwitching,
 		Resolution: resolution,

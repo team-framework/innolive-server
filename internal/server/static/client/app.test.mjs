@@ -176,7 +176,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, refreshStreamingAccounts };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts };`,
     context,
     { filename: appPath },
   );
@@ -1045,6 +1045,17 @@ test("직전 방송 값 불러오기를 끄면 카드를 채우지 않는다", a
   assert.equal(els.chzzkCategoryId.value, "");
 });
 
+test("방송 중인 플랫폼 연결 해제가 409면 방송을 먼저 끝내라고 안내한다", async () => {
+  const { disconnectChzzk, state, els } = await loadApp({
+    fetchImpl: async () => jsonResponse({ error: { code: "streaming_account_in_use", message: "in use" } }, 409),
+  });
+  state.accessToken = "access-token";
+  els.disconnectChzzkBtn.hidden = false;
+  await disconnectChzzk();
+  assert.equal(els.disconnectChzzkBtn.hidden, false);
+  assert.match(els.chzzkDetail.textContent, /방송을 먼저 종료하세요/);
+});
+
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {
   const calls = [];
   const { createSession, state, els } = await loadApp({
@@ -1232,6 +1243,21 @@ test("플랫폼을 더하는 선택지는 설정 카드를 열고, 확인 버튼
   assert.match(rest[0].path, /\/sessions\/s-1\/broadcast\?provider=chzzk$/);
   assert.match(rest[1].path, /\/sessions\/s-1\/broadcast-mode$/);
   assert.deepEqual(JSON.parse(rest[1].body), { resolution: "720p", targets: ["youtube", "chzzk"] });
+});
+
+test("치지직 재시작 안내는 같은 주소에서 새 방송으로 시작됨을 보인다", async () => {
+  const { acceptUpgradeOffer, state } = await loadApp({ fetchImpl: async () => jsonResponse({}) });
+  state.session = { session_id: "s-1", targets: [] };
+  const notices = [];
+  await acceptUpgradeOffer(
+    { mode: "fhd_single", resolution: "fhd", targets: ["chzzk"], restarts_broadcast: true, restart_effects: [{ provider: "chzzk", same_link: true, gap_seconds: 15 }] },
+    (message) => {
+      notices.push(message);
+      return false;
+    },
+  );
+  assert.match(notices[0], /같은 주소에서 약 15초 뒤 새 방송으로 시작/);
+  assert.match(notices[0], /새로고침 없이/);
 });
 
 test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {

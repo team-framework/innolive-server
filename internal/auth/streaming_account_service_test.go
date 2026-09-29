@@ -332,3 +332,25 @@ func TestRevokeTokenTreatsAlreadyInvalidAsSuccess(t *testing.T) {
 		t.Fatal("5xx must be an error")
 	}
 }
+
+// 방송에 쓰이는 플랫폼은 해제하지 않는다 — 플랫폼 단계도 행 삭제도 하지 않는다(#348).
+func TestDisconnectRejectedWhileProviderInUse(t *testing.T) {
+	service, store, userID, order := disconnectFixture(t, nil, nil)
+	service.SetInUseChecker(func(id uuid.UUID, provider StreamingProvider) bool {
+		return id == userID && provider == StreamingProviderYouTube
+	})
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountInUse) {
+		t.Fatalf("err = %v, want ErrStreamingAccountInUse", err)
+	}
+	if len(*order) != 0 {
+		t.Fatalf("order = %v, want no platform steps", *order)
+	}
+	if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); err != nil {
+		t.Fatalf("account row must be kept: %v", err)
+	}
+
+	service.SetInUseChecker(func(uuid.UUID, StreamingProvider) bool { return false })
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
+		t.Fatal(err)
+	}
+}

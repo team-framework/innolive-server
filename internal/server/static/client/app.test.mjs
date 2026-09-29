@@ -1025,6 +1025,26 @@ test("유튜브 연결 해제 버튼은 연결돼 있을 때만 보이고 DELETE
   assert.equal(els.disconnectYoutubeBtn.hidden, true);
 });
 
+test("직전 방송 값 불러오기를 끄면 카드를 채우지 않는다", async () => {
+  const calls = [];
+  const { createSession, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push(String(url));
+      return jsonResponse({ session_id: "s-1", owner_token: "owner" });
+    },
+  });
+  for (const id of ["sessionLabel", "resolutionSelect", "cameraSelect", "sendAudio"]) {
+    els[id] = { value: "", checked: false, dataset: {} };
+  }
+  state.accessToken = "access-token";
+  els.platformChzzk.checked = true;
+  els.loadBroadcastDefaults = { checked: false };
+  els.chzzkCategoryId.value = "";
+  await createSession();
+  assert.equal(calls.some((url) => url.includes("/broadcast/defaults")), false);
+  assert.equal(els.chzzkCategoryId.value, "");
+});
+
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {
   const calls = [];
   const { createSession, state, els } = await loadApp({

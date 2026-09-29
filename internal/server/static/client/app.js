@@ -182,6 +182,7 @@ function bindElements() {
     "connectChzzkBtn",
     "disconnectChzzkBtn",
     "disconnectYoutubeBtn",
+    "loadBroadcastDefaults",
     "chzzkCallbackRow",
     "chzzkCallbackUrl",
     "chzzkCompleteRow",
@@ -1645,7 +1646,8 @@ async function applyBroadcastDefaults(sessionId) {
 // applyPlatformDefaults는 한 플랫폼의 직전 방송 값을 채운다. 사용자가 건드린
 // 필드는 덮지 않고, 조회가 실패해도 폼은 그대로 쓴다.
 async function applyPlatformDefaults(sessionId, provider) {
-  if (state.platformDefaultsLoaded.has(provider)) {
+  // 끄면 카드를 비운 채로 둔다 — 카테고리 없이 보내려는 경우 등(#352).
+  if (state.platformDefaultsLoaded.has(provider) || els.loadBroadcastDefaults?.checked === false) {
     return;
   }
   const untouched = (field) => !state.touchedBroadcastFields.has(`${provider}:${field}`);

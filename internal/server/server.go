@@ -62,6 +62,9 @@ type Server struct {
 	}
 	signalingTrustedProxies []*net.IPNet
 	signalingConns          signalingConnLimiter
+	ownBroadcasts           ownedBroadcasts
+	quotaLogMu              sync.Mutex
+	quotaLoggedLevel        int
 	mux                     *http.ServeMux
 	handler                 http.Handler
 	platformEnds            platformEndChecks
@@ -445,6 +448,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Provider string `json:"provider"`
+		// AllowConcurrent는 채널이 이미 다른 도구로 라이브 중이어도 방송을 하나 더
+		// 연다는 사용자 확인이다(#361).
+		AllowConcurrent bool `json:"allow_concurrent"`
 	}{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
@@ -459,6 +465,12 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if providerName == "" {
 		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
+	if !request.AllowConcurrent {
+		if conflict := s.channelAlreadyLive(r.Context(), liveSession, providerName); conflict != nil {
+			writeError(w, *conflict)
+			return
+		}
+	}
 	warnings, failure := s.prepareTarget(r.Context(), liveSession, providerName)
 	if failure != nil {
 		writeError(w, *failure)
@@ -469,6 +481,37 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		session.Response
 		Warnings []streaming.Warning `json:"warnings,omitempty"`
 	}{Response: liveSession.Response(), Warnings: warnings})
+}
+
+// channelAlreadyLive는 채널이 이미 다른 도구로 라이브 중이면 409를 돌려준다(#361).
+// 유튜브는 한 채널의 동시 라이브를 허용하므로 막지 않고 사용자에게 확인받는다 —
+// 확인하면 allow_concurrent로 다시 부른다. 방송 중 전환·대상 추가는 이 확인을
+// 거치지 않는다(준비 요청만). 확인에 실패하면 방송을 막지 않는다.
+func (s *Server) channelAlreadyLive(ctx context.Context, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
+	checker, ok := s.streaming[providerName].(streaming.ActiveBroadcastChecker)
+	if !ok || s.youtubeQuotaLow() {
+		return nil
+	}
+	ids, err := checker.ActiveBroadcasts(ctx, liveSession.UserID)
+	if err != nil {
+		s.logger.Warn("active broadcast check failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
+		return nil
+	}
+	// InnoLive가 만든 방송은 뺀다 — 방금 끝낸 방송은 autoStop이 닫기까지 1분가량
+	// active로 남는다.
+	active := 0
+	for _, id := range ids {
+		if !s.ownBroadcasts.contains(id) {
+			active++
+		}
+	}
+	if active == 0 {
+		return nil
+	}
+	s.logger.Info("stream prepare needs concurrent confirmation", "session_id", liveSession.ID, "provider", providerName, "active_broadcasts", active)
+	return &apiError{Status: http.StatusConflict, Code: "channel_already_live",
+		Message: "The channel already has a live broadcast. Confirm to start another one.",
+		Details: map[string]any{"provider": providerName, "active_broadcasts": active}}
 }
 
 // prepareTarget은 대상 하나의 방송을 준비한다. 성공하면 플랫폼 경고를, 실패하면
@@ -536,6 +579,9 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 		}
 	}
 	prepared, err := provider.Prepare(ctx, liveSession.UserID, options)
+	if err == nil && prepared.BroadcastID != "" {
+		s.ownBroadcasts.add(prepared.BroadcastID)
+	}
 	preparedRecord := session.PlatformBroadcast{
 		Provider:    string(prepared.Provider),
 		BroadcastID: prepared.BroadcastID,
@@ -646,6 +692,8 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 			return &apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}}
 		case errors.Is(err, auth.ErrStreamingReconnectRequired):
 			return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
+		case errors.Is(err, streaming.ErrQuotaExceeded):
+			return s.prepareError(err, liveSession.ID, providerName)
 		default:
 			s.logger.Error("go live failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
 			return &apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."}
@@ -891,6 +939,10 @@ func (s *Server) prepareError(err error, sessionID string, providerName auth.Str
 	case errors.Is(err, streaming.ErrPlatformRateLimited):
 		// 재시도로 곧바로 풀리지 않는다 — 일반 준비 실패(502)와 구분해 "잠시 뒤"를 안내한다.
 		return &apiError{Status: http.StatusTooManyRequests, Code: "streaming_rate_limited", Message: "The streaming platform is limiting requests from this account. Try again later.", Details: map[string]any{"provider": providerName}}
+	case errors.Is(err, streaming.ErrQuotaExceeded):
+		// 오늘은 재시도해도 풀리지 않는다 — 일반 준비 실패(502)와 구분해 알린다.
+		s.logger.Error("streaming API quota exhausted", "session_id", sessionID, "provider", providerName)
+		return &apiError{Status: http.StatusServiceUnavailable, Code: "streaming_quota_exceeded", Message: "The streaming platform's daily API limit for this service is used up. It resets at midnight Pacific Time.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, streaming.ErrLiveStreamingBlocked):
 		return &apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}}
 	default:
@@ -1067,7 +1119,8 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 		providerName = auth.StreamingProviderYouTube
 	}
 	defaults := streaming.FallbackDefaults()
-	if provider := s.streaming[providerName]; provider != nil {
+	// 쿼터가 모자라면 폼은 폴백값으로 열고 남은 쿼터를 방송에 남긴다(#361).
+	if provider := s.streaming[providerName]; provider != nil && !(providerName == auth.StreamingProviderYouTube && s.youtubeQuotaLow()) {
 		if loaded, err := provider.Defaults(r.Context(), liveSession.UserID); err != nil {
 			// 계정 미연결·권한·네트워크 어느 쪽이든 사용자가 할 일은 같다:
 			// 폴백값으로 폼을 열고 직접 채운다.

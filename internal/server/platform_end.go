@@ -49,6 +49,10 @@ func (c *platformEndChecks) due(key string, now time.Time) bool {
 // 않으면 시청자가 없는 송출이 사용자의 방송 시간을 계속 차감한다. 확인에 실패하면
 // 다음 차례에 다시 본다.
 func (s *Server) stopPlatformEndedTargets(ctx context.Context, live *session.Session, targets []string, now time.Time) {
+	// 쿼터가 모자라면 확인을 쉬고 남은 쿼터를 방송 시작·종료·전환에 남긴다(#361).
+	if s.youtubeQuotaLow() {
+		return
+	}
 	for _, provider := range targets {
 		checker, ok := s.streaming[auth.StreamingProvider(provider)].(streaming.BroadcastStatusChecker)
 		if !ok {

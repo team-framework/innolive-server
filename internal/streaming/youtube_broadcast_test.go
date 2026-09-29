@@ -407,3 +407,40 @@ func TestBroadcastEndedReadsLifeCycle(t *testing.T) {
 		}
 	}
 }
+
+// ActiveBroadcasts는 채널의 active 방송 id를 broadcastStatus=active로 조회한다(#361).
+func TestActiveBroadcastsListsActiveIDs(t *testing.T) {
+	stub := &youtubeAPIStub{broadcastListBody: `{"items":[{"id":"obs-live"},{"id":"innolive-own"}]}`}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	ids, err := provider.ActiveBroadcasts(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "obs-live" {
+		t.Fatalf("ids = %v", ids)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if !strings.Contains(stub.broadcastListQuery, "broadcastStatus=active") {
+		t.Fatalf("query = %q", stub.broadcastListQuery)
+	}
+}
+
+// 일일 쿼터 소진은 재시도로 풀리지 않으므로 별도 에러로 구분한다.
+func TestGoLiveReportsQuotaExceeded(t *testing.T) {
+	stub := &youtubeAPIStub{
+		transitionStatus: 403,
+		transitionBody:   `{"error":{"code":403,"message":"quota","errors":[{"reason":"quotaExceeded"}]}}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+	if err := provider.GoLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("GoLive() error = %v, want ErrQuotaExceeded", err)
+	}
+}

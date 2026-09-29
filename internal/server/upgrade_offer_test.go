@@ -82,16 +82,19 @@ func TestUpgradeCandidateFor(t *testing.T) {
 		resolution string
 		targets    int
 		used       time.Duration
+		opening    bool
 		want       plan.Mode
 	}{
-		{"beam 720p single", plan.Beam, session.Resolution720p, 1, 0, plan.ModeFHDSingle},
-		{"beam 720p multi has no fhd multi", plan.Beam, session.Resolution720p, 2, 0, ""},
-		{"plasma 720p multi", plan.Plasma, session.Resolution720p, 2, 0, plan.ModeFHDMulti},
-		{"spark is not offered", plan.Spark, session.Resolution720p, 1, 0, ""},
-		{"already fhd", plan.Beam, session.ResolutionFHD, 1, 0, ""},
-		{"not broadcasting", plan.Beam, session.Resolution720p, 0, 0, ""},
+		{"beam 720p single", plan.Beam, session.Resolution720p, 1, 0, false, plan.ModeFHDSingle},
+		{"beam 720p multi has no fhd multi", plan.Beam, session.Resolution720p, 2, 0, false, ""},
+		{"plasma 720p multi", plan.Plasma, session.Resolution720p, 2, 0, false, plan.ModeFHDMulti},
+		{"spark is not offered", plan.Spark, session.Resolution720p, 1, 0, false, ""},
+		{"already fhd", plan.Beam, session.ResolutionFHD, 1, 0, false, ""},
+		{"not broadcasting", plan.Beam, session.Resolution720p, 0, 0, false, ""},
 		// 새 배수(2)로 30분밖에 남지 않는다.
-		{"under an hour at the new rate", plan.Beam, session.Resolution720p, 1, beamMonthly - time.Hour, ""},
+		{"under an hour at the new rate", plan.Beam, session.Resolution720p, 1, beamMonthly - time.Hour, false, ""},
+		// 유튜브는 라이브, 치지직은 아직 열리는 중 — 동시 송출을 단독으로 세면 안 된다.
+		{"a target is still opening", plan.Plasma, session.Resolution720p, 1, 0, true, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{})
@@ -99,6 +102,16 @@ func TestUpgradeCandidateFor(t *testing.T) {
 			live, _, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", test.resolution, nil)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// 판정은 세션의 대상 상태와 대조한다 — 라이브 대상 수만큼 대상을 연다.
+			opened := test.targets
+			if test.opening {
+				opened++
+			}
+			for _, provider := range []string{"youtube", "chzzk"}[:opened] {
+				if _, err := manager.BeginBroadcastPrepare(live.ID, provider); err != nil {
+					t.Fatal(err)
+				}
 			}
 			candidate, ok := upgradeCandidateFor(live, test.targets, 0, test.used)
 			if test.want == "" {
@@ -136,6 +149,9 @@ func TestOfferUpgradesPrefersHigherPlan(t *testing.T) {
 
 	var candidates []upgradeCandidate
 	for _, live := range []*session.Session{beam, plasma} {
+		if _, err := manager.BeginBroadcastPrepare(live.ID, "youtube"); err != nil {
+			t.Fatal(err)
+		}
 		candidate, ok := upgradeCandidateFor(live, 1, 0, 0)
 		if !ok {
 			t.Fatalf("%s is not a candidate", live.Plan)

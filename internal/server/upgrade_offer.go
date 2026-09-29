@@ -33,6 +33,11 @@ func upgradeCandidateFor(live *session.Session, targets int, onAir, used time.Du
 	if targets == 0 || live.Resolution() == session.ResolutionFHD || live.ResolutionSwitching() || live.UpgradeOffered() {
 		return upgradeCandidate{}, false
 	}
+	// 준비·라이브 전환 중인 대상이 있으면 구성이 아직 정해지지 않았다. 지금 세면
+	// 동시 송출을 단독으로 잘못 제안한다 — 다음 점검에서 본다(#329).
+	if live.BusyTargetCount() != targets {
+		return upgradeCandidate{}, false
+	}
 	if live.Plan != plan.Beam && live.Plan != plan.Plasma {
 		return upgradeCandidate{}, false
 	}

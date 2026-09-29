@@ -190,6 +190,7 @@ function bindElements() {
     "upgradeOffer",
     "upgradeOfferText",
     "upgradeOfferOptions",
+    "confirmUpgradeBtn",
     "declineUpgradeBtn",
     "chzzkCategoryType",
     "chzzkTags",
@@ -292,6 +293,7 @@ function bindEvents() {
   els.youtubeApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("youtube"));
   els.chzzkApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("chzzk"));
   els.declineUpgradeBtn.addEventListener("click", () => void declineUpgradeOffer());
+  els.confirmUpgradeBtn.addEventListener("click", () => void confirmUpgradeOption());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
@@ -2129,9 +2131,15 @@ function renderUpgradeOffer(session) {
     els.upgradeOfferOptions.replaceChildren();
     return;
   }
-  els.upgradeOfferText.textContent = offer.selected
-    ? `${UPGRADE_MODE_LABELS[offer.selected] || offer.selected}: 새 플랫폼 설정을 채운 뒤 '송출 방식 변경'을 누르세요(3분 안).`
-    : "빈자리가 생겨 송출 방식을 올릴 수 있어요.";
+  // 선택지를 고른 뒤에는 새 플랫폼 설정을 채우고 확정하는 단계다 — 다른 선택지는 숨긴다.
+  els.confirmUpgradeBtn.hidden = !offer.selected;
+  if (offer.selected) {
+    els.upgradeOfferText.textContent =
+      `${UPGRADE_MODE_LABELS[offer.selected] || offer.selected}: 새 플랫폼의 방송 설정을 채운 뒤 '설정 완료하고 전환'을 누르세요(3분 안).`;
+    els.upgradeOfferOptions.replaceChildren();
+    return;
+  }
+  els.upgradeOfferText.textContent = "빈자리가 생겨 송출 방식을 올릴 수 있어요.";
   const buttons = (offer.options || []).map((option) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2181,6 +2189,32 @@ async function acceptUpgradeOffer(option, confirmRestart = (message) => window.c
       setCurrentSession(session);
       logEvent("ok", "Upgrade option selected", { session_id: sessionId, mode: option.mode });
       return;
+    }
+    const body = { resolution: option.resolution, targets: option.targets };
+    const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    setCurrentSession(session);
+    logEvent("ok", "Upgrade offer accepted", { session_id: sessionId, request: body });
+  });
+}
+
+// confirmUpgradeOption은 고른 선택지를 확정한다: 새 플랫폼 설정을 저장한 뒤 선택지의
+// 구성으로 전환한다. 재시작 안내는 선택할 때 이미 동의받았다.
+async function confirmUpgradeOption() {
+  const sessionId = state.session?.session_id;
+  const offer = state.session?.upgrade_offer;
+  const option = offer?.options?.find((candidate) => candidate.mode === offer.selected);
+  if (!sessionId || !option) {
+    return;
+  }
+  await runBusy(async () => {
+    const liveTargets = liveTargetProviders();
+    for (const provider of option.targets) {
+      if (!liveTargets.includes(provider)) {
+        await savePlatformSettings(sessionId, provider);
+      }
     }
     const body = { resolution: option.resolution, targets: option.targets };
     const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {

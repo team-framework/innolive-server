@@ -1,6 +1,8 @@
 const DEFAULT_SERVER_URL = "https://innolive.duckdns.org";
 const SERVER_STORAGE_KEY = "inno-live-client.server-url";
 const CLIENT_ID_STORAGE_KEY = "inno-live-client.client-id";
+// 마지막으로 만든 세션(id·owner token). 새로고침으로 잃은 세션을 409 때 정리하는 데 쓴다.
+const LAST_SESSION_STORAGE_KEY = "inno-live-client.last-session";
 const MAX_LOG_ITEMS = 120;
 const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const VIDEO_TRACK_WAIT_ATTEMPTS = 15;
@@ -179,6 +181,7 @@ function bindElements() {
     "youtubeDetail",
     "connectChzzkBtn",
     "disconnectChzzkBtn",
+    "disconnectYoutubeBtn",
     "chzzkCallbackRow",
     "chzzkCallbackUrl",
     "chzzkCompleteRow",
@@ -256,6 +259,10 @@ function bindEvents() {
   els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
+  els.disconnectYoutubeBtn.addEventListener("click", () => void disconnectYoutube());
+  // 새로고침·탭 닫기면 세션을 지운다. 그대로 두면 서버가 망 복구를 기다리며 약
+  // 50초 세션을 쥐고 있어 다시 시작할 때 409가 난다.
+  window.addEventListener("pagehide", () => closeSessionOnPageHide());
   for (const provider of PLATFORMS) {
     platformToggle(provider).addEventListener("change", () => {
       applyPlatformSelection();
@@ -332,6 +339,68 @@ function bindEvents() {
       stopPolling();
     }
   });
+}
+
+function rememberSession(sessionId, ownerToken) {
+  try {
+    localStorage.setItem(LAST_SESSION_STORAGE_KEY, JSON.stringify({ session_id: sessionId, owner_token: ownerToken }));
+  } catch {
+    return;
+  }
+}
+
+function forgetSession() {
+  try {
+    localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
+  } catch {
+    return;
+  }
+}
+
+function readRememberedSession() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(LAST_SESSION_STORAGE_KEY) || "null");
+    return stored?.session_id && stored?.owner_token ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+// deleteRememberedSession은 보관해 둔 이전 세션을 지운다. 지울 세션이 있었으면
+// true다(이미 끝나 404여도 자리는 비었다).
+async function deleteRememberedSession() {
+  const previous = readRememberedSession();
+  if (!previous) {
+    return false;
+  }
+  forgetSession();
+  try {
+    await apiFetch(`/sessions/${previous.session_id}`, {
+      method: "DELETE",
+      headers: { "X-Session-Owner-Token": previous.owner_token },
+    });
+  } catch (error) {
+    if (error.status !== 404) {
+      throw error;
+    }
+  }
+  logEvent("warn", "Previous session removed", { session_id: previous.session_id });
+  return true;
+}
+
+// closeSessionOnPageHide는 페이지를 떠날 때 세션 삭제를 보낸다. 응답은 기다릴 수
+// 없으므로 keepalive로 보내고, 보관한 세션은 그대로 둔다 — 요청이 닿지 않았으면
+// 다음 생성의 409 때 지운다.
+function closeSessionOnPageHide() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId || !state.ownerToken) {
+    return;
+  }
+  const headers = { "X-Session-Owner-Token": state.ownerToken };
+  if (state.accessToken) {
+    headers.Authorization = `Bearer ${state.accessToken}`;
+  }
+  fetch(apiUrl(`/sessions/${sessionId}`), { method: "DELETE", headers, keepalive: true }).catch(() => null);
 }
 
 function inferDefaultServerUrl() {
@@ -825,6 +894,9 @@ function renderAuth() {
   els.signOutBtn.hidden = !signedIn;
   // YouTube 연결은 로그인(이메일)과 별개의 부가 기능이다 — 로그인 상태에서만 노출.
   els.connectYoutubeBtn.hidden = !signedIn;
+  if (!signedIn) {
+    els.disconnectYoutubeBtn.hidden = true;
+  }
   els.connectChzzkBtn.hidden = !signedIn;
   if (!signedIn) {
     els.youtubeDetail.hidden = true;
@@ -1127,6 +1199,7 @@ async function refreshStreamingAccounts() {
   );
   const chzzk = list.find((account) => account?.provider === "chzzk");
   els.disconnectChzzkBtn.hidden = !chzzk;
+  els.disconnectYoutubeBtn.hidden = !list.some((account) => account?.provider === "youtube");
   if (chzzk) {
     const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
     setChzzkDetail(
@@ -1136,6 +1209,17 @@ async function refreshStreamingAccounts() {
   }
   if (list.some((account) => account?.provider === "youtube")) {
     await loadYoutubeCategories();
+  }
+}
+
+async function disconnectYoutube() {
+  try {
+    await apiFetch("/auth/streaming/accounts/youtube", { method: "DELETE" });
+    els.disconnectYoutubeBtn.hidden = true;
+    logEvent("ok", "YouTube account disconnected");
+    await refreshStreamingAccounts().catch(() => null);
+  } catch (error) {
+    logEvent("error", "YouTube disconnect failed", { message: error.message });
   }
 }
 
@@ -1498,7 +1582,7 @@ async function createSessionOnly() {
 async function createSession() {
   persistServerUrl();
   const metadata = buildSessionMetadata();
-  const session = await apiFetch("/sessions", {
+  const request = {
     method: "POST",
     // 첫 번째로 고른 플랫폼이 세션의 기본 대상이다. 해상도는 방송 전이면 준비
     // 직전에 다시 맞추고(#283), 방송 중이면 송출 방식 변경으로 바꾼다(#300).
@@ -1507,10 +1591,21 @@ async function createSession() {
       broadcast_resolution: els.broadcastResolution.value,
       metadata,
     }),
-  });
+  };
+  let session;
+  try {
+    session = await apiFetch("/sessions", request);
+  } catch (error) {
+    // 새로고침 등으로 잃은 이전 세션이 남아 있으면 지우고 한 번만 다시 만든다.
+    if (error.payload?.error?.code !== "session_already_exists" || !(await deleteRememberedSession())) {
+      throw error;
+    }
+    session = await apiFetch("/sessions", request);
+  }
   // owner_token은 여기서 정확히 한 번만 반환된다. 이후 세션 범위 요청과 signaling이
   // 소유권을 증명하도록 메모리에 보관하며, 세션 새로고침 응답에는 다시 오지 않는다.
   state.ownerToken = session.owner_token || null;
+  rememberSession(session.session_id, state.ownerToken);
   state.platformDefaultsLoaded = new Set();
   logEvent("ok", "Session created", {
     session_id: session.session_id,
@@ -3478,6 +3573,7 @@ function updateCurrentSessionStream(stream) {
 function clearCurrentSession() {
   state.session = null;
   state.ownerToken = null;
+  forgetSession();
   state.lastSessionJson = null;
   renderSessionDetails(null);
   updateButtons();

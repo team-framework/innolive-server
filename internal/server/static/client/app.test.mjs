@@ -1225,6 +1225,21 @@ test("플랫폼을 더하는 선택지는 설정 카드를 열고, 확인 버튼
   assert.deepEqual(JSON.parse(rest[1].body), { resolution: "720p", targets: ["youtube", "chzzk"] });
 });
 
+test("치지직 재시작 안내는 같은 주소에서 새 방송으로 시작됨을 보인다", async () => {
+  const { acceptUpgradeOffer, state } = await loadApp({ fetchImpl: async () => jsonResponse({}) });
+  state.session = { session_id: "s-1", targets: [] };
+  const notices = [];
+  await acceptUpgradeOffer(
+    { mode: "fhd_single", resolution: "fhd", targets: ["chzzk"], restarts_broadcast: true, restart_effects: [{ provider: "chzzk", same_link: true, gap_seconds: 15 }] },
+    (message) => {
+      notices.push(message);
+      return false;
+    },
+  );
+  assert.match(notices[0], /같은 주소에서 약 15초 뒤 새 방송으로 시작/);
+  assert.match(notices[0], /새로고침 없이/);
+});
+
 test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {
   const calls = [];
   const { declineUpgradeOffer, state } = await loadApp({

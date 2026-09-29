@@ -1005,6 +1005,14 @@ test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FH
       { provider: "chzzk", stream: { broadcast_phase: "idle" } },
     ],
   };
+  els.resolutionSelect = createElement();
+  els.cameraSelect = createElement();
+  els.resolutionSelect.value = "hd";
+  els.broadcastResolution.value = "720p";
+  const applied = [];
+  state.localStream = {
+    getVideoTracks: () => [{ async applyConstraints(constraints) { applied.push(constraints); } }],
+  };
   renderUpgradeOffer({ upgrade_offer: { units_from: 1, units_to: 2, remaining_seconds_after: 7200 } });
   assert.equal(els.upgradeOffer.hidden, false);
   assert.match(els.upgradeOfferText.textContent, /1배 → 2배/);
@@ -1016,6 +1024,9 @@ test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FH
   assert.equal(calls[0].method, "PUT");
   assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd", targets: ["youtube"] });
   assert.equal(els.broadcastResolution.value, "fhd");
+  // 수락하면 캡처도 FHD로 맞춘다(#331).
+  assert.equal(els.resolutionSelect.value, "fhd");
+  assert.equal(applied.at(-1)?.width.ideal, 1920);
   // 응답에 제안이 없으면 숨긴다.
   assert.equal(els.upgradeOffer.hidden, true);
 });

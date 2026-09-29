@@ -2108,7 +2108,9 @@ async function acceptUpgradeOffer() {
       method: "PUT",
       body: JSON.stringify(body),
     });
+    // 코드로 바꾼 값은 change 이벤트를 내지 않으므로 캡처도 직접 맞춘다(#331).
     els.broadcastResolution.value = "fhd";
+    await syncCaptureResolution();
     setCurrentSession(session);
     logEvent("ok", "Upgrade offer accepted", { session_id: sessionId, request: body });
   });

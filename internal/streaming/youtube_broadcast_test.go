@@ -400,3 +400,18 @@ func TestActiveBroadcastsListsActiveIDs(t *testing.T) {
 		t.Fatalf("query = %q", stub.broadcastListQuery)
 	}
 }
+
+// 일일 쿼터 소진은 재시도로 풀리지 않으므로 별도 에러로 구분한다.
+func TestGoLiveReportsQuotaExceeded(t *testing.T) {
+	stub := &youtubeAPIStub{
+		transitionStatus: 403,
+		transitionBody:   `{"error":{"code":403,"message":"quota","errors":[{"reason":"quotaExceeded"}]}}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+	if err := provider.GoLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("GoLive() error = %v, want ErrQuotaExceeded", err)
+	}
+}

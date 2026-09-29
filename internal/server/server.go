@@ -689,6 +689,8 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 			return &apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}}
 		case errors.Is(err, auth.ErrStreamingReconnectRequired):
 			return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
+		case errors.Is(err, streaming.ErrQuotaExceeded):
+			return s.prepareError(err, liveSession.ID, providerName)
 		default:
 			s.logger.Error("go live failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
 			return &apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."}
@@ -934,6 +936,10 @@ func (s *Server) prepareError(err error, sessionID string, providerName auth.Str
 	case errors.Is(err, streaming.ErrPlatformRateLimited):
 		// 재시도로 곧바로 풀리지 않는다 — 일반 준비 실패(502)와 구분해 "잠시 뒤"를 안내한다.
 		return &apiError{Status: http.StatusTooManyRequests, Code: "streaming_rate_limited", Message: "The streaming platform is limiting requests from this account. Try again later.", Details: map[string]any{"provider": providerName}}
+	case errors.Is(err, streaming.ErrQuotaExceeded):
+		// 오늘은 재시도해도 풀리지 않는다 — 일반 준비 실패(502)와 구분해 알린다.
+		s.logger.Error("streaming API quota exhausted", "session_id", sessionID, "provider", providerName)
+		return &apiError{Status: http.StatusServiceUnavailable, Code: "streaming_quota_exceeded", Message: "The streaming platform's daily API limit for this service is used up. It resets at midnight Pacific Time.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, streaming.ErrLiveStreamingBlocked):
 		return &apiError{Status: http.StatusForbidden, Code: "live_streaming_blocked", Message: "The channel is not enabled for live streaming. Enabling can take up to 24 hours.", Details: map[string]any{"help_url": streaming.LiveStreamingHelpURL}}
 	default:

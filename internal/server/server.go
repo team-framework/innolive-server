@@ -64,6 +64,7 @@ type Server struct {
 	signalingConns          signalingConnLimiter
 	mux                     *http.ServeMux
 	handler                 http.Handler
+	platformEnds            platformEndChecks
 }
 
 func New(

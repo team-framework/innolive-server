@@ -378,3 +378,25 @@ func TestDefaultsStopsAtPageCap(t *testing.T) {
 		t.Fatalf("liveBroadcasts.list calls = %d, want %d", stub.broadcastLists, defaultsMaxPages)
 	}
 }
+
+// ActiveBroadcasts는 채널의 active 방송 id를 broadcastStatus=active로 조회한다(#361).
+func TestActiveBroadcastsListsActiveIDs(t *testing.T) {
+	stub := &youtubeAPIStub{broadcastListBody: `{"items":[{"id":"obs-live"},{"id":"innolive-own"}]}`}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	ids, err := provider.ActiveBroadcasts(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "obs-live" {
+		t.Fatalf("ids = %v", ids)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if !strings.Contains(stub.broadcastListQuery, "broadcastStatus=active") {
+		t.Fatalf("query = %q", stub.broadcastListQuery)
+	}
+}

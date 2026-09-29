@@ -15,7 +15,10 @@ import (
 type activeCheckingProvider struct {
 	*stubStreamingProvider
 	active []string
+	quota  *streaming.QuotaMeter
 }
+
+func (p activeCheckingProvider) Quota() *streaming.QuotaMeter { return p.quota }
 
 func (p activeCheckingProvider) ActiveBroadcasts(context.Context, uuid.UUID) ([]string, error) {
 	return p.active, nil
@@ -25,7 +28,7 @@ func (p activeCheckingProvider) ActiveBroadcasts(context.Context, uuid.UUID) ([]
 func TestPrepareStreamAsksBeforeConcurrentYouTubeBroadcast(t *testing.T) {
 	stub := &stubStreamingProvider{}
 	server, _, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live", "innolive-own"}},
+		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live", "innolive-own"}, quota: streaming.NewQuotaMeter()},
 	})
 	application.ownBroadcasts.add("innolive-own")
 	created, ownerToken := createTestSession(t, server.URL, nil)
@@ -63,12 +66,29 @@ func TestPrepareStreamAsksBeforeConcurrentYouTubeBroadcast(t *testing.T) {
 func TestPrepareStreamIgnoresOwnActiveBroadcast(t *testing.T) {
 	stub := &stubStreamingProvider{}
 	server, _, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"innolive-own"}},
+		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"innolive-own"}, quota: streaming.NewQuotaMeter()},
 	})
 	application.ownBroadcasts.add("innolive-own")
 	created, ownerToken := createTestSession(t, server.URL, nil)
 	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) == "channel_already_live" {
 		t.Fatalf("own broadcast triggered the confirmation: %v", payload)
+	}
+}
+
+// 쿼터가 80%를 넘으면 채널 라이브 확인을 건너뛰고 바로 준비한다(#361).
+func TestPrepareStreamSkipsLiveCheckWhenQuotaLow(t *testing.T) {
+	stub := &stubStreamingProvider{}
+	meter := streaming.NewQuotaMeter()
+	for i := 0; i < 160; i++ {
+		meter.Record(http.MethodPost)
+	}
+	server, _, _ := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live"}, quota: meter},
+	})
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) == "channel_already_live" {
+		t.Fatalf("low quota must skip the live check: %v", payload)
 	}
 }

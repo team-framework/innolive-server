@@ -71,6 +71,7 @@ type YouTubeProvider struct {
 	apiBase    string
 	uploadBase string
 	now        func() time.Time
+	quota      *QuotaMeter
 }
 
 func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountStore, cipher *auth.ProviderTokenCipher) (*YouTubeProvider, error) {
@@ -85,6 +86,7 @@ func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountS
 		apiBase:    youtubeAPIBase,
 		uploadBase: youtubeUploadBase,
 		now:        func() time.Time { return time.Now().UTC() },
+		quota:      NewQuotaMeter(),
 	}, nil
 }
 
@@ -356,6 +358,7 @@ func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("request liveStreams.delete: %w", err)
@@ -435,6 +438,7 @@ func (p *YouTubeProvider) refreshChannelInfo(ctx context.Context, accessToken st
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return
@@ -612,6 +616,7 @@ func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, cont
 	if body != nil {
 		request.Header.Set("Content-Type", contentType)
 	}
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("request YouTube Live API: %w", err)

@@ -182,6 +182,7 @@ function bindElements() {
     "connectChzzkBtn",
     "disconnectChzzkBtn",
     "disconnectYoutubeBtn",
+    "loadBroadcastDefaults",
     "chzzkCallbackRow",
     "chzzkCallbackUrl",
     "chzzkCompleteRow",
@@ -1219,8 +1220,16 @@ async function disconnectYoutube() {
     logEvent("ok", "YouTube account disconnected");
     await refreshStreamingAccounts().catch(() => null);
   } catch (error) {
-    logEvent("error", "YouTube disconnect failed", { message: error.message });
+    logEvent("error", "YouTube disconnect failed", { message: disconnectErrorMessage(error) });
   }
+}
+
+// disconnectErrorMessage는 연결 해제 실패 안내다. 방송 중인 플랫폼은 서버가 409로
+// 거절한다(#348).
+function disconnectErrorMessage(error) {
+  return error.payload?.error?.code === "streaming_account_in_use"
+    ? "이 플랫폼으로 방송 중에는 연결을 해제할 수 없습니다. 방송을 먼저 종료하세요."
+    : error.message;
 }
 
 async function disconnectChzzk() {
@@ -1230,8 +1239,8 @@ async function disconnectChzzk() {
     setChzzkDetail("치지직 연결을 해제했습니다.");
     logEvent("ok", "Chzzk account disconnected");
   } catch (error) {
-    setChzzkDetail(`해제 실패: ${error.message}`, true);
-    logEvent("error", "Chzzk disconnect failed", { message: error.message });
+    setChzzkDetail(`해제 실패: ${disconnectErrorMessage(error)}`, true);
+    logEvent("error", "Chzzk disconnect failed", { message: disconnectErrorMessage(error) });
   }
 }
 
@@ -1645,7 +1654,8 @@ async function applyBroadcastDefaults(sessionId) {
 // applyPlatformDefaults는 한 플랫폼의 직전 방송 값을 채운다. 사용자가 건드린
 // 필드는 덮지 않고, 조회가 실패해도 폼은 그대로 쓴다.
 async function applyPlatformDefaults(sessionId, provider) {
-  if (state.platformDefaultsLoaded.has(provider)) {
+  // 끄면 카드를 비운 채로 둔다 — 카테고리 없이 보내려는 경우 등(#352).
+  if (state.platformDefaultsLoaded.has(provider) || els.loadBroadcastDefaults?.checked === false) {
     return;
   }
   const untouched = (field) => !state.touchedBroadcastFields.has(`${provider}:${field}`);
@@ -2251,7 +2261,7 @@ function renderUpgradeOffer(session) {
 function upgradeRestartNotice(option) {
   const effects = (option.restart_effects || []).map((effect) =>
     effect.same_link
-      ? `- ${platformLabel(effect.provider)}: 같은 주소, 약 ${effect.gap_seconds}초 공백`
+      ? `- ${platformLabel(effect.provider)}: 같은 주소에서 약 ${effect.gap_seconds}초 뒤 새 방송으로 시작(시청자는 새로고침 없이 이어서 봄)`
       : `- ${platformLabel(effect.provider)}: 새 방송 링크, 지금 시청자는 끊김`,
   );
   return ["방송이 종료되고 새 방송으로 다시 시작됩니다.", ...effects].join("\n");

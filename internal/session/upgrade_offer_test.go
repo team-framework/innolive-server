@@ -170,3 +170,20 @@ func TestSwitchStartKeepsHoldAndDeleteReleasesIt(t *testing.T) {
 		t.Fatalf("held after delete = %d, want 0", held)
 	}
 }
+
+// 방송 준비·라이브 중인 플랫폼만 사용 중이다. 다른 사용자·다른 플랫폼은 아니다(#348).
+func TestProviderInUse(t *testing.T) {
+	manager, live := newUpgradeTestManager(t, 0)
+	if manager.ProviderInUse(live.UserID, "youtube") {
+		t.Fatal("idle session must not hold youtube")
+	}
+	if _, err := manager.BeginBroadcastPrepare(live.ID, "youtube"); err != nil {
+		t.Fatal(err)
+	}
+	if !manager.ProviderInUse(live.UserID, "youtube") {
+		t.Fatal("preparing youtube must be in use")
+	}
+	if manager.ProviderInUse(live.UserID, "chzzk") || manager.ProviderInUse(uuid.New(), "youtube") {
+		t.Fatal("other provider or user must not be in use")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
@@ -186,5 +187,21 @@ func TestYouTubeMadeForKidsRejectionReleasesPreparation(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 for the missing video track", response.StatusCode)
+	}
+}
+
+// 저장한 설정의 빈 카테고리만 지우기로 옮긴다. 저장한 적이 없으면 채널 카테고리를
+// 건드리지 않는다(#352).
+func TestChzzkPrepareOptionsClearOnlySavedEmptyCategory(t *testing.T) {
+	if chzzkPrepareOptionsFrom(session.ChzzkBroadcastSettings{}).ClearCategory {
+		t.Fatal("unsaved settings must not clear the channel category")
+	}
+	saved := session.ChzzkBroadcastSettings{Title: "제목", UpdatedAt: time.Now()}
+	if !chzzkPrepareOptionsFrom(saved).ClearCategory {
+		t.Fatal("saved settings without a category must clear it")
+	}
+	saved.CategoryType, saved.CategoryID = "GAME", "LoL"
+	if chzzkPrepareOptionsFrom(saved).ClearCategory {
+		t.Fatal("a chosen category must not be cleared")
 	}
 }

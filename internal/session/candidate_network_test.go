@@ -38,3 +38,26 @@ func TestCandidateNetworkIgnoresNonAddresses(t *testing.T) {
 		}
 	}
 }
+
+// 로그용 요약은 candidate 종류·프로토콜·버전·망 해시만 남기고 주소를 담지 않는다(#345).
+func TestCandidateSummaryDropsAddresses(t *testing.T) {
+	relay := "candidate:2248413281 1 udp 58401279 203.0.113.7 50004 typ relay raddr 198.51.100.9 rport 46783 generation 0 ufrag q2om"
+	candidateType, protocol, version, network := candidateSummary(relay)
+	_, want := candidateNetwork("203.0.113.7")
+	if candidateType != "relay" || protocol != "udp" || version != "v4" || network != want {
+		t.Fatalf("summary = %q %q %q %q", candidateType, protocol, version, network)
+	}
+	for _, value := range []string{candidateType, protocol, version, network} {
+		if strings.Contains(value, "203.0.113") || strings.Contains(value, "198.51.100") {
+			t.Fatalf("summary leaks an address: %q", value)
+		}
+	}
+
+	if _, _, version, network := candidateSummary("a=candidate:1 1 UDP 2122 0f1e2d3c-aaaa-bbbb-cccc-111122223333.local 5000 typ host"); version != "mdns" || network != "" {
+		t.Fatalf("mdns = %q %q", version, network)
+	}
+	// 형식이 다르면 아무것도 남기지 않는다 — 원문 일부라도 흘리지 않는다.
+	if candidateType, protocol, version, network := candidateSummary("garbage 203.0.113.7"); candidateType+protocol+version+network != "" {
+		t.Fatalf("malformed = %q %q %q %q", candidateType, protocol, version, network)
+	}
+}

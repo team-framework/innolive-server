@@ -185,6 +185,8 @@ function bindElements() {
     "completeChzzkBtn",
     "chzzkDetail",
     "broadcastResolution",
+    "youtubeApplyLiveBtn",
+    "chzzkApplyLiveBtn",
     "upgradeOffer",
     "upgradeOfferText",
     "acceptUpgradeBtn",
@@ -288,6 +290,8 @@ function bindEvents() {
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
   els.acceptUpgradeBtn.addEventListener("click", () => void acceptUpgradeOffer());
+  els.youtubeApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("youtube"));
+  els.chzzkApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("chzzk"));
   els.declineUpgradeBtn.addEventListener("click", () => void declineUpgradeOffer());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
@@ -1850,6 +1854,35 @@ async function platformSettingsPayload(provider) {
   };
 }
 
+// liveSettingsPayload는 방송 중에 바꿀 수 있는 항목만 싣는다(#334). 공개 범위·
+// 아동용 신고·썸네일은 서버가 거절한다.
+async function liveSettingsPayload(provider) {
+  const payload = await platformSettingsPayload(provider);
+  if (provider === "chzzk") {
+    return payload;
+  }
+  return { title: payload.title, description: payload.description, category_id: payload.category_id };
+}
+
+// applyLiveSettings는 송출을 끊지 않고 진행 중인 방송에 설정을 반영한다.
+async function applyLiveSettings(provider) {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    return;
+  }
+  await runBusy(async () => {
+    const body = await liveSettingsPayload(provider);
+    const session = await apiFetch(`/sessions/${sessionId}/broadcast/live?provider=${provider}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    setCurrentSession(session);
+    setBroadcastStatus(els.broadcastSettingsState, "방송 중 적용됨", "ok");
+    els.broadcastSettingsDetail.textContent = `${platformLabel(provider)} 방송에 설정을 반영했습니다(송출 유지).`;
+    logEvent("ok", "Live broadcast settings applied", { session_id: sessionId, provider, request: body });
+  });
+}
+
 // savePlatformSettings는 한 플랫폼의 방송 설정을 저장한다. 대상은 쿼리로 고른다 —
 // 빼면 세션의 기본 대상에 덮어쓴다.
 async function savePlatformSettings(sessionId, provider) {
@@ -2108,7 +2141,9 @@ async function acceptUpgradeOffer() {
       method: "PUT",
       body: JSON.stringify(body),
     });
+    // 코드로 바꾼 값은 change 이벤트를 내지 않으므로 캡처도 직접 맞춘다(#331).
     els.broadcastResolution.value = "fhd";
+    await syncCaptureResolution();
     setCurrentSession(session);
     logEvent("ok", "Upgrade offer accepted", { session_id: sessionId, request: body });
   });
@@ -3643,6 +3678,13 @@ function updateButtons() {
   // 송출 구성을 그대로 쓴다.
   els.changeResolutionBtn.disabled =
     state.busy || !mode.allowed || switching || liveTargetProviders().length === 0;
+  // 방송 중 설정 변경은 그 플랫폼 방송이 준비됐거나 라이브일 때만 받는다(#334).
+  const onAir = (provider) =>
+    (state.session?.targets || []).some(
+      (target) => target.provider === provider && ["prepared", "live"].includes(target.stream?.broadcast_phase),
+    );
+  els.youtubeApplyLiveBtn.disabled = state.busy || switching || !onAir("youtube");
+  els.chzzkApplyLiveBtn.disabled = state.busy || switching || !onAir("chzzk");
   // 종료는 egress가 살아 있는 모든 상태에서 열어 둔다 — 재연결·일시 중지
   // 중에도 방송을 끝낼 수 있어야 한다. 서버가 ErrStreamNotActive로 보는
   // idle·stopped만 막는다.

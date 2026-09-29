@@ -48,6 +48,8 @@ type stubStreamingProvider struct {
 	goLiveRelease  chan struct{}
 	categories     []streaming.VideoCategory
 	categoriesErr  error
+	liveUpdates    []streaming.LiveUpdate
+	liveUpdateErr  error
 }
 
 func (s *stubStreamingProvider) Categories(context.Context, uuid.UUID) ([]streaming.VideoCategory, error) {

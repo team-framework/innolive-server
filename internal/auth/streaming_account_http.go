@@ -68,6 +68,8 @@ func (h *tokenHTTPHandler) handleDisconnectStreamingAccount(w http.ResponseWrite
 	err := h.streamingAccounts.Disconnect(r.Context(), userID, provider)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrStreamingAccountInUse):
+			h.writeError(w, r, http.StatusConflict, "streaming_account_in_use", "End the broadcast on this platform before disconnecting the account.")
 		case errors.Is(err, ErrWithdrawalInProgress):
 			h.writeError(w, r, http.StatusConflict, "withdrawal_in_progress", "Account deletion is already in progress. Retry shortly.")
 		case isUnauthorizedStreamingError(err):

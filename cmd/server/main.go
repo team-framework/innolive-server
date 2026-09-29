@@ -547,6 +547,9 @@ func main() {
 		chzzkConnect.SetUserOperationGate(withdrawal)
 	}
 	streamingAccounts.SetUserOperationGate(withdrawal)
+	streamingAccounts.SetInUseChecker(func(userID uuid.UUID, provider auth.StreamingProvider) bool {
+		return sessionManager.ProviderInUse(userID, string(provider))
+	})
 	withdrawal.SetCleanup(auth.WithdrawalCleanup{
 		CloseUserSessions:           sessionManager.CloseUserSessionsForWithdrawal,
 		DisconnectStreamingAccounts: streamingAccounts.CleanupForWithdrawal,

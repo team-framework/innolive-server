@@ -1063,3 +1063,20 @@ test("카메라가 열려 있지 않으면 캡처 선택만 바꾼다", async ()
   await syncCaptureResolution();
   assert.equal(els.resolutionSelect.value, "fhd");
 });
+
+test("송출 대상 목록은 방송하지 않는(idle) 대상을 그리지 않는다", async () => {
+  const { renderTargets, els } = await loadApp();
+  renderTargets({
+    targets: [
+      { provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  });
+  assert.equal(els.targetList.children.length, 1);
+  assert.equal(els.targetList.children[0].children[0].textContent, "YouTube");
+  assert.equal(els.targetListEmpty.hidden, true);
+
+  renderTargets({ targets: [{ provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } }] });
+  assert.equal(els.targetList.children.length, 0);
+  assert.equal(els.targetListEmpty.hidden, false);
+});

@@ -493,3 +493,70 @@ func TestBudgetCheckClaim(t *testing.T) {
 		t.Fatalf("new owner: %v", err)
 	}
 }
+
+// 보류한 유닛은 다른 소유자가 가져가지 못하고, 보류한 소유자의 화질 올리기에
+// 먼저 쓰인다(#278).
+func TestBudgetHoldReservesUnitsForOwner(t *testing.T) {
+	budget := NewEgressSlotBudget(2, 0)
+	ctx := context.Background()
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", Group: "plasma"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Hold(EgressClaim{Owner: "a", Group: "plasma"}, 1); err != nil || budget.Used() != 2 || budget.Held("a") != 1 {
+		t.Fatalf("hold: err=%v used=%d held=%d, want 2/1", err, budget.Used(), budget.Held("a"))
+	}
+	// 남은 자리가 없다 — 다른 소유자는 못 잡는다.
+	if _, _, err := budget.tryAcquire(EgressClaim{Owner: "b", Group: "beam"}); !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("other acquire err=%v, want exhausted while held", err)
+	}
+	// 보류한 소유자의 확인은 자기 보류분을 제 몫으로 센다.
+	if err := budget.CheckClaim(EgressClaim{Owner: "a", HighRes: true}, 1); err != nil {
+		t.Fatalf("CheckClaim(fhd) = %v, want room from own hold", err)
+	}
+	// 화질 올리기는 보류분을 소비한다 — 점유는 그대로 2.
+	if err := budget.ChangeResolution("a", true); err != nil || budget.Used() != 2 || budget.Held("a") != 0 {
+		t.Fatalf("upgrade: err=%v used=%d held=%d, want 2/0", err, budget.Used(), budget.Held("a"))
+	}
+}
+
+// 전환은 옛 송출을 모두 내린 뒤 새로 잡는다. 그 사이에도 보류분은 남아 새 송출이
+// 먼저 쓴다.
+func TestBudgetHoldSurvivesReopen(t *testing.T) {
+	budget := NewEgressSlotBudget(2, 0)
+	ctx := context.Background()
+	lease, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", Group: "beam"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Hold(EgressClaim{Owner: "a", Group: "beam"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	if budget.Used() != 1 || budget.Held("a") != 1 {
+		t.Fatalf("after stop used=%d held=%d, want only the hold", budget.Used(), budget.Held("a"))
+	}
+	if _, err := budget.AcquireClaim(ctx, EgressClaim{Owner: "a", HighRes: true, Group: "beam"}); err != nil {
+		t.Fatalf("reopen as FHD: %v", err)
+	}
+	if budget.Used() != 2 || budget.Held("a") != 0 || budget.UsedByGroup()["beam"] != 2 {
+		t.Fatalf("reopened used=%d held=%d groups=%v, want 2/0", budget.Used(), budget.Held("a"), budget.UsedByGroup())
+	}
+}
+
+func TestBudgetReleaseHoldFreesUnitsAndRejectsWhenFull(t *testing.T) {
+	budget := NewEgressSlotBudget(1, 0)
+	if err := budget.Hold(EgressClaim{Owner: "a", Group: "beam"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Hold(EgressClaim{Owner: "b", Group: "beam"}, 1); !errors.Is(err, ErrEgressSlotsExhausted) {
+		t.Fatalf("second hold err=%v, want exhausted", err)
+	}
+	budget.ReleaseHold("a")
+	budget.ReleaseHold("a") // 두 번 불러도 안전하다
+	if budget.Used() != 0 || len(budget.UsedByGroup()) != 0 {
+		t.Fatalf("after release used=%d groups=%v, want empty", budget.Used(), budget.UsedByGroup())
+	}
+	if _, _, err := budget.tryAcquire(EgressClaim{Owner: "b", Group: "beam"}); err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+}

@@ -261,6 +261,7 @@ function bindEvents() {
   els.broadcastResolution.addEventListener("change", () => {
     renderModeHint();
     updateButtons();
+    void syncCaptureResolution();
   });
   els.chzzkCategorySearchBtn.addEventListener("click", () =>
     void searchChzzkCategories().catch(() => null),
@@ -2272,6 +2273,33 @@ async function ensureLocalMedia() {
   updateLocalTrackState();
   logEvent("ok", "Local media opened", describeStream(stream));
   await loadCameras();
+}
+
+// captureResolutionFor는 송출 해상도에 맞는 캡처 해상도다(#322). FHD로 송출하는데
+// 720p로 찍으면 서버가 업스케일해 화질이 오르지 않는다.
+function captureResolutionFor(broadcastResolution) {
+  return broadcastResolution === "fhd" ? "fhd" : "hd";
+}
+
+// syncCaptureResolution은 캡처 선택을 송출 해상도에 맞추고, 카메라가 열려 있으면
+// 트랙에 바로 적용한다. applyConstraints라 재협상 없이 바뀐다.
+async function syncCaptureResolution() {
+  const capture = captureResolutionFor(els.broadcastResolution.value);
+  if (els.resolutionSelect.value === capture) {
+    return;
+  }
+  els.resolutionSelect.value = capture;
+  const [videoTrack] = state.localStream?.getVideoTracks() || [];
+  if (!videoTrack) {
+    return;
+  }
+  const { deviceId, ...constraints } = buildVideoConstraints();
+  try {
+    await videoTrack.applyConstraints(constraints);
+    logEvent("ok", "Capture resolution changed", videoTrack.getSettings?.() || constraints);
+  } catch (error) {
+    logEvent("warn", "Capture resolution change failed", error?.message || String(error));
+  }
 }
 
 function buildVideoConstraints() {

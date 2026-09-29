@@ -388,3 +388,15 @@ func TestEgressSelfStopReleasesLiveBroadcast(t *testing.T) {
 		t.Fatalf("SetBroadcastSettings() after egress self-stop = %v, want success", err)
 	}
 }
+
+func TestYouTubeBroadcastSettingsRejectAngleBracketsInTitle(t *testing.T) {
+	for _, title := range []string{"<방송>", "a > b", "<"} {
+		var invalid InvalidBroadcastSettingsError
+		if err := (YouTubeBroadcastSettings{Title: title}).Validate(); !errors.As(err, &invalid) || invalid.Field != "title" {
+			t.Fatalf("Validate(%q) = %v, want invalid title", title, err)
+		}
+	}
+	if err := (YouTubeBroadcastSettings{Title: "오늘의 방송 (1부) & Q/A"}).Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a title without angle brackets", err)
+	}
+}

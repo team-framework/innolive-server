@@ -167,7 +167,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution };`,
     context,
     { filename: appPath },
   );
@@ -1016,4 +1016,50 @@ test("송출 방식 전환 진행은 상태가 바뀔 때만 알린다", async (
 
   renderSwitchStatus({ resolution_switch: { ...switching, status: "done", failed_targets: [{ provider: "chzzk", code: "streaming_rate_limited" }] } });
   assert.match(els.broadcastSettingsDetail.textContent, /실패: 치지직: streaming_rate_limited/);
+});
+
+test("송출 해상도를 바꾸면 캡처 해상도가 따라가고 열린 카메라에 바로 적용된다", async () => {
+  const { syncCaptureResolution, state, els } = await loadApp();
+  els.resolutionSelect = createElement();
+  els.cameraSelect = createElement();
+  els.resolutionSelect.value = "hd";
+  els.cameraSelect.value = "camera-1";
+  const applied = [];
+  const videoTrack = {
+    async applyConstraints(constraints) {
+      applied.push(constraints);
+    },
+    getSettings: () => ({ width: 1920, height: 1080 }),
+  };
+  state.localStream = { getVideoTracks: () => [videoTrack] };
+
+  els.broadcastResolution.value = "fhd";
+  await syncCaptureResolution();
+  assert.equal(els.resolutionSelect.value, "fhd");
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0].width.ideal, 1920);
+  assert.equal(applied[0].height.ideal, 1080);
+  // 카메라 선택은 트랙을 다시 열지 않으므로 제약에 싣지 않는다.
+  assert.equal(applied[0].deviceId, undefined);
+
+  els.broadcastResolution.value = "720p";
+  await syncCaptureResolution();
+  assert.equal(els.resolutionSelect.value, "hd");
+  assert.equal(applied.at(-1).width.ideal, 1280);
+
+  // 이미 맞으면 다시 적용하지 않는다.
+  await syncCaptureResolution();
+  assert.equal(applied.length, 2);
+});
+
+test("카메라가 열려 있지 않으면 캡처 선택만 바꾼다", async () => {
+  const { syncCaptureResolution, state, els } = await loadApp();
+  els.resolutionSelect = createElement();
+  els.cameraSelect = createElement();
+  els.resolutionSelect.value = "hd";
+  state.localStream = null;
+
+  els.broadcastResolution.value = "fhd";
+  await syncCaptureResolution();
+  assert.equal(els.resolutionSelect.value, "fhd");
 });

@@ -60,6 +60,11 @@ func (b YouTubeBroadcastSettings) Validate() error {
 	if utf8.RuneCountInString(b.Title) > MaxYouTubeTitleLength {
 		return InvalidBroadcastSettingsError{Field: "title", Reason: fmt.Sprintf("must be at most %d characters", MaxYouTubeTitleLength)}
 	}
+	// 유튜브는 <·>가 든 제목을 "Title is invalid"(400)로 거부한다(#318).
+	// 방송 준비에서 실패하면 이유가 가려지고 방송 생성 한도만 쓴다.
+	if strings.ContainsAny(b.Title, "<>") {
+		return InvalidBroadcastSettingsError{Field: "title", Reason: "must not contain < or >"}
+	}
 	if utf8.RuneCountInString(b.Description) > MaxYouTubeDescriptionLength {
 		return InvalidBroadcastSettingsError{Field: "description", Reason: fmt.Sprintf("must be at most %d characters", MaxYouTubeDescriptionLength)}
 	}

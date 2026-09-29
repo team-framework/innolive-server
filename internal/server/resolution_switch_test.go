@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -289,6 +290,59 @@ func TestResolutionSwitchKeepsPausedTargetPaused(t *testing.T) {
 			t.Fatalf("youtube stream = %q after the switch, want paused again", youtube)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// 모든 대상이 멈춘 상태에서 대상을 더하면 새 대상도 멈춘 채로 연다(#320).
+func TestBroadcastModeAddsTargetPausedWhenAllPaused(t *testing.T) {
+	fixture := newModeSwitchFixture(t, time.Second, plan.Beam, session.Resolution720p, "youtube")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		response, _ := postStream(t, fixture.baseURL, fixture.sessionID, fixture.ownerToken, "pause?provider=youtube", "")
+		if response.StatusCode == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("could not pause youtube before the switch: %d", response.StatusCode)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if status, payload := fixture.putMode(t, `{"targets":["youtube","chzzk"]}`); status != http.StatusAccepted {
+		t.Fatalf("status = %d %v", status, payload)
+	}
+	if _, state := fixture.waitSwitch(t); state["status"] != "done" {
+		t.Fatalf("state = %v, want done", state)
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		payload := getSessionPayload(t, fixture.baseURL, fixture.sessionID, fixture.ownerToken)
+		youtube, chzzk := targetStreamStatus(payload, "youtube"), targetStreamStatus(payload, "chzzk")
+		if youtube == "paused" && chzzk == "paused" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("youtube=%q chzzk=%q after the switch, want both paused", youtube, chzzk)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestPausedAfterSwitch(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		live, paused, to []string
+		want             []string
+	}{
+		{"all paused adds new target", []string{"youtube"}, []string{"youtube"}, []string{"chzzk", "youtube"}, []string{"chzzk", "youtube"}},
+		{"some paused keeps only those", []string{"chzzk", "youtube"}, []string{"youtube"}, []string{"chzzk", "youtube"}, []string{"youtube"}},
+		{"none paused", []string{"youtube"}, nil, []string{"chzzk", "youtube"}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pausedAfterSwitch(test.live, test.paused, test.to); !slices.Equal(got, test.want) {
+				t.Fatalf("pausedAfterSwitch() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

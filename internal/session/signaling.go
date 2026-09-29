@@ -284,7 +284,9 @@ func (m *Manager) AddICECandidateWithNegotiation(sessionID, ownerToken, negotiat
 	} else if err := s.PC.AddICECandidate(candidate); err != nil {
 		return CandidateResult{}, fmt.Errorf("add ICE candidate: %w", err)
 	}
-	m.logger.Info("received remote ICE candidate", "session_id", sessionID, "queued", queued, "end_of_candidates", candidate.Candidate == "", "candidate", candidate.Candidate)
+	candidateType, protocol, addressVersion, network := candidateSummary(candidate.Candidate)
+	m.logger.Info("received remote ICE candidate", "session_id", sessionID, "queued", queued, "end_of_candidates", candidate.Candidate == "",
+		"candidate_type", candidateType, "protocol", protocol, "address_version", addressVersion, "network", network)
 	return CandidateResult{
 		Type:               "ice_candidate_added",
 		SessionID:          sessionID,

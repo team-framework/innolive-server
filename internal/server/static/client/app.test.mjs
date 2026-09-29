@@ -30,6 +30,7 @@ const buttonKeys = [
   "deleteReferenceFaceBtn",
   "connectChzzkBtn",
   "disconnectChzzkBtn",
+  "disconnectYoutubeBtn",
   "chzzkCallbackRow",
   "chzzkCallbackUrl",
   "chzzkCompleteRow",
@@ -155,6 +156,7 @@ async function loadApp({ fetchImpl } = {}) {
       addEventListener() {},
       createElement,
     },
+    localStorage: createStorage(),
     location: { origin: "https://example.test", protocol: "https:" },
     MediaStream: FakeMediaStream,
     WebSocket: { OPEN: 1 },
@@ -174,7 +176,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, refreshStreamingAccounts };`,
     context,
     { filename: appPath },
   );
@@ -482,6 +484,15 @@ test("방송 종료 버튼은 송출이 살아 있을 때만 눌린다", async (
   updateButtons();
   assert.equal(els.stopBroadcastBtn.disabled, true);
 });
+
+function createStorage() {
+  const items = new Map();
+  return {
+    getItem: (key) => (items.has(key) ? items.get(key) : null),
+    setItem: (key, value) => items.set(key, String(value)),
+    removeItem: (key) => items.delete(key),
+  };
+}
 
 function jsonResponse(body, status = 200) {
   return {
@@ -914,6 +925,104 @@ test("준비를 거친 대상이 하나뿐이면 상단 버튼은 종전처럼 p
 
   state.session.targets[0].stream.broadcast_phase = "prepared";
   assert.deepEqual(Array.from(broadcastControlTargets()), ["chzzk", "youtube"]);
+});
+
+test("세션 생성이 409면 보관한 이전 세션을 지우고 한 번 다시 만든다", async () => {
+  const calls = [];
+  let creates = 0;
+  const { createSession, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url).replace("https://example.test", "");
+      calls.push({ path, method: options?.method, owner: new Headers(options?.headers).get("X-Session-Owner-Token") });
+      if (options?.method === "POST" && path === "/sessions") {
+        creates += 1;
+        if (creates === 2) {
+          return jsonResponse({ error: { code: "session_already_exists", message: "exists" } }, 409);
+        }
+        return jsonResponse({ session_id: `s-${creates}`, owner_token: `owner-${creates}` });
+      }
+      return jsonResponse({});
+    },
+  });
+  for (const id of ["sessionLabel", "resolutionSelect", "cameraSelect", "sendAudio"]) {
+    els[id] = { value: "", checked: false, dataset: {} };
+  }
+  state.accessToken = "access-token";
+  els.platformYoutube.checked = true;
+
+  // 첫 세션을 만들고(보관됨) 새로고침한 것처럼 메모리만 잃는다.
+  await createSession();
+  state.session = null;
+  state.ownerToken = null;
+  calls.length = 0;
+
+  const session = await createSession();
+  assert.equal(session.session_id, "s-3");
+  assert.deepEqual(
+    calls.slice(0, 3).map((call) => `${call.method} ${call.path} ${call.owner || ""}`.trim()),
+    ["POST /sessions", "DELETE /sessions/s-1 owner-1", "POST /sessions"],
+  );
+});
+
+test("세션 생성이 409인데 보관한 세션이 없으면 그대로 실패한다", async () => {
+  let creates = 0;
+  const { createSession, state, els } = await loadApp({
+    fetchImpl: async () => {
+      creates += 1;
+      return jsonResponse({ error: { code: "session_already_exists", message: "exists" } }, 409);
+    },
+  });
+  for (const id of ["sessionLabel", "resolutionSelect", "cameraSelect", "sendAudio"]) {
+    els[id] = { value: "", checked: false, dataset: {} };
+  }
+  state.accessToken = "access-token";
+  await assert.rejects(createSession(), /exists/);
+  assert.equal(creates, 1);
+});
+
+test("페이지를 떠나면 keepalive로 세션 삭제를 보낸다", async () => {
+  const calls = [];
+  const { closeSessionOnPageHide, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), options });
+      return jsonResponse({});
+    },
+  });
+  closeSessionOnPageHide();
+  assert.equal(calls.length, 0, "no session, nothing to delete");
+  state.accessToken = "access-token";
+  state.ownerToken = "owner";
+  state.session = { session_id: "s-1" };
+  closeSessionOnPageHide();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1$/);
+  assert.equal(calls[0].options.method, "DELETE");
+  assert.equal(calls[0].options.keepalive, true);
+  assert.equal(calls[0].options.headers["X-Session-Owner-Token"], "owner");
+});
+
+test("유튜브 연결 해제 버튼은 연결돼 있을 때만 보이고 DELETE를 보낸다", async () => {
+  const calls = [];
+  let accounts = [{ provider: "youtube", channel_title: "채널" }];
+  const { disconnectYoutube, refreshStreamingAccounts, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = String(url).replace("https://example.test", "");
+      calls.push(`${options?.method || "GET"} ${path}`);
+      if (path === "/auth/streaming/accounts") {
+        return jsonResponse(accounts);
+      }
+      if (options?.method === "DELETE") {
+        accounts = [];
+      }
+      return jsonResponse({ items: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  await refreshStreamingAccounts();
+  assert.equal(els.disconnectYoutubeBtn.hidden, false);
+  await disconnectYoutube();
+  assert.ok(calls.includes("DELETE /auth/streaming/accounts/youtube"));
+  assert.equal(els.disconnectYoutubeBtn.hidden, true);
 });
 
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {

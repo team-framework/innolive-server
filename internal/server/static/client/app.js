@@ -2186,6 +2186,11 @@ async function acceptUpgradeOffer(option, confirmRestart = (message) => window.c
         platformToggle(provider).checked = option.targets.includes(provider);
       }
       applyPlatformSelection();
+      // 코드로 켠 카드는 change 이벤트가 없으므로 직전 방송 값을 직접 채운다.
+      const liveTargets = liveTargetProviders();
+      for (const provider of option.targets.filter((target) => !liveTargets.includes(target))) {
+        await applyPlatformDefaults(sessionId, provider);
+      }
       setCurrentSession(session);
       logEvent("ok", "Upgrade option selected", { session_id: sessionId, mode: option.mode });
       return;

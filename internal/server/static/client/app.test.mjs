@@ -1082,8 +1082,10 @@ test("플랫폼을 더하는 선택지는 설정 카드를 열고, 확인 버튼
   });
   // 재시작이 아니면 안내 없이, 전환이 아니라 선택만 알린다.
   assert.equal(asked, false);
-  assert.equal(calls.length, 1);
+  // 선택을 알리고, 새로 켠 치지직 카드만 직전 방송 값으로 채운다(라이브인 유튜브 폼은 그대로).
+  assert.equal(calls.length, 2);
   assert.match(calls[0].path, /\/sessions\/s-1\/upgrade-offer\/select$/);
+  assert.match(calls[1].path, /\/broadcast\/defaults\?provider=chzzk$/);
   assert.deepEqual(JSON.parse(calls[0].body), { mode: "720p_multi" });
   assert.equal(els.platformChzzk.checked, true);
   assert.equal(els.chzzkSettings.hidden, false);
@@ -1096,7 +1098,7 @@ test("플랫폼을 더하는 선택지는 설정 카드를 열고, 확인 버튼
   els.chzzkCategoryId.value = "";
   els.chzzkTags.value = "";
   await confirmUpgradeOption();
-  const rest = calls.slice(1);
+  const rest = calls.slice(2);
   assert.equal(rest.length, 2);
   assert.match(rest[0].path, /\/sessions\/s-1\/broadcast\?provider=chzzk$/);
   assert.match(rest[1].path, /\/sessions\/s-1\/broadcast-mode$/);

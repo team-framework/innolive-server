@@ -21,7 +21,8 @@ var (
 
 // RestartEffect는 방송 재시작이 대상 하나에 주는 영향이다(#333). 확인된 사실만
 // 싣는다 — 유튜브는 새 방송이라 링크가 바뀌고, 치지직은 채널 주소가 같지만 이전
-// 방송이 닫힐 때까지 공백이 생긴다.
+// 방송이 닫힐 때까지 공백이 생긴다. 치지직 시청자는 새로고침 없이 이어서 보지만
+// 방송은 새로 시작된다(2026-09-29 실측, #350).
 type RestartEffect struct {
 	Provider   string `json:"provider"`
 	SameLink   bool   `json:"same_link"`

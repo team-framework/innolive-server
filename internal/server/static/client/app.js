@@ -2251,7 +2251,7 @@ function renderUpgradeOffer(session) {
 function upgradeRestartNotice(option) {
   const effects = (option.restart_effects || []).map((effect) =>
     effect.same_link
-      ? `- ${platformLabel(effect.provider)}: 같은 주소, 약 ${effect.gap_seconds}초 공백`
+      ? `- ${platformLabel(effect.provider)}: 같은 주소에서 약 ${effect.gap_seconds}초 뒤 새 방송으로 시작(시청자는 새로고침 없이 이어서 봄)`
       : `- ${platformLabel(effect.provider)}: 새 방송 링크, 지금 시청자는 끊김`,
   );
   return ["방송이 종료되고 새 방송으로 다시 시작됩니다.", ...effects].join("\n");

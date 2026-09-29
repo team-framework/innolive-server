@@ -190,23 +190,38 @@ func TestYouTubeMadeForKidsRejectionReleasesPreparation(t *testing.T) {
 	}
 }
 
-// 첫 연결 뒤 재연결이 일어나면 거절로 본다 — 다른 도구가 같은 키로 방송 중이면
-// 치지직이 약 3초 만에 끊는다(#361).
-func TestChzzkIngestVerdict(t *testing.T) {
+// 순간 끊김은 재연결 뒤 다시 8초를 채우면 통과하고, 송출이 멈추면(재연결 예산
+// 소진 — 다른 도구가 같은 키로 방송 중) 거절이다(#361).
+func TestIngestWatch(t *testing.T) {
 	live := session.BroadcastPhaseLive
-	for _, test := range []struct {
-		name   string
-		stream session.StreamState
-		want   ingestVerdict
-	}{
-		{"streaming", session.StreamState{Status: "streaming", BroadcastPhase: live}, ingestPending},
-		{"reconnected", session.StreamState{Status: "streaming", ReconnectAttempts: 1, BroadcastPhase: live}, ingestRejected},
-		{"stopped", session.StreamState{Status: "stopped", BroadcastPhase: live}, ingestRejected},
-		{"broadcast ended", session.StreamState{Status: "streaming", BroadcastPhase: session.BroadcastPhaseIdle}, ingestEnded},
-	} {
-		if got := chzzkIngestVerdict(test.stream); got != test.want {
-			t.Errorf("%s: verdict = %d, want %d", test.name, got, test.want)
-		}
+	streaming := func(attempts int) session.StreamState {
+		return session.StreamState{Status: "streaming", ReconnectAttempts: attempts, BroadcastPhase: live}
+	}
+	start := time.Now()
+	watch := newIngestWatch(start)
+	if got := watch.observe(streaming(0), start.Add(3*time.Second)); got != ingestPending {
+		t.Fatalf("3s = %d, want pending", got)
+	}
+	// 5초에 한 번 끊겼다 붙었다 — 안정 시계가 다시 시작한다.
+	if got := watch.observe(streaming(1), start.Add(5*time.Second)); got != ingestPending {
+		t.Fatalf("after a blip = %d, want pending", got)
+	}
+	if got := watch.observe(streaming(1), start.Add(12*time.Second)); got != ingestPending {
+		t.Fatalf("7s after the blip = %d, want pending", got)
+	}
+	if got := watch.observe(streaming(1), start.Add(13*time.Second)); got != ingestAccepted {
+		t.Fatalf("8s after the blip = %d, want accepted", got)
+	}
+
+	rejected := newIngestWatch(start)
+	if got := rejected.observe(session.StreamState{Status: "reconnecting", ReconnectAttempts: 2, BroadcastPhase: live}, start.Add(4*time.Second)); got != ingestPending {
+		t.Fatalf("reconnecting = %d, want pending", got)
+	}
+	if got := rejected.observe(session.StreamState{Status: "stopped", ReconnectAttempts: 3, BroadcastPhase: live}, start.Add(13*time.Second)); got != ingestRejected {
+		t.Fatalf("stopped = %d, want rejected", got)
+	}
+	if got := newIngestWatch(start).observe(session.StreamState{Status: "streaming", BroadcastPhase: session.BroadcastPhaseIdle}, start); got != ingestEnded {
+		t.Fatalf("ended = %d, want ended", got)
 	}
 }
 

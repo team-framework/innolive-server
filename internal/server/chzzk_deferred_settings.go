@@ -11,10 +11,14 @@ import (
 )
 
 const (
-	// chzzkIngestAcceptWindow는 치지직이 RTMP를 받아들였는지 지켜보는 시간이다.
-	// 다른 도구가 같은 스트림 키로 방송 중이면 치지직은 약 3초 만에 연결을
-	// 끊는다(2026-09-29 실측, #361).
-	chzzkIngestAcceptWindow = 8 * time.Second
+	// chzzkIngestStableFor는 송출이 끊기지 않고 이어져야 받아들여진 것으로 보는
+	// 시간이다. 다른 도구가 같은 스트림 키로 방송 중이면 치지직은 3~6초마다
+	// 연결을 끊는다(2026-09-29 실측, #361).
+	chzzkIngestStableFor = 8 * time.Second
+	// chzzkIngestMaxWatch는 판정을 기다리는 최대 시간이다. 순간적인 망 끊김은
+	// 재연결 뒤 다시 8초를 채우면 통과한다 — 사용자에게 티 나지 않게. 거절은
+	// 재연결 예산(10초)이 다하면 송출이 멈추는 것으로 확정된다.
+	chzzkIngestMaxWatch     = 40 * time.Second
 	chzzkIngestPollInterval = 500 * time.Millisecond
 	// noticeChannelLiveElsewhere는 채널이 다른 도구로 방송 중이라 송출이 거절됐다는
 	// 세션 알림이다.
@@ -32,19 +36,25 @@ func (s *Server) applyChzzkSettingsWhenAccepted(liveSession *session.Session, se
 		return
 	}
 	provider := string(auth.StreamingProviderChzzk)
-	deadline := time.Now().Add(chzzkIngestAcceptWindow)
+	watch := newIngestWatch(time.Now())
 	for {
-		switch chzzkIngestVerdict(liveSession.TargetStream(provider)) {
-		case ingestRejected:
-			if liveSession.AddNotice(noticeChannelLiveElsewhere, time.Now()) {
+		now := time.Now()
+		verdict := watch.observe(liveSession.TargetStream(provider), now)
+		if verdict == ingestAccepted {
+			break
+		}
+		if verdict == ingestRejected {
+			if liveSession.AddNotice(noticeChannelLiveElsewhere, now) {
 				s.logger.Warn("chzzk ingest rejected; channel may be live from another tool", "session_id", liveSession.ID)
 			}
 			return
-		case ingestEnded:
+		}
+		if verdict == ingestEnded {
 			return // 그 사이 방송이 끝났다.
 		}
-		if time.Now().After(deadline) {
-			break
+		if now.Sub(watch.started) > chzzkIngestMaxWatch {
+			s.logger.Warn("chzzk ingest never stabilized; settings not applied", "session_id", liveSession.ID)
+			return
 		}
 		time.Sleep(chzzkIngestPollInterval)
 	}
@@ -62,21 +72,39 @@ type ingestVerdict int
 
 const (
 	ingestPending ingestVerdict = iota
+	ingestAccepted
 	ingestRejected
 	ingestEnded
 )
 
-// chzzkIngestVerdict는 치지직 송출 상태로 거절 여부를 판정한다. 첫 연결 뒤 재연결이
-// 한 번이라도 일어났거나 멈췄으면 거절이다.
-func chzzkIngestVerdict(stream session.StreamState) ingestVerdict {
+// ingestWatch는 치지직 송출이 받아들여졌는지 지켜본다. 재연결이 일어날 때마다
+// 안정 시계를 다시 시작하고, 송출이 멈추면(재연결 예산 소진) 거절로 확정한다.
+type ingestWatch struct {
+	started      time.Time
+	stableSince  time.Time
+	lastAttempts int
+}
+
+func newIngestWatch(now time.Time) *ingestWatch {
+	return &ingestWatch{started: now, stableSince: now}
+}
+
+func (w *ingestWatch) observe(stream session.StreamState, now time.Time) ingestVerdict {
 	switch {
-	case stream.ReconnectAttempts > 0 || stream.Status == string(media.EgressPhaseStopped):
+	case stream.Status == string(media.EgressPhaseStopped):
 		return ingestRejected
 	case stream.BroadcastPhase != session.BroadcastPhaseLive:
 		return ingestEnded
-	default:
+	}
+	if stream.ReconnectAttempts != w.lastAttempts || stream.Status != string(media.EgressPhaseStreaming) {
+		w.lastAttempts = stream.ReconnectAttempts
+		w.stableSince = now
 		return ingestPending
 	}
+	if now.Sub(w.stableSince) >= chzzkIngestStableFor {
+		return ingestAccepted
+	}
+	return ingestPending
 }
 
 // chzzkLiveUpdateFrom은 저장한 치지직 설정을 방송 중 설정 변경으로 옮긴다. 빈

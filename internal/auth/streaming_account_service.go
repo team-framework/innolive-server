@@ -31,6 +31,9 @@ type StreamingDisconnectHooks struct {
 	// RevokeToken은 플랫폼 쪽 권한 부여를 취소한다. 인자는 refresh token
 	// 평문이다.
 	RevokeToken func(ctx context.Context, refreshToken string) error
+	// ClearTokenCache는 서버 메모리에 캐시한 access token을 지운다. 지우지 않으면
+	// 해제한 계정의 토큰을 만료 전까지 계속 쓴다(#340).
+	ClearTokenCache func(userID uuid.UUID)
 }
 
 // StreamingAccountService는 송출 계정 연결의 조회·해제를 담당한다.
@@ -111,7 +114,12 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 				"provider", provider, "user_id", userID, "error", err)
 		}
 	}
-	return s.store.Delete(ctx, account.ID)
+	err = s.store.Delete(ctx, account.ID)
+	// 행을 지운 뒤에 캐시를 비운다 — 그 사이 토큰을 새로 받으려 해도 행이 없다.
+	if hooks.ClearTokenCache != nil {
+		hooks.ClearTokenCache(userID)
+	}
+	return err
 }
 
 // CleanupForWithdrawal performs platform cleanup while retaining the database

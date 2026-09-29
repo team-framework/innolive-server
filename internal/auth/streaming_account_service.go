@@ -47,6 +47,20 @@ type StreamingAccountService struct {
 	gate   interface {
 		BeginOperation(uuid.UUID) (func(), bool)
 	}
+	inUse func(userID uuid.UUID, provider StreamingProvider) bool
+}
+
+// ErrStreamingAccountInUse는 그 플랫폼으로 방송을 준비·송출하는 중이라 연결을
+// 해제할 수 없다는 뜻이다(#348). 해제하면 토큰이 사라져 영상은 계속 나가는데
+// 플랫폼 방송은 정리하지 못한다.
+var ErrStreamingAccountInUse = errors.New("streaming account is in use by an active broadcast")
+
+// SetInUseChecker는 플랫폼이 방송에 쓰이는 중인지 알려 줄 함수를 붙인다. auth는
+// 세션을 모르므로 조립 단계에서 주입한다.
+func (s *StreamingAccountService) SetInUseChecker(inUse func(userID uuid.UUID, provider StreamingProvider) bool) {
+	if s != nil {
+		s.inUse = inUse
+	}
 }
 
 // NewStreamingAccountService를 만든다. cipher와 hooks는 해제 시 플랫폼 정리
@@ -92,6 +106,9 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return err
+	}
+	if s.inUse != nil && s.inUse(userID, provider) {
+		return ErrStreamingAccountInUse
 	}
 	account, err := s.store.Get(ctx, userID, provider)
 	if err != nil {

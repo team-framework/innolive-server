@@ -849,6 +849,28 @@ func (m *Manager) List() []*Session {
 	return result
 }
 
+// ProviderInUse는 사용자의 세션 중 그 플랫폼 대상이 준비·라이브 중이거나 송출
+// 방식을 전환하는 중인지다(#348). 전환 중에는 대상이 잠깐 비었다가 다시 열리므로
+// 사용 중으로 본다.
+func (m *Manager) ProviderInUse(userID uuid.UUID, provider string) bool {
+	for _, s := range m.List() {
+		if s.UserID != userID {
+			continue
+		}
+		if s.ResolutionSwitching() {
+			return true
+		}
+		s.mu.RLock()
+		target := s.targets[provider]
+		busy := target != nil && target.phase != BroadcastPhaseIdle
+		s.mu.RUnlock()
+		if busy {
+			return true
+		}
+	}
+	return false
+}
+
 // CloseUserSessions는 탈퇴한 사용자의 모든 활성 세션을 종료한다. 세션 소유권은
 // 메모리에 있으므로, 이후 API 요청을 거부하는 DB 계정 상태 확인과 함께 쓴다.
 func (m *Manager) CloseUserSessions(userID uuid.UUID) {

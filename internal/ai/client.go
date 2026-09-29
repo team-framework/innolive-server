@@ -131,7 +131,11 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 		Height:     uint32(height),
 		PixFmt:     pixFmt,
 	}
-	if err := runWithContext(callCtx, func() error { return s.stream.Send(request) }); err != nil {
+	// 고루틴은 ctx가 끝나면 기다리지 않으므로 reset 뒤에 실행될 수 있다.
+	// s.stream을 실행 시점에 읽으면 nil이라 서버 전체가 죽는다(#316) — 지금
+	// 스트림을 고정해 넘긴다.
+	stream := s.stream
+	if err := runWithContext(callCtx, func() error { return stream.Send(request) }); err != nil {
 		s.reset()
 		return nil, s.wrapStreamError("send AI video frame", err)
 	}
@@ -139,7 +143,7 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 	var response *aiv1.ProcessedVideoChunk
 	if err := runWithContext(callCtx, func() error {
 		var err error
-		response, err = s.stream.Recv()
+		response, err = stream.Recv()
 		return err
 	}); err != nil {
 		s.reset()

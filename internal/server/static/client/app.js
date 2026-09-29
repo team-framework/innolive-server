@@ -1294,7 +1294,11 @@ function setYoutubeCategory(id) {
 // renderTargets는 대상별 상태와 개별 제어를 그린다. 서버 응답의 targets[]는
 // provider 이름 정렬이라 순서가 흔들리지 않는다.
 function renderTargets(session) {
-  const targets = session?.targets || [];
+  // 방송하지 않는 대상(idle)은 빼고 그린다. 서버는 전환으로 뺀 대상도 idle로
+  // 남기므로, 그대로 그리면 송출하지 않는 플랫폼이 목록에 남는다(#325).
+  const targets = (session?.targets || []).filter(
+    (target) => (target.stream?.broadcast_phase || "idle") !== "idle",
+  );
   els.targetList.replaceChildren();
   els.targetListEmpty.hidden = targets.length > 0;
   for (const target of targets) {

@@ -41,6 +41,7 @@ const buttonKeys = [
   "upgradeOffer",
   "upgradeOfferText",
   "upgradeOfferOptions",
+  "confirmUpgradeBtn",
   "declineUpgradeBtn",
   "chzzkCategoryType",
   "chzzkTags",
@@ -173,7 +174,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, declineUpgradeOffer, applyLiveSettings };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings };`,
     context,
     { filename: appPath },
   );
@@ -1058,28 +1059,27 @@ test("화질 올리기 제안은 선택지마다 버튼이고, 재시작 안내�
   assert.equal(els.upgradeOffer.hidden, true);
 });
 
-test("플랫폼을 더하는 선택지는 보류를 늘리고 새 플랫폼 설정 카드를 연다", async () => {
+test("플랫폼을 더하는 선택지는 설정 카드를 열고, 확인 버튼이 설정 저장 뒤 전환한다", async () => {
   const calls = [];
-  const { acceptUpgradeOffer, state, els } = await loadApp({
+  const multi = { mode: "720p_multi", resolution: "720p", targets: ["youtube", "chzzk"], units_to: 2, needs_settings: true, restarts_broadcast: false };
+  const liveYoutube = [{ provider: "youtube", stream: { broadcast_phase: "live" } }];
+  const { acceptUpgradeOffer, confirmUpgradeOption, state, els } = await loadApp({
     fetchImpl: async (url, options) => {
       calls.push({ path: String(url), method: options?.method, body: options?.body });
-      return jsonResponse({ session_id: "s-1", targets: [], upgrade_offer: { units_from: 1, selected: "720p_multi", options: [] } });
+      return jsonResponse({ session_id: "s-1", targets: liveYoutube, upgrade_offer: { units_from: 1, selected: "720p_multi", options: [multi] } });
     },
   });
   state.accessToken = "access-token";
-  state.session = { session_id: "s-1", targets: [{ provider: "youtube", stream: { broadcast_phase: "live" } }] };
+  state.session = { session_id: "s-1", targets: liveYoutube };
   els.resolutionSelect = createElement();
   els.cameraSelect = createElement();
   els.platformYoutube.checked = true;
   els.platformChzzk.checked = false;
   let asked = false;
-  await acceptUpgradeOffer(
-    { mode: "720p_multi", resolution: "720p", targets: ["youtube", "chzzk"], units_to: 2, needs_settings: true, restarts_broadcast: false },
-    () => {
-      asked = true;
-      return true;
-    },
-  );
+  await acceptUpgradeOffer(multi, () => {
+    asked = true;
+    return true;
+  });
   // 재시작이 아니면 안내 없이, 전환이 아니라 선택만 알린다.
   assert.equal(asked, false);
   assert.equal(calls.length, 1);
@@ -1087,7 +1087,20 @@ test("플랫폼을 더하는 선택지는 보류를 늘리고 새 플랫폼 설�
   assert.deepEqual(JSON.parse(calls[0].body), { mode: "720p_multi" });
   assert.equal(els.platformChzzk.checked, true);
   assert.equal(els.chzzkSettings.hidden, false);
-  assert.match(els.upgradeOfferText.textContent, /송출 방식 변경/);
+  // 고른 뒤에는 다른 선택지를 숨기고 확인 버튼만 보인다.
+  assert.equal(els.confirmUpgradeBtn.hidden, false);
+  assert.equal(els.upgradeOfferOptions.children.length, 0);
+  assert.match(els.upgradeOfferText.textContent, /설정 완료하고 전환/);
+
+  els.chzzkTitle.value = "치지직 제목";
+  els.chzzkCategoryId.value = "";
+  els.chzzkTags.value = "";
+  await confirmUpgradeOption();
+  const rest = calls.slice(1);
+  assert.equal(rest.length, 2);
+  assert.match(rest[0].path, /\/sessions\/s-1\/broadcast\?provider=chzzk$/);
+  assert.match(rest[1].path, /\/sessions\/s-1\/broadcast-mode$/);
+  assert.deepEqual(JSON.parse(rest[1].body), { resolution: "720p", targets: ["youtube", "chzzk"] });
 });
 
 test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {

@@ -166,8 +166,19 @@ func (s *Server) startBroadcastSwitch(w http.ResponseWriter, liveSession *sessio
 		writeError(w, switchInProgressError(liveSession.ID))
 		return
 	}
-	go s.runBroadcastSwitch(liveSession, resolution, liveTargets, targets, liveSession.PausedTargets())
+	go s.runBroadcastSwitch(liveSession, resolution, liveTargets, targets, pausedAfterSwitch(liveTargets, liveSession.PausedTargets(), targets))
 	writeJSON(w, http.StatusAccepted, liveSession.Response())
+}
+
+// pausedAfterSwitch는 전환 뒤 멈춘 채로 열 대상이다. 라이브 대상이 전부 멈춰
+// 있었다면 방송 전체를 멈춘 상태이므로 새로 추가한 대상까지 멈춘다 — 자리를 비운
+// 스트리머의 화면이 새 플랫폼으로 나가면 안 된다(#320). 일부만 멈췄다면 멈춰 있던
+// 대상만 다시 멈춘다.
+func pausedAfterSwitch(live, paused, to []string) []string {
+	if len(live) > 0 && len(paused) >= len(live) {
+		return slices.Clone(to)
+	}
+	return paused
 }
 
 // runBroadcastSwitch는 라이브 구성(from)을 새 구성(to)으로 바꾼다.

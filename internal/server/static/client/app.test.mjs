@@ -36,6 +36,8 @@ const buttonKeys = [
   "completeChzzkBtn",
   "chzzkDetail",
   "broadcastResolution",
+  "youtubeApplyLiveBtn",
+  "chzzkApplyLiveBtn",
   "upgradeOffer",
   "upgradeOfferText",
   "acceptUpgradeBtn",
@@ -171,7 +173,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, declineUpgradeOffer };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, declineUpgradeOffer, applyLiveSettings };`,
     context,
     { filename: appPath },
   );
@@ -1034,6 +1036,31 @@ test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {
   assert.equal(calls.length, 1);
   assert.match(calls[0].path, /\/sessions\/s-1\/upgrade-offer$/);
   assert.equal(calls[0].method, "DELETE");
+});
+
+test("방송 중 적용은 바꿀 수 있는 항목만 PATCH로 보낸다", async () => {
+  const calls = [];
+  const { applyLiveSettings, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method, body: options?.body });
+      return jsonResponse({ session_id: "s-1", targets: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", targets: [] };
+  els.youtubeTitle.value = " 새 제목 ";
+  els.youtubeDescription.value = "설명";
+  els.youtubeCategory.value = "20";
+  els.youtubePrivacy.value = "public";
+  els.youtubeMadeForKids.checked = true;
+  els.youtubeThumbnail.files = { length: 0 };
+
+  await applyLiveSettings("youtube");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/broadcast\/live\?provider=youtube$/);
+  assert.equal(calls[0].method, "PATCH");
+  // 공개 범위·아동용·썸네일은 방송 중에 바꾸지 않는다.
+  assert.deepEqual(JSON.parse(calls[0].body), { title: "새 제목", description: "설명", category_id: "20" });
 });
 
 test("송출 방식 변경 버튼은 라이브 중에만 열린다", async () => {

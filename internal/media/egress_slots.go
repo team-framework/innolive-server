@@ -89,6 +89,16 @@ type EgressSlotBudget struct {
 	anonymous   int
 	waiters     []chan struct{}
 	usedByGroup map[string]int
+	// holds는 소유자별로 잡아 둔 보류 유닛이다(#278). 점유에 포함되므로 다른
+	// 소유자가 가져가지 못하고, 그 소유자가 자리를 잡을 때 먼저 소비된다.
+	holds map[string]egressHold
+}
+
+// egressHold는 아직 송출에 쓰지 않고 잡아 둔 유닛이다.
+type egressHold struct {
+	units int
+	tier  int
+	group string
 }
 
 // NewEgressSlotBudget은 예산을 만든다. capacity가 0 이하면 총량 제한이 없고,
@@ -98,7 +108,7 @@ func NewEgressSlotBudget(capacity, devices int) *EgressSlotBudget {
 	if capacity <= 0 && devices <= 0 {
 		return nil
 	}
-	budget := &EgressSlotBudget{capacity: capacity, devices: devices, owners: map[string]*egressOwner{}, usedByGroup: map[string]int{}, usedByTier: map[int]int{}}
+	budget := &EgressSlotBudget{capacity: capacity, devices: devices, owners: map[string]*egressOwner{}, usedByGroup: map[string]int{}, usedByTier: map[int]int{}, holds: map[string]egressHold{}}
 	if devices > 0 {
 		budget.perCard = make([]int, devices)
 	}
@@ -181,10 +191,11 @@ func (b *EgressSlotBudget) tryAcquire(claim EgressClaim) (*EgressLease, chan str
 		owner = &egressOwner{claim: claim}
 	}
 	delta := egressUnits(owner.claim.HighRes, owner.count+1) - owner.held
-	if b.capacity > 0 && b.used+delta > b.capacity {
+	held := b.holdForLocked(claim.Owner, delta)
+	if b.capacity > 0 && b.used-held+delta > b.capacity {
 		return nil, b.appendWaiterLocked(), ErrEgressSlotsExhausted
 	}
-	if b.capacity > 0 && b.used+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
+	if b.capacity > 0 && b.used-held+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
 		return nil, b.appendWaiterLocked(), ErrEgressTierUnitsExhausted
 	}
 	device := -1
@@ -196,6 +207,7 @@ func (b *EgressSlotBudget) tryAcquire(claim EgressClaim) (*EgressLease, chan str
 		}
 		b.perCard[device]++
 	}
+	b.consumeHoldLocked(claim.Owner, held)
 	owner.count++
 	owner.held += delta
 	b.used += delta
@@ -297,14 +309,16 @@ func (b *EgressSlotBudget) ChangeResolution(key string, highRes bool) error {
 		return nil
 	}
 	delta := egressUnits(highRes, owner.count) - owner.held
+	held := b.holdForLocked(key, delta)
 	if delta > 0 && b.capacity > 0 {
-		if b.used+delta > b.capacity {
+		if b.used-held+delta > b.capacity {
 			return ErrEgressSlotsExhausted
 		}
-		if b.used+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
+		if b.used-held+delta > b.capacity-b.higherTierVacancyLocked(owner.claim.Tier) {
 			return ErrEgressTierUnitsExhausted
 		}
 	}
+	b.consumeHoldLocked(key, held)
 	owner.claim.HighRes = highRes
 	owner.held += delta
 	b.used += delta
@@ -331,6 +345,10 @@ func (b *EgressSlotBudget) CheckClaim(claim EgressClaim, count int) error {
 	if owner := b.owners[claim.Owner]; claim.Owner != "" && owner != nil {
 		held = owner.held
 	}
+	// 자기 보류분도 이 소유자 몫이다.
+	if claim.Owner != "" {
+		held += b.holds[claim.Owner].units
+	}
 	used := b.used - held + egressUnits(claim.HighRes, count)
 	if used > b.capacity {
 		return ErrEgressSlotsExhausted
@@ -339,6 +357,91 @@ func (b *EgressSlotBudget) CheckClaim(claim EgressClaim, count int) error {
 		return ErrEgressTierUnitsExhausted
 	}
 	return nil
+}
+
+// Hold는 소유자 몫으로 유닛을 잡아 둔다(#278). 새로 잡는 것과 같은 규칙(총량·상위
+// 등급 전용 몫)으로 판정하고 기다리지 않는다. 소유자당 보류는 하나다.
+func (b *EgressSlotBudget) Hold(claim EgressClaim, units int) error {
+	if b == nil || units <= 0 || claim.Owner == "" {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.holds[claim.Owner]; exists {
+		return fmt.Errorf("egress units already held for %s", claim.Owner)
+	}
+	if b.capacity > 0 {
+		if b.used+units > b.capacity {
+			return ErrEgressSlotsExhausted
+		}
+		if b.used+units > b.capacity-b.higherTierVacancyLocked(claim.Tier) {
+			return ErrEgressTierUnitsExhausted
+		}
+	}
+	b.holds[claim.Owner] = egressHold{units: units, tier: claim.Tier, group: claim.Group}
+	b.addLocked(claim.Tier, claim.Group, units)
+	return nil
+}
+
+// ReleaseHold는 남은 보류분을 반납한다. 보류가 없거나 이미 소비됐으면 아무 일도 없다.
+func (b *EgressSlotBudget) ReleaseHold(owner string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	hold, ok := b.holds[owner]
+	if !ok {
+		return
+	}
+	delete(b.holds, owner)
+	b.addLocked(hold.tier, hold.group, -hold.units)
+	for len(b.waiters) > 0 {
+		b.wakeOneLocked()
+	}
+}
+
+// Held는 소유자의 남은 보류 유닛이다.
+func (b *EgressSlotBudget) Held(owner string) int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.holds[owner].units
+}
+
+// holdForLocked는 delta만큼 늘릴 때 쓸 수 있는 자기 보류분이다.
+func (b *EgressSlotBudget) holdForLocked(owner string, delta int) int {
+	if owner == "" || delta <= 0 {
+		return 0
+	}
+	return min(b.holds[owner].units, delta)
+}
+
+// consumeHoldLocked는 보류분 units를 점유에서 빼 소유자의 실제 점유로 넘긴다.
+// 호출자가 곧바로 delta 전체를 점유에 더한다.
+func (b *EgressSlotBudget) consumeHoldLocked(owner string, units int) {
+	if units <= 0 {
+		return
+	}
+	hold := b.holds[owner]
+	hold.units -= units
+	b.addLocked(hold.tier, hold.group, -units)
+	if hold.units <= 0 {
+		delete(b.holds, owner)
+		return
+	}
+	b.holds[owner] = hold
+}
+
+func (b *EgressSlotBudget) addLocked(tier int, group string, units int) {
+	b.used += units
+	b.usedByTier[tier] += units
+	b.usedByGroup[group] += units
+	if b.usedByGroup[group] <= 0 {
+		delete(b.usedByGroup, group)
+	}
 }
 
 // wakeOneLocked는 대기자 하나에게 자리가 났음을 알린다. 호출자가 mu를 쥐고 있어야 한다.

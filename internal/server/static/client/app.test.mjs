@@ -36,6 +36,10 @@ const buttonKeys = [
   "completeChzzkBtn",
   "chzzkDetail",
   "broadcastResolution",
+  "upgradeOffer",
+  "upgradeOfferText",
+  "acceptUpgradeBtn",
+  "declineUpgradeBtn",
   "chzzkCategoryType",
   "chzzkTags",
   "chzzkCategoryQuery",
@@ -167,7 +171,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, declineUpgradeOffer };`,
     context,
     { filename: appPath },
   );
@@ -985,6 +989,53 @@ test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast
   assert.equal(state.session.resolution_switch.status, "switching");
 });
 
+test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FHD 전환을 요청한다", async () => {
+  const calls = [];
+  const { renderUpgradeOffer, acceptUpgradeOffer, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method, body: options?.body });
+      return jsonResponse({ session_id: "s-1", targets: [], upgrade_offer: null });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = {
+    session_id: "s-1",
+    targets: [
+      { provider: "youtube", stream: { broadcast_phase: "live" } },
+      { provider: "chzzk", stream: { broadcast_phase: "idle" } },
+    ],
+  };
+  renderUpgradeOffer({ upgrade_offer: { units_from: 1, units_to: 2, remaining_seconds_after: 7200 } });
+  assert.equal(els.upgradeOffer.hidden, false);
+  assert.match(els.upgradeOfferText.textContent, /1배 → 2배/);
+  assert.match(els.upgradeOfferText.textContent, /2시간/);
+
+  await acceptUpgradeOffer();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-mode$/);
+  assert.equal(calls[0].method, "PUT");
+  assert.deepEqual(JSON.parse(calls[0].body), { resolution: "fhd", targets: ["youtube"] });
+  assert.equal(els.broadcastResolution.value, "fhd");
+  // 응답에 제안이 없으면 숨긴다.
+  assert.equal(els.upgradeOffer.hidden, true);
+});
+
+test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {
+  const calls = [];
+  const { declineUpgradeOffer, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method });
+      return jsonResponse({ session_id: "s-1", targets: [], upgrade_offer: null });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", targets: [] };
+  await declineUpgradeOffer();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/upgrade-offer$/);
+  assert.equal(calls[0].method, "DELETE");
+});
+
 test("송출 방식 변경 버튼은 라이브 중에만 열린다", async () => {
   const { updateButtons, state, els } = await loadApp();
   state.accessToken = "access-token";
@@ -1062,4 +1113,21 @@ test("카메라가 열려 있지 않으면 캡처 선택만 바꾼다", async ()
   els.broadcastResolution.value = "fhd";
   await syncCaptureResolution();
   assert.equal(els.resolutionSelect.value, "fhd");
+});
+
+test("송출 대상 목록은 방송하지 않는(idle) 대상을 그리지 않는다", async () => {
+  const { renderTargets, els } = await loadApp();
+  renderTargets({
+    targets: [
+      { provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } },
+      { provider: "youtube", stream: { status: "streaming", broadcast_phase: "live" } },
+    ],
+  });
+  assert.equal(els.targetList.children.length, 1);
+  assert.equal(els.targetList.children[0].children[0].textContent, "YouTube");
+  assert.equal(els.targetListEmpty.hidden, true);
+
+  renderTargets({ targets: [{ provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } }] });
+  assert.equal(els.targetList.children.length, 0);
+  assert.equal(els.targetListEmpty.hidden, false);
 });

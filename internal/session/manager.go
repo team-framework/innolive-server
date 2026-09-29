@@ -165,6 +165,8 @@ type Response struct {
 	// ResolutionSwitch는 방송 중 해상도 전환(#283)의 진행 상태다. 전환한 적이
 	// 없으면 null이다.
 	ResolutionSwitch *ResolutionSwitchState `json:"resolution_switch"`
+	// UpgradeOffer는 빈자리로 화질을 올릴 수 있다는 제안이다(#278). 없으면 null.
+	UpgradeOffer *UpgradeOffer `json:"upgrade_offer"`
 }
 
 type Session struct {
@@ -258,6 +260,11 @@ type Session struct {
 	pipelineDone     chan struct{}
 	resolutionMu     sync.Mutex
 	resolutionSwitch *ResolutionSwitchState
+	// upgradeOffer는 걸려 있는 화질 올리기 제안, upgradeOffered는 제안한 적이
+	// 있는지다(#278). 한 세션에 한 번만 제안한다.
+	upgradeOffer   *UpgradeOffer
+	upgradeOffered bool
+	upgradeTimer   *time.Timer
 }
 
 // pendingCreate는 아직 sessions에 등록되지 않은 진행 중인 세션 생성이다.
@@ -870,6 +877,7 @@ func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uui
 		sessions = append(sessions, liveSession)
 		m.deleting.Add(1)
 		delete(m.sessions, id)
+		m.egressSlots.ReleaseHold(id)
 	}
 	count := len(m.sessions)
 	pending := append([]pendingBroadcastCleanup(nil), m.pendingWithdrawalBroadcasts[userID]...)
@@ -1215,15 +1223,11 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 // (해상도·송출 수), 등급은 Spark < Beam < Plasma다. 플랜이 없는 세션(인증을 끈
 // 벤치)은 등급 규칙 없이 "none"으로 센다.
 func egressClaimFor(s *Session) media.EgressClaim {
-	group := string(s.Plan)
-	if group == "" {
-		group = "none"
-	}
 	return media.EgressClaim{
 		Owner:   s.ID,
 		HighRes: s.Resolution() == ResolutionFHD,
 		Tier:    egressTierFor(s.Plan),
-		Group:   group,
+		Group:   egressGroupFor(s.Plan),
 	}
 }
 
@@ -1561,6 +1565,8 @@ func (m *Manager) Delete(id, reason string) error {
 	count := len(m.sessions)
 	m.mu.Unlock()
 	defer m.deleting.Done()
+	// 걸려 있던 화질 올리기 제안의 보류를 돌려준다(#278).
+	m.egressSlots.ReleaseHold(id)
 	m.metrics.SetActiveSessions(count)
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
@@ -1947,6 +1953,10 @@ func (s *Session) Response() Response {
 	}
 	response.BroadcastResolution = s.BroadcastResolution
 	response.ResolutionSwitch = s.resolutionSwitchSnapshotLocked()
+	if s.upgradeOffer != nil {
+		offer := *s.upgradeOffer
+		response.UpgradeOffer = &offer
+	}
 	response.Notices = append([]Notice{}, s.notices...)
 	if s.broadcastRemaining != nil {
 		remaining := *s.broadcastRemaining

@@ -185,6 +185,10 @@ function bindElements() {
     "completeChzzkBtn",
     "chzzkDetail",
     "broadcastResolution",
+    "upgradeOffer",
+    "upgradeOfferText",
+    "acceptUpgradeBtn",
+    "declineUpgradeBtn",
     "chzzkCategoryType",
     "chzzkTags",
     "chzzkCategoryQuery",
@@ -283,6 +287,8 @@ function bindEvents() {
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
+  els.acceptUpgradeBtn.addEventListener("click", () => void acceptUpgradeOffer());
+  els.declineUpgradeBtn.addEventListener("click", () => void declineUpgradeOffer());
   els.resumeBroadcastBtn.addEventListener("click", () => void resumeBroadcast());
   els.stopBroadcastBtn.addEventListener("click", () => void stopBroadcast());
   els.disconnectBtn.addEventListener("click", () => void disconnect());
@@ -1294,7 +1300,11 @@ function setYoutubeCategory(id) {
 // renderTargets는 대상별 상태와 개별 제어를 그린다. 서버 응답의 targets[]는
 // provider 이름 정렬이라 순서가 흔들리지 않는다.
 function renderTargets(session) {
-  const targets = session?.targets || [];
+  // 방송하지 않는 대상(idle)은 빼고 그린다. 서버는 전환으로 뺀 대상도 idle로
+  // 남기므로, 그대로 그리면 송출하지 않는 플랫폼이 목록에 남는다(#325).
+  const targets = (session?.targets || []).filter(
+    (target) => (target.stream?.broadcast_phase || "idle") !== "idle",
+  );
   els.targetList.replaceChildren();
   els.targetListEmpty.hidden = targets.length > 0;
   for (const target of targets) {
@@ -2069,6 +2079,50 @@ async function changeBroadcastMode() {
       request: body,
       resolution_switch: session.resolution_switch,
     });
+  });
+}
+
+// renderUpgradeOffer는 빈자리로 화질을 올릴 수 있다는 서버 제안을 보인다(#278).
+// 수락하면 지금 대상 그대로 FHD 새 방송으로 다시 열린다.
+function renderUpgradeOffer(session) {
+  const offer = session?.upgrade_offer;
+  els.upgradeOffer.hidden = !offer;
+  if (!offer) {
+    return;
+  }
+  const remaining =
+    offer.remaining_seconds_after == null ? "" : ` 이 방식으로 약 ${formatDuration(offer.remaining_seconds_after)} 방송할 수 있어요.`;
+  els.upgradeOfferText.textContent =
+    `빈자리가 생겨 FHD로 올릴 수 있어요. 새 방송으로 다시 열리고(유튜브는 링크가 바뀝니다), ` +
+    `방송 시간은 ${offer.units_from}배 → ${offer.units_to}배로 차감돼요.${remaining}`;
+}
+
+async function acceptUpgradeOffer() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    return;
+  }
+  await runBusy(async () => {
+    const body = { resolution: "fhd", targets: liveTargetProviders() };
+    const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    els.broadcastResolution.value = "fhd";
+    setCurrentSession(session);
+    logEvent("ok", "Upgrade offer accepted", { session_id: sessionId, request: body });
+  });
+}
+
+async function declineUpgradeOffer() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    return;
+  }
+  await runBusy(async () => {
+    const session = await apiFetch(`/sessions/${sessionId}/upgrade-offer`, { method: "DELETE" });
+    setCurrentSession(session);
+    logEvent("ok", "Upgrade offer declined", { session_id: sessionId });
   });
 }
 
@@ -3290,6 +3344,7 @@ function setCurrentSession(session) {
   renderSessionDetails(session);
   renderTargets(session);
   renderSwitchStatus(session);
+  renderUpgradeOffer(session);
   updateButtons();
 }
 

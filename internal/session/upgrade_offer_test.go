@@ -39,7 +39,59 @@ func newUpgradeTestManager(t *testing.T, units int) (*Manager, *Session) {
 }
 
 func testOffer() UpgradeOffer {
-	return UpgradeOffer{Resolution: ResolutionFHD, Mode: plan.ModeFHDSingle, UnitsFrom: 1, UnitsTo: 2, ExpiresAt: time.Now().Add(time.Minute)}
+	return UpgradeOffer{UnitsFrom: 1, ExpiresAt: time.Now().Add(time.Minute), Options: []UpgradeOption{
+		{Mode: plan.ModeFHDSingle, Resolution: ResolutionFHD, UnitsTo: 2},
+	}}
+}
+
+// 빈자리에 드는 가장 큰 선택지만큼 보류하고, 보류 안에 드는 선택지만 보인다(#333).
+func TestOfferUpgradeHoldsLargestFittingOption(t *testing.T) {
+	offer := UpgradeOffer{UnitsFrom: 1, Options: []UpgradeOption{
+		{Mode: plan.ModeFHDSingle, Resolution: ResolutionFHD, UnitsTo: 2},
+		{Mode: plan.Mode720pMulti, Resolution: Resolution720p, UnitsTo: 2},
+		{Mode: plan.ModeFHDMulti, Resolution: ResolutionFHD, UnitsTo: 3},
+	}}
+	for _, test := range []struct {
+		name  string
+		units int
+		held  int
+		shown int
+	}{
+		// 이 세션은 아직 송출 전이라 빈자리 = 상한이다.
+		{"room for all", 2, 2, 3},
+		{"room for one more unit", 1, 1, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, live := newUpgradeTestManager(t, test.units)
+			if err := manager.OfferUpgrade(live.ID, offer, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			shown := live.Response().UpgradeOffer
+			if held := manager.EgressSlots().Held(live.ID); held != test.held || shown == nil || len(shown.Options) != test.shown {
+				t.Fatalf("held=%d offer=%+v, want held %d with %d options", held, shown, test.held, test.shown)
+			}
+			if shown.Mode != plan.ModeFHDSingle || shown.UnitsTo != 2 {
+				t.Fatalf("compat fields = %s %d, want the first option", shown.Mode, shown.UnitsTo)
+			}
+		})
+	}
+}
+
+func TestSelectUpgradeOptionExtendsHold(t *testing.T) {
+	manager, live := newUpgradeTestManager(t, 2)
+	if err := manager.OfferUpgrade(live.ID, testOffer(), 30*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.SelectUpgradeOption(live.ID, plan.ModeFHDMulti, time.Minute); !errors.Is(err, ErrUpgradeOptionNotFound) {
+		t.Fatalf("select err = %v, want ErrUpgradeOptionNotFound", err)
+	}
+	if _, err := manager.SelectUpgradeOption(live.ID, plan.ModeFHDSingle, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if offer := live.Response().UpgradeOffer; offer == nil || offer.Selected != plan.ModeFHDSingle || manager.EgressSlots().Held(live.ID) != 1 {
+		t.Fatalf("after the original ttl offer=%+v held=%d, want kept", offer, manager.EgressSlots().Held(live.ID))
+	}
 }
 
 func TestOfferUpgradeHoldsUnitsUntilDeclined(t *testing.T) {

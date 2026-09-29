@@ -147,7 +147,8 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			}
 		}
 		if decision.stopReason == "" {
-			if candidate, ok := upgradeCandidateFor(live, len(targets), onAir, used); ok {
+			addable := s.addableProviders(ctx, live, targets)
+			if candidate, ok := upgradeCandidateFor(live, targets, addable, onAir, used); ok {
 				upgrades = append(upgrades, candidate)
 			}
 			continue

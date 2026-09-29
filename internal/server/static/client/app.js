@@ -189,7 +189,7 @@ function bindElements() {
     "chzzkApplyLiveBtn",
     "upgradeOffer",
     "upgradeOfferText",
-    "acceptUpgradeBtn",
+    "upgradeOfferOptions",
     "declineUpgradeBtn",
     "chzzkCategoryType",
     "chzzkTags",
@@ -289,7 +289,6 @@ function bindEvents() {
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
-  els.acceptUpgradeBtn.addEventListener("click", () => void acceptUpgradeOffer());
   els.youtubeApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("youtube"));
   els.chzzkApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("chzzk"));
   els.declineUpgradeBtn.addEventListener("click", () => void declineUpgradeOffer());
@@ -2115,35 +2114,79 @@ async function changeBroadcastMode() {
   });
 }
 
-// renderUpgradeOffer는 빈자리로 화질을 올릴 수 있다는 서버 제안을 보인다(#278).
-// 수락하면 지금 대상 그대로 FHD 새 방송으로 다시 열린다.
+const UPGRADE_MODE_LABELS = {
+  fhd_single: "FHD로 올리기",
+  "720p_multi": "720p 동시 송출",
+  fhd_multi: "FHD 동시 송출",
+};
+
+// renderUpgradeOffer는 빈자리로 송출 방식을 올릴 수 있다는 서버 제안을 선택지마다
+// 버튼으로 보인다(#278, #333). 하나를 수락하면 서버가 제안 전체를 지운다.
 function renderUpgradeOffer(session) {
   const offer = session?.upgrade_offer;
   els.upgradeOffer.hidden = !offer;
   if (!offer) {
+    els.upgradeOfferOptions.replaceChildren();
     return;
   }
-  const remaining =
-    offer.remaining_seconds_after == null ? "" : ` 이 방식으로 약 ${formatDuration(offer.remaining_seconds_after)} 방송할 수 있어요.`;
-  els.upgradeOfferText.textContent =
-    `빈자리가 생겨 FHD로 올릴 수 있어요. 새 방송으로 다시 열리고(유튜브는 링크가 바뀝니다), ` +
-    `방송 시간은 ${offer.units_from}배 → ${offer.units_to}배로 차감돼요.${remaining}`;
+  els.upgradeOfferText.textContent = offer.selected
+    ? `${UPGRADE_MODE_LABELS[offer.selected] || offer.selected}: 새 플랫폼 설정을 채운 뒤 '송출 방식 변경'을 누르세요(3분 안).`
+    : "빈자리가 생겨 송출 방식을 올릴 수 있어요.";
+  const buttons = (offer.options || []).map((option) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button button-primary";
+    const remaining = option.remaining_seconds_after == null ? "" : `, 약 ${formatDuration(option.remaining_seconds_after)}`;
+    button.textContent = `${UPGRADE_MODE_LABELS[option.mode] || option.mode} (${offer.units_from}배 → ${option.units_to}배${remaining})`;
+    button.addEventListener("click", () => void acceptUpgradeOffer(option));
+    return button;
+  });
+  els.upgradeOfferOptions.replaceChildren(...buttons);
 }
 
-async function acceptUpgradeOffer() {
+// upgradeRestartNotice는 재시작 선택지를 수락하기 전에 반드시 보일 안내다(#333).
+function upgradeRestartNotice(option) {
+  const effects = (option.restart_effects || []).map((effect) =>
+    effect.same_link
+      ? `- ${platformLabel(effect.provider)}: 같은 주소, 약 ${effect.gap_seconds}초 공백`
+      : `- ${platformLabel(effect.provider)}: 새 방송 링크, 지금 시청자는 끊김`,
+  );
+  return ["방송이 종료되고 새 방송으로 다시 시작됩니다.", ...effects].join("\n");
+}
+
+// acceptUpgradeOffer는 선택지 하나를 수락한다. 재시작 선택지는 안내에 동의해야만
+// 진행한다. 플랫폼을 더하는 선택지는 보류를 늘리고 새 플랫폼 설정 카드를 연다 —
+// 설정을 채운 뒤 '송출 방식 변경'으로 확정한다. 해상도만 바꾸는 선택지는 바로 전환한다.
+async function acceptUpgradeOffer(option, confirmRestart = (message) => window.confirm(message)) {
   const sessionId = state.session?.session_id;
-  if (!sessionId) {
+  if (!sessionId || !option) {
+    return;
+  }
+  if (option.restarts_broadcast && !confirmRestart(upgradeRestartNotice(option))) {
     return;
   }
   await runBusy(async () => {
-    const body = { resolution: "fhd", targets: liveTargetProviders() };
+    // 코드로 바꾼 값은 change 이벤트를 내지 않으므로 캡처도 직접 맞춘다(#331).
+    els.broadcastResolution.value = option.resolution;
+    await syncCaptureResolution();
+    if (option.needs_settings) {
+      const session = await apiFetch(`/sessions/${sessionId}/upgrade-offer/select`, {
+        method: "POST",
+        body: JSON.stringify({ mode: option.mode }),
+      });
+      for (const provider of PLATFORMS) {
+        platformToggle(provider).checked = option.targets.includes(provider);
+      }
+      applyPlatformSelection();
+      setCurrentSession(session);
+      logEvent("ok", "Upgrade option selected", { session_id: sessionId, mode: option.mode });
+      return;
+    }
+    const body = { resolution: option.resolution, targets: option.targets };
     const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
       method: "PUT",
       body: JSON.stringify(body),
     });
-    // 코드로 바꾼 값은 change 이벤트를 내지 않으므로 캡처도 직접 맞춘다(#331).
-    els.broadcastResolution.value = "fhd";
-    await syncCaptureResolution();
     setCurrentSession(session);
     logEvent("ok", "Upgrade offer accepted", { session_id: sessionId, request: body });
   });

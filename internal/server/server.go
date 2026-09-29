@@ -121,6 +121,7 @@ func New(
 	mux.Handle("GET /auth/youtube/categories", requireUser(http.HandlerFunc(s.handleGetYouTubeCategories)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast-mode", requireUser(s.requireSessionOwner(s.handlePutBroadcastMode)))
 	mux.Handle("DELETE /sessions/{session_id}/upgrade-offer", requireUser(s.requireSessionOwner(s.handleDeleteUpgradeOffer)))
+	mux.Handle("POST /sessions/{session_id}/upgrade-offer/select", requireUser(s.requireSessionOwner(s.handleSelectUpgradeOption)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
 	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
 	mux.Handle("POST /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handlePostReferenceFace))))

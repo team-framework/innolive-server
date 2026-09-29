@@ -115,6 +115,7 @@ func New(
 	mux.Handle("POST /sessions/{session_id}/stream/resume", requireUser(s.requireSessionOwner(s.handleResumeStream)))
 	mux.Handle("POST /sessions/{session_id}/stream/stop", requireUser(s.requireSessionOwner(s.handleStopStream)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast", requireUser(s.requireSessionOwner(s.handlePutBroadcast)))
+	mux.Handle("PATCH /sessions/{session_id}/broadcast/live", requireUser(s.requireSessionOwner(s.handlePatchLiveBroadcast)))
 	mux.Handle("GET /sessions/{session_id}/broadcast/defaults", requireUser(s.requireSessionOwner(s.handleGetBroadcastDefaults)))
 	mux.Handle("PUT /sessions/{session_id}/broadcast-resolution", requireUser(s.requireSessionOwner(s.handlePutBroadcastResolution)))
 	mux.Handle("GET /auth/youtube/categories", requireUser(http.HandlerFunc(s.handleGetYouTubeCategories)))

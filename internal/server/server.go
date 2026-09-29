@@ -939,12 +939,15 @@ func prepareOptionsFrom(settings session.YouTubeBroadcastSettings) streaming.Pre
 
 // chzzkPrepareOptionsFrom은 저장된 치지직 설정을 준비 옵션으로 옮긴다.
 // 치지직에는 설명·공개범위·썸네일·아동용 신고가 없으므로 비운 채로 둔다.
+// 설정을 저장했는데 카테고리가 비었으면 사용자가 카테고리 없이 고른 것이라
+// 채널에 남은 카테고리를 지운다. 저장한 적이 없으면 건드리지 않는다(#352).
 func chzzkPrepareOptionsFrom(settings session.ChzzkBroadcastSettings) streaming.PrepareOptions {
 	return streaming.PrepareOptions{
-		Title:        settings.Title,
-		CategoryType: settings.CategoryType,
-		CategoryID:   settings.CategoryID,
-		Tags:         settings.Tags,
+		Title:         settings.Title,
+		CategoryType:  settings.CategoryType,
+		CategoryID:    settings.CategoryID,
+		Tags:          settings.Tags,
+		ClearCategory: !settings.UpdatedAt.IsZero() && settings.CategoryType == "" && settings.CategoryID == "",
 	}
 }
 

@@ -85,6 +85,7 @@ func (p *ChzzkProvider) UpdateLive(ctx context.Context, userID uuid.UUID, _ Prep
 	}
 	if update.CategoryType != nil && update.CategoryID != nil {
 		options.CategoryType, options.CategoryID = *update.CategoryType, *update.CategoryID
+		options.ClearCategory = options.CategoryType == "" && options.CategoryID == ""
 	}
 	if update.TagsSet {
 		options.Tags = append([]string{}, update.Tags...)

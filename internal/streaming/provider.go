@@ -34,6 +34,9 @@ type PrepareOptions struct {
 	CategoryType string
 	// Tags는 치지직 방송 태그다. 유튜브 구현은 무시한다.
 	Tags []string
+	// ClearCategory는 채널에 남은 카테고리를 지운다(치지직, #352). 카테고리를
+	// 비우면 보내지 않는 것이 기본이라, 사용자가 비운 것을 명시할 때만 켠다.
+	ClearCategory bool
 }
 
 // Thumbnail은 업로드할 썸네일 이미지다.

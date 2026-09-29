@@ -131,6 +131,23 @@ func TestChzzkPrepareSkipsSettingWhenNothingToApply(t *testing.T) {
 	}
 }
 
+// 비운 카테고리를 명시하면 categoryId ""로 채널 카테고리를 지운다(#352).
+func TestChzzkPrepareClearsCategoryWhenRequested(t *testing.T) {
+	stub := &chzzkStub{t: t, streamKey: "key-abc"}
+	provider := newChzzkProviderForTest(t, stub, stubTokens{token: "token-1"})
+
+	if _, err := provider.Prepare(context.Background(), uuid.New(), PrepareOptions{Title: "제목", ClearCategory: true}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	body := stub.bodies[0]
+	if id, ok := body["categoryId"]; !ok || id != "" {
+		t.Fatalf("setting body = %v, want categoryId \"\"", body)
+	}
+	if _, ok := body["categoryType"]; ok {
+		t.Fatalf("setting body = %v, must not send categoryType when clearing", body)
+	}
+}
+
 func TestChzzkPrepareRejectsNotConnectedAccount(t *testing.T) {
 	stub := &chzzkStub{t: t, streamKey: "key-abc"}
 	provider := newChzzkProviderForTest(t, stub, errTokens{err: auth.ErrStreamingNotConnected})

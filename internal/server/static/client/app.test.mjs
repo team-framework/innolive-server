@@ -40,7 +40,7 @@ const buttonKeys = [
   "chzzkApplyLiveBtn",
   "upgradeOffer",
   "upgradeOfferText",
-  "acceptUpgradeBtn",
+  "upgradeOfferOptions",
   "declineUpgradeBtn",
   "chzzkCategoryType",
   "chzzkTags",
@@ -991,7 +991,17 @@ test("방송 중 송출 방식 변경은 해상도와 대상 구성을 broadcast
   assert.equal(state.session.resolution_switch.status, "switching");
 });
 
-test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FHD 전환을 요청한다", async () => {
+const fhdSingleOption = {
+  mode: "fhd_single",
+  resolution: "fhd",
+  targets: ["youtube"],
+  units_to: 2,
+  remaining_seconds_after: 7200,
+  restarts_broadcast: true,
+  restart_effects: [{ provider: "youtube", same_link: false }],
+};
+
+test("화질 올리기 제안은 선택지마다 버튼이고, 재시작 안내에 동의해야 전환을 요청한다", async () => {
   const calls = [];
   const { renderUpgradeOffer, acceptUpgradeOffer, state, els } = await loadApp({
     fetchImpl: async (url, options) => {
@@ -1015,12 +1025,27 @@ test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FH
   state.localStream = {
     getVideoTracks: () => [{ async applyConstraints(constraints) { applied.push(constraints); } }],
   };
-  renderUpgradeOffer({ upgrade_offer: { units_from: 1, units_to: 2, remaining_seconds_after: 7200 } });
+  renderUpgradeOffer({
+    upgrade_offer: {
+      units_from: 1,
+      options: [fhdSingleOption, { mode: "720p_multi", resolution: "720p", targets: ["youtube", "chzzk"], units_to: 2, needs_settings: true }],
+    },
+  });
   assert.equal(els.upgradeOffer.hidden, false);
-  assert.match(els.upgradeOfferText.textContent, /1배 → 2배/);
-  assert.match(els.upgradeOfferText.textContent, /2시간/);
+  assert.equal(els.upgradeOfferOptions.children.length, 2);
+  assert.match(els.upgradeOfferOptions.children[0].textContent, /1배 → 2배, 약 2시간/);
 
-  await acceptUpgradeOffer();
+  // 재시작 안내를 거절하면 아무것도 요청하지 않는다.
+  const notices = [];
+  await acceptUpgradeOffer(fhdSingleOption, (message) => {
+    notices.push(message);
+    return false;
+  });
+  assert.equal(calls.length, 0);
+  assert.match(notices[0], /방송이 종료되고 새 방송으로 다시 시작됩니다/);
+  assert.match(notices[0], /새 방송 링크/);
+
+  await acceptUpgradeOffer(fhdSingleOption, () => true);
   assert.equal(calls.length, 1);
   assert.match(calls[0].path, /\/sessions\/s-1\/broadcast-mode$/);
   assert.equal(calls[0].method, "PUT");
@@ -1031,6 +1056,38 @@ test("화질 올리기 제안은 보이고, 수락은 지금 대상 그대로 FH
   assert.equal(applied.at(-1)?.width.ideal, 1920);
   // 응답에 제안이 없으면 숨긴다.
   assert.equal(els.upgradeOffer.hidden, true);
+});
+
+test("플랫폼을 더하는 선택지는 보류를 늘리고 새 플랫폼 설정 카드를 연다", async () => {
+  const calls = [];
+  const { acceptUpgradeOffer, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      calls.push({ path: String(url), method: options?.method, body: options?.body });
+      return jsonResponse({ session_id: "s-1", targets: [], upgrade_offer: { units_from: 1, selected: "720p_multi", options: [] } });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", targets: [{ provider: "youtube", stream: { broadcast_phase: "live" } }] };
+  els.resolutionSelect = createElement();
+  els.cameraSelect = createElement();
+  els.platformYoutube.checked = true;
+  els.platformChzzk.checked = false;
+  let asked = false;
+  await acceptUpgradeOffer(
+    { mode: "720p_multi", resolution: "720p", targets: ["youtube", "chzzk"], units_to: 2, needs_settings: true, restarts_broadcast: false },
+    () => {
+      asked = true;
+      return true;
+    },
+  );
+  // 재시작이 아니면 안내 없이, 전환이 아니라 선택만 알린다.
+  assert.equal(asked, false);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/sessions\/s-1\/upgrade-offer\/select$/);
+  assert.deepEqual(JSON.parse(calls[0].body), { mode: "720p_multi" });
+  assert.equal(els.platformChzzk.checked, true);
+  assert.equal(els.chzzkSettings.hidden, false);
+  assert.match(els.upgradeOfferText.textContent, /송출 방식 변경/);
 });
 
 test("화질 올리기 거절은 upgrade-offer를 DELETE한다", async () => {

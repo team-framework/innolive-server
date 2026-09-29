@@ -100,6 +100,9 @@ func (p *ChzzkProvider) applySetting(ctx context.Context, accessToken string, op
 	if options.CategoryType != "" && options.CategoryID != "" {
 		body["categoryType"] = options.CategoryType
 		body["categoryId"] = options.CategoryID
+	} else if options.ClearCategory {
+		// 문서: categoryId를 ""로 보내면 카테고리 설정이 제거된다.
+		body["categoryId"] = ""
 	}
 	if options.Tags != nil {
 		body["tags"] = options.Tags

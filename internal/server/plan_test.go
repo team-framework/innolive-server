@@ -16,8 +16,33 @@ import (
 )
 
 type memoryPlanStore struct {
-	mu    sync.Mutex
-	plans map[uuid.UUID]plan.Plan
+	mu     sync.Mutex
+	plans  map[uuid.UUID]plan.Plan
+	emails map[uuid.UUID]string
+}
+
+func (s *memoryPlanStore) SearchUsers(_ context.Context, query string, limit int) ([]auth.AdminUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []auth.AdminUser
+	for id, value := range s.plans {
+		if strings.Contains(s.emails[id], query) && len(result) < limit {
+			result = append(result, auth.AdminUser{ID: id, Email: s.emails[id], Plan: value})
+		}
+	}
+	return result, nil
+}
+
+func (s *memoryPlanStore) UsersByID(_ context.Context, ids []uuid.UUID) ([]auth.AdminUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []auth.AdminUser
+	for _, id := range ids {
+		if value, ok := s.plans[id]; ok {
+			result = append(result, auth.AdminUser{ID: id, Email: s.emails[id], Plan: value})
+		}
+	}
+	return result, nil
 }
 
 func (s *memoryPlanStore) UserPlan(_ context.Context, userID uuid.UUID) (plan.Plan, error) {

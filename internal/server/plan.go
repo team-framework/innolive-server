@@ -16,6 +16,9 @@ import (
 type PlanStore interface {
 	UserPlan(ctx context.Context, userID uuid.UUID) (plan.Plan, error)
 	SetUserPlan(ctx context.Context, userID uuid.UUID, value plan.Plan) error
+	// 아래 둘은 관리자 화면용이다(#373).
+	SearchUsers(ctx context.Context, query string, limit int) ([]auth.AdminUser, error)
+	UsersByID(ctx context.Context, ids []uuid.UUID) ([]auth.AdminUser, error)
 }
 
 // SetPlanStore는 플랜 조회·관리자 지정 라우트를 붙이고, 세션 생성이 소유자
@@ -35,6 +38,7 @@ func (s *Server) SetPlanStore(store PlanStore) {
 	}
 	s.mux.Handle("GET /users/me/plan", s.requireUser(http.HandlerFunc(s.handleGetMyPlan)))
 	s.mux.Handle("PUT /admin/users/{user_id}/plan", s.requireUser(http.HandlerFunc(s.handlePutUserPlan)))
+	s.registerAdminRoutes()
 	if s.sessions != nil {
 		s.sessions.SetPlanResolver(store.UserPlan)
 	}

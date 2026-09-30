@@ -108,9 +108,9 @@ func New(
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.Handle("GET /webrtc/config", requireUser(http.HandlerFunc(s.handleWebRTCConfig)))
 	mux.Handle("POST /sessions", requireUser(http.HandlerFunc(s.handleCreateSession)))
-	// Every session-scoped route goes through requireSessionOwner so ownership
-	// is enforced structurally. The list endpoint is intentionally removed: it
-	// leaked every active session_id, defeating the token model.
+	// 세션 범위 경로는 모두 requireSessionOwner를 거쳐 소유권을 구조적으로 강제한다.
+	// 목록 엔드포인트는 일부러 없앴다 — 활성 session_id를 전부 흘려 토큰 모델을
+	// 무력화했다.
 	mux.Handle("GET /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleGetSession)))
 	mux.Handle("DELETE /sessions/{session_id}", requireUser(s.requireSessionOwner(s.handleDeleteSession)))
 	mux.Handle("POST /sessions/{session_id}/stream/prepare", requireUser(s.requireSessionOwner(s.handlePrepareStream)))
@@ -229,8 +229,8 @@ func (s *Server) WaitGuestCleanup(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
-// SetUserOperationGate serializes user-scoped HTTP work with account
-// withdrawal. It is called during startup after auth services are assembled.
+// SetUserOperationGate는 사용자 범위 HTTP 작업을 계정 탈퇴와 직렬화한다. 인증
+// 서비스를 조립한 뒤 기동 단계에서 부른다.
 func (s *Server) SetUserOperationGate(gate interface {
 	BeginOperation(uuid.UUID) (func(), bool)
 }) {
@@ -264,9 +264,9 @@ func (s *Server) withUserOperation(next http.Handler) http.Handler {
 	})
 }
 
-// ClearUserReferenceData removes the authenticated user's worker whitelist and
-// persisted face metadata. The worker cleanup runs first so an error does not
-// report success while its in-memory embeddings remain active.
+// ClearUserReferenceData는 인증된 사용자의 워커 화이트리스트와 저장된 얼굴
+// 메타데이터를 지운다. 워커 정리를 먼저 해, 메모리 임베딩이 살아 있는데 성공으로
+// 알리는 일이 없게 한다.
 func (s *Server) ClearUserReferenceData(ctx context.Context, userID uuid.UUID) error {
 	clientID := session.AIClientIDForUser(userID)
 	if s.ai != nil {
@@ -351,7 +351,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("Unknown streaming provider.", map[string]any{"provider": request.Provider}))
 		return
 	}
-	// Metadata selection also works with clients that must negotiate with older servers.
+	// 메타데이터 선택은 이전 서버와 협상해야 하는 클라이언트에서도 동작한다.
 	if request.AIProcessing == "" {
 		request.AIProcessing = request.Metadata["ai_processing"]
 	}
@@ -418,7 +418,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, internalError())
 		return
 	}
-	// owner_token is returned exactly once, here, and never re-exposed.
+	// owner_token은 여기서 정확히 한 번만 돌려주고 다시 노출하지 않는다.
 	writeJSON(w, http.StatusCreated, struct {
 		session.Response
 		OwnerToken string `json:"owner_token"`
@@ -834,9 +834,9 @@ func (s *Server) disposeBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 	}
 }
 
-// disposeBroadcastWithContext waits for provider cleanup during withdrawal.
-// Transient failures require a retry. Revoked credentials prevent remote
-// cleanup but do not block deletion of the user's local account data.
+// disposeBroadcastWithContext는 탈퇴 중 플랫폼 정리를 기다린다. 일시적 실패는
+// 재시도가 필요하다. 권한이 취소돼 원격 정리를 못 해도 사용자의 로컬 계정 데이터
+// 삭제는 막지 않는다.
 func (s *Server) disposeBroadcastWithContext(parent context.Context, userID uuid.UUID, broadcast session.PlatformBroadcast, phase session.BroadcastPhase) error {
 	if phase == session.BroadcastPhaseIdle || broadcast.BroadcastID == "" {
 		return nil
@@ -864,11 +864,10 @@ func (s *Server) disposeBroadcastWithContext(parent context.Context, userID uuid
 	}
 	if err != nil {
 		if errors.Is(err, auth.ErrStreamingReconnectRequired) {
-			// The provider can no longer authenticate the resource with the
-			// stored refresh token. There is no authorized delete call left for
-			// this server to make, so withdrawal may continue and remove the
-			// local account data. Transient provider failures remain errors so a
-			// later withdrawal can retry the external cleanup.
+			// 저장한 refresh token으로 더는 이 리소스를 인증할 수 없다. 이 서버가 부를
+			// 수 있는 인가된 삭제 호출이 남아 있지 않으므로, 탈퇴는 계속해 로컬 계정
+			// 데이터를 지운다. 일시적 플랫폼 실패는 오류로 남겨 이후 탈퇴가 외부 정리를
+			// 다시 시도하게 한다.
 			s.logger.Warn("broadcast cleanup skipped because provider token is invalid",
 				"user_id", userID, "provider", providerName, "broadcast_id", broadcast.BroadcastID,
 				"phase", phase)
@@ -1213,8 +1212,8 @@ func (s *Server) handleResumeStream(w http.ResponseWriter, r *http.Request, live
 	writeJSON(w, http.StatusOK, liveSession.TargetStream(string(providerName)))
 }
 
-// handlePatchAnonymization controls AI privacy processing without changing the
-// WebRTC session or an active RTMP/YouTube broadcast.
+// handlePatchAnonymization은 WebRTC 세션이나 진행 중인 RTMP/유튜브 방송을 바꾸지
+// 않고 AI 프라이버시 처리를 켜고 끈다.
 func (s *Server) handlePatchAnonymization(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Enabled *bool `json:"enabled"`
@@ -1261,25 +1260,23 @@ func recoverMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-// reqWriter carries the per-request id so writeError can echo it in the body
-// without threading it through every handler signature.
+// reqWriter는 요청 id를 들고 다녀, 모든 핸들러 시그니처에 넘기지 않고도
+// writeError가 본문에 되돌려 줄 수 있게 한다.
 type reqWriter struct {
 	http.ResponseWriter
 	requestID string
 }
 
-// Unwrap exposes the writer underneath so http.ResponseController reaches the
-// real connection. Without it every SetReadDeadline/SetWriteDeadline call on a
-// wrapped writer fails with ErrNotSupported — silently, because those calls are
-// best-effort — which disabled the guest SSE write timeout and the reference
-// upload's body read deadline.
+// Unwrap은 아래 writer를 드러내 http.ResponseController가 실제 연결에 닿게 한다.
+// 없으면 감싼 writer의 SetReadDeadline/SetWriteDeadline 호출이 모두 ErrNotSupported로
+// 실패한다 — 최선 노력 호출이라 조용히 — 그래서 게스트 SSE 쓰기 타임아웃과 기준
+// 얼굴 업로드의 본문 읽기 기한이 꺼져 있었다.
 func (w *reqWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// Hijack forwards to the underlying writer so WebSocket upgrades (the /signaling
-// endpoint) keep working — gorilla/websocket requires http.Hijacker, which the
-// wrapper would otherwise hide.
+// Hijack은 아래 writer로 넘겨 WebSocket 업그레이드(/signaling)가 동작하게 한다.
+// gorilla/websocket은 http.Hijacker를 요구하는데 감싸면 가려진다.
 func (w *reqWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hj, ok := w.ResponseWriter.(http.Hijacker)
 	if !ok {
@@ -1288,15 +1285,15 @@ func (w *reqWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hj.Hijack()
 }
 
-// Flush forwards to the underlying writer when it supports streaming responses.
+// Flush는 아래 writer가 스트리밍 응답을 지원하면 넘긴다.
 func (w *reqWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// requestIDMiddleware propagates an X-Request-ID (client-supplied or generated),
-// sets it on the response header, and wraps the writer so errors include it.
+// requestIDMiddleware는 X-Request-ID(클라이언트가 준 값 또는 생성값)를 전파해 응답
+// 헤더에 싣고, 오류에 포함되도록 writer를 감싼다.
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))

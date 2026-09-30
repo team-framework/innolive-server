@@ -28,9 +28,9 @@ const (
 	rtpReorderMaxDelay       = 250 * time.Millisecond
 	rtpIngressQueueSize      = 1024
 	maxTrackedMissingPackets = 2048
-	// keyframeRequestMinInterval throttles keyframe requests: one lost gap
-	// usually spans several samples, and the publisher needs time to encode
-	// and deliver the keyframe before another request is worth sending.
+	// keyframeRequestMinInterval은 키프레임 요청을 조절한다. 잃은 구간 하나가 대개
+	// 여러 샘플에 걸치고, 송신자가 키프레임을 인코딩해 보낼 시간이 있어야 다음
+	// 요청이 의미 있다.
 	keyframeRequestMinInterval = 500 * time.Millisecond
 )
 
@@ -38,16 +38,14 @@ type frame struct {
 	data      []byte
 	timestamp uint32
 	stageAt   time.Time
-	// decodeInAt is when this frame finished being written to the FFmpeg
-	// decoder's stdin, splitting the merged "decode" stage into the wait
-	// before decode (compressed queue + stdin backpressure) and the FFmpeg
-	// round-trip itself. Set only on the VP8 decode path; the zero value
-	// elsewhere carries no observation (#177).
+	// decodeInAt은 이 프레임을 FFmpeg 디코더 stdin에 다 쓴 시각이다. 합쳐져 있던
+	// "decode" 단계를 디코드 전 대기(압축 큐 + stdin 역압)와 FFmpeg 왕복 자체로
+	// 나눈다. VP8 디코드 경로에서만 설정하고, 다른 곳의 0 값은 관측이 없다는
+	// 뜻이다(#177).
 	decodeInAt time.Time
-	// ingestAt is when this frame was first assembled from RTP, preserved
-	// unchanged through decode/blur/encode so the egress can measure the full
-	// ingest→pipe-write latency (the blur pipeline delay that A/V sync must
-	// compensate for). Unlike stageAt it is never reset.
+	// ingestAt은 이 프레임을 RTP에서 처음 조립한 시각이다. 디코드·블러·인코드 내내
+	// 그대로 두어 egress가 수신→파이프 쓰기 전체 지연(A/V 싱크가 보상해야 하는
+	// 블러 파이프라인 지연)을 잰다. stageAt과 달리 다시 설정하지 않는다.
 	ingestAt time.Time
 	// privacyGeneration은 이 프레임을 처리한 익명화 설정 세대다. 처리 도중
 	// 설정이 바뀌었으면 0이다. egress는 0이거나 무효화된 세대의 프레임을
@@ -201,8 +199,8 @@ type rtpFrameAssembler struct {
 	builder  *samplebuilder.SampleBuilder
 	registry *metrics.Registry
 	mode     string
-	// requestKeyframe asks the publisher for a fresh keyframe. It may be nil
-	// when no feedback channel is available.
+	// requestKeyframe은 송신자에게 새 키프레임을 요청한다. 피드백 채널이 없으면
+	// nil일 수 있다.
 	requestKeyframe     func()
 	keyframeMinInterval time.Duration
 	lastKeyframeAt      time.Time
@@ -281,11 +279,10 @@ func (a *rtpFrameAssembler) pop() []frame {
 	return frames
 }
 
-// requestKeyframeAfterLoss asks the publisher for a keyframe once the sample
-// builder has given up on a gap. Dropped packets mean the decoder just lost its
-// reference, and every frame the pipeline re-encodes from that point carries
-// the damage — including its own keyframes. Without this the picture stays
-// broken until the publisher happens to send a keyframe on its own.
+// requestKeyframeAfterLoss는 샘플 빌더가 구간을 포기하면 송신자에게 키프레임을
+// 요청한다. 패킷을 버렸다는 것은 디코더가 방금 참조를 잃었다는 뜻이고, 그때부터
+// 파이프라인이 다시 인코딩하는 모든 프레임(자체 키프레임 포함)에 손상이 실린다.
+// 요청하지 않으면 송신자가 스스로 키프레임을 보낼 때까지 화면이 깨진 채로 남는다.
 func (a *rtpFrameAssembler) requestKeyframeAfterLoss() {
 	if a.requestKeyframe == nil {
 		return
@@ -394,9 +391,9 @@ func runTranscodedTrack(
 		_ = remote.SetReadDeadline(time.Now())
 		reader.Wait()
 		queueWorkers.Wait()
-		// Join the FFmpeg-owning goroutines so RunTrack's return means the
-		// process pair has actually finished its (graceful) teardown — the
-		// session manager's capacity accounting relies on this.
+		// FFmpeg를 쥔 고루틴을 기다려, RunTrack이 돌아왔다는 것이 프로세스 쌍의
+		// (정상) 정리가 실제로 끝났다는 뜻이 되게 한다 — 세션 매니저의 용량 회계가
+		// 이에 기댄다.
 		streamWorkers.Wait()
 		subtractRemainingQueue(decoded, registry)
 	}()

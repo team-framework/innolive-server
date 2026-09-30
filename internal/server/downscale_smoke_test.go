@@ -9,7 +9,7 @@ import (
 )
 
 func TestDownscaleForAISmoke(t *testing.T) {
-	// large 2000x1500 image -> must come back <=640 long edge
+	// 큰 2000x1500 이미지 -> 긴 변 640 이하로 돌아와야 한다
 	big := image.NewRGBA(image.Rect(0, 0, 2000, 1500))
 	var buf bytes.Buffer
 	_ = jpeg.Encode(&buf, big, nil)
@@ -27,7 +27,7 @@ func TestDownscaleForAISmoke(t *testing.T) {
 	if cfg.Width != 640 {
 		t.Fatalf("expected long edge 640, got %dx%d", cfg.Width, cfg.Height)
 	}
-	// small image passes through unchanged
+	// 작은 이미지는 그대로 통과한다
 	small := image.NewRGBA(image.Rect(0, 0, 300, 200))
 	var sbuf bytes.Buffer
 	_ = jpeg.Encode(&sbuf, small, nil)
@@ -42,8 +42,8 @@ func TestDownscaleForAISmoke(t *testing.T) {
 }
 
 func TestDownscaleForAIRejectsOversized(t *testing.T) {
-	// A highly compressible 8192x8192 image has a tiny file size but would
-	// decode into hundreds of MiB. Its header must be rejected before decode.
+	// 압축률이 높은 8192x8192 이미지는 파일은 작지만 디코드하면 수백 MiB가 된다.
+	// 디코드 전에 헤더에서 거절해야 한다.
 	oversized := image.NewRGBA(image.Rect(0, 0, 8192, 8192))
 	var buf bytes.Buffer
 	_ = jpeg.Encode(&buf, oversized, nil)
@@ -51,7 +51,7 @@ func TestDownscaleForAIRejectsOversized(t *testing.T) {
 		t.Fatalf("expected errImageTooLarge, got %v", err)
 	}
 
-	// A wide-but-thin image under the pixel budget still exceeds the edge limit.
+	// 픽셀 예산 안인 넓고 얇은 이미지도 변 길이 한계는 넘는다.
 	wide := image.NewRGBA(image.Rect(0, 0, 6000, 200))
 	var wbuf bytes.Buffer
 	_ = jpeg.Encode(&wbuf, wide, nil)

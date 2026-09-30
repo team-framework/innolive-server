@@ -119,12 +119,12 @@ func TestStartSignupThrottlesResendAndPerEmailCap(t *testing.T) {
 	if _, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9"); err != nil {
 		t.Fatalf("first signup = %v", err)
 	}
-	// A second request within the resend interval must be rejected before bcrypt/SMTP.
+	// 재발송 간격 안의 두 번째 요청은 bcrypt/SMTP 전에 거절돼야 한다.
 	if _, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9"); !errors.Is(err, ErrEmailSignupThrottled) {
 		t.Fatalf("resend signup = %v, want throttled", err)
 	}
 
-	// Clearing the resend flag lets the per-email window cap be reached instead.
+	// 재발송 표시를 지워 이번에는 이메일별 창 상한에 닿게 한다.
 	for i := 0; i < emailSignupEmailLimitDefault+2; i++ {
 		_ = pending.ClearKey(context.Background(), signupResendKey("victim@example.com"))
 		_, err := service.StartSignup(context.Background(), "victim@example.com", "correct horse battery staple", "203.0.113.9")
@@ -154,7 +154,7 @@ func TestCompleteSignupCapsCodeAttemptsThenRejectsCorrectCode(t *testing.T) {
 			t.Fatalf("wrong attempt %d = %v", i, err)
 		}
 	}
-	// The cap is now exceeded: even the correct code must be rejected and the pending user discarded.
+	// 이제 상한을 넘었다. 맞는 코드도 거절되고 가입 대기 사용자는 버려져야 한다.
 	if err := service.CompleteSignup(context.Background(), token, sender.code); !errors.Is(err, ErrEmailVerificationInvalid) {
 		t.Fatalf("correct code after cap = %v, want invalid", err)
 	}
@@ -181,12 +181,12 @@ func TestLoginHardLimitAndFailureReset(t *testing.T) {
 			t.Fatalf("failed login %d = %v", i, err)
 		}
 	}
-	// After the hard cap the correct password is refused with a throttle error.
+	// 하드 상한을 넘으면 맞는 비밀번호도 제한 오류로 거절된다.
 	if _, err := service.Login(context.Background(), "member@example.com", "correct horse battery staple", ClientInfo{}); !errors.Is(err, ErrEmailLoginThrottled) {
 		t.Fatalf("login at cap = %v, want throttled", err)
 	}
 
-	// A successful login below the cap clears the counter.
+	// 상한 아래에서 로그인에 성공하면 카운터가 초기화된다.
 	_ = pending.ClearKey(context.Background(), loginFailureKey("member@example.com"))
 	if _, err := service.Login(context.Background(), "member@example.com", "correct horse battery staple", ClientInfo{}); err != nil {
 		t.Fatalf("successful login = %v", err)

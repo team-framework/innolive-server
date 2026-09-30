@@ -94,8 +94,8 @@ func TestRealProcessorToleratesTransientTimeoutsThenLatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The first `threshold` consecutive timeouts are tolerated: a blackout frame
-	// is served, but the session is NOT latched and the AI keeps being retried.
+	// 처음 `threshold`번의 연속 타임아웃은 허용한다. 블랙아웃 프레임을 내보내지만
+	// 세션을 잠그지 않고 AI를 계속 다시 시도한다.
 	for i := 1; i <= threshold; i++ {
 		frame, err := processor.Process(context.Background(), []byte("frame"), int64(i), 64, 48)
 		if err != nil {
@@ -112,7 +112,7 @@ func TestRealProcessorToleratesTransientTimeoutsThenLatches(t *testing.T) {
 		}
 	}
 
-	// Exceeding the threshold latches permanently.
+	// 한계를 넘으면 영구히 잠근다.
 	if _, err := processor.Process(context.Background(), []byte("frame"), 99, 64, 48); err != nil {
 		t.Fatalf("Process() at latch error = %v", err)
 	}
@@ -123,7 +123,7 @@ func TestRealProcessorToleratesTransientTimeoutsThenLatches(t *testing.T) {
 		t.Fatalf("AI calls at latch = %d, want %d", calls, threshold+1)
 	}
 
-	// Once latched, the AI is no longer called.
+	// 잠근 뒤에는 AI를 더 부르지 않는다.
 	if _, err := processor.Process(context.Background(), []byte("frame"), 100, 64, 48); err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +138,8 @@ func TestRealProcessorNonTimeoutLatchesImmediatelyDespiteThreshold(t *testing.T)
 		calls++
 		return nil, errors.New("status=\"failed\"")
 	}}
-	// A generous threshold must not protect a non-timeout (definitive) failure:
-	// it latches on the very first one, as before.
+	// 한계를 넉넉히 줘도 타임아웃이 아닌(확정적) 실패는 보호하지 않는다.
+	// 이전처럼 첫 실패에서 바로 잠근다.
 	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 5)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestRealProcessorTimeoutStreakResetsOnSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Two timeouts (within threshold), then a success must reset the streak.
+	// 타임아웃 두 번(한계 안) 뒤 성공하면 연속 횟수를 초기화해야 한다.
 	for i := 1; i <= threshold; i++ {
 		if _, err := processor.Process(context.Background(), []byte("f"), int64(i), 64, 48); err != nil {
 			t.Fatalf("tolerated timeout %d error = %v", i, err)
@@ -185,7 +185,7 @@ func TestRealProcessorTimeoutStreakResetsOnSuccess(t *testing.T) {
 		t.Fatal("session latched despite a successful frame within the tolerated window")
 	}
 
-	// After the reset it must again tolerate `threshold` timeouts before latching.
+	// 초기화 뒤에는 다시 `threshold`번의 타임아웃을 허용한 다음에 잠가야 한다.
 	failing = true
 	for i := 0; i < threshold; i++ {
 		if _, err := processor.Process(context.Background(), []byte("f"), int64(10+i), 64, 48); err != nil {
@@ -240,10 +240,10 @@ func TestRealProcessorSelfHealsAfterAIRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Probe every frame so recovery is observable without waiting the interval.
+	// 프레임마다 시도해 주기를 기다리지 않고 회복을 관측한다.
 	processor.recoveryProbeInterval = 0
 
-	// First failure latches.
+	// 첫 실패에서 잠근다.
 	if _, err := processor.Process(context.Background(), []byte("f"), 1, 64, 48); err != nil {
 		t.Fatalf("Process() at latch = %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRealProcessorSelfHealsAfterAIRecovers(t *testing.T) {
 		t.Fatal("session did not latch after AI failure")
 	}
 
-	// While still failing, the session stays latched but keeps probing.
+	// 계속 실패하는 동안 세션은 잠긴 채로 시도를 이어 간다.
 	if _, err := processor.Process(context.Background(), []byte("f"), 2, 64, 48); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestRealProcessorSelfHealsAfterAIRecovers(t *testing.T) {
 		t.Fatal("session unlatched while AI still failing")
 	}
 
-	// AI recovers: the next probe must clear the latch and return real output.
+	// AI가 회복한다. 다음 시도에서 잠금을 풀고 실제 출력을 돌려줘야 한다.
 	failing = false
 	out, err := processor.Process(context.Background(), []byte("f"), 3, 64, 48)
 	if err != nil {
@@ -283,8 +283,8 @@ func TestRealProcessorLatchedProbeIntervalThrottlesAI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Keep the default 1s interval: frames arriving back-to-back after the latch
-	// must not each hit the AI.
+	// 기본 1초 주기를 그대로 둔다. 잠금 뒤 연달아 오는 프레임이 각각 AI를 부르면
+	// 안 된다.
 	if _, err := processor.Process(context.Background(), []byte("f"), 1, 64, 48); err != nil {
 		t.Fatal(err)
 	}

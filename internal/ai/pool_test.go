@@ -21,7 +21,7 @@ import (
 )
 
 func TestPoolNextCyclesRoundRobin(t *testing.T) {
-	// grpc.NewClient dials lazily, so unreachable targets are fine here.
+	// grpc.NewClient는 지연 연결이라 닿지 않는 대상도 여기서는 괜찮다.
 	pool, err := NewPool([]string{"a:1", "b:1", "c:1"}, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -45,9 +45,9 @@ func TestNewPoolRejectsEmptyTargetList(t *testing.T) {
 	}
 }
 
-// countingAIServer mimics the real worker's whitelist bookkeeping: every entry
-// id is minted by this worker alone, so two workers never agree on the id for
-// the same face, and an unknown id is rejected with NOT_FOUND.
+// countingAIServer는 실제 워커의 화이트리스트 기록을 흉내 낸다. 엔트리 id는 이
+// 워커만 발급하므로 두 워커가 같은 얼굴에 같은 id를 쓰는 일이 없고, 모르는 id는
+// NOT_FOUND로 거절한다.
 type countingAIServer struct {
 	aiv1.UnimplementedAiProcessorServer
 	name           string
@@ -141,8 +141,8 @@ func TestPoolAddWhitelistBroadcastsToEveryWorker(t *testing.T) {
 	if result.Response.GetStatusMessage() != "success" {
 		t.Fatalf("status = %q, want success", result.Response.GetStatusMessage())
 	}
-	// Each worker mints its own id; keeping only one of them is what made
-	// per-face deletion fail against a multi-worker pool.
+	// 워커마다 자기 id를 발급한다. 하나만 남기면 다중 워커 풀에서 얼굴별 삭제가
+	// 실패했다.
 	want := map[string]string{"worker-a": "a-entry-1", "worker-b": "b-entry-1"}
 	if !maps.Equal(result.EntryIDs, want) {
 		t.Fatalf("EntryIDs = %v, want %v", result.EntryIDs, want)
@@ -185,8 +185,8 @@ func TestPoolDeleteWhitelistEntriesTreatsUnknownEntryAsDeleted(t *testing.T) {
 	server := &countingAIServer{name: "a"}
 	pool := &Pool{clients: []*Client{newBufconnClient(t, "worker-a", server)}}
 
-	// A worker that restarted no longer knows the entry; the face is gone either
-	// way, so the caller must not be blocked from dropping its own record.
+	// 재시작한 워커는 엔트리를 모른다. 어느 쪽이든 얼굴은 없으므로 호출자가 자기
+	// 기록을 지우는 것을 막으면 안 된다.
 	err := pool.DeleteWhitelistEntries(context.Background(), "session", map[string]string{"worker-a": "a-entry-1"})
 	if err != nil {
 		t.Fatalf("DeleteWhitelistEntries() on an unknown entry = %v, want nil", err)
@@ -207,8 +207,8 @@ func TestPoolClearWhitelistDeletesEveryEntryTheWorkerHolds(t *testing.T) {
 		}
 	}
 
-	// The worker rejects an empty entry id, so clearing must enumerate the ids
-	// the worker itself reports rather than send one "delete all" request.
+	// 워커는 빈 엔트리 id를 거절하므로, 비우기는 "전부 지우기" 요청 하나가 아니라
+	// 워커가 알려 준 id를 하나씩 지워야 한다.
 	if err := pool.ClearWhitelist(ctx, "session"); err != nil {
 		t.Fatalf("ClearWhitelist() error = %v", err)
 	}
@@ -242,9 +242,9 @@ func TestPoolAddWhitelistReportsFailedTarget(t *testing.T) {
 	}
 }
 
-// A broadcast that fails on one worker must not leave the face registered on the
-// workers that accepted it. Only the broadcast ever sees those entry ids, so a
-// caller told "registration failed" has no way to remove them later (#205).
+// 한 워커에서 실패한 브로드캐스트는 받아들인 워커에 얼굴을 남기면 안 된다. 그
+// 엔트리 id는 브로드캐스트만 보므로, "등록 실패"를 받은 호출자는 나중에 지울
+// 방법이 없다(#205).
 func TestPoolAddWhitelistRollsBackPartialRegistration(t *testing.T) {
 	healthy := &countingAIServer{name: "a"}
 	unreachable, err := New("127.0.0.1:1", 200*time.Millisecond)
@@ -265,9 +265,8 @@ func TestPoolAddWhitelistRollsBackPartialRegistration(t *testing.T) {
 	}
 }
 
-// The rollback must survive a cancelled request context: a client that
-// disconnects mid-upload cancels it, and that cancellation is itself one of the
-// ways the broadcast fails.
+// 롤백은 취소된 요청 컨텍스트에서도 살아야 한다. 업로드 도중 끊긴 클라이언트가
+// 컨텍스트를 취소하고, 그 취소가 브로드캐스트가 실패하는 경로 중 하나다.
 func TestPoolRollbackPartialAddIgnoresCancelledContext(t *testing.T) {
 	healthy := &countingAIServer{name: "a"}
 	pool := &Pool{clients: []*Client{newBufconnClient(t, "worker-a", healthy)}}
@@ -329,17 +328,17 @@ func TestRetryWhitelistDeleteStopsOnCancelledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("want context error")
 	}
-	// First attempt runs, then the cancelled context stops the backoff wait.
+	// 첫 시도는 돌고, 취소된 컨텍스트가 backoff 대기를 멈춘다.
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1 before the cancelled backoff", calls)
 	}
 }
 
-// A partial AddWhitelist whose compensating delete first fails must still clear
-// the entry once the worker recovers, thanks to the rollback retry (#215).
+// 보상 삭제가 처음에 실패한 부분 AddWhitelist도 워커가 회복하면 롤백 재시도 덕에
+// 엔트리를 지워야 한다(#215).
 func TestPoolRollbackPartialAddRetriesTransientDeleteFailure(t *testing.T) {
 	healthy := &countingAIServer{name: "a"}
-	healthy.deleteFailsLeft.Store(2) // first two rollback deletes fail, third succeeds
+	healthy.deleteFailsLeft.Store(2) // 롤백 삭제 두 번은 실패하고 세 번째에 성공
 	unreachable, err := New("127.0.0.1:1", 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)

@@ -26,7 +26,7 @@ type chzzkStub struct {
 	bodies     []map[string]any
 	settingErr int // PATCH lives/setting에 돌려줄 봉투 code (0이면 200)
 	keyErr     int
-	setting    string // GET lives/setting content
+	setting    string // GET lives/setting 응답의 content
 	streamKey  string
 }
 

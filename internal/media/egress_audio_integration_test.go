@@ -1,13 +1,13 @@
 //go:build egress_harness
 
-// Integration tests for the audio egress path with real ffmpeg/ffprobe. Unlike
-// the harness (which measures), these assert output and fail on regressions.
-// They cover behaviour not exercised by egress_audio_harness_test.go:
+// 실제 ffmpeg/ffprobe로 오디오 egress 경로를 검증하는 통합 테스트다. 측정용인
+// 하네스와 달리 출력을 단언하고 회귀가 있으면 실패한다. egress_audio_harness_test.go가
+// 다루지 않는 동작을 본다.
 //
-//   - -itsoffset (EGRESS_AUDIO_OFFSET_MS) actually delays the audio stream
+//   - -itsoffset(EGRESS_AUDIO_OFFSET_MS)이 실제로 오디오 스트림을 늦춘다
 //
-//   - an attached-but-silent AudioPipe (no mic packets) falls back to the
-//     generated-silence path instead of stalling on an empty Ogg input
+//   - 붙어 있지만 조용한 AudioPipe(마이크 패킷 없음)는 빈 Ogg 입력에서 멈추지 않고
+//     생성한 무음 경로로 넘어간다
 //
 //     go test -tags egress_harness -run TestEgressAudioIntegration ./internal/media -v -timeout 5m
 package media
@@ -25,8 +25,8 @@ import (
 	"github.com/pion/rtp"
 )
 
-// feedEgress drives an egress with synthetic video (and, when audioFeed is
-// non-nil, real Opus audio) for the given duration, then tears it down.
+// feedEgress는 주어진 시간 동안 합성 영상(audioFeed가 있으면 실제 Opus 오디오도)으로
+// egress를 돌린 뒤 정리한다.
 func feedEgress(t *testing.T, egress *RTMPEgress, seconds int, audioFeed func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,9 +78,8 @@ func parseStartTime(t *testing.T, ffprobeOut string) float64 {
 	return seconds
 }
 
-// TestEgressAudioIntegrationItsOffset asserts a positive EGRESS_AUDIO_OFFSET_MS
-// delays the audio relative to the video in the muxed FLV, which is how A/V
-// sync is corrected for the blur-delayed video.
+// TestEgressAudioIntegrationItsOffset: 양수 EGRESS_AUDIO_OFFSET_MS는 먹싱한 FLV에서
+// 오디오를 영상보다 늦춘다. 블러로 늦어진 영상에 A/V 싱크를 맞추는 방법이다.
 func TestEgressAudioIntegrationItsOffset(t *testing.T) {
 	requireTool(t, "ffmpeg")
 	requireTool(t, "ffprobe")
@@ -112,8 +111,8 @@ func TestEgressAudioIntegrationItsOffset(t *testing.T) {
 
 	videoStart := parseStartTime(t, ffprobeField(t, out, "v", "stream=start_time"))
 	audioStart := parseStartTime(t, ffprobeField(t, out, "a", "stream=start_time"))
-	// With a 400 ms audio offset the audio timeline must start clearly later
-	// than the (wallclock, ~0) video timeline. Loose bound absorbs pipeline jitter.
+	// 오디오 오프셋이 400ms면 오디오 타임라인은 (벽시계, 약 0인) 영상 타임라인보다
+	// 분명히 늦게 시작해야 한다. 느슨한 한계로 파이프라인 지터를 흡수한다.
 	if audioStart-videoStart < 0.15 {
 		t.Fatalf("audio not delayed by offset: video_start=%.3f audio_start=%.3f (want audio-video >= 0.15s for %v offset)",
 			videoStart, audioStart, offset)
@@ -121,16 +120,16 @@ func TestEgressAudioIntegrationItsOffset(t *testing.T) {
 	t.Logf("itsoffset %v → video_start=%.3f audio_start=%.3f", offset, videoStart, audioStart)
 }
 
-// TestEgressAudioIntegrationNoMicFallsBackToSilence proves an attached AudioPipe
-// that never receives a microphone packet does not stall the egress on an empty
-// Ogg input: PacketSeen() stays false so start() picks the silence path, and the
-// FLV still carries both an h264 video and an aac audio stream.
+// TestEgressAudioIntegrationNoMicFallsBackToSilence: 마이크 패킷을 한 번도 받지 않은
+// AudioPipe가 붙어 있어도 egress가 빈 Ogg 입력에서 멈추지 않는다. PacketSeen()이
+// false로 남아 start()가 무음 경로를 고르고, FLV에는 h264 영상과 aac 오디오가
+// 모두 실린다.
 func TestEgressAudioIntegrationNoMicFallsBackToSilence(t *testing.T) {
 	requireTool(t, "ffmpeg")
 	requireTool(t, "ffprobe")
 	out := t.TempDir() + "/out.flv"
 
-	// Pipe present and running, but no WritePacket is ever called.
+	// 파이프는 있고 돌지만 WritePacket은 한 번도 부르지 않는다.
 	pipe := NewAudioPipe(testLogger(), metrics.New(), 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -6,17 +6,15 @@ import (
 	"time"
 )
 
-// egressLatencyWindow is how often the tracker summarises collected samples.
+// egressLatencyWindow는 추적기가 모은 표본을 요약하는 주기다.
 const egressLatencyWindow = 10 * time.Second
 
-// latencyTracker summarises ingest→egress-write frame latency into periodic
-// p50/p95/max log lines. It is Phase 4-1 measurement scaffolding used to size
-// the A/V sync offset: the video path is delayed by the blur round-trip while
-// audio passes through, so this delay is roughly how far ahead the audio runs.
+// latencyTracker는 수신→egress 쓰기 프레임 지연을 주기적인 p50/p95/max 로그 줄로
+// 요약한다. A/V 싱크 오프셋을 정하려는 4-1단계 측정 도구다. 영상 경로는 블러 왕복만큼
+// 늦고 오디오는 그대로 지나가므로, 이 지연이 대략 오디오가 앞서는 정도다.
 //
-// It is only touched from the egress writer goroutine, so it needs no
-// synchronisation. A per-window index lets a reader see whether the delay is a
-// stable offset or drifts over time.
+// egress 쓰기 고루틴에서만 건드리므로 동기화가 필요 없다. 창 번호를 붙여 지연이
+// 고정 오프셋인지 시간에 따라 흐르는지 읽는 쪽이 볼 수 있다.
 type latencyTracker struct {
 	logger      *slog.Logger
 	enabled     bool
@@ -29,9 +27,8 @@ func newLatencyTracker(logger *slog.Logger, enabled bool) *latencyTracker {
 	return &latencyTracker{logger: logger, enabled: enabled}
 }
 
-// observe records one delivered frame's ingest→write latency and flushes a
-// summary once a window elapses. Frames without an ingest timestamp (e.g. test
-// harness frames) are ignored.
+// observe는 전달한 프레임 하나의 수신→쓰기 지연을 기록하고, 창이 지나면 요약을
+// 내보낸다. 수신 타임스탬프가 없는 프레임(예: 테스트 하네스 프레임)은 무시한다.
 func (l *latencyTracker) observe(ingestAt time.Time) {
 	if !l.enabled || ingestAt.IsZero() {
 		return

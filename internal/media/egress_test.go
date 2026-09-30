@@ -69,7 +69,7 @@ func TestVideoBitrateFor(t *testing.T) {
 		{640, 360, egressVideoBitrate},
 		{1280, 720, egressVideoBitrate},
 		{1920, 1080, egressVideoBitrateFHD},
-		{1080, 1920, egressVideoBitrateFHD}, // portrait FHD
+		{1080, 1920, egressVideoBitrateFHD}, // 세로 FHD
 	}
 	for _, c := range cases {
 		if got := e.videoBitrateFor(c.width, c.height); got != c.want {
@@ -210,7 +210,7 @@ func TestCancellationSlateCacheKeepsOnlyCurrentEgressProfile(t *testing.T) {
 }
 
 func TestMeasureFPS(t *testing.T) {
-	// framesAt builds n frames whose RTP timestamps advance by step (90kHz clock).
+	// framesAt은 RTP 타임스탬프가 step씩(90kHz 클록) 늘어나는 프레임 n개를 만든다.
 	framesAt := func(n int, start uint32, step uint32) []frame {
 		out := make([]frame, n)
 		ts := start
@@ -301,7 +301,7 @@ func TestMaskStreamKey(t *testing.T) {
 		"rtmp://a.rtmp.youtube.com/live2/ss0y-abcd-1234": "rtmp://a.rtmp.youtube.com/live2/****",
 		"rtmp://host/live/key":                           "rtmp://host/live/****",
 		"rtmp://host/live/":                              "rtmp://host/live/", // trailing slash: nothing to mask
-		"out.flv":                                        "out.flv",           // no slash
+		"out.flv":                                        "out.flv",           // 슬래시 없음
 	}
 	for in, want := range tests {
 		if got := maskStreamKey(in); got != want {
@@ -350,8 +350,8 @@ func TestValidFrame(t *testing.T) {
 
 func TestEnqueueDropsOldest(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "out.flv")
-	// Fill past capacity; queue holds egressQueueSize (5). Oldest must be dropped.
-	total := egressQueueSize + 2 // 7 frames -> expect the last 5 retained
+	// 용량을 넘게 채운다. 큐는 egressQueueSize(5)개를 담고 가장 오래된 것을 버려야 한다.
+	total := egressQueueSize + 2 // 7프레임 -> 마지막 5개가 남아야 한다
 	for i := 1; i <= total; i++ {
 		e.Enqueue(frame{timestamp: uint32(i)})
 	}
@@ -371,7 +371,7 @@ func TestEnqueueDropsOldest(t *testing.T) {
 			t.Fatalf("drained %v, want %v (drop-oldest violated)", got, want)
 		}
 	}
-	// Two frames were dropped; the metric must reflect it.
+	// 두 프레임을 버렸으므로 메트릭이 이를 반영해야 한다.
 	if n := egressDroppedCount(e.metrics); n != 2 {
 		t.Fatalf("egress dropped metric = %d, want 2", n)
 	}
@@ -381,7 +381,7 @@ func TestHandleStderrLineParsesProgress(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secretkey")
 	e.handleStderrLine("dup_frames=7")
 	e.handleStderrLine("drop_frames=4")
-	e.handleStderrLine("fps=30.0") // progress but not a counter we store
+	e.handleStderrLine("fps=30.0") // 진행 표시지만 저장하는 카운터가 아니다
 	out := prometheusDump(e.metrics)
 	if !strings.Contains(out, "innolive_egress_dup_frames 7") {
 		t.Errorf("dup_frames gauge not set:\n%s", out)
@@ -1220,13 +1220,13 @@ func TestRunStopsOnCancelBeforeSpawn(t *testing.T) {
 	}
 }
 
-// egressDroppedCount extracts the innolive_egress_frames_dropped_total counter.
+// egressDroppedCount는 innolive_egress_frames_dropped_total 카운터를 읽는다.
 func egressDroppedCount(r *metrics.Registry) int {
 	out := prometheusDump(r)
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "innolive_egress_frames_dropped_total ") {
 			var n int
-			// value is the trailing field
+			// 값은 마지막 필드다
 			fields := strings.Fields(line)
 			if len(fields) == 2 {
 				for _, c := range fields[1] {

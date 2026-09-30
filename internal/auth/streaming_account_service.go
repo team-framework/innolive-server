@@ -82,9 +82,8 @@ func NewStreamingAccountService(store StreamingAccountStore, users UserStatusChe
 	}, nil
 }
 
-// SetUserOperationGate prevents a new connect/disconnect request from racing
-// with account withdrawal. The withdrawal cleanup method intentionally bypasses
-// this gate because it already owns the user's exclusive slot.
+// SetUserOperationGate는 새 연결·해제 요청이 계정 탈퇴와 경쟁하지 않게 한다. 탈퇴
+// 정리 메서드는 이미 사용자의 독점 자리를 쥐고 있어 이 게이트를 일부러 건너뛴다.
 func (s *StreamingAccountService) SetUserOperationGate(gate interface {
 	BeginOperation(uuid.UUID) (func(), bool)
 }) {
@@ -139,9 +138,9 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 	return err
 }
 
-// CleanupForWithdrawal performs platform cleanup while retaining the database
-// rows. The final account transaction removes those rows only after every
-// external operation succeeds, so a failed request can safely retry.
+// CleanupForWithdrawal은 DB 행을 남긴 채 플랫폼 정리를 한다. 마지막 계정
+// 트랜잭션이 모든 외부 작업이 성공한 뒤에만 그 행을 지우므로, 실패한 요청을
+// 안전하게 다시 시도할 수 있다.
 func (s *StreamingAccountService) CleanupForWithdrawal(ctx context.Context, userID uuid.UUID) error {
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return err
@@ -157,20 +156,18 @@ func (s *StreamingAccountService) CleanupForWithdrawal(ctx context.Context, user
 				if !errors.Is(err, ErrStreamingReconnectRequired) {
 					return fmt.Errorf("cleanup %s resources: %w", account.Provider, err)
 				}
-				// A revoked refresh token cannot authenticate the provider's
-				// delete call. Keep account deletion retryable by treating this
-				// external state as permanently inaccessible and clearing the
-				// server-side resource marker below. Token revocation remains
-				// idempotent and is attempted with the same refresh token.
+				// 취소된 refresh token으로는 플랫폼 삭제 호출을 인증할 수 없다. 이 외부
+				// 상태를 영구히 접근 불가로 보고 아래에서 서버 쪽 리소스 표시를 지워 계정
+				// 삭제를 재시도 가능하게 둔다. 토큰 취소는 멱등이라 같은 refresh token으로
+				// 시도한다.
 				if s.logger != nil {
 					s.logger.Warn("streaming resource cleanup skipped because provider token is invalid",
 						"provider", account.Provider, "user_id", userID, "stream_id", *account.StreamID)
 				}
 			}
-			// Persist that no further provider cleanup is possible before
-			// revoking the token. If a later withdrawal stage fails, the next
-			// attempt can skip the already-deleted (or inaccessible) resource
-			// and use the refresh token only for idempotent revocation.
+			// 토큰을 취소하기 전에 더는 플랫폼 정리를 할 수 없다는 사실을 저장한다. 이후
+			// 탈퇴 단계가 실패해도 다음 시도는 이미 지워진(또는 접근할 수 없는) 리소스를
+			// 건너뛰고 refresh token은 멱등인 취소에만 쓴다.
 			if account.StreamID != nil && *account.StreamID != "" {
 				if err := s.store.UpdateStreamInfo(ctx, account.ID, StreamInfo{}); err != nil {
 					return fmt.Errorf("clear %s stream resource metadata: %w", account.Provider, err)

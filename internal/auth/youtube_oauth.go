@@ -335,8 +335,8 @@ func NewYouTubeConnectService(oauth YouTubeAuthorizer, store StreamingAccountSto
 	}, nil
 }
 
-// SetUserOperationGate prevents an OAuth callback from persisting a new
-// streaming account after withdrawal cleanup has started.
+// SetUserOperationGate는 탈퇴 정리가 시작된 뒤 OAuth 콜백이 새 송출 계정을 저장하지
+// 못하게 한다.
 func (s *YouTubeConnectService) SetUserOperationGate(gate interface {
 	BeginOperation(uuid.UUID) (func(), bool)
 }) {
@@ -345,8 +345,8 @@ func (s *YouTubeConnectService) SetUserOperationGate(gate interface {
 	}
 }
 
-// SetTokenCacheInvalidator wires the access-token provider's cache eviction so
-// a re-connect discards the previous channel's cached access token.
+// SetTokenCacheInvalidator는 access token 공급자의 캐시 삭제를 연결해, 재연결이 이전
+// 채널의 캐시된 access token을 버리게 한다.
 func (s *YouTubeConnectService) SetTokenCacheInvalidator(clear func(uuid.UUID)) {
 	if s != nil {
 		s.clearTokenCache = clear
@@ -522,10 +522,9 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	return state.token, nil
 }
 
-// ClearCachedToken forgets the in-memory access token after account deletion.
-// The refresh token is removed by the withdrawal transaction; dropping this
-// cache as well prevents a removed account from retaining a usable provider
-// credential in the running process.
+// ClearCachedToken은 계정 삭제 뒤 메모리의 access token을 잊는다. refresh token은
+// 탈퇴 트랜잭션이 지우고, 이 캐시까지 버려 삭제된 계정이 실행 중인 프로세스에
+// 쓸 수 있는 플랫폼 자격 정보를 남기지 않게 한다.
 func (p *YouTubeAccessTokenProvider) ClearCachedToken(userID uuid.UUID) {
 	if p == nil || userID == uuid.Nil {
 		return

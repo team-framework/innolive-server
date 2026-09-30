@@ -31,8 +31,8 @@ func newAuthManager(t *testing.T) *Manager {
 	return manager
 }
 
-// TestSessionIDAndTokenAreRandom verifies session IDs and owner tokens are
-// unique and unordered across many creations (no counter/sequence leakage).
+// TestSessionIDAndTokenAreRandom: 여러 번 만들어도 세션 id와 소유자 토큰이 겹치지
+// 않고 순서가 없다(카운터·순번 유출 없음).
 func TestSessionIDAndTokenAreRandom(t *testing.T) {
 	manager := newTestManager(t, 0)
 	const n = 100
@@ -103,10 +103,10 @@ func TestVerifyOwner(t *testing.T) {
 	}
 }
 
-// TestVerifyOwnerAuthDisabled confirms that with auth disabled the token is not
-// checked but the session must still exist.
+// TestVerifyOwnerAuthDisabled: 인증을 끄면 토큰은 확인하지 않지만 세션은 있어야
+// 한다.
 func TestVerifyOwnerAuthDisabled(t *testing.T) {
-	manager := newTestManager(t, 0) // RequireSessionAuth defaults to false
+	manager := newTestManager(t, 0) // RequireSessionAuth 기본값은 false
 	s, _, err := manager.Create(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -119,10 +119,9 @@ func TestVerifyOwnerAuthDisabled(t *testing.T) {
 	}
 }
 
-// TestHijackOfferRejectedBeforeTouchingPeerConnection reproduces the issue: an
-// attacker who knows a victim's session_id but not its owner token sends an
-// offer. CreateAnswer must reject it before mutating the PeerConnection, so the
-// victim's media path is untouched.
+// TestHijackOfferRejectedBeforeTouchingPeerConnection은 이슈를 재현한다. 피해자의
+// session_id는 알지만 소유자 토큰은 모르는 공격자가 offer를 보낸다. CreateAnswer는
+// PeerConnection을 바꾸기 전에 거절해 피해자의 미디어 경로를 건드리지 않아야 한다.
 func TestHijackOfferRejectedBeforeTouchingPeerConnection(t *testing.T) {
 	manager := newAuthManager(t)
 	victim, _, err := manager.Create(nil)
@@ -134,8 +133,8 @@ func TestHijackOfferRejectedBeforeTouchingPeerConnection(t *testing.T) {
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("CreateAnswer with wrong token = %v, want ErrUnauthorized", err)
 	}
-	// The rejected offer must not have advanced the PeerConnection nor started
-	// any track pipeline.
+	// 거절한 offer는 PeerConnection을 진행시키거나 트랙 파이프라인을 시작하지 않아야
+	// 한다.
 	if victim.PC.RemoteDescription() != nil {
 		t.Fatal("attacker offer was applied to the victim PeerConnection")
 	}
@@ -147,8 +146,8 @@ func TestHijackOfferRejectedBeforeTouchingPeerConnection(t *testing.T) {
 		t.Fatal("attacker offer started or replaced a track on the victim session")
 	}
 
-	// ICE candidates from the attacker are rejected the same way and never
-	// queued onto the victim's PeerConnection.
+	// 공격자의 ICE candidate도 같은 방식으로 거절되고 피해자의 PeerConnection에 쌓이지
+	// 않는다.
 	_, err = manager.AddICECandidate(victim.ID, "stolen-or-guessed", webrtc.ICECandidateInit{Candidate: "candidate:0 1 udp 1 1.2.3.4 5 typ host"})
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("AddICECandidate with wrong token = %v, want ErrUnauthorized", err)

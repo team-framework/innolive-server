@@ -589,7 +589,7 @@ func TestYouTubeAccessTokenProviderClearsDeletedUserCache(t *testing.T) {
 	}
 
 	provider.ClearCachedToken(userID)
-	// The other user's cache remains valid and does not trigger a refresh.
+	// 다른 사용자의 캐시는 유효하게 남아 갱신을 일으키지 않는다.
 	if token, err := provider.AccessToken(context.Background(), otherUserID); err != nil || token != "fresh-at-1" {
 		t.Fatalf("other user token after clear = %q, %v", token, err)
 	}

@@ -55,9 +55,9 @@ var (
 	ErrEmailDeliveryUnavailable = errors.New("email delivery is unavailable")
 )
 
-// EmailAuthConfig mirrors the short-lived signup contract used by Clash:
-// a verification code lasts five minutes and its pending user lasts 30 minutes.
-// Email authentication is disabled when AUTH_EMAIL_SMTP_HOST is empty.
+// EmailAuthConfig는 Clash가 쓰는 짧은 수명의 가입 계약을 따른다. 인증 코드는 5분,
+// 가입 대기 사용자는 30분 유지된다. AUTH_EMAIL_SMTP_HOST가 비어 있으면 이메일
+// 인증을 끈다.
 type EmailAuthConfig struct {
 	SMTPHost       string
 	SMTPPort       int
@@ -270,8 +270,8 @@ func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, 
 	return writer.Close()
 }
 
-// PendingEmailSignup is stored in Redis, never in PostgreSQL. The credentials
-// are bcrypt hashes and the key expires automatically after PendingUserTTL.
+// PendingEmailSignup은 PostgreSQL이 아니라 Redis에만 저장한다. 자격 정보는 bcrypt
+// 해시이고, 키는 PendingUserTTL이 지나면 자동으로 만료된다.
 type PendingEmailSignup struct {
 	Email        string `json:"email"`
 	PasswordHash string `json:"password_hash"`
@@ -359,18 +359,16 @@ func (s *redisPendingEmailSignupStore) Close() error { return s.client.Close() }
 func pendingUserKey(token string) string      { return pendingUserKeyPrefix + token }
 func verificationCodeKey(token string) string { return verificationCodeKeyPrefix + token }
 
-// EmailRateLimiter provides the atomic counters that gate email authentication
-// against abuse. Keys carry a TTL so limits reset without a background sweeper.
+// EmailRateLimiter는 이메일 인증 남용을 막는 원자적 카운터를 제공한다. 키에 TTL을
+// 둬서 별도 정리 작업 없이 한도가 초기화된다.
 type EmailRateLimiter interface {
-	// Increment adds one to a counter, sets its TTL on first creation, and
-	// returns the new value.
+	// Increment는 카운터를 1 올리고, 처음 만들 때 TTL을 걸며, 새 값을 돌려준다.
 	Increment(ctx context.Context, key string, ttl time.Duration) (int64, error)
-	// Count returns the current counter value, or zero when the key is absent.
+	// Count는 현재 카운터 값이다. 키가 없으면 0이다.
 	Count(ctx context.Context, key string) (int64, error)
-	// SetIfAbsent creates the key with the given TTL only when it does not
-	// already exist, reporting whether it was created.
+	// SetIfAbsent는 키가 없을 때만 주어진 TTL로 만들고, 만들었는지를 돌려준다.
 	SetIfAbsent(ctx context.Context, key string, ttl time.Duration) (bool, error)
-	// ClearKey removes a counter.
+	// ClearKey는 카운터를 지운다.
 	ClearKey(ctx context.Context, key string) error
 }
 
@@ -495,8 +493,8 @@ func NewEmailAuthService(pending PendingEmailSignupStore, accounts EmailAccountS
 	return &EmailAuthService{pending: pending, accounts: accounts, sender: sender, tokens: tokens, limiter: limiter, config: config, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-// StartSignup matches Clash's signup contract: generate a signup token, cache
-// the pending user for 30 minutes and code for 5 minutes, then send the code.
+// StartSignup은 Clash의 가입 계약을 따른다. 가입 토큰을 만들고, 대기 사용자는 30분,
+// 코드는 5분 캐시한 뒤 코드를 보낸다.
 func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, clientIP string) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
@@ -512,8 +510,8 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, cli
 	if alreadyRegistered {
 		return "", ErrEmailAlreadyRegistered
 	}
-	// Throttle before the expensive bcrypt hashing and SMTP delivery so a caller
-	// cannot bomb an address or burn CPU with repeated requests.
+	// 비싼 bcrypt 해시와 SMTP 발송 전에 제한을 걸어, 반복 요청으로 한 주소에 폭탄을
+	// 보내거나 CPU를 태우지 못하게 한다.
 	if err := s.throttleSignup(ctx, clientIP, email); err != nil {
 		return "", err
 	}
@@ -544,8 +542,8 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, cli
 	return token, nil
 }
 
-// throttleSignup applies the resend interval and the per-email and per-IP
-// request caps. Non-fresh resend or an exceeded cap returns ErrEmailSignupThrottled.
+// throttleSignup은 재발송 간격과 이메일별·IP별 요청 상한을 적용한다. 재발송이
+// 너무 이르거나 상한을 넘으면 ErrEmailSignupThrottled다.
 func (s *EmailAuthService) throttleSignup(ctx context.Context, clientIP, email string) error {
 	fresh, err := s.limiter.SetIfAbsent(ctx, signupResendKey(email), s.config.SignupResendInterval)
 	if err != nil {
@@ -573,15 +571,14 @@ func (s *EmailAuthService) throttleSignup(ctx context.Context, clientIP, email s
 	return nil
 }
 
-// CompleteSignup validates but does not issue a token. Like Clash, the client
-// signs in through the separate sign-in endpoint after email verification.
+// CompleteSignup은 검증만 하고 토큰을 발급하지 않는다. Clash처럼 클라이언트는 이메일
+// 인증 뒤 별도 로그인 엔드포인트로 로그인한다.
 func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code string) error {
 	if !validEmailVerificationCode(code) || strings.TrimSpace(signupToken) == "" {
 		return ErrEmailVerificationInvalid
 	}
-	// Count the attempt before comparing so a caller cannot brute-force the
-	// six-digit code. Once the cap is exceeded the code is discarded, so even a
-	// correct guess afterwards fails.
+	// 비교하기 전에 시도를 세어 여섯 자리 코드를 무차별 대입하지 못하게 한다. 상한을
+	// 넘으면 코드를 버리므로 그 뒤에는 맞게 추측해도 실패한다.
 	attempts, err := s.limiter.Increment(ctx, codeAttemptKey(signupToken), s.config.CodeTTL)
 	if err != nil {
 		return err
@@ -597,8 +594,8 @@ func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code
 	if bcrypt.CompareHashAndPassword([]byte(codeHash), []byte(code)) != nil {
 		return ErrEmailVerificationInvalid
 	}
-	// GETDEL is atomic: exactly one concurrent request can continue after a
-	// correct code. We deliberately consume it before the PostgreSQL write.
+	// GETDEL은 원자적이라 맞는 코드 뒤에 진행할 수 있는 동시 요청은 정확히 하나다.
+	// PostgreSQL 쓰기 전에 일부러 먼저 소비한다.
 	if _, err := s.pending.ConsumeVerificationCode(ctx, signupToken); err != nil {
 		return err
 	}
@@ -626,8 +623,8 @@ func (s *EmailAuthService) Login(ctx context.Context, email, password string, cl
 	if failures >= int64(s.config.LoginMaxFailures) {
 		return TokenPair{}, ErrEmailLoginThrottled
 	}
-	// Progressive delay grows with recent failures so brute forcing a password
-	// becomes slower with every miss, without locking the account outright.
+	// 최근 실패가 늘수록 지연을 키워, 계정을 잠그지 않으면서도 비밀번호 무차별 대입을
+	// 틀릴 때마다 느리게 만든다.
 	if delay := loginFailureDelay(failures, s.config.LoginFailureDelay); delay > 0 {
 		select {
 		case <-time.After(delay):

@@ -14,41 +14,37 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Pool holds one client per AI worker target and assigns sessions to
-// workers round-robin. With MPS (or software resource caps) each worker
-// process owns a bounded GPU share, so spreading sessions across workers is
-// what turns that isolation into per-stream isolation.
+// Pool은 AI 워커 대상마다 클라이언트를 하나씩 두고 세션을 라운드로빈으로
+// 배정한다. MPS(또는 소프트웨어 자원 상한)로 워커 프로세스마다 GPU 몫이 정해져
+// 있으므로, 세션을 워커에 나눠야 그 격리가 스트림별 격리가 된다.
 type Pool struct {
 	clients []*Client
 	next    atomic.Uint64
 	logger  *slog.Logger
 }
 
-// SetLogger wires a logger so best-effort paths (like whitelist rollback) can
-// report a failure that survives every retry. A nil logger is valid and silent.
+// SetLogger는 로거를 붙인다. 화이트리스트 롤백처럼 최선 노력 경로가 재시도를 다
+// 한 실패를 남길 수 있게 한다. nil 로거도 유효하며 아무것도 남기지 않는다.
 func (p *Pool) SetLogger(logger *slog.Logger) {
 	if p != nil {
 		p.logger = logger
 	}
 }
 
-// RetryWhitelistDelete is the exported form of retryWhitelistDelete, so callers
-// outside this package (a handler rolling back its own registrations) apply the
-// same retry policy to a compensating whitelist delete.
+// RetryWhitelistDelete는 retryWhitelistDelete의 공개 형태다. 이 패키지 밖의
+// 호출자(자기 등록을 되돌리는 핸들러)도 보상 삭제에 같은 재시도 정책을 쓰게 한다.
 func RetryWhitelistDelete(ctx context.Context, del func(context.Context) error) error {
 	return retryWhitelistDelete(ctx, del)
 }
 
-// whitelistDeleteAttempts is how many times a compensating whitelist delete is
-// tried before giving up. A worker that is briefly down or wedged usually
-// recovers within these, so a stale entry is not left behind for a transient
-// failure.
+// whitelistDeleteAttempts는 보상 화이트리스트 삭제를 포기하기 전까지 시도하는
+// 횟수다. 잠깐 내려갔거나 멈춘 워커는 대개 이 안에 회복하므로, 일시적 실패로
+// 오래된 엔트리가 남지 않는다.
 const whitelistDeleteAttempts = 3
 
-// retryWhitelistDelete runs a compensating whitelist delete a few times with a
-// short growing backoff, stopping on the first success. It exists because a
-// rollback that fails silently leaves exactly the stale entry the rollback was
-// meant to remove. A cancelled context ends the retries early.
+// retryWhitelistDelete는 보상 화이트리스트 삭제를 조금씩 늘어나는 간격으로 몇 번
+// 시도하고 처음 성공하면 멈춘다. 조용히 실패한 롤백은 그 롤백이 지우려던 바로 그
+// 엔트리를 남기기 때문에 있다. 컨텍스트가 취소되면 일찍 멈춘다.
 func retryWhitelistDelete(ctx context.Context, del func(context.Context) error) error {
 	backoff := 100 * time.Millisecond
 	var err error
@@ -86,7 +82,7 @@ func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
 	return &Pool{clients: clients}, nil
 }
 
-// Next returns the client for the next session, cycling through targets.
+// Next는 다음 세션에 쓸 클라이언트를 대상들을 돌아가며 돌려준다.
 func (p *Pool) Next() *Client {
 	index := (p.next.Add(1) - 1) % uint64(len(p.clients))
 	return p.clients[index]
@@ -108,30 +104,27 @@ func (p *Pool) Close() error {
 	return errors.Join(errs...)
 }
 
-// WhitelistResult is the outcome of registering one reference face across the
-// pool: a representative worker response plus every worker's own entry id.
+// WhitelistResult는 기준 얼굴 하나를 풀 전체에 등록한 결과다. 대표 워커 응답과
+// 워커마다 발급한 엔트리 id를 담는다.
 type WhitelistResult struct {
 	Response *aiv1.WhitelistResponse
-	// EntryIDs maps a worker address to the entry id that worker minted for the
-	// face. Each worker generates its id independently (uuid4), so the ids for
-	// one face differ per worker and deleting it later means sending every
-	// worker its own id — see DeleteWhitelistEntries.
+	// EntryIDs는 워커 주소별로 그 워커가 이 얼굴에 발급한 엔트리 id다. 워커마다
+	// id를 따로 만들므로(uuid4) 같은 얼굴도 워커마다 id가 다르고, 나중에 지우려면
+	// 워커마다 자기 id를 보내야 한다 — DeleteWhitelistEntries 참고.
 	EntryIDs map[string]string
 }
 
-// partialAddRollbackTimeout bounds the compensating delete below. The request
-// context is often already cancelled when the broadcast fails, so the rollback
-// runs detached and needs a deadline of its own.
+// partialAddRollbackTimeout은 아래 보상 삭제의 한계다. 브로드캐스트가 실패할 때
+// 요청 컨텍스트는 이미 취소된 경우가 많아, 롤백은 분리해 돌리고 자기 기한을 둔다.
 const partialAddRollbackTimeout = 5 * time.Second
 
-// AddWhitelist registers a client's reference face on every AI worker (sessions
-// spread round-robin across targets, so the whitelist must exist on all of them).
+// AddWhitelist는 클라이언트의 기준 얼굴을 모든 AI 워커에 등록한다(세션이 대상에
+// 라운드로빈으로 퍼지므로 화이트리스트가 전부에 있어야 한다).
 //
-// An error means the face is registered nowhere: workers that did accept it are
-// rolled back here. Callers cannot do that themselves — the entry ids are minted
-// per worker and only this broadcast ever sees the ones from a partial success,
-// so returning an error while leaving those workers excluding the face from blur
-// would strand it permanently.
+// 오류가 나면 얼굴은 어디에도 등록되지 않은 상태다. 받아들인 워커는 여기서
+// 되돌린다. 호출자는 이를 할 수 없다 — 엔트리 id는 워커마다 발급되고 부분 성공의
+// id는 이 브로드캐스트만 본다. 오류를 돌려주면서 그 워커들이 얼굴을 계속 블러에서
+// 제외하게 두면 영영 남는다.
 func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) (*WhitelistResult, error) {
 	result, err := p.broadcast("add", func(c *Client) (*aiv1.WhitelistResponse, error) {
 		return c.AddWhitelist(ctx, sessionID, data)
@@ -145,9 +138,9 @@ func (p *Pool) AddWhitelist(ctx context.Context, sessionID string, data []byte) 
 	return result, nil
 }
 
-// rollbackPartialAdd removes the entries a failed AddWhitelist did manage to
-// register. Best-effort: the caller is already reporting the failure, so a
-// delete that also fails is only logged by the worker side and dropped here.
+// rollbackPartialAdd는 실패한 AddWhitelist가 그래도 등록해 버린 엔트리를 지운다.
+// 최선 노력이다 — 호출자가 이미 실패를 알리고 있으므로, 삭제마저 실패하면 워커
+// 쪽 로그에만 남고 여기서는 버린다.
 func (p *Pool) rollbackPartialAdd(ctx context.Context, sessionID string, entryIDs map[string]string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), partialAddRollbackTimeout)
 	defer cancel()
@@ -160,12 +153,11 @@ func (p *Pool) rollbackPartialAdd(ctx context.Context, sessionID string, entryID
 	}
 }
 
-// DeleteWhitelistEntries removes one registered face from every worker holding
-// it, addressing each worker with the entry id that worker itself minted
-// (entryIDs is the map from AddWhitelist). Workers absent from the map never
-// stored the face and are skipped; a worker that no longer knows the id (it
-// restarted, or the entry is already gone) counts as deleted, so a face never
-// becomes permanently undeletable.
+// DeleteWhitelistEntries는 등록한 얼굴 하나를 그 얼굴을 가진 모든 워커에서 지운다.
+// 워커마다 그 워커가 발급한 엔트리 id로 요청한다(entryIDs는 AddWhitelist의 맵).
+// 맵에 없는 워커는 얼굴을 저장한 적이 없어 건너뛴다. id를 더는 모르는 워커(재시작
+// 했거나 이미 지워진 엔트리)는 지운 것으로 쳐서, 얼굴이 영영 못 지우는 상태가 되지
+// 않게 한다.
 func (p *Pool) DeleteWhitelistEntries(ctx context.Context, sessionID string, entryIDs map[string]string) error {
 	return p.runOnWorkers("delete", func(c *Client) error {
 		entryID := entryIDs[c.Address()]
@@ -177,11 +169,10 @@ func (p *Pool) DeleteWhitelistEntries(ctx context.Context, sessionID string, ent
 	})
 }
 
-// ClearWhitelist removes every entry each worker currently holds for the
-// session. The entry ids come from the worker itself rather than from this
-// server's bookkeeping, so the worker whitelist ends up empty even if the two
-// have drifted apart. The workers reject an empty entry id, so there is no
-// single "delete all" call to use instead.
+// ClearWhitelist는 각 워커가 이 세션에 대해 지금 가진 엔트리를 모두 지운다. 엔트리
+// id는 이 서버의 기록이 아니라 워커에서 받아 오므로, 둘이 어긋났어도 워커
+// 화이트리스트는 비게 된다. 워커가 빈 엔트리 id를 거절해 "전부 지우기" 호출 하나로
+// 대신할 수 없다.
 func (p *Pool) ClearWhitelist(ctx context.Context, sessionID string) error {
 	return p.runOnWorkers("clear", func(c *Client) error {
 		snapshot, err := c.GetWhitelistStatus(ctx, sessionID)
@@ -199,8 +190,8 @@ func (p *Pool) ClearWhitelist(ctx context.Context, sessionID string) error {
 	})
 }
 
-// ignoreNotFound drops the error a worker returns for an entry or session it
-// does not have: the caller wanted it gone, and it is gone.
+// ignoreNotFound는 워커가 없는 엔트리·세션에 대해 돌려준 오류를 버린다. 호출자는
+// 그것이 없어지길 원했고, 없다.
 func ignoreNotFound(err error) error {
 	if status.Code(err) == codes.NotFound {
 		return nil
@@ -208,11 +199,10 @@ func ignoreNotFound(err error) error {
 	return err
 }
 
-// broadcast runs op on every worker concurrently. A partial failure is reported
-// naming the failed targets (the caller may retry — workers treat re-application
-// as idempotent), and a worker-side rejection ("failed" status) is surfaced
-// through the returned response. On a partial failure both the result and the
-// error are returned, so the caller can act on what did succeed.
+// broadcast는 op를 모든 워커에 동시에 실행한다. 부분 실패는 실패한 대상을 밝혀
+// 알리고(호출자가 재시도할 수 있다 — 워커는 다시 적용해도 멱등이다), 워커 쪽
+// 거절("failed" 상태)은 돌려주는 응답으로 드러낸다. 부분 실패면 결과와 오류를 함께
+// 돌려줘 호출자가 성공한 부분으로 처리할 수 있게 한다.
 func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse, error)) (*WhitelistResult, error) {
 	type outcome struct {
 		address  string
@@ -243,16 +233,14 @@ func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse,
 		}
 	}
 	if len(errs) > 0 {
-		// The partial result travels with the error: the entry ids from the
-		// workers that succeeded exist nowhere else, and AddWhitelist needs them
-		// to undo the partial registration.
+		// 부분 결과를 오류와 함께 넘긴다. 성공한 워커의 엔트리 id는 다른 어디에도
+		// 없고, AddWhitelist가 부분 등록을 되돌리려면 그것이 필요하다.
 		return result, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
 	}
 	return result, nil
 }
 
-// runOnWorkers runs op on every worker concurrently, joining failures with the
-// target that produced them.
+// runOnWorkers는 op를 모든 워커에 동시에 실행하고, 실패를 낸 대상과 함께 모은다.
 func (p *Pool) runOnWorkers(kind string, op func(*Client) error) error {
 	results := make(chan error, len(p.clients))
 	for _, client := range p.clients {

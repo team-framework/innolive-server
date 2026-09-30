@@ -14,10 +14,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestPostgresStreamingAccountUpsert verifies the PostgreSQL-specific pieces a
-// memory double cannot: the ON CONFLICT (user_id, provider) upsert path, the
-// unique index, and the row-locked refresh-token update. Set TEST_DATABASE_URL
-// to run it; each run uses an isolated, temporary schema.
+// TestPostgresStreamingAccountUpsert는 메모리 대역이 할 수 없는 PostgreSQL 고유 부분을
+// 검증한다. ON CONFLICT (user_id, provider) upsert 경로, 고유 인덱스, 행 잠금 refresh
+// token 갱신. TEST_DATABASE_URL을 주면 돌고, 매번 격리된 임시 스키마를 쓴다.
 func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
 	if databaseURL == "" {

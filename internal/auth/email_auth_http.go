@@ -13,8 +13,8 @@ const (
 	signupTokenCookieName   = "signup_token"
 )
 
-// handleEmailSignup follows Clash's /auth/sign-up contract. The signup token
-// is deliberately kept out of the JSON response and sent as an HttpOnly cookie.
+// handleEmailSignup은 Clash의 /auth/sign-up 계약을 따른다. 가입 토큰은 일부러 JSON
+// 응답에 넣지 않고 HttpOnly 쿠키로 보낸다.
 func (h *tokenHTTPHandler) handleEmailSignup(w http.ResponseWriter, r *http.Request) {
 	h.handleEmailSignupMode(w, r, false)
 }
@@ -73,8 +73,8 @@ func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.
 	h.writeJSON(w, http.StatusOK, map[string]string{"status": "verification_email_sent"})
 }
 
-// handleEmailSignupVerification follows Clash's /auth/verify-email contract:
-// it reads signup_token from the HttpOnly cookie and accepts only the code.
+// handleEmailSignupVerification은 Clash의 /auth/verify-email 계약을 따른다.
+// signup_token은 HttpOnly 쿠키에서 읽고 코드만 받는다.
 func (h *tokenHTTPHandler) handleEmailSignupVerification(w http.ResponseWriter, r *http.Request) {
 	h.handleEmailSignupVerificationMode(w, r, false)
 }

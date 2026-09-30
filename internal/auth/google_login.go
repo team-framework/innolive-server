@@ -17,9 +17,9 @@ import (
 
 var ErrInvalidGoogleIDToken = errors.New("invalid Google ID token")
 
-// GoogleOAuthConfig contains the backend audience shared by web and Android.
-// Android's own client ID identifies the signed application to Google, while
-// ID tokens sent to this server must have the web client ID as their audience.
+// GoogleOAuthConfig는 웹과 Android가 함께 쓰는 백엔드 audience를 담는다. Android의
+// 자체 client ID는 서명된 앱을 Google에 식별하고, 이 서버로 오는 ID token은 웹
+// client ID를 audience로 가져야 한다.
 type GoogleOAuthConfig struct {
 	WebClientID string
 }
@@ -39,8 +39,8 @@ func (c GoogleOAuthConfig) Enabled() bool {
 	return c.WebClientID != ""
 }
 
-// GoogleIdentity is the verified identity information that can be persisted.
-// The provider subject, rather than email, is the stable account identifier.
+// GoogleIdentity는 저장할 수 있는 검증된 신원 정보다. 이메일이 아니라 플랫폼
+// subject가 안정적인 계정 식별자다.
 type GoogleIdentity struct {
 	Subject       string
 	Email         string
@@ -132,9 +132,9 @@ func NewGormGoogleAccountResolver(db *gorm.DB) GoogleAccountResolver {
 	return &gormGoogleAccountResolver{db: db, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// ResolveGoogleIdentity finds the account by provider subject, never by email.
-// For a new subject, the unique provider/subject index makes concurrent first
-// logins converge on one OAuth account and one internal user.
+// ResolveGoogleIdentity는 이메일이 아니라 플랫폼 subject로 계정을 찾는다. 새
+// subject면 provider/subject 고유 인덱스 덕에 동시 첫 로그인이 OAuth 계정 하나와
+// 내부 사용자 하나로 모인다.
 func (s *gormGoogleAccountResolver) ResolveGoogleIdentity(ctx context.Context, identity GoogleIdentity) (googleLoginUser, error) {
 	if s == nil || s.db == nil {
 		return googleLoginUser{}, errors.New("Google account database is nil")
@@ -182,8 +182,8 @@ func (s *gormGoogleAccountResolver) ResolveGoogleIdentity(ctx context.Context, i
 			return nil
 		}
 
-		// A concurrent request created the account. Remove the unreferenced user
-		// inside this transaction, then use the account it won.
+		// 동시 요청이 계정을 만들었다. 이 트랜잭션 안에서 참조되지 않은 사용자를 지우고
+		// 이긴 쪽의 계정을 쓴다.
 		if err := tx.Delete(&user).Error; err != nil {
 			return err
 		}

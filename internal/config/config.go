@@ -277,12 +277,12 @@ func (c Config) Validate() error {
 		return errors.New("AI_FRAME_QUEUE_SIZE must be at least 1")
 	}
 	switch c.AIWireFormat {
-	case "", WireFormatJPEG, WireFormatRaw: // empty defaults to jpeg downstream
+	case "", WireFormatJPEG, WireFormatRaw: // 비면 뒤에서 jpeg로 본다
 	default:
 		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be jpeg or raw: %q", c.AIWireFormat)
 	}
 	switch c.EgressVideoEncoder {
-	case "", EgressVideoEncoderX264, EgressVideoEncoderNVENC: // empty defaults to x264 downstream
+	case "", EgressVideoEncoderX264, EgressVideoEncoderNVENC: // 비면 뒤에서 x264로 본다
 	default:
 		return fmt.Errorf("EGRESS_VIDEO_ENCODER must be x264 or nvenc: %q", c.EgressVideoEncoder)
 	}
@@ -312,7 +312,7 @@ func (c Config) Validate() error {
 		}
 	}
 	switch c.AIFailurePolicy {
-	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // empty defaults to blackout_latch downstream
+	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // 비면 뒤에서 blackout_latch로 본다
 	default:
 		return fmt.Errorf("AI_FAILURE_POLICY must be one of blackout_latch, freeze: %q", c.AIFailurePolicy)
 	}

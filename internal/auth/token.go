@@ -316,9 +316,8 @@ func (s *TokenService) ValidateAccessToken(raw string) (*AccessClaims, error) {
 	return claims, nil
 }
 
-// ValidateExpiredAccessToken verifies a token whose only time-based failure at
-// the current instant is expiration. It is only for reconciling an account
-// deletion after the user row and refresh sessions are already gone.
+// ValidateExpiredAccessToken은 지금 시각 기준으로 만료만 실패인 토큰을 검증한다.
+// 사용자 행과 refresh 세션이 이미 사라진 뒤 계정 삭제를 맞추는 데만 쓴다.
 func (s *TokenService) ValidateExpiredAccessToken(raw string) (*AccessClaims, error) {
 	currentClaims := &AccessClaims{}
 	_, currentErr := jwt.ParseWithClaims(

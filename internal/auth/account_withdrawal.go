@@ -32,10 +32,9 @@ const (
 	WithdrawalUserInactive
 )
 
-// WithdrawalCleanup contains the external and in-memory cleanup stages that
-// must succeed before the account rows are deleted. Each callback must
-// leave its database rows intact until all external work for that stage has
-// completed so a later request can retry it.
+// WithdrawalCleanup은 계정 행을 지우기 전에 성공해야 하는 외부·메모리 정리 단계를
+// 담는다. 각 콜백은 그 단계의 외부 작업이 다 끝날 때까지 DB 행을 남겨, 이후 요청이
+// 다시 시도할 수 있게 해야 한다.
 type WithdrawalCleanup struct {
 	CloseUserSessions           func(context.Context, uuid.UUID) error
 	DisconnectStreamingAccounts func(context.Context, uuid.UUID) error
@@ -102,10 +101,9 @@ func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID
 			return ErrUserInactive
 		}
 
-		// Remove every account-owned row in one transaction. Authentication rejects
-		// old access tokens because the user lookup below will no longer find a
-		// row, while provider subjects and email addresses become available for a
-		// future account.
+		// 계정이 가진 행을 한 트랜잭션에서 모두 지운다. 아래 사용자 조회가 더는 행을
+		// 찾지 못하므로 인증은 이전 access token을 거절하고, 플랫폼 subject와 이메일
+		// 주소는 이후 새 계정이 쓸 수 있게 된다.
 		for _, model := range []any{&EmailAccount{}, &OAuthAccount{}, &StreamingAccount{}, &RefreshSession{}} {
 			if err := tx.Where("user_id = ?", userID).Delete(model).Error; err != nil {
 				return err
@@ -120,9 +118,9 @@ func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID
 	})
 }
 
-// MarkDeleted closes the in-process operation gate after the database delete
-// commits. It prevents a request that passed active-user authentication just
-// before withdrawal from writing a new session or reference face afterwards.
+// MarkDeleted는 DB 삭제가 커밋된 뒤 프로세스 안 작업 게이트를 닫는다. 탈퇴 직전에
+// 활성 사용자 인증을 통과한 요청이 그 뒤에 새 세션이나 기준 얼굴을 쓰지 못하게
+// 한다.
 func (s *AccountWithdrawalService) MarkDeleted(userID uuid.UUID) {
 	if s == nil || s.gate == nil {
 		return
@@ -154,8 +152,8 @@ func NewAccountWithdrawalService(store WithdrawalAccountStore, cipher *ProviderT
 	}, nil
 }
 
-// SetCleanup wires the server-owned stages after all platform services and the
-// HTTP server have been assembled. It must be called before serving requests.
+// SetCleanup은 모든 플랫폼 서비스와 HTTP 서버를 조립한 뒤 서버가 가진 정리 단계를
+// 연결한다. 요청을 받기 전에 불러야 한다.
 func (s *AccountWithdrawalService) SetCleanup(cleanup WithdrawalCleanup) {
 	if s == nil {
 		return
@@ -163,8 +161,8 @@ func (s *AccountWithdrawalService) SetCleanup(cleanup WithdrawalCleanup) {
 	s.cleanup = cleanup
 }
 
-// BeginOperation admits a user-scoped operation. Server and auth services use
-// this method to close the race between withdrawal cleanup and new data writes.
+// BeginOperation은 사용자 범위 작업을 들인다. 서버와 인증 서비스가 탈퇴 정리와 새
+// 데이터 쓰기 사이의 경쟁을 막는 데 쓴다.
 func (s *AccountWithdrawalService) BeginOperation(userID uuid.UUID) (func(), bool) {
 	if s == nil || s.gate == nil {
 		return func() {}, true

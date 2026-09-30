@@ -150,9 +150,9 @@ func TestChzzkPrepareDoesNotRequireMadeForKids(t *testing.T) {
 	if chzzk.prepareCalls != 1 {
 		t.Fatalf("chzzk prepare calls = %d, want 1", chzzk.prepareCalls)
 	}
-	if chzzk.lastOptions.Title != "치지직 방송" || chzzk.lastOptions.CategoryType != "GAME" ||
-		chzzk.lastOptions.CategoryID != "GTA5" || len(chzzk.lastOptions.Tags) != 1 {
-		t.Fatalf("prepare options = %+v, want the stored chzzk settings", chzzk.lastOptions)
+	// 채널 전역 설정은 송출이 받아들여진 뒤에 적용한다 — 준비는 설정을 싣지 않는다(#361).
+	if chzzk.lastOptions.Title != "" || chzzk.lastOptions.CategoryID != "" || len(chzzk.lastOptions.Tags) != 0 {
+		t.Fatalf("prepare options = %+v, want no channel settings at prepare", chzzk.lastOptions)
 	}
 	if chzzk.lastOptions.MadeForKids != nil {
 		t.Fatalf("made_for_kids = %v, want unset on chzzk", *chzzk.lastOptions.MadeForKids)
@@ -190,18 +190,50 @@ func TestYouTubeMadeForKidsRejectionReleasesPreparation(t *testing.T) {
 	}
 }
 
-// 저장한 설정의 빈 카테고리만 지우기로 옮긴다. 저장한 적이 없으면 채널 카테고리를
-// 건드리지 않는다(#352).
-func TestChzzkPrepareOptionsClearOnlySavedEmptyCategory(t *testing.T) {
-	if chzzkPrepareOptionsFrom(session.ChzzkBroadcastSettings{}).ClearCategory {
-		t.Fatal("unsaved settings must not clear the channel category")
+// 순간 끊김은 재연결 뒤 다시 8초를 채우면 통과하고, 송출이 멈추면(재연결 예산
+// 소진 — 다른 도구가 같은 키로 방송 중) 거절이다(#361).
+func TestIngestWatch(t *testing.T) {
+	live := session.BroadcastPhaseLive
+	streaming := func(attempts int) session.StreamState {
+		return session.StreamState{Status: "streaming", ReconnectAttempts: attempts, BroadcastPhase: live}
 	}
-	saved := session.ChzzkBroadcastSettings{Title: "제목", UpdatedAt: time.Now()}
-	if !chzzkPrepareOptionsFrom(saved).ClearCategory {
-		t.Fatal("saved settings without a category must clear it")
+	start := time.Now()
+	watch := newIngestWatch(start)
+	if got := watch.observe(streaming(0), start.Add(3*time.Second)); got != ingestPending {
+		t.Fatalf("3s = %d, want pending", got)
 	}
-	saved.CategoryType, saved.CategoryID = "GAME", "LoL"
-	if chzzkPrepareOptionsFrom(saved).ClearCategory {
-		t.Fatal("a chosen category must not be cleared")
+	// 5초에 한 번 끊겼다 붙었다 — 안정 시계가 다시 시작한다.
+	if got := watch.observe(streaming(1), start.Add(5*time.Second)); got != ingestPending {
+		t.Fatalf("after a blip = %d, want pending", got)
+	}
+	if got := watch.observe(streaming(1), start.Add(12*time.Second)); got != ingestPending {
+		t.Fatalf("7s after the blip = %d, want pending", got)
+	}
+	if got := watch.observe(streaming(1), start.Add(13*time.Second)); got != ingestAccepted {
+		t.Fatalf("8s after the blip = %d, want accepted", got)
+	}
+
+	rejected := newIngestWatch(start)
+	if got := rejected.observe(session.StreamState{Status: "reconnecting", ReconnectAttempts: 2, BroadcastPhase: live}, start.Add(4*time.Second)); got != ingestPending {
+		t.Fatalf("reconnecting = %d, want pending", got)
+	}
+	if got := rejected.observe(session.StreamState{Status: "stopped", ReconnectAttempts: 3, BroadcastPhase: live}, start.Add(13*time.Second)); got != ingestRejected {
+		t.Fatalf("stopped = %d, want rejected", got)
+	}
+	if got := newIngestWatch(start).observe(session.StreamState{Status: "streaming", BroadcastPhase: session.BroadcastPhaseIdle}, start); got != ingestEnded {
+		t.Fatalf("ended = %d, want ended", got)
+	}
+}
+
+// 저장한 설정은 제목·카테고리·태그를 모두 싣고, 저장한 적 없는 빈 카테고리는 싣지
+// 않는다(채널 카테고리 보존, #352).
+func TestChzzkLiveUpdateFrom(t *testing.T) {
+	saved := session.ChzzkBroadcastSettings{Title: "치지직 방송", Tags: []string{"게임"}, UpdatedAt: time.Now()}
+	update := chzzkLiveUpdateFrom(saved)
+	if *update.Title != "치지직 방송" || !update.TagsSet || update.CategoryID == nil || *update.CategoryID != "" {
+		t.Fatalf("saved update = %+v, want title, tags and a cleared category", update)
+	}
+	if unsaved := chzzkLiveUpdateFrom(session.ChzzkBroadcastSettings{}); unsaved.CategoryID != nil || unsaved.CategoryType != nil {
+		t.Fatalf("unsaved update = %+v, must leave the channel category alone", unsaved)
 	}
 }

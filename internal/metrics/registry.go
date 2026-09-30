@@ -23,6 +23,7 @@ type Registry struct {
 	activeSessions      atomic.Int64
 	egressSlotsUsed     atomic.Int64
 	egressSlotsCapacity atomic.Int64
+	youtubeQuotaUsed    atomic.Int64
 	connections         atomic.Uint64
 	connectionFailure   atomic.Uint64
 	reconnects          atomic.Uint64
@@ -111,6 +112,10 @@ func (r *Registry) SetEgressSlots(used, capacity int) {
 	r.egressSlotsUsed.Store(int64(used))
 	r.egressSlotsCapacity.Store(int64(capacity))
 }
+
+// SetYouTubeQuotaUsed는 오늘(태평양 시간) 쓴 YouTube API 쿼터 추정치다(#361).
+// 프로세스가 센 하한값이라 재시작 뒤에는 콘솔 수치보다 작다.
+func (r *Registry) SetYouTubeQuotaUsed(units int) { r.youtubeQuotaUsed.Store(int64(units)) }
 
 // SetEgressUnitsByPlan은 플랜별 송출 유닛 점유다(#272). 스냅샷으로 통째 교체한다.
 func (r *Registry) SetEgressUnitsByPlan(units map[string]int) {
@@ -300,6 +305,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	// #272부터 자리는 유닛이다(720p 한 곳 1 · FHD 한 곳 2 · 720p 동시 2 · FHD 동시 3).
 	writeGauge(w, "innolive_egress_slots_used", "Egress units currently held by running broadcasts.", r.egressSlotsUsed.Load())
 	writeGauge(w, "innolive_egress_slots_capacity", "Configured egress unit limit (0 means unlimited).", r.egressSlotsCapacity.Load())
+	writeGauge(w, "innolive_youtube_quota_used_estimate", "YouTube API quota units this process used today (Pacific time; lower bound).", r.youtubeQuotaUsed.Load())
 	r.mu.RLock()
 	egressUnitsByPlan := make(map[string]int64, len(r.egressUnitsByPlan))
 	for plan, value := range r.egressUnitsByPlan {

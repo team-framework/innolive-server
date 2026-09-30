@@ -173,6 +173,34 @@ func TestGoLiveReportsNotReady(t *testing.T) {
 	}
 }
 
+// 이미 끝난 방송(autoStop)을 종료하면 redundantTransition — 목적이 달성된 상태라
+// 성공으로 본다. 다른 403은 그대로 실패다(#355).
+func TestEndLiveTreatsRedundantTransitionAsDone(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		reason  string
+		wantErr bool
+	}{
+		{"already complete", "redundantTransition", false},
+		{"forbidden", "forbidden", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &youtubeAPIStub{
+				transitionStatus: 403,
+				transitionBody:   `{"error":{"code":403,"message":"x","errors":[{"reason":"` + test.reason + `"}]}}`,
+			}
+			store := newMemoryStore()
+			userID := uuid.New()
+			connectedAccount(t, store, userID)
+			provider := testProviderWith(t, stub, store)
+			err := provider.EndLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("EndLive() error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 // TestStopDeletesBroadcast: autoStart를 끈 뒤로 라이브가 되지 못한 방송은
 // 아무도 정리해주지 않으므로 Stop이 지운다.
 func TestStopDeletesBroadcast(t *testing.T) {
@@ -376,5 +404,71 @@ func TestDefaultsStopsAtPageCap(t *testing.T) {
 	// 실제로 따라갔는지 확인한다.
 	if stub.broadcastLists != defaultsMaxPages {
 		t.Fatalf("liveBroadcasts.list calls = %d, want %d", stub.broadcastLists, defaultsMaxPages)
+	}
+}
+
+// BroadcastEnded는 lifeCycleStatus가 complete·revoked이거나 방송이 사라졌으면
+// 끝난 것으로 본다(#360).
+func TestBroadcastEndedReadsLifeCycle(t *testing.T) {
+	for _, test := range []struct {
+		body string
+		want bool
+	}{
+		{`{"items":[{"status":{"lifeCycleStatus":"live"}}]}`, false},
+		{`{"items":[{"status":{"lifeCycleStatus":"complete"}}]}`, true},
+		{`{"items":[]}`, true},
+	} {
+		stub := &youtubeAPIStub{broadcastListBody: test.body}
+		store := newMemoryStore()
+		userID := uuid.New()
+		connectedAccount(t, store, userID)
+		provider := testProviderWith(t, stub, store)
+		ended, err := provider.BroadcastEnded(context.Background(), userID, "yt-1")
+		if err != nil || ended != test.want {
+			t.Fatalf("%s: ended = %v err = %v, want %v", test.body, ended, err, test.want)
+		}
+		stub.mu.Lock()
+		query := stub.broadcastListQuery
+		stub.mu.Unlock()
+		if !strings.Contains(query, "id=yt-1") {
+			t.Fatalf("query = %q", query)
+		}
+	}
+}
+
+// ActiveBroadcasts는 채널의 active 방송 id를 broadcastStatus=active로 조회한다(#361).
+func TestActiveBroadcastsListsActiveIDs(t *testing.T) {
+	stub := &youtubeAPIStub{broadcastListBody: `{"items":[{"id":"obs-live"},{"id":"innolive-own"}]}`}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+
+	ids, err := provider.ActiveBroadcasts(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "obs-live" {
+		t.Fatalf("ids = %v", ids)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if !strings.Contains(stub.broadcastListQuery, "broadcastStatus=active") {
+		t.Fatalf("query = %q", stub.broadcastListQuery)
+	}
+}
+
+// 일일 쿼터 소진은 재시도로 풀리지 않으므로 별도 에러로 구분한다.
+func TestGoLiveReportsQuotaExceeded(t *testing.T) {
+	stub := &youtubeAPIStub{
+		transitionStatus: 403,
+		transitionBody:   `{"error":{"code":403,"message":"quota","errors":[{"reason":"quotaExceeded"}]}}`,
+	}
+	store := newMemoryStore()
+	userID := uuid.New()
+	connectedAccount(t, store, userID)
+	provider := testProviderWith(t, stub, store)
+	if err := provider.GoLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("GoLive() error = %v, want ErrQuotaExceeded", err)
 	}
 }

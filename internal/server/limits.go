@@ -118,6 +118,7 @@ func (s *Server) RunLimitEnforcer(ctx context.Context) {
 }
 
 func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
+	s.publishYouTubeQuota()
 	var upgrades []upgradeCandidate
 	defer func() { s.offerUpgrades(upgrades, now) }()
 	for _, live := range s.sessions.List() {
@@ -147,6 +148,8 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			}
 		}
 		if decision.stopReason == "" {
+			s.stopPlatformEndedTargets(ctx, live, targets, now)
+			s.noticeYouTubeQuotaLowFor(live, targets, now)
 			addable := s.addableProviders(ctx, live, targets)
 			if candidate, ok := upgradeCandidateFor(live, targets, addable, onAir, used); ok {
 				upgrades = append(upgrades, candidate)

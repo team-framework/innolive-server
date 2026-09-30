@@ -176,7 +176,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings };`,
     context,
     { filename: appPath },
   );
@@ -1054,6 +1054,42 @@ test("방송 중인 플랫폼 연결 해제가 409면 방송을 먼저 끝내라
   await disconnectChzzk();
   assert.equal(els.disconnectChzzkBtn.hidden, false);
   assert.match(els.chzzkDetail.textContent, /방송을 먼저 종료하세요/);
+});
+
+test("채널이 이미 라이브면 확인받고, 동의하면 allow_concurrent로 다시 준비한다", async () => {
+  const bodies = [];
+  const { prepareTargetWithConfirm, state } = await loadApp({
+    fetchImpl: async (url, options) => {
+      bodies.push(JSON.parse(options.body));
+      if (!JSON.parse(options.body).allow_concurrent) {
+        return jsonResponse({ error: { code: "channel_already_live", message: "live" } }, 409);
+      }
+      return jsonResponse({ session_id: "s-1" });
+    },
+  });
+  state.accessToken = "access-token";
+  await assert.rejects(prepareTargetWithConfirm("s-1", "youtube", () => false), /live/);
+  assert.equal(bodies.length, 1);
+  const asked = [];
+  const prepared = await prepareTargetWithConfirm("s-1", "youtube", (message) => {
+    asked.push(message);
+    return true;
+  });
+  assert.equal(prepared.session_id, "s-1");
+  assert.match(asked[0], /이미 다른 도구로 라이브/);
+  assert.deepEqual(bodies.at(-1), { provider: "youtube", allow_concurrent: true });
+});
+
+test("세션 알림과 준비 경고는 한국어 문구로 한 번만 보인다", async () => {
+  const { renderSessionNotices, renderBroadcastWarnings, els } = await loadApp();
+  const session = { session_id: "s-1", notices: [{ code: "youtube_quota_low" }, { code: "monthly_limit_reached" }] };
+  renderSessionNotices(session);
+  assert.match(els.broadcastSettingsDetail.textContent, /유튜브 API 사용량/);
+  els.broadcastSettingsDetail.textContent = "";
+  renderSessionNotices(session);
+  assert.equal(els.broadcastSettingsDetail.textContent, "", "the same notice must not repeat");
+  renderBroadcastWarnings([{ code: "youtube_quota_low", message: "english" }]);
+  assert.match(els.broadcastSettingsDetail.textContent, /유튜브 API 사용량/);
 });
 
 test("세션 생성은 고른 송출 해상도를 broadcast_resolution으로 보낸다", async () => {

@@ -30,36 +30,34 @@ import (
 
 const maxReferenceUpload = 10 << 20
 
-// referenceUploadReadTimeout bounds how long the whole request body may take to
-// arrive. Generous enough for a multi-megabyte upload on a mobile connection,
-// short enough that a stalled sender gives the slot back.
+// referenceUploadReadTimeout은 요청 본문 전체가 도착하기까지 기다리는 한계다.
+// 모바일 회선에서 수 MB를 올리기에 넉넉하고, 멈춘 송신자가 자리를 오래 붙잡지
+// 않을 만큼 짧다.
 var referenceUploadReadTimeout = 60 * time.Second
 
-// maxAIFaceEdge is the AI worker's B1-640 long-edge limit. Uploads larger than
-// this are rejected by AddWhitelist, so we downscale before registering.
+// maxAIFaceEdge는 AI 워커의 B1-640 긴 변 한계다. 이보다 크면 AddWhitelist가
+// 거절하므로 등록 전에 줄인다.
 const maxAIFaceEdge = 640
 
-// maxDecodeEdge/maxDecodePixels bound the dimensions we are willing to decode.
-// DecodeConfig reads them from the header, so an oversized image is rejected
-// before its full bitmap is allocated — a small but highly compressible file
-// can otherwise decode into hundreds of MiB. The result is downscaled to
-// maxAIFaceEdge, so a reference photo never needs to exceed these.
+// maxDecodeEdge/maxDecodePixels는 디코드를 허용하는 크기 한계다. DecodeConfig가
+// 헤더에서 읽으므로 큰 이미지는 전체 비트맵을 할당하기 전에 거절된다 — 작지만
+// 압축률이 높은 파일은 그러지 않으면 수백 MiB로 풀릴 수 있다. 결과는
+// maxAIFaceEdge로 줄이므로 기준 사진이 이 한계를 넘을 필요는 없다.
 const (
 	maxDecodeEdge   = 4096
 	maxDecodePixels = 16 << 20 // 16,777,216 px (~16MP)
 )
 
-// errImageTooLarge is returned by downscaleForAI when an image's header reports
-// dimensions past the decode limits.
+// errImageTooLarge는 헤더가 알린 크기가 디코드 한계를 넘을 때 downscaleForAI가
+// 돌려준다.
 var errImageTooLarge = errors.New("image exceeds decode limits")
 
-// decodeGate bounds how many uploaded images are decoded at the same moment
-// across the whole process. Each decode transiently allocates the full bitmap
-// (bounded by maxDecodePixels), so unbounded concurrency lets simultaneous
-// uploads stack that memory and starve the real-time media path. The token is
-// held only across the decode, never across the AI worker call.
+// decodeGate는 프로세스 전체에서 동시에 디코드하는 업로드 이미지 수를 제한한다.
+// 디코드마다 전체 비트맵(maxDecodePixels 이하)을 잠시 할당하므로, 제한이 없으면
+// 동시 업로드가 그 메모리를 쌓아 실시간 미디어 경로를 굶긴다. 토큰은 디코드
+// 동안만 쥐고 AI 워커 호출 동안에는 쥐지 않는다.
 //
-// A nil *decodeGate is valid and means unlimited.
+// nil *decodeGate는 유효하며 제한 없음을 뜻한다.
 type decodeGate struct {
 	tokens chan struct{}
 }
@@ -90,12 +88,11 @@ func (g *decodeGate) release() {
 	<-g.tokens
 }
 
-// downscaleForAI shrinks an uploaded face image so its long edge is at most
-// maxAIFaceEdge, re-encoding as JPEG. Images already within the limit (or that
-// fail to decode here) are returned unchanged so the AI worker still applies its
-// own validation and error reporting. Images whose header reports dimensions
-// past maxDecodeEdge/maxDecodePixels are rejected with errImageTooLarge before
-// the full bitmap is decoded.
+// downscaleForAI는 업로드한 얼굴 이미지의 긴 변이 maxAIFaceEdge 이하가 되도록
+// 줄여 JPEG로 다시 인코딩한다. 이미 한계 안이거나 여기서 디코드하지 못한
+// 이미지는 그대로 돌려줘 AI 워커가 자체 검증과 오류 보고를 하게 한다. 헤더가
+// 알린 크기가 maxDecodeEdge/maxDecodePixels를 넘으면 전체 비트맵을 디코드하기
+// 전에 errImageTooLarge로 거절한다.
 func downscaleForAI(data []byte) ([]byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
@@ -122,20 +119,19 @@ func downscaleForAI(data []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// referenceFace is the stored form of one registered face. It is persisted to
-// disk but never written to an API response — referenceFaceView is.
+// referenceFace는 등록한 얼굴 하나의 저장 형태다. 디스크에는 남지만 API 응답에는
+// 쓰지 않는다 — 응답은 referenceFaceView다.
 type referenceFace struct {
 	Name   string `json:"name,omitempty"`
 	FaceID string `json:"face_id"`
-	// EntryIDs maps an AI worker address to the entry id that worker minted for
-	// this face. Every worker generates its own id, so deleting the face means
-	// addressing each worker with its own id.
+	// EntryIDs는 AI 워커 주소별로 그 워커가 이 얼굴에 발급한 엔트리 id다. 워커마다
+	// id를 따로 만들므로, 얼굴을 지우려면 각 워커에 그 워커의 id로 요청해야 한다.
 	EntryIDs     map[string]string `json:"entry_ids,omitempty"`
 	RegisteredAt time.Time         `json:"registered_at"`
 }
 
-// referenceFaceView is the public shape of a registered face: the worker entry
-// ids are internal bookkeeping and stay out of the API.
+// referenceFaceView는 등록한 얼굴의 공개 형태다. 워커 엔트리 id는 내부 기록이라
+// API에 내보내지 않는다.
 type referenceFaceView struct {
 	Name         string    `json:"name,omitempty"`
 	FaceID       string    `json:"face_id"`
@@ -154,8 +150,8 @@ type referenceStatus struct {
 type referenceStore struct {
 	mu            sync.RWMutex
 	faces         map[string][]referenceFace
-	path          string // JSON persistence path; "" disables persistence
-	envConfigured bool   // AI_PRIVACY_ME_IMAGE_PATH set → env default reference
+	path          string // JSON 저장 경로. ""이면 저장하지 않는다
+	envConfigured bool   // AI_PRIVACY_ME_IMAGE_PATH가 있으면 env 기본 기준 얼굴을 쓴다
 }
 
 type guestReferenceContextKey struct{}
@@ -249,7 +245,7 @@ func (s *referenceStore) load() {
 	}
 }
 
-// save persists the client→faces map. The caller must hold s.mu for writing.
+// save는 클라이언트→얼굴 맵을 저장한다. 호출자가 s.mu를 쓰기로 쥐고 있어야 한다.
 func (s *referenceStore) save() error {
 	if s.path == "" {
 		return nil
@@ -262,10 +258,9 @@ func (s *referenceStore) save() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create reference metadata directory: %w", err)
 	}
-	// Write and rename in the same directory. A direct WriteFile can truncate
-	// the only copy before an I/O error, leaving metadata for every other user
-	// unreadable. Rename publishes the complete snapshot in one filesystem
-	// operation.
+	// 같은 디렉터리에 쓰고 이름을 바꾼다. WriteFile로 바로 쓰면 I/O 오류 전에 유일한
+	// 사본을 잘라 다른 사용자의 메타데이터까지 읽을 수 없게 될 수 있다. rename은
+	// 완성된 스냅샷을 파일시스템 연산 한 번으로 공개한다.
 	temporary, err := os.CreateTemp(dir, ".reference-faces-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary reference metadata: %w", err)
@@ -298,10 +293,10 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		writeError(w, apiError{Status: http.StatusBadRequest, Code: "bad_request", Message: "AI privacy mode is not enabled.", Details: map[string]any{"reason": "ai_disabled"}})
 		return
 	}
-	// The server sets no body read timeout (a global one would also cut off the
-	// signaling websocket and the guest SSE stream), so bound this upload here:
-	// the body may be up to maxReferenceUpload*20, and a connection trickling
-	// those bytes would otherwise hold the handler open indefinitely (#207).
+	// 서버에는 본문 읽기 타임아웃이 없다(전역으로 걸면 signaling 웹소켓과 게스트 SSE
+	// 스트림까지 끊긴다). 그래서 이 업로드만 여기서 제한한다. 본문은
+	// maxReferenceUpload*20까지 가능하고, 그 바이트를 조금씩 흘리는 연결은 제한이
+	// 없으면 핸들러를 무한정 붙잡는다(#207).
 	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(referenceUploadReadTimeout)); err != nil {
 		s.logger.Warn("set reference upload read deadline failed", "error", err)
 	}
@@ -310,8 +305,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		writeError(w, badRequest("Invalid multipart image upload.", nil))
 		return
 	}
-	// ParseMultipartForm may spill files above its memory budget to disk. Remove
-	// those request-scoped copies after every upload path returns.
+	// ParseMultipartForm은 메모리 예산을 넘는 파일을 디스크에 쏟을 수 있다. 업로드
+	// 경로가 어떻게 끝나든 요청 범위의 그 사본을 지운다.
 	if r.MultipartForm != nil {
 		defer func() {
 			if err := r.MultipartForm.RemoveAll(); err != nil && s.logger != nil {
@@ -335,22 +330,21 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		writeError(w, badRequest("name must be at most 40 characters and apply to one image.", map[string]any{"field": "name"}))
 		return
 	}
-	// "image" (single field) replaces the client's set; "images[]" appends.
+	// "image"(단일 필드)는 클라이언트의 얼굴 집합을 교체하고, "images[]"는 추가한다.
 	replace := len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
 	if replace {
-		// Clear the client's existing worker whitelist first so stale faces stop
-		// being excluded (matches Python's replace semantics). A failure here has
-		// to abort the upload: leaving the previous faces whitelisted keeps
-		// excluding people the client just replaced.
+		// 클라이언트의 기존 워커 화이트리스트를 먼저 비워 오래된 얼굴이 더는 제외되지
+		// 않게 한다(Python의 교체 동작과 같다). 여기서 실패하면 업로드를 중단해야
+		// 한다 — 이전 얼굴을 화이트리스트에 남기면 방금 교체한 사람을 계속 제외한다.
 		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
 			s.logger.Error("clear whitelist before replace failed", "client_id", clientID, "error", err)
 			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
 			return
 		}
 	}
-	// Validate and decode every file before touching the AI workers. A bad file
-	// then aborts the request with nothing registered, so a later file's format
-	// or size error can never leave an earlier file's face on a worker.
+	// AI 워커를 건드리기 전에 모든 파일을 검증·디코드한다. 잘못된 파일이 있으면
+	// 아무것도 등록하지 않고 요청을 끝내므로, 뒤 파일의 형식·크기 오류가 앞 파일의
+	// 얼굴을 워커에 남기는 일이 없다.
 	type preparedFace struct {
 		faceID string
 		data   []byte
@@ -386,10 +380,9 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		prepared = append(prepared, preparedFace{faceID: uuid.NewString(), data: scaled})
 	}
 
-	// Register each prepared face on the workers. If any registration fails, roll
-	// back this request's already-registered entries so the workers never keep a
-	// face the API reports as unregistered. Faces registered by earlier requests
-	// (append mode) are untouched.
+	// 준비한 얼굴을 워커에 하나씩 등록한다. 하나라도 실패하면 이 요청에서 이미 등록한
+	// 엔트리를 되돌려, API가 미등록이라고 알린 얼굴을 워커가 쥐고 있지 않게 한다.
+	// 이전 요청이 등록한 얼굴(추가 모드)은 건드리지 않는다.
 	registered := make([]referenceFace, 0, len(prepared))
 	for _, face := range prepared {
 		result, err := s.ai.AddWhitelist(r.Context(), clientID, face.data)
@@ -438,19 +431,17 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
 
-// referenceRollbackTimeout bounds the detached rollback so a wedged worker
-// cannot hold the handler open after the response is already decided.
+// referenceRollbackTimeout은 분리된 롤백의 한계다. 응답이 이미 정해진 뒤 멈춘
+// 워커가 핸들러를 붙잡지 못하게 한다.
 const referenceRollbackTimeout = 5 * time.Second
 
-// rollbackReferenceRegistrations removes the worker whitelist entries created by
-// the faces registered so far in the current request, addressing each worker
-// with its own minted id. Best-effort: a delete failure is logged, not returned,
-// because the caller is already reporting the registration failure to the client.
+// rollbackReferenceRegistrations는 이 요청에서 지금까지 등록한 얼굴의 워커
+// 화이트리스트 엔트리를 워커마다 그 워커가 발급한 id로 지운다. 최선 노력이다 —
+// 호출자가 이미 등록 실패를 클라이언트에 알리고 있으므로 삭제 실패는 로그만 남긴다.
 //
-// The request context is detached first. A client that disconnects mid-upload
-// cancels it, which is itself one of the ways AddWhitelist fails — rolling back
-// on the cancelled context would fail immediately and leave exactly the stale
-// whitelist entry this rollback exists to remove (#201).
+// 요청 컨텍스트를 먼저 분리한다. 업로드 도중 클라이언트가 끊으면 컨텍스트가
+// 취소되는데, 그것이 AddWhitelist가 실패하는 경로 중 하나다 — 취소된 컨텍스트로
+// 롤백하면 곧바로 실패해 이 롤백이 지우려는 바로 그 엔트리가 남는다(#201).
 func (s *Server) rollbackReferenceRegistrations(ctx context.Context, clientID string, registered []referenceFace) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), referenceRollbackTimeout)
 	defer cancel()
@@ -510,10 +501,9 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if len(entryIDs) == 0 {
-		// A face persisted before per-worker entry ids were recorded cannot be
-		// targeted individually. Clearing the whole session is the only way to
-		// stop excluding it, so drop the client's other faces too rather than
-		// report a registration the workers no longer hold.
+		// 워커별 엔트리 id를 기록하기 전에 저장된 얼굴은 하나만 골라 지울 수 없다.
+		// 제외를 멈추는 유일한 방법이 세션 전체를 비우는 것이라, 워커가 더는 쥐고
+		// 있지 않은 등록을 알리느니 클라이언트의 다른 얼굴도 함께 지운다.
 		s.logger.Warn("reference face has no worker entry ids; clearing the whole client whitelist",
 			"client_id", clientID, "face_id", faceID)
 		s.handleDeleteReferenceFace(w, r)
@@ -558,7 +548,7 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 		result.Source = &source
 		result.RegisteredAt = &registeredAt
 	} else if envConfigured {
-		// No API faces for this client, but an env default reference is set.
+		// 이 클라이언트의 API 얼굴은 없지만 env 기본 기준 얼굴이 설정돼 있다.
 		source := "env"
 		result.Registered = true
 		result.Source = &source
@@ -574,9 +564,9 @@ func referenceClientID(r *http.Request) string {
 	if userID, ok := auth.UserIDFromContext(r.Context()); ok {
 		return session.AIClientIDForUser(userID)
 	}
-	// Reference-face endpoints are mounted behind RequireUser in production.
-	// A deterministic fallback keeps direct handler tests independent from the
-	// authentication package without accepting a caller-controlled bucket.
+	// 기준 얼굴 엔드포인트는 프로덕션에서 RequireUser 뒤에 달린다. 결정적인 대체
+	// 값은 핸들러를 직접 부르는 테스트를 인증 패키지와 떼어 두면서도 호출자가 고른
+	// 버킷을 받지 않게 한다.
 	return "default"
 }
 

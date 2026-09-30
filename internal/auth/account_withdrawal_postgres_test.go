@@ -39,8 +39,7 @@ func TestPostgresWithdrawalDeletesAccountData(t *testing.T) {
 		t.Fatalf("deleted user status error = %v, want ErrUserInactive", err)
 	}
 
-	// The provider subject and email become available for a new account after
-	// the old user's rows have been deleted.
+	// 이전 사용자 행을 지운 뒤에는 플랫폼 subject와 이메일을 새 계정이 쓸 수 있다.
 	reRegistered := seedWithdrawalUser(t, db, now, *target.Email, "withdrawal")
 	assertWithdrawalCounts(t, db, reRegistered.ID, [5]int64{1, 1, 2, 1, 1})
 }
@@ -54,9 +53,8 @@ func TestPostgresWithdrawalRollsBackPartialDelete(t *testing.T) {
 	db := newPostgresWithdrawalTestDB(t, databaseURL)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	target := seedWithdrawalUser(t, db, now, "rollback@example.com", "rollback")
-	// This unrelated FK deliberately rejects the final user DELETE. The child
-	// rows must be restored by the same transaction rather than left partially
-	// removed.
+	// 이 무관한 FK는 마지막 사용자 DELETE를 일부러 거절한다. 자식 행은 일부만 지워진
+	// 채 남지 않고 같은 트랜잭션으로 되돌아와야 한다.
 	if err := db.Exec("CREATE TABLE withdrawal_delete_guards (user_id uuid PRIMARY KEY REFERENCES users(id))").Error; err != nil {
 		t.Fatal(err)
 	}

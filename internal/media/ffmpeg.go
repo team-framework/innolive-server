@@ -180,9 +180,8 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 				return err
 			}
 			index++
-			// The frame has now cleared the compressed queue and the decoder
-			// stdin backpressure; mark the boundary so the read loop can split
-			// the merged "decode" stage into wait vs. FFmpeg round-trip (#177).
+			// 프레임이 이제 압축 큐와 디코더 stdin 역압을 지났다. 경계를 표시해 읽기 루프가
+			// 합쳐진 "decode" 단계를 대기와 FFmpeg 왕복으로 나누게 한다(#177).
 			item.decodeInAt = time.Now()
 			select {
 			case metadata <- item:
@@ -225,10 +224,9 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 			return fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 		}
 		item.data = decoded
-		// Split the merged "decode" stage: pre_decode_wait is the compressed
-		// queue plus stdin backpressure, ffmpeg_decode is the decoder
-		// round-trip. The remainder up to the "decode" observation downstream
-		// is the decoderOutput queue wait (#177).
+		// 합쳐진 "decode" 단계를 나눈다. pre_decode_wait는 압축 큐와 stdin 역압,
+		// ffmpeg_decode는 디코더 왕복이다. 뒤쪽 "decode" 관측까지 남는 시간은
+		// decoderOutput 큐 대기다(#177).
 		t.metrics.ObserveStage("pre_decode_wait", item.decodeInAt.Sub(item.stageAt))
 		t.metrics.ObserveStage("ffmpeg_decode", time.Since(item.decodeInAt))
 		select {

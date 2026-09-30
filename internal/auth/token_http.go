@@ -42,14 +42,13 @@ func MountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 	return mountAuthHTTP(next, service, google, apple, nil, nil, nil, nil, nil, logger, config, nil)
 }
 
-// MountAuthHTTPWithWithdrawal adds account deletion to the authentication
-// routes. It is kept separate to preserve the existing constructor used by
-// smaller deployments and focused handler tests.
+// MountAuthHTTPWithWithdrawal은 인증 경로에 계정 삭제를 더한다. 작은 배포와 핸들러
+// 단위 테스트가 쓰는 기존 생성자를 유지하려고 따로 둔다.
 func MountAuthHTTPWithWithdrawal(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig) http.Handler {
 	return mountAuthHTTP(next, service, google, apple, nil, withdrawal, nil, nil, nil, logger, config, nil)
 }
 
-// MountAuthHTTPWithServices mounts all configured authentication services.
+// MountAuthHTTPWithServices는 설정된 인증 서비스를 모두 단다.
 // youtubeServices는 송출 연동(YouTube OAuth)을 함께 마운트할 때만 전달한다 —
 // 기존 호출부(테스트 포함)를 깨지 않도록 가변 인자로 확장했다.
 func MountAuthHTTPWithServices(next http.Handler, service *TokenService, google *GoogleLoginService, apple *AppleLoginService, email *EmailAuthService, withdrawal *AccountWithdrawalService, logger *slog.Logger, config TokenHTTPConfig, youtubeServices ...*YouTubeConnectService) http.Handler {

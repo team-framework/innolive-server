@@ -7,30 +7,30 @@ import (
 )
 
 func TestDecodeGateNilUnlimited(t *testing.T) {
-	var g *decodeGate // size <= 0 yields nil
+	var g *decodeGate // size <= 0이면 nil
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("nil gate acquire: %v", err)
 	}
-	g.release() // must be a no-op, not a panic
+	g.release() // 패닉이 아니라 아무 일도 없어야 한다
 }
 
 func TestDecodeGateBoundsConcurrency(t *testing.T) {
 	g := newDecodeGate(1)
 
-	// First acquire takes the only token.
+	// 첫 acquire가 하나뿐인 토큰을 가져간다.
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 
-	// Second acquire must block while the gate is saturated, then fail when its
-	// context is canceled rather than proceeding past the limit.
+	// 두 번째 acquire는 게이트가 가득한 동안 막히고, 한계를 넘어 진행하지 않고
+	// 컨텍스트가 취소되면 실패해야 한다.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := g.acquire(ctx); err == nil {
 		t.Fatal("expected acquire to fail while gate is saturated")
 	}
 
-	// After releasing, a fresh acquire succeeds again.
+	// 반납하면 새 acquire가 다시 성공한다.
 	g.release()
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("acquire after release: %v", err)

@@ -1016,7 +1016,7 @@ func singleSink(fanout *media.EgressFanout) *media.RTMPEgress {
 
 func TestAIProcessingIsFixedPerSessionAndDefaultsToServer(t *testing.T) {
 	manager := newTestManager(t, 0)
-	// No tracks in this test: inspect selection independently of an AI worker.
+	// 이 테스트에는 트랙이 없다. AI 워커와 무관하게 선택만 본다.
 	manager.cfg.PrivacyMode = config.PrivacyModeReal
 	remote, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, "", nil)
 	if err != nil {

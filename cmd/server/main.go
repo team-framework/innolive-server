@@ -528,9 +528,9 @@ func main() {
 		streamingProviders,
 		authenticateUser,
 	)
-	// Withdrawal owns the user's operation gate. Wire all user-scoped writers
-	// before serving requests so a session creation, YouTube callback, or face
-	// upload cannot race the final account transaction.
+	// 탈퇴가 사용자의 작업 게이트를 쥔다. 요청을 받기 전에 사용자 범위 쓰기 경로를
+	// 모두 연결해, 세션 생성·유튜브 콜백·얼굴 업로드가 마지막 계정 트랜잭션과
+	// 경쟁하지 못하게 한다.
 	application.SetUserOperationGate(withdrawal)
 	// 세션 생성이 소유자 플랜을 싣고, 플랜 조회·관리자 지정 라우트가 붙는다(#270).
 	application.SetPlanStore(auth.NewPlanStore(databaseConnection.DB))

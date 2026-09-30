@@ -15,10 +15,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestPostgresRefreshRotationConcurrentReuse verifies the PostgreSQL-specific
-// locking and persistence contract. Set TEST_DATABASE_URL to a database the
-// test user may create and drop schemas in (for example the compose Postgres
-// instance) to run it. Each run uses an isolated, temporary schema.
+// TestPostgresRefreshRotationConcurrentReuse는 PostgreSQL 고유의 잠금·저장 계약을
+// 검증한다. 테스트 사용자가 스키마를 만들고 지울 수 있는 DB(예: compose Postgres)를
+// TEST_DATABASE_URL로 주면 돈다. 매번 격리된 임시 스키마를 쓴다.
 func TestPostgresRefreshRotationConcurrentReuse(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
 	if databaseURL == "" {

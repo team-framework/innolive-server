@@ -1,10 +1,9 @@
 //go:build egress_harness
 
-// Phase 3 audio-egress verification. Drives the real RTMPEgress with synthetic
-// video frames AND a real Opus microphone (a sine wave pre-encoded by ffmpeg,
-// replayed as RTP packets through the audio pipe on fd 3). Afterwards ffprobe
-// must report both an h264 video stream and an aac audio stream in the FLV
-// output — proving the ExtraFiles/pipe:3 wiring and Ogg muxing end to end.
+// 3단계 오디오 egress 검증. 합성 영상 프레임과 실제 Opus 마이크(ffmpeg로 미리
+// 인코딩한 사인파를 fd 3의 오디오 파이프로 RTP 패킷처럼 재생)로 실제 RTMPEgress를
+// 돌린다. 이후 ffprobe가 FLV 출력에서 h264 영상과 aac 오디오 스트림을 모두 보고해야
+// 한다 — ExtraFiles/pipe:3 배선과 Ogg 먹싱을 끝까지 증명한다.
 //
 //	go test -tags egress_harness -run TestEgressHarnessAudio ./internal/media -v -timeout 5m
 package media
@@ -25,16 +24,16 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media/oggreader"
 )
 
-// buildSineOpusPayloads pre-encodes a sine wave to Ogg/Opus with ffmpeg and
-// returns each page's payload as a raw Opus packet to replay over RTP.
+// buildSineOpusPayloads는 ffmpeg로 사인파를 Ogg/Opus로 미리 인코딩하고, 페이지마다
+// 페이로드를 RTP로 재생할 원시 Opus 패킷으로 돌려준다.
 func buildSineOpusPayloads(t *testing.T) [][]byte {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sine.ogg")
 	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=6",
 		"-c:a", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2",
-		// One Opus frame per Ogg page so each ParseNextPage payload is a single
-		// packet we can replay over RTP.
+		// Ogg 페이지마다 Opus 프레임 하나라 ParseNextPage 페이로드가 곧 RTP로 재생할
+		// 패킷 하나다.
 		"-page_duration", "20000", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("encode sine opus: %v\n%s", err, out)
@@ -80,8 +79,8 @@ func TestEgressHarnessAudio(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go pipe.Run(ctx)
 
-	// Prime the pipe so the egress's spawn-time PacketSeen() check picks the
-	// microphone path rather than silence.
+	// 파이프를 미리 채워 egress가 시작할 때 PacketSeen() 확인에서 무음이 아니라
+	// 마이크 경로를 고르게 한다.
 	var audioTS uint32 = 480000
 	var audioSeq uint16 = 1000
 	feedAudio := func() {
@@ -95,7 +94,7 @@ func TestEgressHarnessAudio(t *testing.T) {
 	feedAudio()
 	feedAudio()
 
-	// newHarnessEgress passes nil audio; build one with the pipe attached.
+	// newHarnessEgress는 오디오를 nil로 넘기므로 파이프를 붙인 것을 따로 만든다.
 	egress := NewRTMPEgress("ffmpeg", testLogger(), metrics.New(),
 		TranscoderOptions{WireFormat: harnessWireFormat()}, output, pipe, false, 0, "", "")
 
@@ -133,7 +132,7 @@ feed:
 	cancel()
 	done.Wait()
 
-	// FLV must carry both a video and an audio stream.
+	// FLV에는 영상과 오디오 스트림이 모두 있어야 한다.
 	types := ffprobeAll(t, output, "stream=codec_type")
 	if !strings.Contains(types, "video") || !strings.Contains(types, "audio") {
 		t.Fatalf("stream types = %q, want both video and audio", types)

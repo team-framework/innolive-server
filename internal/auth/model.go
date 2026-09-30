@@ -77,8 +77,8 @@ func (OAuthAccount) TableName() string {
 	return "oauth_accounts"
 }
 
-// EmailAccount stores credentials for a password-based account separately
-// from OAuth identities. A user is created only after email verification.
+// EmailAccount는 비밀번호 계정의 자격 정보를 OAuth 신원과 따로 저장한다. 사용자는
+// 이메일 인증 뒤에만 만든다.
 type EmailAccount struct {
 	UserID uuid.UUID `gorm:"type:uuid;primaryKey"`
 	User   *User     `gorm:"foreignKey:UserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`

@@ -14,8 +14,8 @@ import (
 	"github.com/pion/rtp"
 )
 
-// counterValue renders the registry and returns a single unlabelled counter's
-// value, so AudioPipe's drop/write bookkeeping can be asserted without ffmpeg.
+// counterValue는 레지스트리를 렌더링해 라벨 없는 카운터 하나의 값을 돌려준다.
+// ffmpeg 없이 AudioPipe의 드롭·쓰기 기록을 검증한다.
 func counterValue(t *testing.T, reg *metrics.Registry, name string) float64 {
 	t.Helper()
 	var buf bytes.Buffer
@@ -42,20 +42,20 @@ const (
 	audioDroppedMetric = "innolive_audio_samples_dropped_total"
 )
 
-// TestAudioPipeWritePacketDropsOldestWhenFull verifies the RTP ingress queue
-// never blocks: once full, the oldest packet is dropped to make room so the
-// WebRTC read loop is never stalled by a slow egress.
+// TestAudioPipeWritePacketDropsOldestWhenFull: RTP 수신 큐는 막히지 않는다. 가득
+// 차면 가장 오래된 패킷을 버려 자리를 만들어, 느린 egress가 WebRTC 읽기 루프를
+// 멈추지 않게 한다.
 func TestAudioPipeWritePacketDropsOldestWhenFull(t *testing.T) {
 	reg := metrics.New()
 	p := NewAudioPipe(testLogger(), reg, 2)
-	// Run is deliberately not started, so nothing drains p.input.
+	// Run은 일부러 시작하지 않아 p.input을 비우는 쪽이 없다.
 	for i := 0; i < audioIngressQueueSize; i++ {
 		p.WritePacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: uint16(i)}})
 	}
 	if got := counterValue(t, reg, audioDroppedMetric); got != 0 {
 		t.Fatalf("filling to capacity should not drop, got %v", got)
 	}
-	p.WritePacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: 9999}}) // overflow
+	p.WritePacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: 9999}}) // 넘침
 	if got := counterValue(t, reg, audioDroppedMetric); got != 1 {
 		t.Fatalf("overflow should drop exactly one, got %v", got)
 	}
@@ -67,10 +67,9 @@ func TestAudioPipeWritePacketDropsOldestWhenFull(t *testing.T) {
 	}
 }
 
-// TestAudioPipeMonotonicGuardDropsBackwardTimestamps ensures a non-increasing
-// PacketTimestamp (possible on a forced samplebuilder flush) is dropped before
-// oggwriter, whose uint32 granule delta would otherwise underflow into a huge
-// forward jump.
+// TestAudioPipeMonotonicGuardDropsBackwardTimestamps: 늘지 않는 PacketTimestamp
+// (samplebuilder 강제 flush에서 생길 수 있다)는 oggwriter 전에 버린다. 그러지 않으면
+// oggwriter의 uint32 granule 차이가 언더플로해 앞으로 크게 건너뛴다.
 func TestAudioPipeMonotonicGuardDropsBackwardTimestamps(t *testing.T) {
 	reg := metrics.New()
 	p := NewAudioPipe(testLogger(), reg, 2)
@@ -94,9 +93,8 @@ func TestAudioPipeMonotonicGuardDropsBackwardTimestamps(t *testing.T) {
 	}
 }
 
-// TestAudioPipeDetachIsWriteEndTargeted proves a stale egress tearing down after
-// a track replacement cannot close the stream a newer egress just attached:
-// Detach only acts on the matching write end.
+// TestAudioPipeDetachIsWriteEndTargeted: 트랙 교체 뒤 정리되는 낡은 egress가 새
+// egress가 방금 붙인 스트림을 닫지 못한다. Detach는 일치하는 쓰기 끝에만 작용한다.
 func TestAudioPipeDetachIsWriteEndTargeted(t *testing.T) {
 	reg := metrics.New()
 	p := NewAudioPipe(testLogger(), reg, 2)
@@ -112,12 +110,12 @@ func TestAudioPipeDetachIsWriteEndTargeted(t *testing.T) {
 	if err := p.Attach(f1, false); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	p.Detach(f2) // some other (stale) write end — must be a no-op
+	p.Detach(f2) // 다른(낡은) 쓰기 끝 — 아무 일도 없어야 한다
 	p.writeSample(1000, []byte{0xf8, 0x01})
 	if got := counterValue(t, reg, audioWrittenMetric); got != 1 {
 		t.Fatalf("Detach(other) must not detach; written=%v want 1", got)
 	}
-	p.Detach(f1) // the real write end — detaches
+	p.Detach(f1) // 실제 쓰기 끝 — 떼어 낸다
 	p.writeSample(2000, []byte{0xf8, 0x01})
 	if got := counterValue(t, reg, audioWrittenMetric); got != 1 {
 		t.Fatalf("no write after Detach(f1); written=%v want 1", got)
@@ -127,9 +125,8 @@ func TestAudioPipeDetachIsWriteEndTargeted(t *testing.T) {
 	}
 }
 
-// TestAudioPipeChannelsDefaultsToStereo checks the channel count fed to the Ogg
-// header (0 → 2), since a header that disagrees with the payload plays back at
-// the wrong speed.
+// TestAudioPipeChannelsDefaultsToStereo: Ogg 헤더에 넣는 채널 수(0 → 2)를 확인한다.
+// 페이로드와 어긋난 헤더는 잘못된 속도로 재생된다.
 func TestAudioPipeChannelsDefaultsToStereo(t *testing.T) {
 	p := NewAudioPipe(testLogger(), metrics.New(), 0)
 	if p.Channels() != 2 {
@@ -145,9 +142,8 @@ func TestAudioPipeChannelsDefaultsToStereo(t *testing.T) {
 	}
 }
 
-// TestAudioPipeAttachWritesOggOpusHeader confirms Attach emits a valid
-// Ogg/Opus header immediately, so a freshly spawned egress FFmpeg sees a
-// well-formed stream from its first byte.
+// TestAudioPipeAttachWritesOggOpusHeader: Attach는 곧바로 유효한 Ogg/Opus 헤더를
+// 내보내, 새로 띄운 egress FFmpeg가 첫 바이트부터 올바른 스트림을 본다.
 func TestAudioPipeAttachWritesOggOpusHeader(t *testing.T) {
 	p := NewAudioPipe(testLogger(), metrics.New(), 2)
 	path := filepath.Join(t.TempDir(), "header.ogg")

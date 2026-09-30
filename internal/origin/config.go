@@ -1,6 +1,6 @@
-// Package origin provides the single Origin policy used by HTTP and WebSocket
-// endpoints. It deliberately treats requests without an Origin header as
-// non-browser requests, because CORS only governs browser-originated requests.
+// Package origin은 HTTP와 WebSocket 엔드포인트가 함께 쓰는 Origin 정책을 제공한다.
+// Origin 헤더가 없는 요청은 일부러 브라우저가 아닌 요청으로 본다 — CORS는
+// 브라우저에서 온 요청만 다룬다.
 package origin
 
 import (
@@ -13,15 +13,15 @@ import (
 	"strings"
 )
 
-// Config controls which browser origins may access the application.
+// Config는 어떤 브라우저 origin이 애플리케이션에 접근할 수 있는지 정한다.
 type Config struct {
 	AllowAllOrigins bool
 	AllowedOrigins  []string
 	allowedOrigins  map[string]struct{}
 }
 
-// LoadFromEnv loads the application-wide CORS policy. The environment names
-// retain their AUTH_ prefix for backward compatibility with existing deploys.
+// LoadFromEnv는 애플리케이션 전체 CORS 정책을 읽는다. 환경 변수 이름은 기존 배포와
+// 호환되도록 AUTH_ 접두를 유지한다.
 func LoadFromEnv() (Config, error) {
 	allowAll, err := envBool("AUTH_CORS_ALLOW_ALL_ORIGINS", false)
 	if err != nil {
@@ -56,9 +56,9 @@ func NewConfig(allowAll bool, origins []string) (Config, error) {
 	return Config{AllowAllOrigins: allowAll, AllowedOrigins: normalized, allowedOrigins: allowed}, nil
 }
 
-// AllowedOrigin returns the response Access-Control-Allow-Origin value for a
-// non-empty request Origin. Allow-all intentionally returns "*" so credentials
-// are not enabled for arbitrary sites.
+// AllowedOrigin은 비어 있지 않은 요청 Origin에 대한 Access-Control-Allow-Origin
+// 응답 값이다. 전체 허용은 일부러 "*"를 돌려줘 임의 사이트에 자격 정보를 켜지
+// 않는다.
 func (c Config) AllowedOrigin(requestOrigin string) (string, bool) {
 	if c.AllowAllOrigins {
 		return "*", true
@@ -71,8 +71,8 @@ func (c Config) AllowedOrigin(requestOrigin string) (string, bool) {
 	return normalized, ok
 }
 
-// Allows reports whether a request origin may connect. Non-browser clients do
-// not send Origin and remain supported by the same policy.
+// Allows는 요청 origin이 연결할 수 있는지다. 브라우저가 아닌 클라이언트는 Origin을
+// 보내지 않으며 같은 정책에서 계속 지원된다.
 func (c Config) Allows(requestOrigin string) bool {
 	if strings.TrimSpace(requestOrigin) == "" {
 		return true

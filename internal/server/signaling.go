@@ -407,10 +407,9 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs
 	return result, nil
 }
 
-// verifySignalingSession binds each WebSocket action to the same active user
-// that created the session, in addition to the session's one-time owner token.
-// access_token is part of the encrypted WebSocket message because browsers
-// cannot attach an Authorization header to WebSocket upgrade requests.
+// verifySignalingSession은 세션의 1회용 소유자 토큰에 더해, WebSocket 동작마다 세션을
+// 만든 같은 활성 사용자에 묶는다. 브라우저는 WebSocket 업그레이드 요청에
+// Authorization 헤더를 붙일 수 없어 access_token을 암호화된 WebSocket 메시지에 싣는다.
 func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) (func(), *apiError) {
 	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
 	if errors.Is(err, session.ErrNotFound) {

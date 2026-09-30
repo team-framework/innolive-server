@@ -275,9 +275,8 @@ type pendingCreate struct {
 	revoked bool
 }
 
-// UserOperationGate is implemented by auth.AccountWithdrawalService. The
-// manager uses it to stop a new member session from entering while withdrawal
-// owns the user's cleanup sequence.
+// UserOperationGate는 auth.AccountWithdrawalService가 구현한다. 탈퇴가 사용자의
+// 정리 순서를 쥐고 있는 동안 새 회원 세션이 들어오지 못하게 매니저가 쓴다.
 type UserOperationGate interface {
 	BeginOperation(uuid.UUID) (func(), bool)
 }
@@ -327,21 +326,19 @@ type Manager struct {
 	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
 	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
 	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
-	// broadcastCleanupWithContext is the synchronous variant used by account
-	// withdrawal. Its errors must reach DELETE /auth/me before the DB tombstone
-	// is committed.
+	// broadcastCleanupWithContext는 계정 탈퇴가 쓰는 동기 버전이다. 오류가 DB 삭제
+	// 표시를 커밋하기 전에 DELETE /auth/me까지 전달돼야 한다.
 	broadcastCleanupWithContext func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error
 	sessionCleanup              func(*Session)
 	userOperationGate           UserOperationGate
 	planResolver                func(context.Context, uuid.UUID) (plan.Plan, error)
 	// usage는 실사용 기록(#266)이다. nil이면 기록하지 않는다.
 	usage UsageRecorder
-	// A broadcast is removed from a session before its provider call. Keep a
-	// failed cleanup here so the next withdrawal request can retry by id.
+	// 방송은 플랫폼 호출 전에 세션에서 빠진다. 실패한 정리를 여기 보관해 다음 탈퇴
+	// 요청이 id로 다시 시도하게 한다.
 	pendingWithdrawalBroadcasts map[uuid.UUID][]pendingBroadcastCleanup
-	// A closed session whose egress did not drain before the withdrawal context
-	// expired must also be waited on by the next retry. Keeping the pointer here
-	// prevents final account deletion while that egress is still running.
+	// 탈퇴 컨텍스트가 끝나기 전에 egress가 다 빠지지 않은 닫힌 세션도 다음 재시도가
+	// 기다려야 한다. 포인터를 여기 두어 그 egress가 도는 동안 최종 계정 삭제를 막는다.
 	pendingWithdrawalSessions map[uuid.UUID][]*Session
 }
 
@@ -352,9 +349,8 @@ func (m *Manager) SetBroadcastCleanup(cleanup func(userID uuid.UUID, broadcast P
 	m.broadcastCleanup = cleanup
 }
 
-// SetBroadcastCleanupWithContext registers the error-returning cleanup used by
-// account withdrawal. Regular session teardown continues to use the existing
-// asynchronous callback and behavior.
+// SetBroadcastCleanupWithContext는 계정 탈퇴가 쓰는, 오류를 돌려주는 정리를
+// 등록한다. 일반 세션 정리는 기존 비동기 콜백과 동작을 그대로 쓴다.
 func (m *Manager) SetBroadcastCleanupWithContext(cleanup func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error) {
 	m.broadcastCleanupWithContext = cleanup
 }
@@ -557,7 +553,7 @@ func (m *Manager) CreateForUserWithProvider(userID uuid.UUID, provider string, m
 	return m.CreateForUserWithAIProcessing(userID, provider, AIProcessingServer, metadata)
 }
 
-// CreateForUserWithAIProcessing fixes the processing location for this session.
+// CreateForUserWithAIProcessing은 이 세션의 처리 위치를 정한다.
 func (m *Manager) CreateForUserWithAIProcessing(userID uuid.UUID, provider, processing string, metadata map[string]string) (*Session, string, error) {
 	return m.CreateForUserWithResolution(userID, provider, processing, "", metadata)
 }
@@ -877,9 +873,9 @@ func (m *Manager) CloseUserSessions(userID uuid.UUID) {
 	m.closeUserSessions(userID, "user_withdrawal")
 }
 
-// CloseUserSessionsForWithdrawal closes the user's sessions and waits for
-// provider cleanup to finish. A failed broadcast cleanup is retained in memory
-// so the next withdrawal request can retry it by the same platform id.
+// CloseUserSessionsForWithdrawal은 사용자의 세션을 닫고 플랫폼 정리가 끝나길
+// 기다린다. 실패한 방송 정리는 메모리에 남겨 다음 탈퇴 요청이 같은 플랫폼 id로
+// 다시 시도하게 한다.
 func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uuid.UUID) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1007,9 +1003,8 @@ func takeWithdrawalBroadcast(s *Session, provider string) (PlatformBroadcast, Br
 	broadcast := *t.platformBroadcast
 	phase := t.phase
 	if phase == BroadcastPhaseGoingLive {
-		// Session HTTP operations are gated during withdrawal, so an in-flight
-		// transition has completed by this point. Treat a leftover marker as live
-		// to ensure it is explicitly ended rather than left to auto-stop.
+		// 탈퇴 중에는 세션 HTTP 작업이 막히므로 진행 중이던 전환은 이 시점에 끝났다.
+		// 남은 표시는 라이브로 보고 자동 종료에 맡기지 않고 명시적으로 끝낸다.
 		phase = BroadcastPhaseLive
 	}
 	if phase != BroadcastPhasePrepared && phase != BroadcastPhaseLive {

@@ -71,14 +71,12 @@ func TestCreateAnswerSelectsClientPreferredH264(t *testing.T) {
 	}
 }
 
-// TestAnswerRetainsOfferedRTCPFeedback guards the RTCP feedback the client
-// offers. Rebuilding the codec from the offer SDP drops any RTCPFeedback that
-// prepareOutputForOffer does not copy over, and SetCodecPreferences then
-// replaces the transceiver's full codec capability — so an empty list silently
-// strips every a=rtcp-fb line from the answer. Losing "nack" removes the only
-// packet-recovery path and losing "nack pli" removes the client's only way to
-// ask for a keyframe, which corrupts the decoder's static regions until the
-// encoder's next natural IDR.
+// TestAnswerRetainsOfferedRTCPFeedback은 클라이언트가 offer한 RTCP 피드백을 지킨다.
+// offer SDP로 코덱을 다시 만들면 prepareOutputForOffer가 옮기지 않은 RTCPFeedback이
+// 빠지고, SetCodecPreferences가 트랜시버의 코덱 능력을 통째로 바꾸므로 빈 목록이면
+// answer에서 a=rtcp-fb 줄이 조용히 모두 사라진다. "nack"를 잃으면 유일한 패킷 복구
+// 경로가, "nack pli"를 잃으면 클라이언트가 키프레임을 요청할 유일한 방법이 사라져
+// 인코더의 다음 자연 IDR까지 디코더의 정적 영역이 깨진다.
 func TestAnswerRetainsOfferedRTCPFeedback(t *testing.T) {
 	manager := newTestManager(t, 0)
 	liveSession, ownerToken, err := manager.Create(nil)
@@ -140,7 +138,7 @@ func TestAnswerRetainsOfferedRTCPFeedback(t *testing.T) {
 	}
 }
 
-// videoSectionLines returns the lines of the first m=video section of an SDP.
+// videoSectionLines는 SDP의 첫 m=video 섹션 줄을 돌려준다.
 func videoSectionLines(sdp string) []string {
 	var lines []string
 	inVideo := false
@@ -158,8 +156,8 @@ func videoSectionLines(sdp string) []string {
 	return lines
 }
 
-// videoFeedbackLines counts a=rtcp-fb lines in the video section by feedback
-// type, keyed the way they appear in SDP ("nack", "nack pli", "ccm fir", ...).
+// videoFeedbackLines는 영상 섹션의 a=rtcp-fb 줄을 피드백 종류별로 센다. 키는 SDP에
+// 나오는 모양("nack", "nack pli", "ccm fir", ...)이다.
 func videoFeedbackLines(sdp string) map[string]int {
 	counts := make(map[string]int)
 	for _, line := range videoSectionLines(sdp) {

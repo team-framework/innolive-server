@@ -138,3 +138,37 @@ func TestAdminMeAndUserSearch(t *testing.T) {
 		t.Fatalf("GET /admin/users = %d %+v", response.StatusCode, found.Users)
 	}
 }
+
+// 라우트의 requireAdmin이 빠지더라도 핸들러가 스스로 관리자를 확인해야 한다.
+// 미들웨어 없이 핸들러를 직접 불러, 로그인 사용자가 없는 요청이 거절되는지 본다.
+func TestAdminHandlersRejectWithoutAdminMiddleware(t *testing.T) {
+	requireUser, authenticateUser, adminHeader, _, adminID := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser, authenticateUser)
+	defer manager.CloseAll()
+	application.cfg.AdminUserIDs = []string{adminID.String()}
+	application.SetPlanStore(&memoryPlanStore{plans: map[uuid.UUID]plan.Plan{adminID: plan.Spark}})
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+	sessionID := createUserSession(t, httpServer.URL, adminHeader)
+
+	handlers := map[string]http.HandlerFunc{
+		"me":             application.handleGetAdminMe,
+		"list sessions":  application.handleListAdminSessions,
+		"delete session": application.handleDeleteAdminSession,
+		"search users":   application.handleSearchAdminUsers,
+		"put plan":       application.handlePutUserPlan,
+	}
+	for name, handler := range handlers {
+		request := httptest.NewRequest(http.MethodGet, "/admin/x", strings.NewReader(`{"plan":"plasma"}`))
+		request.SetPathValue("session_id", sessionID)
+		request.SetPathValue("user_id", adminID.String())
+		recorder := httptest.NewRecorder()
+		handler(recorder, request)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s without admin = %d, want 403", name, recorder.Code)
+		}
+	}
+	if _, err := manager.Get(sessionID); err != nil {
+		t.Fatalf("rejected handler closed the session: %v", err)
+	}
+}

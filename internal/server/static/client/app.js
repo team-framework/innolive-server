@@ -35,6 +35,10 @@ const state = {
   accessToken: null,
   refreshToken: null,
   authEmail: null,
+  // 로그인한 사용자가 ADMIN_USER_IDS에 있는지(#373). 관리자만 로그인 화면을 넘는다.
+  isAdmin: false,
+  // 상단바에서 고른 화면: "stream"(송출 테스트) 또는 "admin"(어드민).
+  view: "stream",
   refreshPromise: null,
   signupToken: null,
   // 치지직 인가 요청에 실은 state. 콜백에서 돌아온 값과 대조한 뒤 폐기한다.
@@ -227,6 +231,19 @@ function bindElements() {
     "broadcastPlatformState",
     "broadcastVideoInput",
     "broadcastRtmpState",
+    "loginView",
+    "viewNav",
+    "navStreamBtn",
+    "navAdminBtn",
+    "streamView",
+    "adminView",
+    "adminSessionCount",
+    "adminRefreshSessionsBtn",
+    "adminSessionsBody",
+    "adminUserQuery",
+    "adminSearchUsersBtn",
+    "adminUsersBody",
+    "adminDetail",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -258,6 +275,15 @@ function bindEvents() {
   els.signUpBtn.addEventListener("click", () => void requestSignup());
   els.verifyBtn.addEventListener("click", () => void verifySignup());
   els.signOutBtn.addEventListener("click", () => void signOut());
+  els.navStreamBtn.addEventListener("click", () => showView("stream"));
+  els.navAdminBtn.addEventListener("click", () => showView("admin"));
+  els.adminRefreshSessionsBtn.addEventListener("click", () => void refreshAdminSessions());
+  els.adminSearchUsersBtn.addEventListener("click", () => void searchAdminUsers());
+  els.adminUserQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      void searchAdminUsers();
+    }
+  });
   els.connectYoutubeBtn.addEventListener("click", () => void connectYoutube());
   els.connectChzzkBtn.addEventListener("click", () => void connectChzzk());
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
@@ -759,6 +785,13 @@ async function signIn() {
       state.refreshToken = pair?.refresh_token || null;
       state.authEmail = email;
       els.authPassword.value = "";
+      state.isAdmin = await checkAdminAccess();
+      if (!state.isAdmin) {
+        clearAuthState();
+        els.authDetail.textContent = "관리자 계정만 사용할 수 있습니다.";
+        logEvent("warn", "Signed in user is not an administrator", { email });
+        return;
+      }
       renderAuth();
       logEvent("ok", "Signed in", { email, expires_in: pair?.expires_in });
       await refreshReferenceFace({ quiet: true }).catch(() => null);
@@ -838,10 +871,26 @@ async function signOut() {
   logEvent("ok", "Signed out");
 }
 
+// checkAdminAccess는 로그인한 사용자가 관리자인지 서버에 묻는다(#373). 403이면
+// 관리자가 아니고, 404면 관리자 라우트가 조립되지 않은 서버(DB 없음)다.
+async function checkAdminAccess() {
+  try {
+    await apiFetch("/admin/me");
+    return true;
+  } catch (error) {
+    if (error.status === 403 || error.status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function clearAuthState() {
   state.accessToken = null;
   state.refreshToken = null;
   state.authEmail = null;
+  state.isAdmin = false;
+  state.view = "stream";
   state.signupToken = null;
   els.verifyCode.value = "";
   renderAuth();
@@ -889,6 +938,14 @@ async function refreshAccessToken() {
 function renderAuth() {
   const signedIn = Boolean(state.accessToken);
   const verifying = Boolean(state.signupToken);
+  // 로그인 화면은 관리자로 들어가기 전까지만, 들어간 뒤에는 고른 화면 하나만 편다.
+  const entered = signedIn && state.isAdmin;
+  els.loginView.hidden = entered;
+  els.viewNav.hidden = !entered;
+  els.streamView.hidden = !entered || state.view !== "stream";
+  els.adminView.hidden = !entered || state.view !== "admin";
+  setCurrentTab(els.navStreamBtn, state.view === "stream");
+  setCurrentTab(els.navAdminBtn, state.view === "admin");
   setPill(els.authState, signedIn ? "Auth ok" : "Auth idle", signedIn ? "ok" : "idle");
   els.signInBtn.hidden = signedIn || verifying;
   els.signUpBtn.hidden = signedIn || verifying;
@@ -912,8 +969,173 @@ function renderAuth() {
     ? `${state.authEmail} 로 로그인됨. 세션 API를 사용할 수 있습니다.`
     : verifying
       ? '메일로 받은 인증 코드를 입력하고 "인증 완료"를 누르세요.'
-      : "로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.";
+      : "관리자 계정으로 로그인하세요. 계정이 없으면 이메일·비밀번호 입력 후 회원가입한 뒤 관리자 등록을 요청하세요.";
   updateButtons();
+}
+
+function setCurrentTab(button, current) {
+  if (current) {
+    button.setAttribute("aria-current", "page");
+  } else {
+    button.removeAttribute("aria-current");
+  }
+}
+
+function showView(view) {
+  state.view = view;
+  renderAuth();
+  if (view === "admin") {
+    void refreshAdminSessions();
+    void searchAdminUsers();
+  }
+}
+
+const ADMIN_PLANS = ["spark", "glow", "beam", "plasma"];
+
+// refreshAdminSessions는 모든 사용자의 활성 세션을 표로 그린다(#373).
+async function refreshAdminSessions() {
+  try {
+    const payload = await apiFetch("/admin/sessions");
+    renderAdminSessions(payload?.sessions || []);
+  } catch (error) {
+    setAdminDetail(`세션 목록을 불러오지 못했습니다: ${error.message}`);
+  }
+}
+
+function renderAdminSessions(sessions) {
+  els.adminSessionCount.textContent = String(sessions.length);
+  if (sessions.length === 0) {
+    els.adminSessionsBody.replaceChildren(adminEmptyRow(7, "활성 세션이 없습니다."));
+    return;
+  }
+  els.adminSessionsBody.replaceChildren(
+    ...sessions.map((item) => {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "button button-danger button-small";
+      closeBtn.textContent = "강제 종료";
+      closeBtn.addEventListener("click", () => void closeAdminSession(item));
+      return adminRow([
+        item.guest ? "게스트" : item.email || item.user_id,
+        item.plan || "-",
+        item.status,
+        adminTargetsText(item.targets),
+        item.created_at ? new Date(item.created_at).toLocaleString() : "-",
+        String(item.session_id).slice(0, 8),
+        closeBtn,
+      ]);
+    }),
+  );
+}
+
+function adminTargetsText(targets) {
+  const active = (targets || []).filter((target) => target?.stream?.broadcast_phase !== "idle");
+  if (active.length === 0) {
+    return "-";
+  }
+  return active.map((target) => `${target.provider} ${target.stream?.status || ""}`.trim()).join(", ");
+}
+
+// closeAdminSession은 확인을 받은 뒤 세션을 강제로 끝낸다. 송출 중이면 방송도 끝난다.
+async function closeAdminSession(item, confirmClose = (message) => window.confirm(message)) {
+  const who = item.guest ? "게스트" : item.email || item.user_id;
+  if (!confirmClose(`${who}의 세션을 종료합니다. 송출 중이면 방송도 끝납니다. 계속할까요?`)) {
+    return;
+  }
+  try {
+    await apiFetch(`/admin/sessions/${encodeURIComponent(item.session_id)}`, { method: "DELETE" });
+    setAdminDetail(`${who}의 세션을 종료했습니다.`);
+    logEvent("ok", "Session closed by admin", { session_id: item.session_id });
+  } catch (error) {
+    setAdminDetail(`세션을 종료하지 못했습니다: ${error.message}`);
+  }
+  await refreshAdminSessions();
+}
+
+// searchAdminUsers는 이메일로 사용자를 찾아 플랜 변경 표를 그린다.
+async function searchAdminUsers() {
+  const query = els.adminUserQuery.value.trim();
+  try {
+    const payload = await apiFetch(`/admin/users?email=${encodeURIComponent(query)}`);
+    renderAdminUsers(payload?.users || []);
+  } catch (error) {
+    setAdminDetail(`사용자를 불러오지 못했습니다: ${error.message}`);
+  }
+}
+
+function renderAdminUsers(users) {
+  if (users.length === 0) {
+    els.adminUsersBody.replaceChildren(adminEmptyRow(3, "일치하는 사용자가 없습니다."));
+    return;
+  }
+  els.adminUsersBody.replaceChildren(
+    ...users.map((user) => {
+      const select = document.createElement("select");
+      for (const value of ADMIN_PLANS) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        select.append(option);
+      }
+      select.value = user.plan;
+      const applyBtn = document.createElement("button");
+      applyBtn.type = "button";
+      applyBtn.className = "button button-small";
+      applyBtn.textContent = "적용";
+      applyBtn.addEventListener("click", () => void changeUserPlan(user, select.value));
+      const control = document.createElement("span");
+      control.className = "button-row";
+      control.append(select, applyBtn);
+      return adminRow([user.email || user.user_id, user.plan, control]);
+    }),
+  );
+}
+
+// changeUserPlan은 사용자 플랜을 바꾼다. 진행 중인 세션에는 반영되지 않는다.
+async function changeUserPlan(user, value) {
+  try {
+    await apiFetch(`/admin/users/${encodeURIComponent(user.user_id)}/plan`, {
+      method: "PUT",
+      body: JSON.stringify({ plan: value }),
+    });
+    setAdminDetail(`${user.email || user.user_id}의 플랜을 ${value}로 바꿨습니다. 새 세션부터 적용됩니다.`);
+    logEvent("ok", "User plan changed by admin", { user_id: user.user_id, plan: value });
+  } catch (error) {
+    setAdminDetail(`플랜을 바꾸지 못했습니다: ${error.message}`);
+    return;
+  }
+  await searchAdminUsers();
+  if (user.email && user.email === state.authEmail) {
+    await refreshPlan();
+  }
+}
+
+function adminRow(cells) {
+  const row = document.createElement("tr");
+  for (const value of cells) {
+    const cell = document.createElement("td");
+    if (typeof value === "string") {
+      cell.textContent = value;
+    } else {
+      cell.append(value);
+    }
+    row.append(cell);
+  }
+  return row;
+}
+
+function adminEmptyRow(span, text) {
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = span;
+  cell.className = "admin-empty";
+  cell.textContent = text;
+  row.append(cell);
+  return row;
+}
+
+function setAdminDetail(text) {
+  els.adminDetail.textContent = text;
 }
 
 function setYoutubeDetail(text, isError) {

@@ -74,6 +74,26 @@ const buttonKeys = [
   "broadcastSettingsState",
   "broadcastAccounts",
   "broadcastPlatformState",
+  "authEmail",
+  "authPassword",
+  "authDetail",
+  "authState",
+  "verifyRow",
+  "verifyCode",
+  "connectYoutubeBtn",
+  "youtubeDetail",
+  "broadcastVideoInput",
+  "loginView",
+  "viewNav",
+  "navStreamBtn",
+  "navAdminBtn",
+  "streamView",
+  "adminView",
+  "adminSessionCount",
+  "adminSessionsBody",
+  "adminUserQuery",
+  "adminUsersBody",
+  "adminDetail",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -115,6 +135,13 @@ function createElement() {
   return {
     children: [],
     dataset: {},
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
     style: {},
     files: { length: 0 },
     listeners: {},
@@ -177,7 +204,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession };`,
     context,
     { filename: appPath },
   );
@@ -1433,4 +1460,87 @@ test("송출 대상 목록은 방송하지 않는(idle) 대상을 그리지 않�
   renderTargets({ targets: [{ provider: "chzzk", stream: { status: "idle", broadcast_phase: "idle" } }] });
   assert.equal(els.targetList.children.length, 0);
   assert.equal(els.targetListEmpty.hidden, false);
+});
+
+function signInFetch(adminStatus) {
+  const paths = [];
+  const fetchImpl = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    paths.push(`${options.method || "GET"} ${path}`);
+    if (path === "/auth/sign-in") {
+      return jsonResponse({ access_token: "access", refresh_token: "refresh", expires_in: 900 });
+    }
+    if (path === "/admin/me") {
+      return adminStatus === 200
+        ? jsonResponse({ user_id: "u-1" })
+        : jsonResponse({ error: { code: "forbidden", message: "Administrator access is required." } }, adminStatus);
+    }
+    return jsonResponse({});
+  };
+  return { fetchImpl, paths };
+}
+
+test("관리자가 아니면 로그인 화면에서 넘어가지 못한다", async () => {
+  const { fetchImpl } = signInFetch(403);
+  const { signIn, state, els } = await loadApp({ fetchImpl });
+  els.authEmail.value = "user@example.com";
+  els.authPassword.value = "pw";
+
+  await signIn();
+
+  assert.equal(state.accessToken, null);
+  assert.equal(state.isAdmin, false);
+  assert.equal(els.loginView.hidden, false);
+  assert.equal(els.viewNav.hidden, true);
+  assert.equal(els.streamView.hidden, true);
+  assert.equal(els.adminView.hidden, true);
+  assert.match(els.authDetail.textContent, /관리자 계정만/);
+});
+
+test("관리자는 송출 테스트로 들어가고 상단바로 어드민 화면만 연다", async () => {
+  const { fetchImpl, paths } = signInFetch(200);
+  const { signIn, showView, state, els } = await loadApp({ fetchImpl });
+  els.authEmail.value = "admin@example.com";
+  els.authPassword.value = "pw";
+
+  await signIn();
+
+  assert.equal(state.isAdmin, true);
+  assert.equal(els.loginView.hidden, true);
+  assert.equal(els.viewNav.hidden, false);
+  assert.equal(els.streamView.hidden, false);
+  assert.equal(els.adminView.hidden, true);
+  assert.equal(els.navStreamBtn.attributes["aria-current"], "page");
+
+  els.adminUserQuery.value = "";
+  showView("admin");
+  assert.equal(els.streamView.hidden, true);
+  assert.equal(els.adminView.hidden, false);
+  assert.equal(els.navAdminBtn.attributes["aria-current"], "page");
+  assert.equal(els.navStreamBtn.attributes["aria-current"], undefined);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(paths.includes("GET /admin/sessions"));
+  assert.ok(paths.includes("GET /admin/users"));
+});
+
+test("어드민 세션 강제 종료는 확인을 거절하면 요청하지 않는다", async () => {
+  const methods = [];
+  const { closeAdminSession, renderAdminSessions, els } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      methods.push(`${options.method || "GET"} ${new URL(url).pathname}`);
+      return options.method === "DELETE" ? { ok: true, status: 204, headers: new Headers(), async text() { return ""; } } : jsonResponse({ sessions: [] });
+    },
+  });
+  const item = { session_id: "s-1", email: "user@example.com", guest: false, status: "connected", targets: [] };
+  renderAdminSessions([item]);
+  assert.equal(els.adminSessionCount.textContent, "1");
+  assert.equal(els.adminSessionsBody.children.length, 1);
+
+  await closeAdminSession(item, () => false);
+  assert.deepEqual(Array.from(methods), []);
+
+  await closeAdminSession(item, () => true);
+  assert.deepEqual(Array.from(methods), ["DELETE /admin/sessions/s-1", "GET /admin/sessions"]);
+  assert.match(els.adminDetail.textContent, /종료했습니다/);
+  assert.equal(els.adminSessionCount.textContent, "0");
 });

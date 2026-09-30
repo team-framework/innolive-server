@@ -13,6 +13,11 @@
           <p class="eyebrow">Inno Live</p>
           <h1>WebRTC Client</h1>
         </div>
+        <nav class="view-nav" id="viewNav" aria-label="화면 전환" hidden>
+          <button id="navStreamBtn" class="view-tab" type="button" aria-current="page">송출 테스트</button>
+          <button id="navAdminBtn" class="view-tab" type="button">어드민</button>
+          <button id="signOutBtn" class="button button-small" type="button">로그아웃</button>
+        </nav>
         <div class="status-strip" aria-live="polite">
           <div class="status-pill" data-state="idle" id="authState">Auth idle</div>
           <div class="status-pill" data-state="idle" id="healthState">HTTP idle</div>
@@ -21,7 +26,11 @@
         </div>
       </header>
 
-      <section class="toolbar" aria-label="Sign in">
+      <section class="toolbar" id="loginView" aria-label="Sign in">
+        <label class="field field-wide">
+          <span>Server</span>
+          <input id="serverUrl" autocomplete="off" spellcheck="false" />
+        </label>
         <label class="field">
           <span>Email</span>
           <input id="authEmail" type="email" autocomplete="username" spellcheck="false" placeholder="you@example.com" />
@@ -38,9 +47,12 @@
           <button id="signInBtn" class="button button-primary" type="button">로그인</button>
           <button id="signUpBtn" class="button" type="button">회원가입</button>
           <button id="verifyBtn" class="button button-primary" type="button" hidden>인증 완료</button>
-          <button id="signOutBtn" class="button" type="button" hidden>로그아웃</button>
         </div>
-        <span id="authDetail" class="field-wide">로그인이 필요합니다. 계정이 없으면 이메일·비밀번호 입력 후 회원가입하세요.</span>
+        <span id="authDetail" class="field-wide">관리자 계정으로 로그인하세요. 계정이 없으면 이메일·비밀번호 입력 후 회원가입한 뒤 관리자 등록을 요청하세요.</span>
+      </section>
+
+      <div id="streamView" hidden>
+      <section class="toolbar" aria-label="Accounts">
         <div class="plan-summary field-wide" id="planSummary" hidden>
           <span class="status-pill" data-state="ok" id="planBadge">플랜</span>
           <span id="planUsage"></span>
@@ -65,10 +77,6 @@
       </section>
 
       <section class="toolbar" aria-label="Connection controls">
-        <label class="field field-wide">
-          <span>Server</span>
-          <input id="serverUrl" autocomplete="off" spellcheck="false" />
-        </label>
         <label class="field">
           <span>Session label</span>
           <input id="sessionLabel" autocomplete="off" placeholder="demo" />
@@ -432,6 +440,47 @@
           <pre id="sessionJson">{}</pre>
         </article>
       </section>
+      </div>
+
+      <div id="adminView" hidden>
+        <section class="panel admin-panel" aria-labelledby="adminSessionsTitle">
+          <div class="panel-head">
+            <h2 id="adminSessionsTitle">활성 세션 <span id="adminSessionCount">0</span></h2>
+            <button id="adminRefreshSessionsBtn" class="button button-small" type="button">새로고침</button>
+          </div>
+          <p class="admin-hint">배포는 활성 세션이 0이 될 때까지 기다립니다. 남은 세션이 배포를 막으면 여기서 종료하세요.</p>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr><th>사용자</th><th>플랜</th><th>상태</th><th>송출</th><th>시작</th><th>세션</th><th></th></tr>
+              </thead>
+              <tbody id="adminSessionsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel admin-panel" aria-labelledby="adminUsersTitle">
+          <div class="panel-head">
+            <h2 id="adminUsersTitle">사용자 플랜</h2>
+          </div>
+          <div class="admin-search">
+            <label class="field">
+              <span>이메일</span>
+              <input id="adminUserQuery" type="search" autocomplete="off" spellcheck="false" placeholder="이메일 일부 (비우면 최근 가입순)" />
+            </label>
+            <button id="adminSearchUsersBtn" class="button button-primary" type="button">검색</button>
+          </div>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr><th>이메일</th><th>현재 플랜</th><th>변경</th></tr>
+              </thead>
+              <tbody id="adminUsersBody"></tbody>
+            </table>
+          </div>
+        </section>
+        <p id="adminDetail" class="admin-detail" aria-live="polite"></p>
+      </div>
     </main>
 
     <!-- GIS(Google Identity Services): YouTube 계정 연결 팝업 전용. 로그인과 무관하다. -->

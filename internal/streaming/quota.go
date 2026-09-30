@@ -11,8 +11,8 @@ import (
 const (
 	// YouTubeDailyQuota는 프로젝트 기본 일일 쿼터다. 모든 사용자가 나눠 쓴다.
 	YouTubeDailyQuota = 10000
-	// youtubeQuotaLowRatio를 넘으면 부가 조회를 끄고 남은 쿼터를 방송 시작·종료·
-	// 전환에 남긴다(#361).
+	// youtubeQuotaLowRatio를 넘으면 백그라운드 주기 조회를 쉬고 남은 쿼터를 방송
+	// 시작·종료·전환에 남긴다(#361).
 	youtubeQuotaLowRatio = 0.8
 )
 

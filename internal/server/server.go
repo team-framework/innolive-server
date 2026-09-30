@@ -489,7 +489,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 // 거치지 않는다(준비 요청만). 확인에 실패하면 방송을 막지 않는다.
 func (s *Server) channelAlreadyLive(ctx context.Context, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
 	checker, ok := s.streaming[providerName].(streaming.ActiveBroadcastChecker)
-	if !ok || s.youtubeQuotaLow() {
+	if !ok {
 		return nil
 	}
 	ids, err := checker.ActiveBroadcasts(ctx, liveSession.UserID)
@@ -1119,8 +1119,7 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 		providerName = auth.StreamingProviderYouTube
 	}
 	defaults := streaming.FallbackDefaults()
-	// 쿼터가 모자라면 폼은 폴백값으로 열고 남은 쿼터를 방송에 남긴다(#361).
-	if provider := s.streaming[providerName]; provider != nil && !(providerName == auth.StreamingProviderYouTube && s.youtubeQuotaLow()) {
+	if provider := s.streaming[providerName]; provider != nil {
 		if loaded, err := provider.Defaults(r.Context(), liveSession.UserID); err != nil {
 			// 계정 미연결·권한·네트워크 어느 쪽이든 사용자가 할 일은 같다:
 			// 폴백값으로 폼을 열고 직접 채운다.

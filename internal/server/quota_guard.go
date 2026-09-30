@@ -5,9 +5,10 @@ import (
 	"inno-live-server/internal/streaming"
 )
 
-// youtubeQuotaLow는 YouTube API 쿼터를 부가 조회를 꺼야 할 만큼 썼는지다(#361).
-// 넘으면 채널 라이브 확인·스튜디오 종료 확인·직전 값 불러오기를 건너뛰고 남은
-// 쿼터를 방송 시작·종료·전환에 남긴다.
+// youtubeQuotaLow는 YouTube API 쿼터를 백그라운드 조회를 쉬어야 할 만큼 썼는지다
+// (#361). 사용자가 쓰는 기능(직전 값 불러오기·채널 라이브 확인)은 끄지 않는다 —
+// 원래 되던 기능이 안 되면 버그로 보이고, 각각 1~3유닛이라 아끼는 양도 작다.
+// 사용자 눈에 보이지 않고 가장 많이 쓰는 주기 조회(스튜디오 종료 확인)만 쉰다.
 func (s *Server) youtubeQuotaLow() bool {
 	reporter, ok := s.streaming[auth.StreamingProviderYouTube].(streaming.QuotaReporter)
 	return ok && reporter.Quota().Low()

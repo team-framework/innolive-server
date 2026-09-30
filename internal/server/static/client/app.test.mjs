@@ -42,6 +42,7 @@ const buttonKeys = [
   "upgradeOffer",
   "upgradeOfferText",
   "upgradeOfferOptions",
+  "sessionNotices",
   "confirmUpgradeBtn",
   "declineUpgradeBtn",
   "chzzkCategoryType",
@@ -1080,14 +1081,15 @@ test("채널이 이미 라이브면 확인받고, 동의하면 allow_concurrent�
   assert.deepEqual(bodies.at(-1), { provider: "youtube", allow_concurrent: true });
 });
 
-test("세션 알림과 준비 경고는 한국어 문구로 한 번만 보인다", async () => {
+test("세션 알림은 닫을 때까지 남는 배너로 한 번만 보이고, 준비 경고는 한국어 문구다", async () => {
   const { renderSessionNotices, renderBroadcastWarnings, els } = await loadApp();
-  const session = { session_id: "s-1", notices: [{ code: "youtube_quota_low" }, { code: "monthly_limit_reached" }] };
+  const session = { session_id: "s-1", notices: [{ code: "channel_live_elsewhere" }, { code: "monthly_limit_reached" }] };
   renderSessionNotices(session);
-  assert.match(els.broadcastSettingsDetail.textContent, /유튜브 API 사용량/);
-  els.broadcastSettingsDetail.textContent = "";
   renderSessionNotices(session);
-  assert.equal(els.broadcastSettingsDetail.textContent, "", "the same notice must not repeat");
+  assert.equal(els.sessionNotices.children.length, 1, "known notices only, once");
+  const [text, close] = els.sessionNotices.children[0].children;
+  assert.match(text.textContent, /다른 도구로 방송 중/);
+  assert.equal(close.textContent, "닫기");
   renderBroadcastWarnings([{ code: "youtube_quota_low", message: "english" }]);
   assert.match(els.broadcastSettingsDetail.textContent, /유튜브 API 사용량/);
 });

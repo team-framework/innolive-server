@@ -195,6 +195,7 @@ function bindElements() {
     "upgradeOffer",
     "upgradeOfferText",
     "upgradeOfferOptions",
+    "sessionNotices",
     "confirmUpgradeBtn",
     "declineUpgradeBtn",
     "chzzkCategoryType",
@@ -3603,7 +3604,9 @@ const NOTICE_MESSAGES = {
   channel_live_elsewhere: "치지직 채널이 이미 다른 도구로 방송 중이라 송출이 거절됐어요. 다른 도구의 방송을 먼저 끝내세요.",
 };
 
-// renderSessionNotices는 새로 생긴 세션 알림을 한 번씩 보인다(#366).
+// renderSessionNotices는 새로 생긴 세션 알림을 사용자가 닫을 때까지 남는 배너로
+// 보인다(#366, #369). 상태 한 줄은 다른 메시지가 곧 덮어써 놓치기 쉽다. 같은
+// 알림은 한 번만 띄운다.
 function renderSessionNotices(session) {
   for (const notice of session?.notices || []) {
     const message = NOTICE_MESSAGES[notice.code];
@@ -3612,8 +3615,18 @@ function renderSessionNotices(session) {
       continue;
     }
     state.shownNotices.add(key);
-    els.broadcastSettingsDetail.textContent = message;
     logEvent("warn", message, { code: notice.code });
+    const banner = document.createElement("div");
+    banner.className = "upgrade-offer";
+    const text = document.createElement("span");
+    text.textContent = message;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "button";
+    close.textContent = "닫기";
+    close.addEventListener("click", () => banner.remove());
+    banner.append(text, close);
+    els.sessionNotices.append(banner);
   }
 }
 

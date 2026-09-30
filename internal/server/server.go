@@ -476,6 +476,9 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, *failure)
 		return
 	}
+	if providerName == auth.StreamingProviderYouTube && s.youtubeQuotaLow() {
+		warnings = append(warnings, youtubeQuotaLowWarning())
+	}
 	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
 	writeJSON(w, http.StatusOK, struct {
 		session.Response

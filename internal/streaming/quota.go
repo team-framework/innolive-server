@@ -77,6 +77,11 @@ func (m *QuotaMeter) Used() int {
 	return m.units
 }
 
+// Ratio는 일일 쿼터 대비 오늘 쓴 비율이다.
+func (m *QuotaMeter) Ratio() float64 {
+	return float64(m.Used()) / YouTubeDailyQuota
+}
+
 // Low는 부가 조회를 꺼야 할 만큼 썼는지다.
 func (m *QuotaMeter) Low() bool {
 	return float64(m.Used()) >= youtubeQuotaLowRatio*YouTubeDailyQuota

@@ -173,6 +173,34 @@ func TestGoLiveReportsNotReady(t *testing.T) {
 	}
 }
 
+// 이미 끝난 방송(autoStop)을 종료하면 redundantTransition — 목적이 달성된 상태라
+// 성공으로 본다. 다른 403은 그대로 실패다(#355).
+func TestEndLiveTreatsRedundantTransitionAsDone(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		reason  string
+		wantErr bool
+	}{
+		{"already complete", "redundantTransition", false},
+		{"forbidden", "forbidden", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &youtubeAPIStub{
+				transitionStatus: 403,
+				transitionBody:   `{"error":{"code":403,"message":"x","errors":[{"reason":"` + test.reason + `"}]}}`,
+			}
+			store := newMemoryStore()
+			userID := uuid.New()
+			connectedAccount(t, store, userID)
+			provider := testProviderWith(t, stub, store)
+			err := provider.EndLive(context.Background(), userID, PreparedBroadcast{BroadcastID: "broadcast-id-1"})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("EndLive() error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 // TestStopDeletesBroadcast: autoStart를 끈 뒤로 라이브가 되지 못한 방송은
 // 아무도 정리해주지 않으므로 Stop이 지운다.
 func TestStopDeletesBroadcast(t *testing.T) {

@@ -347,45 +347,60 @@ func annexBStartCodeAt(data []byte, offset int) (int, int) {
 }
 
 type h264AccessUnitReader struct {
-	reader *bufio.Reader
-	buffer []byte
+	reader     *bufio.Reader
+	buffer     []byte
+	scanOffset int
+	sawAUD     bool
 }
 
 func (r *h264AccessUnitReader) Read() ([]byte, error) {
 	for {
-		starts := h264AUDStarts(r.buffer)
-		if len(starts) >= 2 {
-			result := append([]byte(nil), r.buffer[:starts[1]]...)
-			r.buffer = append(r.buffer[:0], r.buffer[starts[1]:]...)
-			return result, nil
+		for {
+			start, size := annexBStartCodeAt(r.buffer, r.scanOffset)
+			if start < 0 {
+				// A start code may begin with the last three bytes of this buffer.
+				r.scanOffset = max(0, len(r.buffer)-3)
+				break
+			}
+			if start+size >= len(r.buffer) {
+				// The NAL header might arrive in the next read.
+				r.scanOffset = start
+				break
+			}
+			if r.buffer[start+size]&0x1f == 9 {
+				if r.sawAUD {
+					if start > maxEncodedFrameSize {
+						return nil, errors.New("H.264 access unit exceeds maximum size")
+					}
+					result := append([]byte(nil), r.buffer[:start]...)
+					r.buffer = append(r.buffer[:0], r.buffer[start:]...)
+					r.scanOffset = 0
+					r.sawAUD = false
+					return result, nil
+				}
+				r.sawAUD = true
+			}
+			r.scanOffset = start + size + 1
 		}
-		if len(r.buffer) > maxEncodedFrameSize {
+		// Allow enough lookahead for a four-byte delimiter and its NAL header.
+		if len(r.buffer) > maxEncodedFrameSize+5 {
 			return nil, errors.New("H.264 access unit exceeds maximum size")
 		}
 		value, err := r.reader.ReadByte()
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(r.buffer) > 0 {
+				if len(r.buffer) > maxEncodedFrameSize {
+					return nil, errors.New("H.264 access unit exceeds maximum size")
+				}
 				result := append([]byte(nil), r.buffer...)
 				r.buffer = nil
+				r.scanOffset = 0
+				r.sawAUD = false
 				return result, nil
 			}
 			return nil, err
 		}
 		r.buffer = append(r.buffer, value)
-	}
-}
-
-func h264AUDStarts(data []byte) []int {
-	var starts []int
-	for offset := 0; ; {
-		start, size := annexBStartCodeAt(data, offset)
-		if start < 0 || start+size >= len(data) {
-			return starts
-		}
-		if data[start+size]&0x1f == 9 {
-			starts = append(starts, start)
-		}
-		offset = start + size
 	}
 }
 

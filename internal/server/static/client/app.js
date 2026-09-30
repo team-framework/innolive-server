@@ -31,6 +31,7 @@ const state = {
   referenceFacePreviewUrl: null,
   session: null,
   ownerToken: null,
+  shownNotices: new Set(),
   accessToken: null,
   refreshToken: null,
   authEmail: null,
@@ -2464,7 +2465,7 @@ function renderBroadcastWarnings(warnings) {
   }
   setBroadcastStatus(els.broadcastSettingsState, "일부 미반영", "warn");
   els.broadcastSettingsDetail.textContent = warnings
-    .map((warning) => warning.message)
+    .map((warning) => NOTICE_MESSAGES[warning.code] || warning.message)
     .join(" / ");
   logEvent("warn", "Broadcast settings partially applied", { warnings });
 }
@@ -3589,7 +3590,31 @@ function setCurrentSession(session) {
   renderTargets(session);
   renderSwitchStatus(session);
   renderUpgradeOffer(session);
+  renderSessionNotices(session);
   updateButtons();
+}
+
+// NOTICE_MESSAGES는 사용자에게 보일 세션 알림 문구다. 한도 알림처럼 목록에 없는
+// 코드는 기존 표시(방송 상태)에 맡긴다.
+const NOTICE_MESSAGES = {
+  youtube_quota_low:
+    "오늘 유튜브 API 사용량이 많아 송출 방식 변경이나 새 방송이 실패할 수 있어요. 한국 시간 오후 4시(겨울 5시)에 초기화됩니다.",
+  platform_broadcast_ended: "플랫폼 스튜디오에서 방송이 종료되어 송출을 멈췄어요.",
+  channel_live_elsewhere: "치지직 채널이 이미 다른 도구로 방송 중이라 송출이 거절됐어요. 다른 도구의 방송을 먼저 끝내세요.",
+};
+
+// renderSessionNotices는 새로 생긴 세션 알림을 한 번씩 보인다(#366).
+function renderSessionNotices(session) {
+  for (const notice of session?.notices || []) {
+    const message = NOTICE_MESSAGES[notice.code];
+    const key = `${session.session_id}:${notice.code}`;
+    if (!message || state.shownNotices.has(key)) {
+      continue;
+    }
+    state.shownNotices.add(key);
+    els.broadcastSettingsDetail.textContent = message;
+    logEvent("warn", message, { code: notice.code });
+  }
 }
 
 // updateCurrentSessionStream은 pause·resume API가 반환한 stream 상태만 현재

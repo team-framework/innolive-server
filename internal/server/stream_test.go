@@ -242,6 +242,12 @@ func TestPrepareStreamMapsProviderErrors(t *testing.T) {
 			wantCode:   "live_streaming_blocked",
 		},
 		{
+			name:       "quota exceeded",
+			provider:   &stubStreamingProvider{prepareErr: streaming.ErrQuotaExceeded},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "streaming_quota_exceeded",
+		},
+		{
 			// 무효 refresh token은 재시도가 아니라 재연결 안내여야 한다(#88).
 			name:       "reconnect required",
 			provider:   &stubStreamingProvider{prepareErr: auth.ErrStreamingReconnectRequired},

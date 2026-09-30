@@ -118,6 +118,7 @@ func (s *Server) RunLimitEnforcer(ctx context.Context) {
 }
 
 func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
+	s.publishYouTubeQuota()
 	var upgrades []upgradeCandidate
 	defer func() { s.offerUpgrades(upgrades, now) }()
 	for _, live := range s.sessions.List() {

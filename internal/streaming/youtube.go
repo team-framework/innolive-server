@@ -41,6 +41,9 @@ var (
 	// 방송을 많이 만들면 liveBroadcasts.insert가 403 "User requests exceed the rate
 	// limit."으로 거절한다(2026-09-28 실측, 하루 40여 개). 시간이 지나야 풀린다.
 	ErrPlatformRateLimited = errors.New("the streaming platform rate limit for this user was exceeded")
+	// ErrQuotaExceeded: 프로젝트의 일일 API 쿼터(10,000)를 다 썼다. 태평양 시간
+	// 자정에 초기화되며, 그 전에는 재시도해도 풀리지 않는다.
+	ErrQuotaExceeded = errors.New("the YouTube API daily quota for this project is exhausted")
 	// errRedundantTransition: 방송이 이미 요청한 상태다(예: enableAutoStop이 먼저
 	// 끝낸 방송에 complete 전환). 종료 목적은 달성된 상태라 EndLive는 성공으로 본다.
 	errRedundantTransition = errors.New("the YouTube broadcast is already in the requested state")
@@ -71,6 +74,7 @@ type YouTubeProvider struct {
 	apiBase    string
 	uploadBase string
 	now        func() time.Time
+	quota      *QuotaMeter
 }
 
 func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountStore, cipher *auth.ProviderTokenCipher) (*YouTubeProvider, error) {
@@ -85,6 +89,7 @@ func NewYouTubeProvider(tokens AccessTokenProvider, store auth.StreamingAccountS
 		apiBase:    youtubeAPIBase,
 		uploadBase: youtubeUploadBase,
 		now:        func() time.Time { return time.Now().UTC() },
+		quota:      NewQuotaMeter(),
 	}, nil
 }
 
@@ -359,6 +364,7 @@ func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("request liveStreams.delete: %w", err)
@@ -438,6 +444,7 @@ func (p *YouTubeProvider) refreshChannelInfo(ctx context.Context, accessToken st
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return
@@ -615,6 +622,7 @@ func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, cont
 	if body != nil {
 		request.Header.Set("Content-Type", contentType)
 	}
+	p.quota.Record(request.Method)
 	response, err := p.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("request YouTube Live API: %w", err)
@@ -664,6 +672,8 @@ func decodeYouTubeAPIError(response *http.Response) error {
 		switch item.Reason {
 		case "livePermissionBlocked":
 			return ErrLiveStreamingBlocked
+		case "quotaExceeded", "dailyLimitExceeded":
+			return ErrQuotaExceeded
 		case "userRequestsExceedRateLimit", "rateLimitExceeded":
 			return ErrPlatformRateLimited
 		case "redundantTransition":

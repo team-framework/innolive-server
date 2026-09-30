@@ -76,8 +76,8 @@ func TestPrepareStreamIgnoresOwnActiveBroadcast(t *testing.T) {
 	}
 }
 
-// 쿼터가 80%를 넘으면 채널 라이브 확인을 건너뛰고 바로 준비한다(#361).
-func TestPrepareStreamSkipsLiveCheckWhenQuotaLow(t *testing.T) {
+// 쿼터가 80%를 넘어도 채널 라이브 확인은 한다 — 사용자가 쓰는 기능이다(#361).
+func TestPrepareStreamKeepsLiveCheckWhenQuotaLow(t *testing.T) {
 	stub := &stubStreamingProvider{}
 	meter := streaming.NewQuotaMeter()
 	for i := 0; i < 160; i++ {
@@ -88,7 +88,7 @@ func TestPrepareStreamSkipsLiveCheckWhenQuotaLow(t *testing.T) {
 	})
 	created, ownerToken := createTestSession(t, server.URL, nil)
 	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
-	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) == "channel_already_live" {
-		t.Fatalf("low quota must skip the live check: %v", payload)
+	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) != "channel_already_live" {
+		t.Fatalf("low quota must keep the live check: %v", payload)
 	}
 }

@@ -407,6 +407,35 @@ func TestDefaultsStopsAtPageCap(t *testing.T) {
 	}
 }
 
+// BroadcastEnded는 lifeCycleStatus가 complete·revoked이거나 방송이 사라졌으면
+// 끝난 것으로 본다(#360).
+func TestBroadcastEndedReadsLifeCycle(t *testing.T) {
+	for _, test := range []struct {
+		body string
+		want bool
+	}{
+		{`{"items":[{"status":{"lifeCycleStatus":"live"}}]}`, false},
+		{`{"items":[{"status":{"lifeCycleStatus":"complete"}}]}`, true},
+		{`{"items":[]}`, true},
+	} {
+		stub := &youtubeAPIStub{broadcastListBody: test.body}
+		store := newMemoryStore()
+		userID := uuid.New()
+		connectedAccount(t, store, userID)
+		provider := testProviderWith(t, stub, store)
+		ended, err := provider.BroadcastEnded(context.Background(), userID, "yt-1")
+		if err != nil || ended != test.want {
+			t.Fatalf("%s: ended = %v err = %v, want %v", test.body, ended, err, test.want)
+		}
+		stub.mu.Lock()
+		query := stub.broadcastListQuery
+		stub.mu.Unlock()
+		if !strings.Contains(query, "id=yt-1") {
+			t.Fatalf("query = %q", query)
+		}
+	}
+}
+
 // ActiveBroadcasts는 채널의 active 방송 id를 broadcastStatus=active로 조회한다(#361).
 func TestActiveBroadcastsListsActiveIDs(t *testing.T) {
 	stub := &youtubeAPIStub{broadcastListBody: `{"items":[{"id":"obs-live"},{"id":"innolive-own"}]}`}

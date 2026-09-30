@@ -14,8 +14,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// maxAIRecvMsgSize satisfies the AI contract's ≥5 MiB receive floor with
-// headroom for the worst-case processed frame.
+// maxAIRecvMsgSize는 AI 계약의 수신 하한(5 MiB 이상)을 최악의 처리 프레임에 여유를
+// 두고 맞춘다.
 const maxAIRecvMsgSize = 8 << 20
 
 type Client struct {
@@ -31,8 +31,8 @@ func New(address string, timeout time.Duration) (*Client, error) {
 	}
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		// Worst-case ProcessedVideoChunk (mosaic JPEG + per-face metadata) can
-		// exceed gRPC's 4 MiB default receive cap; the AI contract mandates ≥5 MiB.
+		// 최악의 ProcessedVideoChunk(모자이크 JPEG + 얼굴별 메타데이터)는 gRPC 기본 수신
+		// 한도 4 MiB를 넘을 수 있다. AI 계약은 5 MiB 이상을 요구한다.
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxAIRecvMsgSize)),
 	)
 	if err != nil {
@@ -58,9 +58,9 @@ func (c *Client) NewStream(ctx context.Context, sessionID string) *Stream {
 	return &Stream{ctx: ctx, client: c.client, timeout: c.timeout, sessionID: sessionID}
 }
 
-// whitelistTimeout allows far longer than the per-frame stream timeout: the
-// first AddWhitelist can JIT-compile the face-recognition model (tens of
-// seconds on Blackwell), and whitelist ops are rare user actions, not hot path.
+// whitelistTimeout은 프레임 스트림 타임아웃보다 훨씬 길다. 첫 AddWhitelist가 얼굴
+// 인식 모델을 JIT 컴파일할 수 있고(Blackwell에서 수십 초), 화이트리스트 작업은
+// 드문 사용자 동작이라 핫 패스가 아니다.
 func (c *Client) whitelistTimeout() time.Duration {
 	if c.timeout < 120*time.Second {
 		return 120 * time.Second

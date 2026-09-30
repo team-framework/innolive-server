@@ -201,11 +201,10 @@ func TestProcessorSuspendWaitsForInFlightAIFrame(t *testing.T) {
 	}
 }
 
-// TestProcessImageRejectsNonEmptyErrorCode guards the fail-closed path added
-// for the AI server's error_code field: the RPC can succeed at the transport
-// level (status_message=="success"-shaped response) while still reporting a
-// per-frame failure via error_code, and that must be treated as a failure,
-// not a successfully processed frame.
+// TestProcessImageRejectsNonEmptyErrorCode는 AI 서버의 error_code 필드에 추가한
+// fail-closed 경로를 지킨다. RPC는 전송 수준에서 성공할 수 있어도(status_message가
+// "success" 형태인 응답) error_code로 프레임별 실패를 알릴 수 있고, 이는 처리에
+// 성공한 프레임이 아니라 실패로 다뤄야 한다.
 func TestProcessImageRejectsNonEmptyErrorCode(t *testing.T) {
 	ai := &fakeAIStream{process: func(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
 		return &aiv1.ProcessedVideoChunk{

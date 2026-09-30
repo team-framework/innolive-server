@@ -450,8 +450,8 @@ func updateAppleAccount(tx *gorm.DB, account *OAuthAccount, identity AppleIdenti
 	if err := tx.Model(&OAuthAccount{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
 		return err
 	}
-	// Apple only sends a user's name during initial authorization, so never
-	// overwrite the already persisted display name on later sign-ins.
+	// Apple은 최초 인가 때만 사용자 이름을 보내므로, 이후 로그인에서 이미 저장한 표시
+	// 이름을 덮어쓰지 않는다.
 	if identity.EmailVerified {
 		return tx.Model(&User{}).Where("id = ?", account.UserID).Updates(map[string]any{"email": appleVerifiedEmail(identity), "updated_at": now}).Error
 	}

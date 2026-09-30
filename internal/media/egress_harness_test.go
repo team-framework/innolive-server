@@ -1,12 +1,11 @@
 //go:build egress_harness
 
-// Egress verification harness. Not a unit test: it drives the real RTMPEgress
-// (real ffmpeg child, real FLV/RTMP output) with synthetic JPEG frames so the
-// staged shell verifications (ffprobe, pgrep, SIGSTOP, RTMP reconnect) have a
-// media source without a live WebRTC session.
+// egress 검증 하네스. 단위 테스트가 아니다. 합성 JPEG 프레임으로 실제
+// RTMPEgress(실제 ffmpeg 자식, 실제 FLV/RTMP 출력)를 돌려, 단계별 셸 검증(ffprobe,
+// pgrep, SIGSTOP, RTMP 재연결)이 라이브 WebRTC 세션 없이 미디어 입력을 갖게 한다.
 //
 //	go test -tags egress_harness -run TestEgressHarnessStream ./internal/media -v \
-//	    -timeout 20m  # EGRESS_OUT, EGRESS_SECONDS, EGRESS_FPS env knobs
+//	    -timeout 20m  # 환경 변수 EGRESS_OUT, EGRESS_SECONDS, EGRESS_FPS
 package media
 
 import (
@@ -26,8 +25,8 @@ import (
 	"inno-live-server/internal/metrics"
 )
 
-// EGRESS_WIDTH / EGRESS_HEIGHT select the synthetic frame resolution
-// (default 640x360; e.g. 1920x1080 for the FHD pass-through verification).
+// EGRESS_WIDTH / EGRESS_HEIGHT는 합성 프레임 해상도다(기본 640x360, FHD 통과
+// 검증에는 예: 1920x1080).
 var (
 	harnessWidth  = harnessDimension("EGRESS_WIDTH", 640)
 	harnessHeight = harnessDimension("EGRESS_HEIGHT", 360)
@@ -79,8 +78,8 @@ func harnessVideoSize() string {
 	return os.Getenv("EGRESS_VIDEO_SIZE")
 }
 
-// harnessWireFormat selects the frame format via EGRESS_WIRE (jpeg|raw),
-// mirroring the server's AI_FRAME_WIRE_FORMAT.
+// harnessWireFormat은 EGRESS_WIRE(jpeg|raw)로 프레임 형식을 고른다. 서버의
+// AI_FRAME_WIRE_FORMAT과 같다.
 func harnessWireFormat() config.WireFormat {
 	if os.Getenv("EGRESS_WIRE") == string(config.WireFormatRaw) {
 		return config.WireFormatRaw
@@ -88,8 +87,8 @@ func harnessWireFormat() config.WireFormat {
 	return config.WireFormatJPEG
 }
 
-// harnessRawYUV builds one yuv420p frame: luma gradient plus a moving bright
-// box, neutral chroma.
+// harnessRawYUV는 yuv420p 프레임 하나를 만든다. 밝기 그라데이션에 움직이는 밝은
+// 상자, 중립 색차다.
 func harnessRawYUV(index int) []byte {
 	size := rawFrameSize(uint16(harnessWidth), uint16(harnessHeight))
 	data := make([]byte, size)
@@ -122,9 +121,8 @@ func newHarnessEgress(t *testing.T, output string) *RTMPEgress {
 	return NewRTMPEgress("ffmpeg", logger, metrics.New(), TranscoderOptions{WireFormat: harnessWireFormat()}, output, nil, false, 0, "", harnessVideoSize())
 }
 
-// TestEgressHarnessStream feeds synthetic frames at real-time pace for
-// EGRESS_SECONDS and reports the maximum Enqueue latency (backpressure
-// evidence: it must stay tiny even when the ffmpeg child is SIGSTOPped).
+// TestEgressHarnessStream은 EGRESS_SECONDS 동안 실시간 속도로 합성 프레임을 넣고
+// 최대 Enqueue 지연을 알린다(역압 증거: ffmpeg 자식을 SIGSTOP해도 아주 작아야 한다).
 func TestEgressHarnessStream(t *testing.T) {
 	output := os.Getenv("EGRESS_OUT")
 	if output == "" {
@@ -178,8 +176,8 @@ feed:
 	t.Logf("fed %d frames over %s, max Enqueue latency %s", index, elapsed, maxEnqueue)
 }
 
-// TestEgressHarnessRestartLoop spins the egress up and down repeatedly; the
-// shell verification afterwards asserts no ffmpeg process survived.
+// TestEgressHarnessRestartLoop는 egress를 여러 번 올렸다 내린다. 이후 셸 검증이
+// 남은 ffmpeg 프로세스가 없는지 확인한다.
 func TestEgressHarnessRestartLoop(t *testing.T) {
 	iterations := harnessEnvInt(t, "EGRESS_ITERATIONS", 30)
 	data := harnessFrameData(t, 0, harnessWireFormat())

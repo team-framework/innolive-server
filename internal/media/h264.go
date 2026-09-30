@@ -358,12 +358,12 @@ func (r *h264AccessUnitReader) Read() ([]byte, error) {
 		for {
 			start, size := annexBStartCodeAt(r.buffer, r.scanOffset)
 			if start < 0 {
-				// A start code may begin with the last three bytes of this buffer.
+				// 시작 코드가 이 버퍼의 마지막 세 바이트에서 시작할 수 있다.
 				r.scanOffset = max(0, len(r.buffer)-3)
 				break
 			}
 			if start+size >= len(r.buffer) {
-				// The NAL header might arrive in the next read.
+				// NAL 헤더가 다음 읽기에 올 수 있다.
 				r.scanOffset = start
 				break
 			}
@@ -382,7 +382,7 @@ func (r *h264AccessUnitReader) Read() ([]byte, error) {
 			}
 			r.scanOffset = start + size + 1
 		}
-		// Allow enough lookahead for a four-byte delimiter and its NAL header.
+		// 4바이트 구분자와 그 NAL 헤더를 볼 만큼 미리 읽는다.
 		if len(r.buffer) > maxEncodedFrameSize+5 {
 			return nil, errors.New("H.264 access unit exceeds maximum size")
 		}
@@ -416,7 +416,7 @@ func h264SPSDimensions(nalu []byte) (uint16, uint16, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	if _, err = reader.readBits(8); err != nil { // constraint flags + reserved bits
+	if _, err = reader.readBits(8); err != nil { // constraint 플래그와 예약 비트
 		return 0, 0, err
 	}
 	if _, err = reader.readBits(8); err != nil { // level_idc

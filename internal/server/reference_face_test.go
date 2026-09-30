@@ -34,9 +34,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// fakeAIWorker reproduces the whitelist contract of the real Python worker:
-// each worker mints its own entry id, an empty entry id is rejected outright,
-// and deleting an id the worker never issued is NOT_FOUND.
+// fakeAIWorker는 실제 Python 워커의 화이트리스트 계약을 재현한다. 워커마다 자기
+// 엔트리 id를 발급하고, 빈 엔트리 id는 바로 거절하며, 발급한 적 없는 id를 지우면
+// NOT_FOUND다.
 type fakeAIWorker struct {
 	aiv1.UnimplementedAiProcessorServer
 	name string
@@ -52,9 +52,8 @@ type fakeAIWorker struct {
 	allowClear       chan struct{}
 	clearStartedOnce sync.Once
 
-	// onAdd, when set, runs at the start of every AddWhitelist with the number
-	// of entries already registered and the call's context, so a test can drive
-	// what happens between two files of the same upload.
+	// onAdd가 있으면 AddWhitelist마다 시작할 때 이미 등록된 엔트리 수와 호출
+	// 컨텍스트로 부른다. 같은 업로드의 두 파일 사이에 일어나는 일을 테스트가 조종한다.
 	onAdd func(ctx context.Context, registered int)
 }
 
@@ -127,8 +126,8 @@ func (w *fakeAIWorker) snapshot() []string {
 	return append([]string(nil), w.entries...)
 }
 
-// newReferenceFaceTestServer starts workerCount AI workers and an HTTP server
-// wired to a pool covering all of them.
+// newReferenceFaceTestServer는 AI 워커 workerCount개와, 그 전부를 담은 풀에 연결한
+// HTTP 서버를 띄운다.
 func newReferenceFaceTestServer(t *testing.T, workerCount int) (*httptest.Server, []*fakeAIWorker, string) {
 	t.Helper()
 	workers := make([]*fakeAIWorker, 0, workerCount)
@@ -476,10 +475,9 @@ func guestReferenceUploadRequest(t *testing.T, baseURL, sessionID, owner, guest 
 	return request
 }
 
-// Every worker mints its own entry id for the same face, so deleting one face
-// has to address each worker with that worker's id. Sending one worker's id to
-// all of them made the other workers answer NOT_FOUND, failing the whole
-// request and leaving the face registered.
+// 워커마다 같은 얼굴에 자기 엔트리 id를 발급하므로, 얼굴 하나를 지우려면 각 워커에
+// 그 워커의 id로 요청해야 한다. 한 워커의 id를 모두에게 보내면 나머지 워커가
+// NOT_FOUND로 답해 요청 전체가 실패하고 얼굴이 등록된 채 남았다.
 func TestDeleteReferenceFaceByIDRemovesItFromEveryWorker(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
 	registered := uploadReferenceFaces(t, httpServer.URL, 2)
@@ -505,8 +503,8 @@ func TestDeleteReferenceFaceByIDRemovesItFromEveryWorker(t *testing.T) {
 	}
 }
 
-// The workers reject an empty entry id, so "delete everything" must enumerate
-// the ids each worker actually holds.
+// 워커는 빈 엔트리 id를 거절하므로 "전부 지우기"는 각 워커가 실제로 가진 id를
+// 하나씩 지워야 한다.
 func TestDeleteAllReferenceFacesEmptiesEveryWorker(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
 	uploadReferenceFaces(t, httpServer.URL, 2)
@@ -528,8 +526,8 @@ func TestDeleteAllReferenceFacesEmptiesEveryWorker(t *testing.T) {
 	}
 }
 
-// A single-image upload replaces the client's set, which is only true if the
-// previous faces actually leave the workers.
+// 이미지 한 장 업로드는 클라이언트의 얼굴 집합을 교체한다. 이전 얼굴이 실제로
+// 워커에서 빠져야만 참이다.
 func TestReplaceUploadClearsPreviousWorkerEntries(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
 	uploadReferenceFaces(t, httpServer.URL, 2)
@@ -568,8 +566,8 @@ func TestReplaceUploadClearsPreviousWorkerEntries(t *testing.T) {
 	}
 }
 
-// Entry ids are what makes a face deletable, so they have to survive a restart
-// while staying out of API responses.
+// 엔트리 id가 있어야 얼굴을 지울 수 있으므로, 재시작 뒤에도 남되 API 응답에는
+// 나오지 않아야 한다.
 func TestReferenceStorePersistsWorkerEntryIDsWithoutExposingThem(t *testing.T) {
 	httpServer, _, storePath := newReferenceFaceTestServer(t, 2)
 	registered := uploadReferenceFaces(t, httpServer.URL, 1)
@@ -610,9 +608,8 @@ func TestReferenceStoreDeleteClientRestoresDataWhenSaveFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Point persistence below a regular file. MkdirAll fails before any write,
-	// while the previously published metadata file remains available for the
-	// preservation check.
+	// 저장 경로를 일반 파일 아래로 둔다. MkdirAll이 쓰기 전에 실패하고, 이전에 공개한
+	// 메타데이터 파일은 보존 확인을 위해 그대로 남는다.
 	store.path = filepath.Join(path, "cannot-create-child")
 	if err := store.deleteClient("target"); err == nil {
 		t.Fatal("deleteClient unexpectedly succeeded when saving was unavailable")
@@ -640,7 +637,7 @@ func TestReferenceStoreDeleteClientRestoresDataWhenSaveFails(t *testing.T) {
 	}
 }
 
-// referenceUploadPart describes one multipart file for postReferenceFaces.
+// referenceUploadPart는 postReferenceFaces에 넘길 multipart 파일 하나다.
 type referenceUploadPart struct {
 	field       string
 	filename    string
@@ -648,7 +645,7 @@ type referenceUploadPart struct {
 	content     string
 }
 
-// postReferenceFaces uploads arbitrary parts and returns the raw response.
+// postReferenceFaces는 임의의 파트를 올리고 응답을 그대로 돌려준다.
 func postReferenceFaces(t *testing.T, baseURL string, parts []referenceUploadPart) *http.Response {
 	t.Helper()
 	var body bytes.Buffer
@@ -675,8 +672,8 @@ func postReferenceFaces(t *testing.T, baseURL string, parts []referenceUploadPar
 	return response
 }
 
-// A later file failing the format check must not leave an earlier file — already
-// registered on the workers in the same request — excluded from blur.
+// 뒤 파일이 형식 검사에 실패해도, 같은 요청에서 이미 워커에 등록한 앞 파일이 블러
+// 제외로 남으면 안 된다.
 func TestPartialUploadFormatFailureLeavesNoWorkerEntries(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
 
@@ -700,11 +697,11 @@ func TestPartialUploadFormatFailureLeavesNoWorkerEntries(t *testing.T) {
 	}
 }
 
-// A later file rejected by the worker must roll back this request's earlier
-// registrations while leaving faces from previous requests intact.
+// 뒤 파일을 워커가 거절하면 이 요청의 앞선 등록은 되돌리고, 이전 요청의 얼굴은
+// 그대로 둔다.
 func TestPartialUploadWorkerRejectionRollsBackThisRequestOnly(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 2)
-	uploadReferenceFaces(t, httpServer.URL, 1) // pre-existing face from an earlier request
+	uploadReferenceFaces(t, httpServer.URL, 1) // 이전 요청이 등록한 얼굴
 
 	response := postReferenceFaces(t, httpServer.URL, []referenceUploadPart{
 		{field: "images", filename: "ok.jpg", contentType: "image/jpeg", content: "ok"},
@@ -742,19 +739,17 @@ func getReferenceStatus(t *testing.T, baseURL string) referenceStatus {
 	return status
 }
 
-// A client that disconnects mid-upload cancels the request context, which is
-// itself one of the ways a later AddWhitelist fails. The rollback must still
-// remove the entry the earlier file registered (#201) — running it on the
-// cancelled context would leave the worker excluding that face from blur.
+// 업로드 도중 클라이언트가 끊으면 요청 컨텍스트가 취소되고, 그것이 뒤 AddWhitelist가
+// 실패하는 경로 중 하나다. 그래도 롤백은 앞 파일이 등록한 엔트리를 지워야 한다
+// (#201) — 취소된 컨텍스트로 돌리면 워커가 그 얼굴을 계속 블러에서 제외한다.
 func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
 	httpServer, workers, _ := newReferenceFaceTestServer(t, 1)
 	worker := workers[0]
 
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	defer cancelRequest()
-	// Drop the client once the first file is registered and the second file's
-	// call has started. Waiting for the server side to observe the cancellation
-	// keeps that second call's failure deterministic.
+	// 첫 파일이 등록되고 두 번째 파일의 호출이 시작되면 클라이언트를 끊는다. 서버가
+	// 취소를 관측할 때까지 기다려 두 번째 호출의 실패를 결정적으로 만든다.
 	worker.onAdd = func(ctx context.Context, registered int) {
 		if registered != 1 {
 			return
@@ -790,7 +785,7 @@ func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
 		t.Fatal("request succeeded, want client cancellation")
 	}
 
-	// The handler outlives the cancelled client, so wait for the rollback.
+	// 핸들러는 취소된 클라이언트보다 오래 살므로 롤백을 기다린다.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		entries := worker.snapshot()
@@ -807,10 +802,9 @@ func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
 	}
 }
 
-// A body that never finishes arriving must hit the upload read deadline instead
-// of holding the handler and its connection open (#207). Driven over a raw
-// connection so the assertion is about the server, not about when a client
-// stops writing.
+// 끝내 다 도착하지 않는 본문은 핸들러와 연결을 붙잡지 말고 업로드 읽기 기한에
+// 걸려야 한다(#207). 클라이언트가 언제 쓰기를 멈추는지가 아니라 서버를 검증하도록
+// 원시 연결로 보낸다.
 func TestUploadStalledBodyHitsReadDeadline(t *testing.T) {
 	previous := referenceUploadReadTimeout
 	referenceUploadReadTimeout = 300 * time.Millisecond
@@ -830,8 +824,8 @@ func TestUploadStalledBodyHitsReadDeadline(t *testing.T) {
 	if _, err := part.Write([]byte("ok")); err != nil {
 		t.Fatal(err)
 	}
-	// The writer is deliberately left open: the multipart terminator never
-	// arrives, so the handler keeps reading until the deadline fires.
+	// writer는 일부러 열어 둔다. multipart 종결자가 오지 않으므로 핸들러는 기한이
+	// 될 때까지 읽는다.
 
 	address := strings.TrimPrefix(httpServer.URL, "http://")
 	connection, err := net.Dial("tcp", address)
@@ -840,8 +834,8 @@ func TestUploadStalledBodyHitsReadDeadline(t *testing.T) {
 	}
 	defer connection.Close()
 
-	// A large Content-Length with only the first chunk actually sent is the
-	// trickling client: the server must not wait for the rest forever.
+	// Content-Length는 크게 주고 첫 조각만 보내는 것이 찔끔 보내는 클라이언트다.
+	// 서버는 나머지를 영원히 기다리면 안 된다.
 	request := fmt.Sprintf("POST /reference-face HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n",
 		address, writer.FormDataContentType(), head.Len()+1<<20)
 	if _, err := connection.Write(append([]byte(request), head.Bytes()...)); err != nil {

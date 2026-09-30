@@ -1,11 +1,10 @@
 //go:build egress_harness
 
-// Integration test for RTMPEgress: drives the real ffmpeg encode+mux path to a
-// temp FLV file and asserts the output with ffprobe. Unlike the harness (which
-// measures/logs), this test fails on wrong output. It exercises the full egress
-// code path — fps measurement, process spawn, frame writing, mux, teardown —
-// with real ffmpeg, so it is gated behind the egress_harness build tag and
-// skips when ffmpeg/ffprobe are absent.
+// RTMPEgress 통합 테스트. 실제 ffmpeg 인코드+먹스 경로로 임시 FLV 파일에 쓰고
+// ffprobe로 출력을 단언한다. 측정·로그용인 하네스와 달리 출력이 틀리면 실패한다.
+// fps 측정, 프로세스 생성, 프레임 쓰기, 먹스, 정리까지 egress 전체 경로를 실제
+// ffmpeg로 돌리므로 egress_harness 빌드 태그 뒤에 두고, ffmpeg/ffprobe가 없으면
+// 건너뛴다.
 //
 //	go test -tags egress_harness -run TestEgressIntegration ./internal/media -v
 package media
@@ -51,15 +50,15 @@ func ffprobeField(t *testing.T, path, streamSel, entries string) string {
 	return string(out)
 }
 
-// TestEgressIntegrationFileOutput feeds synthetic JPEG frames through a real
-// RTMPEgress writing to a temp FLV and asserts the muxed result: H.264/yuv420p
-// video, AAC audio, a plausible duration, and monotonic video DTS.
+// TestEgressIntegrationFileOutput은 합성 JPEG 프레임을 임시 FLV에 쓰는 실제
+// RTMPEgress에 넣고 먹싱 결과를 단언한다. H.264/yuv420p 영상, AAC 오디오, 그럴듯한
+// 길이, 단조 증가하는 영상 DTS.
 func TestEgressIntegrationFileOutput(t *testing.T) {
 	requireTool(t, "ffmpeg")
 	requireTool(t, "ffprobe")
 
 	out := t.TempDir() + "/egress.flv"
-	egress := newHarnessEgress(t, out) // jpeg wire format by default
+	egress := newHarnessEgress(t, out) // 기본은 jpeg 와이어 형식
 	ctx, cancel := context.WithCancel(context.Background())
 	var done sync.WaitGroup
 	done.Add(1)
@@ -92,7 +91,7 @@ feed:
 	cancel()
 	done.Wait()
 
-	// --- assertions on the muxed FLV ---
+	// --- 먹싱한 FLV 단언 ---
 	vinfo := ffprobeField(t, out, "v", "stream=codec_name,pix_fmt")
 	if !strings.Contains(vinfo, "codec_name=h264") {
 		t.Errorf("video codec not h264:\n%s", vinfo)
@@ -248,8 +247,8 @@ func parseDuration(t *testing.T, ffprobeOut string) float64 {
 	return 0
 }
 
-// assertMonotonicDTS fails if any video packet DTS is not strictly increasing —
-// YouTube drops connections on non-monotonic DTS.
+// assertMonotonicDTS는 영상 패킷 DTS가 엄격히 늘지 않으면 실패한다 — 유튜브는 단조
+// 증가하지 않는 DTS에서 연결을 끊는다.
 func assertMonotonicDTS(t *testing.T, path string) {
 	t.Helper()
 	out, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v",

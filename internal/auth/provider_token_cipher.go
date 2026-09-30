@@ -13,9 +13,9 @@ import (
 
 const providerTokenKeyVersion int16 = 1
 
-// ProviderTokenCipher encrypts provider refresh tokens before persistence.
-// Ciphertexts contain nonce || sealed data, so every stored value has its own
-// AES-GCM nonce and can be decrypted after a process restart using the same key.
+// ProviderTokenCipher는 플랫폼 refresh token을 저장하기 전에 암호화한다. 암호문은
+// nonce || 봉인 데이터라 저장값마다 자기 AES-GCM nonce를 갖고, 같은 키로 프로세스
+// 재시작 뒤에도 복호화할 수 있다.
 type ProviderTokenCipher struct {
 	key []byte
 }

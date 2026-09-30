@@ -28,10 +28,9 @@ type AIStream interface {
 
 var errAIInputPaused = errors.New("AI input is paused")
 
-// defaultRecoveryProbeInterval is how often a latched session re-tries the AI
-// boundary to detect recovery. Short enough that a recovered worker resumes a
-// session within about a second, long enough that many latched sessions do not
-// re-flood an overloaded worker with every frame.
+// defaultRecoveryProbeInterval은 잠긴 세션이 회복을 확인하려고 AI 경계를 다시
+// 시도하는 주기다. 회복한 워커가 1초 안팎에 세션을 재개할 만큼 짧고, 잠긴 세션이
+// 많아도 과부하 워커에 프레임마다 다시 몰리지 않을 만큼 길다.
 const defaultRecoveryProbeInterval = time.Second
 
 // privacyGenerations는 익명화 설정 세대를 매긴다. 프로세스 전역에서 단조
@@ -53,27 +52,23 @@ type Processor struct {
 	wireFormat        config.WireFormat
 	failurePolicy     config.AIFailurePolicy
 
-	// timeoutLatchThreshold bounds how many CONSECUTIVE timeout failures are
-	// tolerated (serving a per-frame blackout, retrying the AI next frame)
-	// before the permanent latch fires. This keeps a transient AI-worker
-	// thread-pool squeeze (a frame briefly queued past AI_GRPC_TIMEOUT) from
-	// permanently blackening a session the way a genuine defect does. 0 means
-	// even a single timeout latches immediately (legacy behavior).
+	// timeoutLatchThreshold는 영구 잠금 전에 허용하는 연속 타임아웃 실패 횟수다(그
+	// 동안은 프레임마다 블랙아웃을 내보내고 다음 프레임에 AI를 다시 시도한다). AI
+	// 워커 스레드 풀이 잠깐 붐벼 프레임이 AI_GRPC_TIMEOUT을 넘긴 경우가 진짜 결함처럼
+	// 세션을 영구히 검게 만들지 않게 한다. 0이면 타임아웃 한 번에 바로 잠근다(이전
+	// 동작).
 	timeoutLatchThreshold int
 	consecutiveTimeouts   atomic.Int64
 
-	// fallback latches the session into fail-closed blackout once the AI
-	// boundary fails: black frames instead of raw or frozen video. The latch is
-	// no longer permanent — while latched the AI is re-probed at most once per
-	// recoveryProbeInterval, and the first frame that succeeds clears the latch
-	// and resumes normal processing. This recovers a session after a transient
-	// AI outage (e.g. a worker restart) without a client re-negotiation, while
-	// the per-frame default between probes stays fail-closed.
+	// fallback은 AI 경계가 실패하면 세션을 fail-closed 블랙아웃으로 잠근다. 원본이나
+	// 멈춘 영상 대신 검은 프레임이다. 잠금은 더는 영구가 아니다 — 잠긴 동안 AI를
+	// recoveryProbeInterval마다 최대 한 번 다시 시도하고, 성공한 첫 프레임에서 잠금을
+	// 풀고 정상 처리로 돌아간다. 워커 재시작 같은 일시적 AI 장애 뒤에 클라이언트
+	// 재협상 없이 세션을 되살리면서, 시도 사이의 프레임은 계속 fail-closed다.
 	fallback atomic.Bool
-	// recoveryProbeInterval bounds how often a latched session re-tries the AI,
-	// so many latched sessions cannot re-flood an already-overloaded worker with
-	// every frame. lastProbeAt is only touched from the single per-session
-	// processing goroutine.
+	// recoveryProbeInterval은 잠긴 세션이 AI를 다시 시도하는 빈도의 한계다. 잠긴
+	// 세션이 많아도 이미 과부하인 워커에 프레임마다 몰리지 않게 한다. lastProbeAt은
+	// 세션당 하나인 처리 고루틴에서만 건드린다.
 	recoveryProbeInterval time.Duration
 	lastProbeAt           time.Time
 	blackoutMu            sync.Mutex
@@ -156,9 +151,9 @@ func (p *Processor) ResumeAIInput() {
 	p.aiMu.Unlock()
 }
 
-// SetAnonymizationEnabled changes whether frames are sent to the AI worker.
-// Unlike SuspendAIInput (used by broadcast pause), disabling anonymization
-// preserves the open bidi stream and passes the raw frame to the outputs.
+// SetAnonymizationEnabled는 프레임을 AI 워커로 보낼지 바꾼다. 방송 일시 정지가 쓰는
+// SuspendAIInput과 달리, 익명화를 끄면 양방향 스트림은 열어 둔 채 원본 프레임을
+// 출력으로 넘긴다.
 func (p *Processor) SetAnonymizationEnabled(enabled bool) {
 	if p.mode != config.PrivacyModeReal {
 		return
@@ -178,8 +173,8 @@ func (p *Processor) PrivacyGeneration() uint64 {
 	return p.privacyGeneration.Load()
 }
 
-// AnonymizationEnabled reports whether real-mode frames are currently sent to
-// the AI worker. Non-real privacy modes have no AI processing to toggle.
+// AnonymizationEnabled는 real 모드 프레임을 지금 AI 워커로 보내는지다. real이 아닌
+// 프라이버시 모드에는 켜고 끌 AI 처리가 없다.
 func (p *Processor) AnonymizationEnabled() bool {
 	if p.mode != config.PrivacyModeReal {
 		return false
@@ -200,7 +195,7 @@ func (p *Processor) AIInputPaused() bool {
 	return p.aiInputPaused
 }
 
-// FallbackActive reports whether the fail-closed blackout latch has fired.
+// FallbackActive는 fail-closed 블랙아웃 잠금이 걸렸는지다.
 func (p *Processor) FallbackActive() bool { return p.fallback.Load() }
 
 func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
@@ -250,10 +245,9 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 		}
 	case config.PrivacyModeReal:
 		if p.fallback.Load() {
-			// Latched: re-probe the AI at most once per recoveryProbeInterval so
-			// a recovering worker is picked up without every latched session
-			// re-flooding an overloaded one. Between probes, serve blackout
-			// without touching the AI.
+			// 잠김: AI를 recoveryProbeInterval마다 최대 한 번만 다시 시도해, 잠긴 세션이
+			// 모두 과부하 워커에 몰리지 않으면서 회복한 워커를 알아챈다. 시도 사이에는
+			// AI를 건드리지 않고 블랙아웃을 내보낸다.
 			if time.Since(p.lastProbeAt) < p.recoveryProbeInterval {
 				return p.serveBlackout(frame, width, height, nil)
 			}
@@ -262,8 +256,7 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 			if err != nil {
 				return p.serveBlackout(frame, width, height, err)
 			}
-			// The AI boundary works again: clear the latch and resume normal
-			// processing for this frame onward.
+			// AI 경계가 다시 동작한다. 잠금을 풀고 이 프레임부터 정상 처리한다.
 			p.fallback.Store(false)
 			p.consecutiveTimeouts.Store(0)
 			p.metrics.IncAIFallbackRecovered(string(p.mode))
@@ -283,10 +276,9 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 		if p.failurePolicy == config.FailurePolicyFreeze {
 			return nil, err
 		}
-		// Tolerate a bounded run of consecutive timeouts (e.g. the AI worker's
-		// thread pool momentarily saturated) without permanently latching:
-		// serve a blackout frame for this frame only and retry the AI next
-		// frame. A non-timeout failure resets straight to the latch path.
+		// 연속 타임아웃이 일정 횟수까지는(예: AI 워커 스레드 풀이 잠깐 포화) 영구히
+		// 잠그지 않는다. 이 프레임만 블랙아웃을 내보내고 다음 프레임에 AI를 다시
+		// 시도한다. 타임아웃이 아닌 실패는 곧바로 잠금 경로로 간다.
 		if isTimeoutError(err) {
 			if int(p.consecutiveTimeouts.Add(1)) <= p.timeoutLatchThreshold {
 				return p.serveBlackout(frame, width, height, err)
@@ -343,10 +335,9 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 	if response.GetTimestamp() != timestamp {
 		return nil, fmt.Errorf("AI response timestamp mismatch: sent=%d received=%d", timestamp, response.GetTimestamp())
 	}
-	// error_code is set when the AI server completed the RPC but the frame
-	// itself failed processing (e.g. decode failure) — the call succeeding
-	// at the transport level does not mean the frame was safely processed,
-	// so this must latch fail-closed exactly like a transport error does.
+	// error_code는 AI 서버가 RPC는 끝냈지만 프레임 처리 자체가 실패했을 때(예: 디코드
+	// 실패) 설정된다. 전송 수준에서 호출이 성공했다고 프레임이 안전하게 처리된 것은
+	// 아니므로, 전송 오류와 똑같이 fail-closed로 잠가야 한다.
 	if response.GetErrorCode() != "" {
 		return nil, fmt.Errorf("AI processing failed: error_code=%s error_message=%q", response.GetErrorCode(), response.GetErrorMessage())
 	}
@@ -359,9 +350,8 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 	return response.GetData(), nil
 }
 
-// serveBlackout returns the cached black frame for this session. If the
-// black frame cannot be built, the original AI error (when present) is
-// propagated so the frame is dropped rather than emitted raw.
+// serveBlackout은 이 세션에 캐시한 검은 프레임을 돌려준다. 검은 프레임을 만들 수
+// 없으면 원래 AI 오류(있으면)를 넘겨 프레임을 원본으로 내보내지 않고 버린다.
 func (p *Processor) serveBlackout(reference []byte, width, height uint16, cause error) ([]byte, error) {
 	black, err := p.blackoutFrame(reference, width, height)
 	if err != nil {
@@ -423,10 +413,9 @@ func (p *Processor) blackoutFrame(reference []byte, width, height uint16) ([]byt
 	return p.blackoutData, nil
 }
 
-// isTimeoutError reports whether an AI-boundary error is a deadline/timeout,
-// as opposed to a definitive rejection (status != success, empty frame) or a
-// transport error. Timeouts are the one failure class that a transient AI
-// worker overload can produce, so they are treated as potentially recoverable.
+// isTimeoutError는 AI 경계 오류가 기한·타임아웃인지다. 확정적 거절(status가 success
+// 아님, 빈 프레임)이나 전송 오류와 구분한다. 일시적 AI 워커 과부하가 만들 수 있는
+// 실패는 타임아웃뿐이라 회복 가능성이 있는 것으로 다룬다.
 func isTimeoutError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
@@ -434,9 +423,8 @@ func isTimeoutError(err error) bool {
 	return status.Code(err) == codes.DeadlineExceeded
 }
 
-// latchHint returns an operator-facing hint tailored to the failure that is
-// about to latch the session, so a wire-format explanation is not appended to
-// failures (timeouts, empty frames) that have nothing to do with pixel format.
+// latchHint는 세션을 잠그려는 실패에 맞춘 운영자용 힌트를 돌려준다. 픽셀 형식과
+// 무관한 실패(타임아웃·빈 프레임)에 와이어 형식 설명이 붙지 않게 한다.
 func latchHint(err error, wireFormat config.WireFormat) string {
 	switch {
 	case isTimeoutError(err):

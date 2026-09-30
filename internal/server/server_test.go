@@ -45,7 +45,7 @@ func TestSessionLifecycleAndMetricsAPI(t *testing.T) {
 		t.Fatalf("new session unexpectedly has media tracks: %+v", created.Media)
 	}
 
-	// The owner can read their own session with the token.
+	// 소유자는 토큰으로 자기 세션을 읽을 수 있다.
 	response := mustRequest(t, http.MethodGet, httpServer.URL+"/sessions/"+created.SessionID, nil, bearer(ownerToken))
 	var fetched session.Response
 	mustDecode(t, response.Body, &fetched)
@@ -210,9 +210,8 @@ func TestUserScopedRoutesRequireValidatedLogin(t *testing.T) {
 		}
 	}
 
-	// Session-scoped routes require both an access token and the separate
-	// capability token. Keeping the latter out of Authorization prevents one
-	// credential from replacing the other.
+	// 세션 범위 경로는 access token과 별도의 권한 토큰을 모두 요구한다. 후자를
+	// Authorization 밖에 두어 한 자격 정보가 다른 것을 대신하지 못하게 한다.
 	createResponse := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", nil, accessHeader)
 	var created struct {
 		session.Response
@@ -348,8 +347,8 @@ func TestSignalingOriginPolicyRejectsDisallowedWebSocketOrigin(t *testing.T) {
 	application, manager := newTestApplication(t)
 	defer manager.CloseAll()
 
-	// Mount the signaling handler directly so this test exercises the
-	// websocket.Upgrader CheckOrigin callback, independently of HTTP CORS.
+	// signaling 핸들러를 직접 달아 HTTP CORS와 별개로 websocket.Upgrader의
+	// CheckOrigin 콜백을 검증한다.
 	httpServer := httptest.NewServer(http.HandlerFunc(application.handleSignaling))
 	defer httpServer.Close()
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/signaling"
@@ -476,9 +475,9 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 	liveSession, ownerToken := createTestSession(t, httpServer.URL, nil)
 	track, received := connectTestPublisher(t, httpServer.URL, liveSession.SessionID, ownerToken)
 
-	// SampleBuilder retains the newest incomplete sample until it sees a later
-	// RTP timestamp. Send a short stream rather than a single GOP so the final
-	// frames are also released to the decoder while the peer remains connected.
+	// SampleBuilder는 더 뒤의 RTP 타임스탬프를 볼 때까지 마지막 미완성 샘플을 쥐고
+	// 있다. GOP 하나가 아니라 짧은 스트림을 보내 피어가 연결된 동안 마지막 프레임도
+	// 디코더로 나가게 한다.
 	for _, input := range generateVP8Frames(t, 30) {
 		if err := track.WriteSample(media.Sample{Data: input, Duration: time.Second / 30}); err != nil {
 			t.Fatal(err)
@@ -712,9 +711,9 @@ func generateVP8Frames(t *testing.T, count int) [][]byte {
 		ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=30",
-		// The sender emits this finite burst immediately after ICE connects. Make
-		// every fixture frame a keyframe so a receiver that begins reading after
-		// the first RTP packet can still initialize its VP8 decoder.
+		// 송신자는 ICE가 연결되자마자 이 유한한 묶음을 보낸다. 첫 RTP 패킷 뒤에 읽기
+		// 시작한 수신자도 VP8 디코더를 초기화할 수 있게 모든 픽스처 프레임을 키프레임으로
+		// 만든다.
 		"-frames:v", fmt.Sprintf("%d", count), "-c:v", "libvpx", "-deadline", "realtime", "-g", "1",
 		"-f", "ivf", "pipe:1",
 	)
@@ -800,8 +799,8 @@ func newTestApplicationWithConfig(t *testing.T, cfg config.Config, requireUser f
 	return New(cfg, logger, registry, manager, nil, origins, requireUser, nil, authenticateUsers...), manager
 }
 
-// createTestSession creates a session and returns its response plus the
-// one-time owner token that later session-scoped calls must present.
+// createTestSession은 세션을 만들고, 응답과 이후 세션 범위 호출이 내밀어야 하는
+// 1회용 소유자 토큰을 돌려준다.
 func createTestSession(t *testing.T, baseURL string, metadata map[string]string) (session.Response, string) {
 	return createTestSessionWithHeaders(t, baseURL, metadata, http.Header{"Content-Type": []string{"application/json"}})
 }
@@ -831,7 +830,7 @@ func createTestSessionWithHeaders(t *testing.T, baseURL string, metadata map[str
 	return result.Response, result.OwnerToken
 }
 
-// bearer builds an Authorization header carrying the owner token.
+// bearer는 소유자 토큰을 실은 Authorization 헤더를 만든다.
 func bearer(token string) http.Header {
 	return http.Header{"Authorization": []string{"Bearer " + token}}
 }

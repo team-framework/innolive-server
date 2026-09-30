@@ -11,10 +11,9 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// prepareOutputForOffer mirrors aiortc's answer-side behaviour: walk the
-// offered video payload types in their original order and bind the first codec
-// that both the client and this server can use. It deliberately does not impose
-// a server H.264 preference.
+// prepareOutputForOffer는 aiortc의 answer 쪽 동작을 따른다. offer의 영상 payload
+// type을 원래 순서대로 훑어 클라이언트와 이 서버가 모두 쓸 수 있는 첫 코덱을 묶는다.
+// 서버 쪽 H.264 선호를 일부러 강요하지 않는다.
 func (s *Session) prepareOutputForOffer(offerSDP string) error {
 	if s.Output != nil || s.Sender != nil {
 		return nil
@@ -94,10 +93,10 @@ func offeredVideoCodecs(raw string) ([]offeredVideoCodec, error) {
 	return result, nil
 }
 
-// offeredRTCPFeedback collects the a=rtcp-fb lines of a media section by
-// payload type. SetCodecPreferences overwrites the transceiver's codec
-// capability wholesale, so a codec rebuilt from the offer must carry the
-// feedback the client asked for or the answer advertises none at all.
+// offeredRTCPFeedback은 미디어 섹션의 a=rtcp-fb 줄을 payload type별로 모은다.
+// SetCodecPreferences는 트랜시버의 코덱 능력을 통째로 덮어쓰므로, offer로 다시 만든
+// 코덱은 클라이언트가 요청한 피드백을 실어야 한다. 아니면 answer가 피드백을 하나도
+// 알리지 않는다.
 func offeredRTCPFeedback(mediaDescription *sdp.MediaDescription) map[uint8][]webrtc.RTCPFeedback {
 	feedback := make(map[uint8][]webrtc.RTCPFeedback)
 	for _, attribute := range mediaDescription.Attributes {

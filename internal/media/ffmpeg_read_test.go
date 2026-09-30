@@ -22,7 +22,7 @@ func TestReadJPEGExtractsFramesAcrossBufferWindows(t *testing.T) {
 	second := []byte{0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9}
 	stream := append(append([]byte(nil), first...), second...)
 
-	// A 16-byte reader forces the scan to walk multiple buffered windows.
+	// 16바이트 리더로 탐색이 버퍼 창 여러 개를 훑게 한다.
 	reader := bufio.NewReaderSize(bytes.NewReader(stream), 16)
 	got, err := readJPEG(reader)
 	if err != nil {
@@ -41,8 +41,8 @@ func TestReadJPEGExtractsFramesAcrossBufferWindows(t *testing.T) {
 }
 
 func TestReadJPEGHandlesEOISplitAcrossWindows(t *testing.T) {
-	// 0xFF sits at the end of the first 16-byte window and 0xD9 begins the
-	// next one, exercising the window-boundary branch.
+	// 0xFF는 첫 16바이트 창의 끝에, 0xD9는 다음 창의 시작에 있어 창 경계 분기를
+	// 탄다.
 	frame := append([]byte{0xff, 0xd8}, bytes.Repeat([]byte{0x00}, 13)...)
 	frame = append(frame, 0xff, 0xd9)
 	trailer := []byte{0xff, 0xd8, 0xff, 0xd9}
@@ -116,8 +116,8 @@ func TestEncodeStreamDefersSpawnUntilFirstFrame(t *testing.T) {
 
 	select {
 	case err := <-result:
-		// cat is not FFmpeg, so the IVF header check must fail — the point
-		// of this test is only the spawn timing.
+		// cat은 FFmpeg가 아니라 IVF 헤더 확인은 실패해야 한다 — 이 테스트가 보는 것은
+		// 프로세스 생성 시점뿐이다.
 		if err == nil {
 			t.Fatal("EncodeStream() with a fake encoder should return an error")
 		}

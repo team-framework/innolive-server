@@ -13,16 +13,15 @@ import (
 
 type userContextKey struct{}
 
-// UserStatusChecker resolves the current state of an access-token subject.
-// Keeping it as an interface makes the middleware independently testable and
-// ensures a disabled user is rejected before any protected handler runs.
+// UserStatusChecker는 access token subject의 현재 상태를 조회한다. 인터페이스로 두어
+// 미들웨어를 따로 테스트할 수 있고, 비활성 사용자는 보호된 핸들러가 돌기 전에
+// 거절된다.
 type UserStatusChecker interface {
 	UserStatus(context.Context, uuid.UUID) (UserStatus, error)
 }
 
-// ErrAuthenticationRequired is returned when a token cannot establish an
-// active InnoLive user. Callers deliberately map it to the same response for
-// malformed, expired, and inactive credentials.
+// ErrAuthenticationRequired는 토큰으로 활성 InnoLive 사용자를 확인할 수 없을 때
+// 돌려준다. 호출자는 잘못된·만료된·비활성 자격 정보를 일부러 같은 응답으로 옮긴다.
 var ErrAuthenticationRequired = errors.New("authentication required")
 
 type gormUserStatusChecker struct {
@@ -50,8 +49,8 @@ func (s *gormUserStatusChecker) UserStatus(ctx context.Context, userID uuid.UUID
 	return row.Status, nil
 }
 
-// RequireUser validates a Bearer access token, confirms the subject still has
-// an active user record, and stores that UUID in the request context.
+// RequireUser는 Bearer access token을 검증하고, subject에 아직 활성 사용자 행이
+// 있는지 확인한 뒤 그 UUID를 요청 컨텍스트에 넣는다.
 func RequireUser(service *TokenService, users UserStatusChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,9 +77,9 @@ func RequireUser(service *TokenService, users UserStatusChecker) func(http.Handl
 	}
 }
 
-// AuthenticateUser validates an access token and confirms its user is still
-// active. It is shared by HTTP middleware and WebSocket signaling, whose
-// credentials arrive inside a signaling message rather than an HTTP header.
+// AuthenticateUser는 access token을 검증하고 사용자가 아직 활성인지 확인한다. HTTP
+// 미들웨어와 WebSocket signaling이 함께 쓴다 — signaling은 자격 정보가 HTTP 헤더가
+// 아니라 signaling 메시지 안에 온다.
 func AuthenticateUser(ctx context.Context, service *TokenService, users UserStatusChecker, raw string) (uuid.UUID, error) {
 	if service == nil || users == nil {
 		return uuid.Nil, errors.New("authentication service is unavailable")
@@ -106,7 +105,7 @@ func AuthenticateUser(ctx context.Context, service *TokenService, users UserStat
 	return userID, nil
 }
 
-// UserIDFromContext returns the authenticated user set by RequireUser.
+// UserIDFromContext는 RequireUser가 넣은 인증 사용자를 돌려준다.
 func UserIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	userID, ok := ctx.Value(userContextKey{}).(uuid.UUID)
 	return userID, ok

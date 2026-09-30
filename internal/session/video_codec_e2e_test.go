@@ -10,12 +10,11 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// TestConnectedPeerNegotiatesRTCPFeedback is the runtime counterpart to
-// TestAnswerRetainsOfferedRTCPFeedback: it completes a real ICE + DTLS
-// handshake against the manager and asserts on the codec parameters the client
-// ends up applying. Pion decides whether to run its NACK, PLI and transport-cc
-// interceptors from these negotiated parameters, not from the SDP text, so this
-// is what actually determines whether feedback works on a live session.
+// TestConnectedPeerNegotiatesRTCPFeedback은 TestAnswerRetainsOfferedRTCPFeedback의
+// 런타임 짝이다. 매니저와 실제 ICE + DTLS 핸드셰이크를 끝내고 클라이언트가 최종
+// 적용한 코덱 파라미터를 단언한다. Pion은 SDP 텍스트가 아니라 이 협상된
+// 파라미터로 NACK·PLI·transport-cc 인터셉터를 돌릴지 정하므로, 라이브 세션에서
+// 피드백이 실제로 동작하는지를 정하는 것이 이것이다.
 func TestConnectedPeerNegotiatesRTCPFeedback(t *testing.T) {
 	manager := newTestManager(t, 0)
 	liveSession, ownerToken, err := manager.Create(nil)
@@ -132,7 +131,7 @@ func TestConnectedPeerNegotiatesRTCPFeedback(t *testing.T) {
 	}
 }
 
-// negotiatedFeedback keys RTCPFeedback the way it appears in SDP ("nack pli").
+// negotiatedFeedback은 RTCPFeedback을 SDP에 나오는 모양("nack pli")으로 키를 잡는다.
 func negotiatedFeedback(feedback []webrtc.RTCPFeedback) map[string]bool {
 	present := make(map[string]bool, len(feedback))
 	for _, item := range feedback {

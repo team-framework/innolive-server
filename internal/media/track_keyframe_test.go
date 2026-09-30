@@ -8,9 +8,8 @@ import (
 	"inno-live-server/internal/metrics"
 )
 
-// newLossyAssembler builds an assembler whose reorder window is small enough
-// that a sequence jump forces the sample builder to give up on the gap and
-// report PrevDroppedPackets.
+// newLossyAssembler는 재정렬 창이 작아 시퀀스가 건너뛰면 샘플 빌더가 구간을
+// 포기하고 PrevDroppedPackets를 알리는 조립기를 만든다.
 func newLossyAssembler(t *testing.T, minInterval time.Duration, requestKeyframe func()) *rtpFrameAssembler {
 	t.Helper()
 	assembler, err := newRTPFrameAssemblerWithLimits(
@@ -28,8 +27,8 @@ func newLossyAssembler(t *testing.T, minInterval time.Duration, requestKeyframe 
 	return assembler
 }
 
-// pushLoss feeds an incomplete frame followed by a far-ahead complete one so
-// the sample builder has to discard the partial frame's packets.
+// pushLoss는 미완성 프레임 뒤에 한참 앞선 완성 프레임을 넣어, 샘플 빌더가 부분
+// 프레임의 패킷을 버리게 한다.
 func pushLoss(assembler *rtpFrameAssembler, base uint16, timestamp uint32) {
 	assembler.push(vp8Packet(base, timestamp, false, true, "partial"))
 	for offset := uint16(1); offset <= 8; offset++ {
@@ -37,12 +36,11 @@ func pushLoss(assembler *rtpFrameAssembler, base uint16, timestamp uint32) {
 	}
 }
 
-// TestAssemblerRequestsKeyframeAfterDroppedPackets covers the recovery path for
-// #93: discarded RTP packets mean the decoder just lost its reference, and the
-// damage is re-encoded into every outgoing frame — including keyframes — until
-// the publisher sends a fresh one. Counting the loss without asking for a
-// keyframe leaves the picture broken for as long as the publisher's own
-// keyframe interval (measured ~20s with Chrome).
+// TestAssemblerRequestsKeyframeAfterDroppedPackets는 #93의 회복 경로를 검증한다.
+// 버린 RTP 패킷은 디코더가 방금 참조를 잃었다는 뜻이고, 송신자가 새 키프레임을
+// 보낼 때까지 손상이 모든 출력 프레임(키프레임 포함)에 다시 인코딩된다. 키프레임을
+// 요청하지 않고 손실만 세면 송신자 자체 키프레임 주기(Chrome 실측 약 20초) 동안
+// 화면이 깨져 있다.
 func TestAssemblerRequestsKeyframeAfterDroppedPackets(t *testing.T) {
 	var requests int
 	assembler := newLossyAssembler(t, 0, func() { requests++ })
@@ -54,9 +52,9 @@ func TestAssemblerRequestsKeyframeAfterDroppedPackets(t *testing.T) {
 	}
 }
 
-// TestAssemblerThrottlesKeyframeRequests guards against flooding the publisher:
-// a single lost gap surfaces across several samples, and the publisher needs
-// time to encode and deliver the keyframe before another request is useful.
+// TestAssemblerThrottlesKeyframeRequests는 송신자에게 요청이 쏟아지지 않게 한다. 잃은
+// 구간 하나가 여러 샘플에 걸쳐 드러나고, 송신자가 키프레임을 인코딩해 보낼 시간이
+// 있어야 다음 요청이 쓸모 있다.
 func TestAssemblerThrottlesKeyframeRequests(t *testing.T) {
 	var requests int
 	assembler := newLossyAssembler(t, time.Hour, func() { requests++ })
@@ -69,15 +67,15 @@ func TestAssemblerThrottlesKeyframeRequests(t *testing.T) {
 	}
 }
 
-// TestAssemblerWithoutKeyframeRequesterDoesNotPanic keeps the assembler usable
-// for callers that have no feedback channel to the publisher.
+// TestAssemblerWithoutKeyframeRequesterDoesNotPanic: 송신자로 가는 피드백 채널이 없는
+// 호출자도 조립기를 쓸 수 있다.
 func TestAssemblerWithoutKeyframeRequesterDoesNotPanic(t *testing.T) {
 	assembler := newLossyAssembler(t, 0, nil)
 	pushLoss(assembler, 100, 3000)
 }
 
-// TestAssemblerDoesNotRequestKeyframeWithoutLoss makes sure a clean stream
-// never asks the publisher for anything.
+// TestAssemblerDoesNotRequestKeyframeWithoutLoss: 깨끗한 스트림은 송신자에게 아무것도
+// 요청하지 않는다.
 func TestAssemblerDoesNotRequestKeyframeWithoutLoss(t *testing.T) {
 	var requests int
 	assembler := newLossyAssembler(t, 0, func() { requests++ })

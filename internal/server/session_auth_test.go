@@ -18,7 +18,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// sessionExists reports whether the session is still readable by its owner.
+// sessionExists는 소유자가 세션을 아직 읽을 수 있는지다.
 func sessionExists(t *testing.T, baseURL, id, token string) bool {
 	t.Helper()
 	resp := mustRequest(t, http.MethodGet, baseURL+"/sessions/"+id, nil, bearer(token))
@@ -98,8 +98,8 @@ func TestSessionOwnershipEnforcement(t *testing.T) {
 	})
 }
 
-// TestSessionAuthDisabledBypass confirms the INNOLIVE_REQUIRE_SESSION_AUTH=false
-// escape hatch: session-scoped routes work without a token (local dev only).
+// TestSessionAuthDisabledBypass: INNOLIVE_REQUIRE_SESSION_AUTH=false 우회로를
+// 확인한다. 세션 범위 경로가 토큰 없이 동작한다(로컬 개발 전용).
 func TestSessionAuthDisabledBypass(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr:                ":0",
@@ -135,12 +135,11 @@ func TestSessionAuthDisabledBypass(t *testing.T) {
 	}
 }
 
-// TestSessionHijackRejectedOverSignaling is the end-to-end reproduction of the
-// issue over the real HTTP + WebSocket signaling path: victim A owns a session,
-// attacker B knows the session_id but not the owner token. B's offer must be
-// rejected at signaling (before the PeerConnection is touched), while A's offer
-// with the correct token is answered — proving the hijack is closed without
-// breaking the legitimate owner.
+// TestSessionHijackRejectedOverSignaling은 실제 HTTP + WebSocket signaling 경로로
+// 이슈를 끝까지 재현한다. 피해자 A가 세션을 가지고, 공격자 B는 session_id는 알지만
+// 소유자 토큰은 모른다. B의 offer는 signaling에서(PeerConnection을 건드리기 전에)
+// 거절되고, 올바른 토큰을 가진 A의 offer에는 answer가 와야 한다 — 정당한 소유자를
+// 깨지 않고 탈취를 막았음을 보인다.
 func TestSessionHijackRejectedOverSignaling(t *testing.T) {
 	application, manager := newTestApplication(t)
 	defer manager.CloseAll()
@@ -149,7 +148,7 @@ func TestSessionHijackRejectedOverSignaling(t *testing.T) {
 
 	victim, victimToken := createTestSession(t, httpServer.URL, nil)
 
-	// A real offer to feed the signaling channel.
+	// signaling 채널에 넣을 실제 offer.
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +189,7 @@ func TestSessionHijackRejectedOverSignaling(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		token any // omitted when nil
+		token any // nil이면 생략
 	}{
 		{name: "stolen token", token: "stolen-or-guessed"},
 		{name: "no token", token: nil},
@@ -206,19 +205,19 @@ func TestSessionHijackRejectedOverSignaling(t *testing.T) {
 		}
 	}
 
-	// Owner with the correct token is answered.
+	// 올바른 토큰을 가진 소유자에게는 answer가 온다.
 	resp := send(map[string]any{"type": "offer", "session_id": victim.SessionID, "owner_token": victimToken, "sdp": offer.SDP})
 	if resp["type"] != "answer" {
 		t.Fatalf("owner offer response = %v, want answer", resp)
 	}
 
-	// The victim's session is intact after the hijack attempts.
+	// 탈취 시도 뒤에도 피해자의 세션은 그대로다.
 	if !sessionExists(t, httpServer.URL, victim.SessionID, victimToken) {
 		t.Fatal("victim session did not survive the hijack attempts")
 	}
 }
 
-// errorCode pulls error.code out of a decoded signaling error response.
+// errorCode는 디코드한 signaling 오류 응답에서 error.code를 꺼낸다.
 func errorCode(resp map[string]any) string {
 	errObj, ok := resp["error"].(map[string]any)
 	if !ok {

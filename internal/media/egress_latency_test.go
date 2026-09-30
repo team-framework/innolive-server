@@ -15,11 +15,11 @@ func TestLatencyTrackerPercentiles(t *testing.T) {
 	tracker := newLatencyTracker(logger, true)
 
 	base := time.Now()
-	// 100 samples of 1ms..100ms latency, fed out of order.
+	// 1ms..100ms 지연 표본 100개를 순서 없이 넣는다.
 	for _, ms := range []int{50, 1, 99, 100, 2, 95, 3} {
 		tracker.observe(base.Add(-time.Duration(ms) * time.Millisecond))
 	}
-	// Fill to 100 total with a spread so percentile indices are exercised.
+	// 백분위 인덱스를 두루 쓰도록 값을 흩어 총 100개로 채운다.
 	for ms := 4; ms <= 98; ms++ {
 		if ms == 50 || ms == 95 || ms == 99 {
 			continue
@@ -32,11 +32,10 @@ func TestLatencyTrackerPercentiles(t *testing.T) {
 	if !strings.Contains(out, "frames=100") {
 		t.Fatalf("expected 100 frames, got: %s", out)
 	}
-	// Each measured latency is the injected delta plus the wall clock elapsed
-	// since base, so assert a range instead of an exact value: what this test
-	// checks is percentile selection, not measurement precision. The tolerance
-	// is generous because a loaded runner adds several ms of drift over 100
-	// observe() calls.
+	// 측정 지연은 주입한 차이에 base 이후 흐른 벽시계를 더한 값이라 정확한 값이
+	// 아니라 범위로 검증한다. 이 테스트가 보는 것은 측정 정밀도가 아니라 백분위
+	// 선택이다. 부하가 걸린 러너는 observe() 100번 동안 수 ms를 밀리므로 허용 폭을
+	// 넉넉히 둔다.
 	const toleranceMs = 25.0
 	for _, want := range []struct {
 		key   string
@@ -44,8 +43,8 @@ func TestLatencyTrackerPercentiles(t *testing.T) {
 	}{
 		{"p50_ms", 51},  // 51st smallest of the injected 1..100ms
 		{"p95_ms", 96},  // 96th smallest
-		{"min_ms", 1},   // smallest
-		{"max_ms", 100}, // largest
+		{"min_ms", 1},   // 가장 작은 값
+		{"max_ms", 100}, // 가장 큰 값
 	} {
 		got := logFloat(t, out, want.key)
 		if got < want.floor || got >= want.floor+toleranceMs {
@@ -54,7 +53,7 @@ func TestLatencyTrackerPercentiles(t *testing.T) {
 	}
 }
 
-// logFloat reads one float attribute out of a slog text line.
+// logFloat는 slog 텍스트 한 줄에서 float 속성 하나를 읽는다.
 func logFloat(t *testing.T, line, key string) float64 {
 	t.Helper()
 	for _, field := range strings.Fields(line) {
@@ -76,12 +75,12 @@ func TestLatencyTrackerDisabledAndZero(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
-	// Disabled: never logs even when flushed.
+	// 꺼져 있으면 flush해도 로그를 남기지 않는다.
 	disabled := newLatencyTracker(logger, false)
 	disabled.observe(time.Now().Add(-time.Second))
 	disabled.flush()
 
-	// Enabled but zero ingest timestamps are ignored (e.g. harness frames).
+	// 켜져 있어도 수신 타임스탬프가 0이면 무시한다(예: 하네스 프레임).
 	enabled := newLatencyTracker(logger, true)
 	enabled.observe(time.Time{})
 	enabled.flush()

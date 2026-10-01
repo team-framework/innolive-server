@@ -21,12 +21,15 @@ func TestGoogleLoginRejectsUnlinkedIdentityWithoutCreatingUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Login(context.Background(), "id-token", ClientInfo{}); !errors.Is(err, ErrAccountNotLinked) {
+	if _, err := service.LoginV2(context.Background(), "id-token", ClientInfo{}); !errors.Is(err, ErrAccountNotLinked) {
 		t.Fatalf("unlinked login error = %v, want ErrAccountNotLinked", err)
+	}
+	if accounts.created {
+		t.Fatal("v2 login asked the resolver to create a user")
 	}
 
 	handler := testGoogleLoginHTTPHandlerWithAccounts(t, verifier, accounts)
-	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/google", map[string]string{"id_token": "id-token"}, nil)
+	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/v2/google", map[string]string{"id_token": "id-token"}, nil)
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"account_not_linked"`) {
 		t.Fatalf("unlinked login HTTP = %d %s", response.Code, response.Body.String())
 	}
@@ -41,7 +44,7 @@ func TestOAuthOnlyUserGetsSetupTokenInsteadOfLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Login(context.Background(), "id-token", ClientInfo{})
+	_, err = service.LoginV2(context.Background(), "id-token", ClientInfo{})
 	var setup *PasswordSetupRequiredError
 	if !errors.As(err, &setup) || setup.SetupToken == "" {
 		t.Fatalf("legacy login error = %v, want password setup", err)
@@ -55,7 +58,7 @@ func TestOAuthOnlyUserGetsSetupTokenInsteadOfLogin(t *testing.T) {
 	}
 
 	handler := testGoogleLoginHTTPHandlerWithAccounts(t, verifier, accounts)
-	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/google", map[string]string{"id_token": "id-token"}, nil)
+	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/v2/google", map[string]string{"id_token": "id-token"}, nil)
 	var body struct {
 		Error       struct{ Code string } `json:"error"`
 		SetupToken  string                `json:"setup_token"`
@@ -66,6 +69,22 @@ func TestOAuthOnlyUserGetsSetupTokenInsteadOfLogin(t *testing.T) {
 	}
 	if response.Code != http.StatusForbidden || body.Error.Code != "password_setup_required" || body.SetupToken == "" || body.AccessToken != "" {
 		t.Fatalf("legacy login HTTP = %d %s", response.Code, response.Body.String())
+	}
+}
+
+// v1(/auth/google)은 v2로 옮기지 않은 앱을 위해 기존 동작을 유지한다 — 처음 보는
+// 신원이면 계정을 만들고, 이메일 계정 없는 기존 가입자도 그대로 로그인시킨다.
+func TestV1GoogleLoginKeepsCreatingAndLoggingInLegacyUsers(t *testing.T) {
+	verifier := &stubGoogleVerifier{identity: GoogleIdentity{Subject: "legacy-subject"}}
+	accounts := &stubGoogleAccounts{user: googleLoginUser{ID: uuid.New(), Status: UserStatusActive}}
+	handler := testGoogleLoginHTTPHandlerWithAccounts(t, verifier, accounts)
+
+	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/google", map[string]string{"id_token": "id-token"}, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "access_token") {
+		t.Fatalf("v1 legacy login = %d %s", response.Code, response.Body.String())
+	}
+	if !accounts.created {
+		t.Fatal("v1 login must let the resolver create a missing user")
 	}
 }
 

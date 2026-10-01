@@ -28,7 +28,7 @@ func testGoogleLoginHTTPHandler(t *testing.T, verifier GoogleIdentityVerifier, u
 
 func TestGoogleLoginHTTPIssuesTokenPairAndUsesCORS(t *testing.T) {
 	verifier := &stubGoogleVerifier{identity: GoogleIdentity{Subject: "google-subject", Email: "person@example.com", EmailVerified: true}}
-	handler := testGoogleLoginHTTPHandler(t, verifier, googleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true})
+	handler := testGoogleLoginHTTPHandler(t, verifier, googleLoginUser{ID: uuid.New(), Status: UserStatusActive})
 
 	request := httptest.NewRequest(http.MethodPost, "/auth/google", bytes.NewBufferString(`{"id_token":"google-id-token"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -58,7 +58,7 @@ func TestGoogleLoginHTTPRejectsInvalidTokenAndBadRequest(t *testing.T) {
 	invalidHandler := testGoogleLoginHTTPHandler(
 		t,
 		&stubGoogleVerifier{err: ErrInvalidGoogleIDToken},
-		googleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true},
+		googleLoginUser{ID: uuid.New(), Status: UserStatusActive},
 	)
 	invalidRequest := httptest.NewRequest(http.MethodPost, "/auth/google", bytes.NewBufferString(`{"id_token":"forged"}`))
 	invalidResponse := httptest.NewRecorder()

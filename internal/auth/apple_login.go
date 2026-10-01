@@ -359,7 +359,8 @@ type appleLoginUser struct {
 }
 
 type AppleAccountResolver interface {
-	ResolveAppleIdentity(context.Context, AppleIdentity, []byte, *int16) (appleLoginUser, error)
+	// createIfMissing이 true면 v1 로그인, false면 연결된 신원만 찾는 v2 로그인이다(#380).
+	ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16, createIfMissing bool) (appleLoginUser, error)
 }
 
 type gormAppleAccountResolver struct {
@@ -371,9 +372,7 @@ func NewGormAppleAccountResolver(db *gorm.DB) AppleAccountResolver {
 	return &gormAppleAccountResolver{db: db, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// ResolveAppleIdentity는 연결된 애플 신원만 찾는다. 연결되지 않은 신원이면 사용자를
-// 만들지 않고 ErrAccountNotLinked다(#380).
-func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16) (appleLoginUser, error) {
+func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16, createIfMissing bool) (appleLoginUser, error) {
 	if s == nil || s.db == nil {
 		return appleLoginUser{}, errors.New("Apple account database is nil")
 	}
@@ -384,29 +383,69 @@ func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, ide
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var account OAuthAccount
 		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("User").Where("provider = ? AND provider_subject = ?", OAuthProviderApple, identity.Subject).Take(&account)
-		if errors.Is(query.Error, gorm.ErrRecordNotFound) {
-			return ErrAccountNotLinked
+		if query.Error == nil {
+			return s.loginExisting(tx, &account, identity, ciphertext, version, s.now(), &result)
 		}
-		if query.Error != nil {
+		if !errors.Is(query.Error, gorm.ErrRecordNotFound) {
 			return query.Error
 		}
-		if account.User == nil {
-			return errors.New("Apple OAuth account has no user")
+		if !createIfMissing {
+			return ErrAccountNotLinked
 		}
-		if err := updateAppleAccount(tx, &account, identity, ciphertext, version, s.now()); err != nil {
+		now := s.now()
+		user := newAppleUser(identity, now)
+		if err := tx.Create(&user).Error; err != nil {
 			return err
 		}
-		hasEmail, err := userHasEmailAccount(tx, account.UserID)
-		if err != nil {
+		account = newAppleOAuthAccount(user.ID, identity, ciphertext, version, now)
+		created := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "provider_subject"}}, DoNothing: true}).Create(&account)
+		if created.Error != nil {
+			return created.Error
+		}
+		if created.RowsAffected == 1 {
+			result = appleLoginUser{ID: user.ID, Status: user.Status}
+			return nil
+		}
+		if err := tx.Delete(&user).Error; err != nil {
 			return err
 		}
-		result = appleLoginUser{ID: account.UserID, Status: account.User.Status, HasEmailAccount: hasEmail}
-		return nil
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("User").Where("provider = ? AND provider_subject = ?", OAuthProviderApple, identity.Subject).Take(&account).Error; err != nil {
+			return err
+		}
+		return s.loginExisting(tx, &account, identity, ciphertext, version, now, &result)
 	})
 	if err != nil {
 		return appleLoginUser{}, err
 	}
 	return result, nil
+}
+
+func (s *gormAppleAccountResolver) loginExisting(tx *gorm.DB, account *OAuthAccount, identity AppleIdentity, ciphertext []byte, version *int16, now time.Time, result *appleLoginUser) error {
+	if account.User == nil {
+		return errors.New("Apple OAuth account has no user")
+	}
+	if err := updateAppleAccount(tx, account, identity, ciphertext, version, now); err != nil {
+		return err
+	}
+	hasEmail, err := userHasEmailAccount(tx, account.UserID)
+	if err != nil {
+		return err
+	}
+	*result = appleLoginUser{ID: account.UserID, Status: account.User.Status, HasEmailAccount: hasEmail}
+	return nil
+}
+
+func newAppleUser(identity AppleIdentity, now time.Time) User {
+	return User{ID: uuid.New(), Email: appleVerifiedEmail(identity), DisplayName: googleOptionalString(identity.DisplayName, 100), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+}
+func newAppleOAuthAccount(userID uuid.UUID, identity AppleIdentity, ciphertext []byte, version *int16, now time.Time) OAuthAccount {
+	return OAuthAccount{ID: uuid.New(), UserID: userID, Provider: OAuthProviderApple, ProviderSubject: identity.Subject, ProviderEmail: googleOptionalString(identity.Email, 320), EmailVerified: identity.EmailVerified, IsPrivateEmail: identity.IsPrivateEmail, ProviderRefreshTokenCiphertext: ciphertext, ProviderTokenKeyVersion: version, LastLoginAt: now, CreatedAt: now, UpdatedAt: now}
+}
+func appleVerifiedEmail(identity AppleIdentity) *string {
+	if !identity.EmailVerified {
+		return nil
+	}
+	return googleOptionalString(identity.Email, 320)
 }
 
 // updateAppleAccount는 신원 정보만 갱신한다. users.email은 이메일 계정이 정본이라
@@ -435,7 +474,18 @@ func NewAppleLoginService(exchanger AppleAuthorizationExchanger, verifier AppleI
 	}
 	return &AppleLoginService{exchanger: exchanger, verifier: verifier, accounts: accounts, tokens: tokens, cipher: cipher}, nil
 }
+
+// Login은 v1 애플 로그인이다. 처음 보는 신원이면 사용자를 만든다.
 func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
+	return s.login(ctx, authorizationCode, nonce, displayName, client, true)
+}
+
+// LoginV2는 연결된 신원만 로그인시킨다(#380).
+func (s *AppleLoginService) LoginV2(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
+	return s.login(ctx, authorizationCode, nonce, displayName, client, false)
+}
+
+func (s *AppleLoginService) login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo, legacy bool) (TokenPair, error) {
 	response, err := s.exchanger.Exchange(ctx, authorizationCode)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("exchange Apple authorization code: %w", err)
@@ -456,7 +506,7 @@ func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce,
 			return TokenPair{}, err
 		}
 	}
-	user, err := s.accounts.ResolveAppleIdentity(ctx, identity, ciphertext, version)
+	user, err := s.accounts.ResolveAppleIdentity(ctx, identity, ciphertext, version, legacy)
 	if err != nil {
 		if errors.Is(err, ErrAccountNotLinked) {
 			return TokenPair{}, err
@@ -466,7 +516,7 @@ func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce,
 	if user.Status != UserStatusActive {
 		return TokenPair{}, ErrUserInactive
 	}
-	if !user.HasEmailAccount {
+	if !legacy && !user.HasEmailAccount {
 		return TokenPair{}, s.tokens.passwordSetupRequired(user.ID)
 	}
 	return s.tokens.IssuePair(ctx, user.ID, client)

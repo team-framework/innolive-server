@@ -46,7 +46,7 @@ type stubAppleAccounts struct {
 	version    *int16
 }
 
-func (s *stubAppleAccounts) ResolveAppleIdentity(_ context.Context, identity AppleIdentity, ciphertext []byte, version *int16) (appleLoginUser, error) {
+func (s *stubAppleAccounts) ResolveAppleIdentity(_ context.Context, identity AppleIdentity, ciphertext []byte, version *int16, _ bool) (appleLoginUser, error) {
 	s.identity, s.ciphertext, s.version = identity, ciphertext, version
 	return s.user, s.err
 }
@@ -55,7 +55,7 @@ func TestAppleLoginIssuesTokensAndEncryptsProviderRefreshToken(t *testing.T) {
 	cipher := &ProviderTokenCipher{key: []byte("0123456789abcdef0123456789abcdef")}
 	exchanger := &stubAppleExchanger{response: AppleTokenResponse{IDToken: "apple-id-token", RefreshToken: "apple-refresh-token"}}
 	verifier := &stubAppleVerifier{identity: AppleIdentity{Subject: "apple-stable-subject", Email: "person@privaterelay.appleid.com", EmailVerified: true, IsPrivateEmail: true}}
-	accounts := &stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true}}
+	accounts := &stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive}}
 	service, err := NewAppleLoginService(exchanger, verifier, accounts, testTokenService(newMemoryRefreshStore()), cipher)
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestAppleLoginRejectsInvalidIDTokenAndInactiveUser(t *testing.T) {
 	invalid, err := NewAppleLoginService(
 		&stubAppleExchanger{response: AppleTokenResponse{IDToken: "forged"}},
 		&stubAppleVerifier{err: ErrInvalidAppleIDToken},
-		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true}},
+		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive}},
 		testTokenService(newMemoryRefreshStore()), cipher,
 	)
 	if err != nil {

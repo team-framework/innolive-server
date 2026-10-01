@@ -204,11 +204,11 @@ func TestPostgresResolversDoNotCreateUsers(t *testing.T) {
 	db := newAccountLinkTestDB(t)
 	ctx := context.Background()
 	google := NewGormGoogleAccountResolver(db)
-	if _, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "unknown"}); !errors.Is(err, ErrAccountNotLinked) {
+	if _, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "unknown"}, false); !errors.Is(err, ErrAccountNotLinked) {
 		t.Fatalf("unknown google subject error = %v", err)
 	}
 	apple := NewGormAppleAccountResolver(db)
-	if _, err := apple.ResolveAppleIdentity(ctx, AppleIdentity{Subject: "unknown"}, nil, nil); !errors.Is(err, ErrAccountNotLinked) {
+	if _, err := apple.ResolveAppleIdentity(ctx, AppleIdentity{Subject: "unknown"}, nil, nil, false); !errors.Is(err, ErrAccountNotLinked) {
 		t.Fatalf("unknown apple subject error = %v", err)
 	}
 	var count int64
@@ -221,7 +221,7 @@ func TestPostgresResolversDoNotCreateUsers(t *testing.T) {
 	createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "member-google")
 	legacy := createLinkTestUser(t, db, "", plan.Spark)
 	createLinkTestIdentity(t, db, legacy, OAuthProviderGoogle, "legacy-google")
-	if user, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "member-google", Email: "member@gmail.com", EmailVerified: true}); err != nil || user.ID != member || !user.HasEmailAccount {
+	if user, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "member-google", Email: "member@gmail.com", EmailVerified: true}, false); err != nil || user.ID != member || !user.HasEmailAccount {
 		t.Fatalf("linked member = %+v, %v", user, err)
 	}
 	var stored User
@@ -229,7 +229,7 @@ func TestPostgresResolversDoNotCreateUsers(t *testing.T) {
 	if stored.Email == nil || *stored.Email != "member@example.com" {
 		t.Fatalf("google login overwrote the account email: %v", stored.Email)
 	}
-	if user, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "legacy-google"}); err != nil || user.ID != legacy || user.HasEmailAccount {
+	if user, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "legacy-google"}, false); err != nil || user.ID != legacy || user.HasEmailAccount {
 		t.Fatalf("legacy user = %+v, %v", user, err)
 	}
 }
@@ -322,8 +322,30 @@ func TestPostgresLinkHTTPMergesAndClosesMergedSessions(t *testing.T) {
 	if methods.Code != http.StatusOK || !strings.Contains(methods.Body.String(), `"provider":"google"`) || !strings.Contains(methods.Body.String(), "member@example.com") {
 		t.Fatalf("login methods = %d %s", methods.Code, methods.Body.String())
 	}
-	// 연결한 뒤에는 구글 로그인이 이메일 계정 사용자로 들어간다.
-	if _, err := google.Login(context.Background(), "google-id-token", ClientInfo{}); err != nil {
+	// 연결한 뒤에는 v2 구글 로그인이 이메일 계정 사용자로 들어간다.
+	if _, err := google.LoginV2(context.Background(), "google-id-token", ClientInfo{}); err != nil {
 		t.Fatalf("google login after link: %v", err)
+	}
+}
+
+func TestPostgresV1ResolverStillCreatesUsers(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	ctx := context.Background()
+	google := NewGormGoogleAccountResolver(db)
+	created, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "v1-google", Email: "v1@gmail.com", EmailVerified: true}, true)
+	if err != nil || created.HasEmailAccount {
+		t.Fatalf("v1 google create = %+v, %v", created, err)
+	}
+	var user User
+	if err := db.Where("id = ?", created.ID).Take(&user).Error; err != nil || user.Email == nil || *user.Email != "v1@gmail.com" {
+		t.Fatalf("v1 user email = %+v, %v", user.Email, err)
+	}
+	again, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: "v1-google"}, true)
+	if err != nil || again.ID != created.ID {
+		t.Fatalf("v1 second login = %+v, %v", again, err)
+	}
+	apple := NewGormAppleAccountResolver(db)
+	if user, err := apple.ResolveAppleIdentity(ctx, AppleIdentity{Subject: "v1-apple"}, nil, nil, true); err != nil || user.ID == uuid.Nil {
+		t.Fatalf("v1 apple create = %+v, %v", user, err)
 	}
 }

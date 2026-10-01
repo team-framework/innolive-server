@@ -20,13 +20,15 @@ func (v *stubGoogleVerifier) Verify(_ context.Context, rawToken string) (GoogleI
 }
 
 type stubGoogleAccounts struct {
-	user googleLoginUser
-	err  error
-	seen GoogleIdentity
+	user    googleLoginUser
+	err     error
+	seen    GoogleIdentity
+	created bool
 }
 
-func (a *stubGoogleAccounts) ResolveGoogleIdentity(_ context.Context, identity GoogleIdentity) (googleLoginUser, error) {
+func (a *stubGoogleAccounts) ResolveGoogleIdentity(_ context.Context, identity GoogleIdentity, createIfMissing bool) (googleLoginUser, error) {
 	a.seen = identity
+	a.created = createIfMissing
 	return a.user, a.err
 }
 
@@ -38,7 +40,7 @@ func TestGoogleLoginIssuesInnoLivePairForVerifiedSubject(t *testing.T) {
 		EmailVerified: true,
 		DisplayName:   "Inno User",
 	}}
-	accounts := &stubGoogleAccounts{user: googleLoginUser{ID: userID, Status: UserStatusActive, HasEmailAccount: true}}
+	accounts := &stubGoogleAccounts{user: googleLoginUser{ID: userID, Status: UserStatusActive}}
 	service, err := NewGoogleLoginService(verifier, accounts, testTokenService(newMemoryRefreshStore()))
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +63,7 @@ func TestGoogleLoginIssuesInnoLivePairForVerifiedSubject(t *testing.T) {
 
 func TestGoogleLoginRejectsInvalidTokenAndInactiveUser(t *testing.T) {
 	invalidVerifier := &stubGoogleVerifier{err: ErrInvalidGoogleIDToken}
-	activeAccounts := &stubGoogleAccounts{user: googleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true}}
+	activeAccounts := &stubGoogleAccounts{user: googleLoginUser{ID: uuid.New(), Status: UserStatusActive}}
 	invalidService, err := NewGoogleLoginService(invalidVerifier, activeAccounts, testTokenService(newMemoryRefreshStore()))
 	if err != nil {
 		t.Fatal(err)

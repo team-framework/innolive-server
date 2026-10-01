@@ -314,6 +314,14 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	// 구글·애플은 로그인한 InnoLive 계정에 연결해야 로그인 수단이 된다(#380).
+	accountLinks := auth.NewAccountLinkStore(databaseConnection.DB)
+	if googleLogin != nil {
+		googleLogin.SetAccountLinks(accountLinks)
+	}
+	if appleLogin != nil {
+		appleLogin.SetAccountLinks(accountLinks)
+	}
 	emailAuthConfig, err := auth.LoadEmailAuthConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid email authentication configuration", "error", err)
@@ -620,7 +628,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithStreamingProviders(application.Handler(), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, chzzkConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
+		Handler:           auth.MountAuthHTTPWithStreamingProviders(auth.MountAccountLinkHTTP(application.Handler(), tokenService, accountLinks, googleLogin, appleLogin, logger, originConfig, sessionManager.CloseUserSessionsForLogout), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, chzzkConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

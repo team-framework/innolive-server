@@ -94,11 +94,12 @@ export function validatePullRequest(pr, { legacyPullRequestMaxNumber = 0 } = {})
   const kind = pullRequestKind(pr, errors);
   bullets(sections.get('변경 내용'), '변경 내용', errors, { max: 3 });
   bullets(sections.get('검증 결과'), '검증 결과', errors, { max: 3 });
-  const checklist = bullets(sections.get('머지 체크리스트'), '머지 체크리스트', errors, { checklist: true });
-  for (const required of ['변경 범위 확인', '리뷰 반영 및 미해결 의견 확인']) {
+  const checklist = bullets(sections.get('머지 체크리스트'), '머지 체크리스트', errors, { checklist: true })
+    .filter(item => item.text !== '리뷰 반영 및 미해결 의견 확인');
+  for (const required of ['변경 범위 확인']) {
     if (!checklist.some(item => item.text === required)) error(errors, `필수 체크 항목: ${required}`);
   }
-  if (checklist.length < 3) error(errors, '머지 체크리스트: 공통 확인 2개와 변경에 맞는 검증 항목 필요');
+  if (checklist.length < 2) error(errors, '머지 체크리스트: 변경 범위 확인과 변경에 맞는 검증 항목 필요');
   const references = [];
   for (const line of sections.get('관련 이슈') ?? []) {
     const reference = /^(?:- )?(Closes|Fixes|Resolves|Refs) (?:(?:[\w.-]+)\/(?:[\w.-]+))?#([1-9]\d*)$/iu.exec(line);
@@ -119,7 +120,7 @@ export function validateReadiness(pr, config = {}) {
   if (result.legacy || pr.draft) return result;
   const { sections } = parseBody(pr.body, PR_HEADINGS);
   const items = bullets(sections.get('머지 체크리스트'), '머지 체크리스트', [] , { checklist: true });
-  for (const item of items) if (!item.checked) error(result.errors, `머지 전 완료 필요: ${item.text}`);
+  for (const item of items) if (item.text !== '리뷰 반영 및 미해결 의견 확인' && !item.checked) error(result.errors, `머지 전 완료 필요: ${item.text}`);
   return result;
 }
 

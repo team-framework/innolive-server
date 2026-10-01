@@ -114,3 +114,7 @@ gh pr merge --merge --match-head-commit "$head_sha" \
 ## 규칙 원본
 
 공통 문서·템플릿·검사기·작성 스킬 원본은 `team-framework/framework-agent-harness-sync`. MCP는 자동 동기화 제외를 유지하고 같은 변경을 별도 PR로 적용. 저장소 고유 지침과 관련 없는 작업 보존.
+
+현재 하네스 App 권한은 Contents·PR 쓰기이며 Workflows 쓰기 권한은 없음. 검사 workflow의 최초 설치와 workflow 자체 변경은 관리자 PR로 별도 적용. 자동 동기화는 문서·템플릿·스킬·검사기 파일을 전파하며 workflow 파일을 작성하지 않음. 새 저장소에는 `manualBootstrapItems`의 workflow와 저장소별 적용 기준·필수 검사 설정을 먼저 적용.
+
+연결 Issue 양식 수정 후 PR 검사가 실패 상태라면 해당 PR 검사를 재실행하거나 PR 본문을 갱신하여 최신 Issue를 검사.

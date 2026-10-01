@@ -284,6 +284,11 @@ function bindElements() {
     "devLogoutBtn",
     "devWithdrawBtn",
     "devV1CheckBtn",
+    "devResetEmail",
+    "devResetPassword",
+    "devResetCode",
+    "devResetStartBtn",
+    "devResetVerifyBtn",
     "devResultBox",
     "devResultTitle",
     "devResult",
@@ -1052,6 +1057,7 @@ function newDevState() {
     refreshToken: null,
     accountLabel: null,
     signupToken: null,
+    resetToken: null,
     setupToken: null,
     setupSignupToken: null,
     googleIdToken: null,
@@ -1094,6 +1100,8 @@ function bindDevEvents() {
   els.devLogoutBtn.addEventListener("click", () => void devLogout());
   els.devWithdrawBtn.addEventListener("click", () => void devWithdraw());
   els.devV1CheckBtn.addEventListener("click", () => void devCheckV1Routes());
+  els.devResetStartBtn.addEventListener("click", () => void devPasswordResetStart());
+  els.devResetVerifyBtn.addEventListener("click", () => void devPasswordResetVerify());
 }
 
 function selectDevFeature(feature) {
@@ -1111,6 +1119,9 @@ function selectDevFeature(feature) {
   }
   if (feature === "google") {
     void ensureDevGoogleButton();
+  }
+  if (feature === "password" && !els.devResetEmail.value && state.dev.methods?.email) {
+    els.devResetEmail.value = state.dev.methods.email;
   }
 }
 
@@ -1248,6 +1259,35 @@ function clearDevLogin() {
   state.dev.usage = null;
   state.dev.streamingAccounts = null;
   renderDevAccount();
+}
+
+// 비밀번호 변경(#388): 이메일 코드 → 확인 시 새 토큰 쌍(다른 기기는 모두 로그아웃).
+async function devPasswordResetStart() {
+  const email = els.devResetEmail.value.trim();
+  const password = els.devResetPassword.value;
+  if (!devRequireFields([["이메일", email], ["새 비밀번호", password]])) {
+    return;
+  }
+  const result = await devRequest("POST", "/auth/password/reset", { email, new_password: password });
+  if (result?.ok) {
+    state.dev.resetToken = result.payload?.reset_token || null;
+  }
+}
+
+async function devPasswordResetVerify() {
+  const code = els.devResetCode.value.trim();
+  if (!state.dev.resetToken) {
+    showDevMessage("먼저 변경 코드 받기를 하세요(reset_token 없음).", "error");
+    return;
+  }
+  if (!devRequireFields([["인증 코드", code]])) {
+    return;
+  }
+  const result = await devRequest("POST", "/auth/password/reset/verify", { reset_token: state.dev.resetToken, verification_code: code });
+  if (result?.ok) {
+    state.dev.resetToken = null;
+    setDevLogin(result.payload, els.devResetEmail.value.trim());
+  }
 }
 
 const DEV_V1_ROUTES = ["/auth/google", "/auth/apple", "/auth/native/sign-up"];

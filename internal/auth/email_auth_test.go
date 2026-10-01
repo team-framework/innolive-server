@@ -316,10 +316,14 @@ func serveEmailJSON(t *testing.T, handler http.Handler, method, path string, val
 	return response
 }
 
-type recordingVerificationEmailSender struct{ code string }
+type recordingVerificationEmailSender struct {
+	code      string
+	recipient string
+	purpose   EmailPurpose
+}
 
-func (s *recordingVerificationEmailSender) SendVerificationCode(_ context.Context, _ string, code string) error {
-	s.code = code
+func (s *recordingVerificationEmailSender) SendVerificationCode(_ context.Context, recipient, code string, purpose EmailPurpose) error {
+	s.code, s.recipient, s.purpose = code, recipient, purpose
 	return nil
 }
 
@@ -392,6 +396,7 @@ type memoryEmailAccountStore struct {
 	user       *User
 	account    *EmailAccount
 	attachedTo uuid.UUID
+	resets     int
 }
 
 func (s *memoryEmailAccountStore) EmailAlreadyRegistered(_ context.Context, email string) (bool, error) {
@@ -406,6 +411,15 @@ func (s *memoryEmailAccountStore) CreateEmailUser(_ context.Context, pending Pen
 	account := EmailAccount{UserID: user.ID, Email: pending.Email, PasswordHash: pending.PasswordHash, CreatedAt: now, UpdatedAt: now}
 	s.user, s.account = &user, &account
 	return user.ID, nil
+}
+func (s *memoryEmailAccountStore) ResetPassword(_ context.Context, userID uuid.UUID, email, passwordHash string, now time.Time) error {
+	if s.account == nil || s.account.UserID != userID || s.account.Email != email {
+		return ErrEmailVerificationInvalid
+	}
+	s.account.PasswordHash = passwordHash
+	s.account.UpdatedAt = now
+	s.resets++
+	return nil
 }
 func (s *memoryEmailAccountStore) EmailRegisteredToOther(_ context.Context, email string, userID uuid.UUID) (bool, error) {
 	return s.user != nil && s.user.ID != userID && s.user.Email != nil && *s.user.Email == email, nil

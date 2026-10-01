@@ -268,3 +268,79 @@ func decodeSingleJSON(w http.ResponseWriter, r *http.Request, target any) error 
 	}
 	return nil
 }
+
+// handlePasswordReset은 이메일 인증으로 비밀번호를 바꾸는 첫 단계다(#388). 로그인 여부와
+// 관계없이 같은 절차다. 가입 여부를 드러내지 않도록 이메일이 없어도 같은 응답을 준다.
+func (h *tokenHTTPHandler) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		h.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+		return
+	}
+	request := struct {
+		Email       string `json:"email"`
+		NewPassword string `json:"new_password"`
+	}{}
+	if err := decodeSingleJSON(w, r, &request); err != nil || strings.TrimSpace(request.Email) == "" || request.NewPassword == "" {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset request.")
+		return
+	}
+	token, err := h.email.StartPasswordReset(r.Context(), request.Email, request.NewPassword, requestClientInfo(r).IPAddress)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrEmailSignupInvalid):
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset request.")
+		case errors.Is(err, ErrEmailSignupThrottled):
+			h.writeError(w, r, http.StatusTooManyRequests, "too_many_requests", "Too many requests. Please try again later.")
+		case errors.Is(err, ErrEmailDeliveryUnavailable):
+			h.writeError(w, r, http.StatusServiceUnavailable, "email_delivery_unavailable", "Email verification is temporarily unavailable.")
+		default:
+			h.logger.Error("password reset request failed", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusBadGateway, "email_delivery_failed", "Email verification could not be sent.")
+		}
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "verification_email_sent", "reset_token": token})
+}
+
+// handlePasswordResetVerify는 코드를 확인해 비밀번호를 바꾸고 새 토큰 쌍을 준다. 다른
+// 기기의 refresh token은 모두 폐기된다.
+func (h *tokenHTTPHandler) handlePasswordResetVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		h.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+		return
+	}
+	request := struct {
+		ResetToken       string `json:"reset_token"`
+		VerificationCode string `json:"verification_code"`
+	}{}
+	if err := decodeSingleJSON(w, r, &request); err != nil || strings.TrimSpace(request.ResetToken) == "" {
+		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset verification request.")
+		return
+	}
+	pair, err := h.email.CompletePasswordReset(r.Context(), request.ResetToken, strings.TrimSpace(request.VerificationCode), requestClientInfo(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrEmailVerificationInvalid):
+			h.writeError(w, r, http.StatusBadRequest, "invalid_verification_code", "Verification code is invalid or expired.")
+		case errors.Is(err, ErrUserInactive):
+			h.writeError(w, r, http.StatusBadRequest, "invalid_verification_code", "Verification code is invalid or expired.")
+		case errors.Is(err, ErrEmailDeliveryUnavailable):
+			h.writeError(w, r, http.StatusServiceUnavailable, "email_auth_unavailable", "Email authentication is temporarily unavailable.")
+		default:
+			h.logger.Error("password reset verification failed", "request_id", tokenRequestID(r), "error", err)
+			h.writeError(w, r, http.StatusInternalServerError, "internal_error", "An unexpected server error occurred.")
+		}
+		return
+	}
+	h.writeJSON(w, http.StatusOK, pair)
+}

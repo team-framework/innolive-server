@@ -77,3 +77,32 @@ func TestPostgresPlanStoreSetAndReject(t *testing.T) {
 		t.Fatalf("read on missing user = %v; want ErrUserNotFound", err)
 	}
 }
+
+func TestPostgresPlanStoreAdminUserQueries(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL plan store integration test")
+	}
+	db := newPostgresRefreshTestDB(t, databaseURL)
+	now := time.Now().UTC()
+	activeEmail, deletedEmail := "Admin-Search@example.com", "gone-search@example.com"
+	active := User{ID: uuid.New(), Email: &activeEmail, Status: UserStatusActive, Plan: plan.Beam, CreatedAt: now, UpdatedAt: now}
+	deleted := User{ID: uuid.New(), Email: &deletedEmail, Status: UserStatusDeleted, Plan: plan.Spark, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&active).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&deleted).Error; err != nil {
+		t.Fatal(err)
+	}
+	store := NewPlanStore(db)
+	ctx := context.Background()
+
+	found, err := store.SearchUsers(ctx, "search@", 10)
+	if err != nil || len(found) != 1 || found[0].ID != active.ID || found[0].Email != activeEmail || found[0].Plan != plan.Beam {
+		t.Fatalf("SearchUsers = %+v, %v; want only the active user", found, err)
+	}
+	byID, err := store.UsersByID(ctx, []uuid.UUID{active.ID, uuid.New()})
+	if err != nil || len(byID) != 1 || byID[0].ID != active.ID {
+		t.Fatalf("UsersByID = %+v, %v; want the existing user only", byID, err)
+	}
+}

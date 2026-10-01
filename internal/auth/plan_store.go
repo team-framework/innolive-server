@@ -55,3 +55,39 @@ func (s *PlanStore) SetUserPlan(ctx context.Context, userID uuid.UUID, value pla
 	}
 	return nil
 }
+
+// AdminUser는 관리자 화면이 보는 사용자 요약이다(#373).
+type AdminUser struct {
+	ID    uuid.UUID `json:"user_id"`
+	Email string    `json:"email"`
+	Plan  plan.Plan `json:"plan"`
+}
+
+// SearchUsers는 이메일에 query가 들어간 사용자를 최근 가입순으로 limit개까지 돌려준다.
+// 탈퇴한 사용자는 뺀다.
+func (s *PlanStore) SearchUsers(ctx context.Context, query string, limit int) ([]AdminUser, error) {
+	var rows []AdminUser
+	result := s.db.WithContext(ctx).Model(&User{}).
+		Select("id, COALESCE(email, '') AS email, plan").
+		Where("status <> ? AND email ILIKE ?", UserStatusDeleted, "%"+query+"%").
+		Order("created_at DESC").Limit(limit).Scan(&rows)
+	if result.Error != nil {
+		return nil, fmt.Errorf("search users: %w", result.Error)
+	}
+	return rows, nil
+}
+
+// UsersByID는 ids에 해당하는 사용자를 돌려준다. 없는 id는 결과에서 빠진다.
+func (s *PlanStore) UsersByID(ctx context.Context, ids []uuid.UUID) ([]AdminUser, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []AdminUser
+	result := s.db.WithContext(ctx).Model(&User{}).
+		Select("id, COALESCE(email, '') AS email, plan").
+		Where("id IN ?", ids).Scan(&rows)
+	if result.Error != nil {
+		return nil, fmt.Errorf("read users by id: %w", result.Error)
+	}
+	return rows, nil
+}

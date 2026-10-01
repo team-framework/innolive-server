@@ -939,3 +939,136 @@ dd {
     grid-template-columns: 1fr;
   }
 }
+
+/* 화면 전환(#373) — 로그인한 관리자에게만 보인다. 한 번에 한 화면만 편다. */
+.view-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  margin-left: 24px;
+}
+
+.view-tab {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 8px 14px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.view-tab:hover {
+  color: var(--text);
+}
+
+.view-tab[aria-current="page"] {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow);
+}
+
+.view-nav .button {
+  margin-left: 8px;
+}
+
+.admin-panel + .admin-panel {
+  margin-top: 16px;
+}
+
+.admin-hint,
+.admin-detail {
+  margin: 10px 14px 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.admin-detail {
+  margin: 12px 0 0;
+}
+
+.admin-search {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  padding: 12px 14px 0;
+}
+
+.admin-search .field {
+  flex: 1;
+  max-width: 420px;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
+  padding: 12px 14px 14px;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.admin-table th {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.admin-table td.admin-empty {
+  color: var(--muted);
+  text-align: center;
+}
+
+.admin-table select {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+@media (max-width: 900px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+
+  .view-nav {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .view-nav .button,
+  .admin-panel .panel-head .button {
+    width: auto;
+    margin-left: auto;
+  }
+
+  .admin-search {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-search .field {
+    max-width: none;
+  }
+}
+
+.view-tab,
+.admin-panel .panel-head h2,
+.admin-search .field span {
+  white-space: nowrap;
+}

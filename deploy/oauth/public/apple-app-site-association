@@ -1,0 +1,12 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["SPT4X66Z4V.com.framework.innolive"],
+        "components": [
+          { "/": "/auth/chzzk/callback" }
+        ]
+      }
+    ]
+  }
+}

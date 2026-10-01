@@ -1,0 +1,27 @@
+# Import inside the existing innolive.studio site, before its landing proxy.
+# These handlers terminate locally; OAuth query values never reach Next.js.
+@innolive_aasa path /.well-known/apple-app-site-association /apple-app-site-association
+handle @innolive_aasa {
+	root * {$INNOLIVE_OAUTH_ASSET_ROOT:/srv/innolive-oauth}
+	header Content-Type application/json
+	header Cache-Control "public, max-age=3600"
+	rewrite * /apple-app-site-association
+	file_server
+}
+
+@innolive_chzzk_callback path /auth/chzzk/callback
+# Skip the entire access entry, including the original request URI/query.
+log_skip @innolive_chzzk_callback
+handle @innolive_chzzk_callback {
+	root * {$INNOLIVE_OAUTH_ASSET_ROOT:/srv/innolive-oauth}
+	header {
+		Content-Type "text/html; charset=utf-8"
+		Cache-Control "no-store"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		X-Content-Type-Options nosniff
+	}
+	# Clear the query before static handling as well as skipping access logs.
+	rewrite * /chzzk-callback.html?
+	file_server
+}

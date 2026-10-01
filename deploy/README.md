@@ -1,5 +1,8 @@
 # InnoLive 배포 파이프라인 운영 가이드
 
+치지직 iOS OAuth의 웹 도메인 AASA·callback 설정은 [oauth/README.md](oauth/README.md)를
+따른다. API 이미지 배포와 별도의 Caddy 호스팅 설정이며 자동 적용되지 않는다.
+
 main 브랜치에 머지되면 GitHub Actions가 Docker 이미지를 빌드해 팀 Docker Hub(private)에
 push하고, GPU 프로덕션 서버가 이미지를 pull해 컨테이너를 재기동한다.
 

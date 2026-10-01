@@ -349,3 +349,47 @@ func TestPostgresV1ResolverStillCreatesUsers(t *testing.T) {
 		t.Fatalf("v1 apple create = %+v, %v", user, err)
 	}
 }
+
+// 구글 로그인은 가입 때 정한 이름을 덮지 않고, 비어 있을 때만 구글 이름으로 채운다(#386).
+func TestPostgresGoogleLoginKeepsExistingName(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	ctx := context.Background()
+	named := createLinkTestUser(t, db, "named@example.com", plan.Spark)
+	if err := db.Model(&User{}).Where("id = ?", named).Update("display_name", "홍길동").Error; err != nil {
+		t.Fatal(err)
+	}
+	createLinkTestIdentity(t, db, named, OAuthProviderGoogle, "named-google")
+	unnamed := createLinkTestUser(t, db, "unnamed@example.com", plan.Spark)
+	createLinkTestIdentity(t, db, unnamed, OAuthProviderGoogle, "unnamed-google")
+	google := NewGormGoogleAccountResolver(db)
+
+	for _, subject := range []string{"named-google", "unnamed-google"} {
+		if _, err := google.ResolveGoogleIdentity(ctx, GoogleIdentity{Subject: subject, DisplayName: "Google Name"}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var users []User
+	db.Where("id IN ?", []uuid.UUID{named, unnamed}).Find(&users)
+	for _, user := range users {
+		want := "Google Name"
+		if user.ID == named {
+			want = "홍길동"
+		}
+		if user.DisplayName == nil || *user.DisplayName != want {
+			t.Fatalf("user %v name = %v, want %q", user.ID, user.DisplayName, want)
+		}
+	}
+}
+
+func TestPostgresEmailSignupStoresName(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	accounts := NewGormEmailAccountStore(db)
+	id, err := accounts.CreateEmailUser(context.Background(), PendingEmailSignup{Email: "new@example.com", PasswordHash: "hash", Name: "홍길동"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user User
+	if err := db.Where("id = ?", id).Take(&user).Error; err != nil || user.DisplayName == nil || *user.DisplayName != "홍길동" {
+		t.Fatalf("stored name = %v, %v", user.DisplayName, err)
+	}
+}

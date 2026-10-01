@@ -263,9 +263,10 @@ func updateGoogleAccount(tx *gorm.DB, account *OAuthAccount, identity GoogleIden
 		return err
 	}
 	// 이메일 계정이 있으면 users.email은 그 계정의 이메일이 정본이다. 구글 이메일로
-	// 덮지 않고 표시 이름·사진만 갱신한다.
+	// 덮지 않는다. 표시 이름도 가입 때 정한 이름이 있으면 유지하고, 비어 있을 때만
+	// 구글 이름으로 채운다(#386). 사진은 구글 값으로 갱신한다.
 	userUpdates := map[string]any{
-		"display_name":      googleOptionalString(identity.DisplayName, 100),
+		"display_name":      gorm.Expr("COALESCE(display_name, ?)", googleOptionalString(identity.DisplayName, 100)),
 		"profile_image_url": googleOptionalString(identity.ProfileURL, 0),
 		"updated_at":        now,
 	}

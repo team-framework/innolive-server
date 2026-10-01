@@ -402,7 +402,7 @@ func (s *memoryEmailAccountStore) CreateEmailUser(_ context.Context, pending Pen
 	if exists {
 		return uuid.Nil, ErrEmailAlreadyRegistered
 	}
-	user := User{ID: uuid.New(), Email: &pending.Email, Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+	user := User{ID: uuid.New(), Email: &pending.Email, DisplayName: googleOptionalString(pending.Name, 100), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
 	account := EmailAccount{UserID: user.ID, Email: pending.Email, PasswordHash: pending.PasswordHash, CreatedAt: now, UpdatedAt: now}
 	s.user, s.account = &user, &account
 	return user.ID, nil
@@ -425,4 +425,61 @@ func (s *memoryEmailAccountStore) FindEmailAccount(_ context.Context, email stri
 		return EmailAccount{}, User{}, ErrEmailCredentialsInvalid
 	}
 	return *s.account, *s.user, nil
+}
+
+func TestNativeEmailSignupV2RequiresNameAndStoresIt(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	accounts := &memoryEmailAccountStore{}
+	sender := &recordingVerificationEmailSender{}
+	tokens := testTokenService(newMemoryRefreshStore())
+	service := newTestEmailAuthService(t, pending, accounts, sender, tokens)
+	config, _ := NewTokenHTTPConfig(false, nil)
+	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, service, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	for _, body := range []map[string]string{
+		{"email": "member@example.com", "password": "correct horse battery staple"},
+		{"email": "member@example.com", "password": "correct horse battery staple", "name": "   "},
+		{"email": "member@example.com", "password": "correct horse battery staple", "name": strings.Repeat("가", 101)},
+		{"email": "member@example.com", "password": "correct horse battery staple", "name": "줄\n바꿈"},
+	} {
+		response := serveEmailJSON(t, handler, http.MethodPost, "/auth/v2/native/sign-up", body, nil)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("v2 signup %q = %d %s, want 400", body["name"], response.Code, response.Body.String())
+		}
+	}
+	if sender.code != "" {
+		t.Fatal("rejected v2 signup sent a verification email")
+	}
+
+	start := serveEmailJSON(t, handler, http.MethodPost, "/auth/v2/native/sign-up", map[string]string{"email": "member@example.com", "password": "correct horse battery staple", "name": "  홍길동 "}, nil)
+	var started struct {
+		SignupToken string `json:"signup_token"`
+	}
+	_ = json.Unmarshal(start.Body.Bytes(), &started)
+	if start.Code != http.StatusOK || started.SignupToken == "" {
+		t.Fatalf("v2 signup = %d %s", start.Code, start.Body.String())
+	}
+	verify := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/verify-email", map[string]string{"signup_token": started.SignupToken, "verification_code": sender.code}, nil)
+	if verify.Code != http.StatusOK {
+		t.Fatalf("verify = %d %s", verify.Code, verify.Body.String())
+	}
+	if accounts.user == nil || accounts.user.DisplayName == nil || *accounts.user.DisplayName != "홍길동" {
+		t.Fatalf("stored name = %v, want trimmed 홍길동", accounts.user)
+	}
+}
+
+// v1 가입은 이름 없이 그대로 동작한다(구버전 앱 호환).
+func TestNativeEmailSignupV1StillWorksWithoutName(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	accounts := &memoryEmailAccountStore{}
+	sender := &recordingVerificationEmailSender{}
+	tokens := testTokenService(newMemoryRefreshStore())
+	service := newTestEmailAuthService(t, pending, accounts, sender, tokens)
+	config, _ := NewTokenHTTPConfig(false, nil)
+	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, service, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+
+	response := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/sign-up", map[string]string{"email": "member@example.com", "password": "correct horse battery staple"}, nil)
+	if response.Code != http.StatusOK || sender.code == "" {
+		t.Fatalf("v1 signup = %d %s", response.Code, response.Body.String())
+	}
 }

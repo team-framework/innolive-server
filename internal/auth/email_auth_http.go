@@ -16,14 +16,19 @@ const (
 // handleEmailSignup은 Clash의 /auth/sign-up 계약을 따른다. 가입 토큰은 일부러 JSON
 // 응답에 넣지 않고 HttpOnly 쿠키로 보낸다.
 func (h *tokenHTTPHandler) handleEmailSignup(w http.ResponseWriter, r *http.Request) {
-	h.handleEmailSignupMode(w, r, false)
+	h.handleEmailSignupMode(w, r, false, false)
 }
 
 func (h *tokenHTTPHandler) handleNativeEmailSignup(w http.ResponseWriter, r *http.Request) {
-	h.handleEmailSignupMode(w, r, true)
+	h.handleEmailSignupMode(w, r, true, false)
 }
 
-func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.Request, native bool) {
+// handleNativeEmailSignupV2는 이름을 필수로 받는 가입 v2다(#386).
+func (h *tokenHTTPHandler) handleNativeEmailSignupV2(w http.ResponseWriter, r *http.Request) {
+	h.handleEmailSignupMode(w, r, true, true)
+}
+
+func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.Request, native, v2 bool) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -34,12 +39,27 @@ func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.
 		return
 	}
 
+	var token string
+	if v2 {
+		request, err := decodeEmailSignupV2Request(w, r)
+		if err != nil {
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
+			return
+		}
+		token, err = h.email.StartSignupV2(r.Context(), request.Email, request.Password, request.Name, requestClientInfo(r).IPAddress)
+		h.finishEmailSignup(w, r, native, token, err)
+		return
+	}
 	request, err := decodeEmailSignupRequest(w, r)
 	if err != nil {
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
 		return
 	}
-	token, err := h.email.StartSignup(r.Context(), request.Email, request.Password, requestClientInfo(r).IPAddress)
+	token, err = h.email.StartSignup(r.Context(), request.Email, request.Password, requestClientInfo(r).IPAddress)
+	h.finishEmailSignup(w, r, native, token, err)
+}
+
+func (h *tokenHTTPHandler) finishEmailSignup(w http.ResponseWriter, r *http.Request, native bool, token string, err error) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrEmailSignupInvalid):
@@ -170,6 +190,24 @@ func (h *tokenHTTPHandler) handleEmailLogin(w http.ResponseWriter, r *http.Reque
 type emailSignupRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+type emailSignupV2Request struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Name     string `json:"name"`
+}
+
+func decodeEmailSignupV2Request(w http.ResponseWriter, r *http.Request) (emailSignupV2Request, error) {
+	var request emailSignupV2Request
+	if err := decodeSingleJSON(w, r, &request); err != nil {
+		return emailSignupV2Request{}, err
+	}
+	request.Email = strings.TrimSpace(request.Email)
+	if request.Email == "" || request.Password == "" {
+		return emailSignupV2Request{}, errors.New("email and password are required")
+	}
+	return request, nil
 }
 
 type emailVerificationRequest struct {

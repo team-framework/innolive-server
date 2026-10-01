@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -278,6 +279,8 @@ type PendingEmailSignup struct {
 	// UserID가 있으면 새 가입이 아니라 기존 OAuth 전용 사용자에 이메일 계정을 붙이는
 	// 설정이다(#380).
 	UserID string `json:"user_id,omitempty"`
+	// Name은 가입 v2가 받는 표시 이름이다(#386). v1 가입은 비어 있다.
+	Name string `json:"name,omitempty"`
 }
 
 type PendingEmailSignupStore interface {
@@ -450,7 +453,7 @@ func (s *gormEmailAccountStore) CreateEmailUser(ctx context.Context, pending Pen
 		if count != 0 {
 			return ErrEmailAlreadyRegistered
 		}
-		user := User{ID: uuid.New(), Email: &pending.Email, Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+		user := User{ID: uuid.New(), Email: &pending.Email, DisplayName: googleOptionalString(pending.Name, 100), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Create(&user).Error; err != nil {
 			return err
 		}
@@ -555,6 +558,20 @@ func NewEmailAuthService(pending PendingEmailSignupStore, accounts EmailAccountS
 // StartSignup은 Clash의 가입 계약을 따른다. 가입 토큰을 만들고, 대기 사용자는 30분,
 // 코드는 5분 캐시한 뒤 코드를 보낸다.
 func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, clientIP string) (string, error) {
+	return s.startSignup(ctx, email, password, "", clientIP)
+}
+
+// StartSignupV2는 이름을 필수로 받는 가입 v2다(#386). 이름은 가입 완료 때 계정의
+// 표시 이름으로 저장된다.
+func (s *EmailAuthService) StartSignupV2(ctx context.Context, email, password, name, clientIP string) (string, error) {
+	name, err := normalizeDisplayName(name)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
+	}
+	return s.startSignup(ctx, email, password, name, clientIP)
+}
+
+func (s *EmailAuthService) startSignup(ctx context.Context, email, password, name, clientIP string) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
@@ -569,7 +586,7 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, cli
 	if alreadyRegistered {
 		return "", ErrEmailAlreadyRegistered
 	}
-	return s.sendVerification(ctx, email, password, clientIP, "")
+	return s.sendVerification(ctx, email, password, clientIP, "", name)
 }
 
 // StartAccountSetup은 #380 이전 OAuth 전용 사용자가 이메일 계정을 만드는 절차를
@@ -597,11 +614,11 @@ func (s *EmailAuthService) StartAccountSetup(ctx context.Context, setupToken, em
 	if taken {
 		return "", ErrEmailAlreadyRegistered
 	}
-	return s.sendVerification(ctx, email, password, clientIP, userID.String())
+	return s.sendVerification(ctx, email, password, clientIP, userID.String(), "")
 }
 
 // sendVerification은 가입과 계정 설정이 함께 쓰는 인증 코드 발송이다.
-func (s *EmailAuthService) sendVerification(ctx context.Context, email, password, clientIP, userID string) (string, error) {
+func (s *EmailAuthService) sendVerification(ctx context.Context, email, password, clientIP, userID, name string) (string, error) {
 	// 비싼 bcrypt 해시와 SMTP 발송 전에 제한을 걸어, 반복 요청으로 한 주소에 폭탄을
 	// 보내거나 CPU를 태우지 못하게 한다.
 	if err := s.throttleSignup(ctx, clientIP, email); err != nil {
@@ -623,7 +640,7 @@ func (s *EmailAuthService) sendVerification(ctx context.Context, email, password
 	if err != nil {
 		return "", err
 	}
-	pending := PendingEmailSignup{Email: email, PasswordHash: string(passwordHash), UserID: userID}
+	pending := PendingEmailSignup{Email: email, PasswordHash: string(passwordHash), UserID: userID, Name: name}
 	if err := s.pending.Save(ctx, token, pending, string(codeHash), s.config.PendingUserTTL, s.config.CodeTTL); err != nil {
 		return "", fmt.Errorf("save pending email signup: %w", err)
 	}
@@ -765,6 +782,22 @@ func normalizeEmail(value string) (string, error) {
 	parsed, err := mail.ParseAddress(value)
 	if err != nil || parsed.Address != value || utf8.RuneCountInString(value) > 320 {
 		return "", errors.New("invalid email")
+	}
+	return value, nil
+}
+
+// normalizeDisplayName은 표시 이름의 앞뒤 공백을 지우고 1~100자인지 본다. 줄바꿈 등
+// 제어 문자는 받지 않는다.
+func normalizeDisplayName(value string) (string, error) {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, ""))
+	length := utf8.RuneCountInString(value)
+	if length == 0 || length > 100 {
+		return "", errors.New("name must be 1 to 100 characters")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return "", errors.New("name must not contain control characters")
+		}
 	}
 	return value, nil
 }

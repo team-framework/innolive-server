@@ -1082,11 +1082,60 @@ dd {
 
 /* 개발중 탭(#384) — 왼쪽 기능 목록, 오른쪽 선택한 기능의 테스트 화면. */
 .dev-account {
+  padding: 12px 14px;
+}
+
+.dev-account-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
+}
+
+/* 계정 구조: InnoLive 계정(루트) 아래에 로그인 수단이 붙는 모양. */
+.dev-tree {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dev-tree:empty {
+  display: none;
+}
+
+.dev-tree-root {
+  font-weight: 700;
+}
+
+.dev-tree-root small {
+  margin-left: 6px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.dev-tree-child {
+  position: relative;
+  margin-left: 18px;
+  padding: 4px 0 4px 16px;
+  border-left: 2px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.dev-tree-child::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 10px;
+  border-top: 2px solid var(--border);
+}
+
+.dev-tree-child[data-linked="true"] {
+  color: var(--ok);
+}
+
+.dev-tree-child[data-linked="false"] {
+  color: var(--muted);
 }
 
 .dev-account-label {

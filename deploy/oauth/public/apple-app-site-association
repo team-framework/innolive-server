@@ -8,5 +8,8 @@
         ]
       }
     ]
+  },
+  "webcredentials": {
+    "apps": ["SPT4X66Z4V.com.framework.innolive"]
   }
 }

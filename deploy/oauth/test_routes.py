@@ -96,7 +96,18 @@ class OAuthRoutesTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"applinks": {"details": [{
             "appIDs": ["SPT4X66Z4V.com.framework.innolive"],
             "components": [{"/": "/auth/chzzk/callback"}],
-        }]}})
+        }]}, "webcredentials": {
+            "apps": ["SPT4X66Z4V.com.framework.innolive"],
+        }})
+
+    def test_https_authentication_service_is_present_on_both_paths(self):
+        for path in ["/.well-known/apple-app-site-association", "/apple-app-site-association"]:
+            with self.subTest(path=path):
+                _, _, body = self.fetch(path)
+                services = json.loads(body)
+                self.assertEqual(services.get("webcredentials"), {
+                    "apps": ["SPT4X66Z4V.com.framework.innolive"],
+                })
 
     def test_callback_never_echoes_oauth_values(self):
         status, headers, body = self.fetch("/auth/chzzk/callback?code=secret-code&state=secret-state")

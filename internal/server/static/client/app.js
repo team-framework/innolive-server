@@ -251,6 +251,8 @@ function bindElements() {
     "devAccountState",
     "devResetBtn",
     "devEmpty",
+    "devAccountTree",
+    "devName",
     "devEmail",
     "devPassword",
     "devCode",
@@ -1049,6 +1051,10 @@ function newDevState() {
     googleIdToken: null,
     googleEmail: null,
     googleReady: false,
+    // GET /auth/login-methods 결과. 계정 구조 카드를 그린다.
+    methods: null,
+    // 가입 화면에서 입력한 이름. 조회 API가 이름을 주지 않아 화면 표시에만 쓴다.
+    name: null,
   };
 }
 
@@ -1067,10 +1073,10 @@ function bindDevEvents() {
   els.devSetupStartBtn.addEventListener("click", () => void devSetupStart());
   els.devSetupVerifyBtn.addEventListener("click", () => void devVerify(state.dev.setupSignupToken, els.devSetupCode.value));
   els.devSetupSignInBtn.addEventListener("click", () => void devSignIn(els.devSetupEmail.value, els.devSetupPassword.value));
-  els.devMethodsBtn.addEventListener("click", () => void devRequest("GET", "/auth/login-methods", undefined, { auth: true }));
+  els.devMethodsBtn.addEventListener("click", () => void devShowMethods());
   els.devLinkGoogleBtn.addEventListener("click", () => void devLinkGoogle());
-  els.devUnlinkGoogleBtn.addEventListener("click", () => void devRequest("DELETE", "/auth/link/google", undefined, { auth: true }));
-  els.devUnlinkAppleBtn.addEventListener("click", () => void devRequest("DELETE", "/auth/link/apple", undefined, { auth: true }));
+  els.devUnlinkGoogleBtn.addEventListener("click", () => void devUnlink("google"));
+  els.devUnlinkAppleBtn.addEventListener("click", () => void devUnlink("apple"));
   els.devAppleV2Btn.addEventListener("click", () => void devApple("/auth/v2/apple", false));
   els.devAppleV1Btn.addEventListener("click", () => void devApple("/auth/apple", false));
   els.devAppleLinkBtn.addEventListener("click", () => void devApple("/auth/link/apple", true));
@@ -1105,6 +1111,7 @@ function resetDevState() {
 function renderDevAccount() {
   const dev = state.dev;
   els.devAccountState.textContent = dev.accessToken ? `${dev.accountLabel} 로그인됨` : "없음";
+  renderDevAccountTree();
   els.devSetupState.textContent = dev.setupToken
     ? "setup_token 있음 (10분 유효) — 이메일·비밀번호를 정해 설정 코드를 받으세요."
     : "setup_token 없음 — 구글 로그인 화면에서 기존 소셜 계정으로 v2 로그인하면 생깁니다.";
@@ -1113,9 +1120,71 @@ function renderDevAccount() {
     : "ID 토큰 없음 — 위 구글 버튼으로 받으세요.";
 }
 
-// devRequest는 테스트 계정 토큰으로 요청하고 상태·응답을 결과 칸에 보여 준다.
-// apiFetch와 달리 401에서 관리자 로그인을 지우거나 토큰을 갱신하지 않는다.
-async function devRequest(method, path, body, { auth = false } = {}) {
+// renderDevAccountTree는 InnoLive 계정을 루트로, 그 아래 로그인 수단을 붙여 그린다.
+// 구글·애플은 계정에 "연결"되는 수단이라는 구조를 화면에서 바로 보이게 한다.
+function renderDevAccountTree() {
+  const dev = state.dev;
+  const items = [];
+  if (dev.accessToken && dev.methods) {
+    const root = document.createElement("li");
+    root.className = "dev-tree-root";
+    root.textContent = "InnoLive 계정";
+    const detail = document.createElement("small");
+    detail.textContent = [dev.name, dev.methods.email || "이메일 계정 없음"].filter(Boolean).join(" · ");
+    root.append(detail);
+    items.push(root);
+    items.push(devTreeChild("이메일 로그인", dev.methods.email));
+    const linked = new Map((dev.methods.providers || []).map((item) => [item.provider, item]));
+    items.push(devTreeChild("구글", linked.has("google") ? linked.get("google").email || "연결됨" : null));
+    items.push(devTreeChild("애플", linked.has("apple") ? linked.get("apple").email || "연결됨" : null));
+  } else if (dev.setupToken) {
+    const root = document.createElement("li");
+    root.className = "dev-tree-root";
+    root.textContent = "기존 소셜 계정 (이메일 계정 없음)";
+    items.push(root);
+    items.push(devTreeChild("계정 설정 필요", null));
+  }
+  els.devAccountTree.replaceChildren(...items);
+}
+
+function devTreeChild(label, value) {
+  const item = document.createElement("li");
+  item.className = "dev-tree-child";
+  item.dataset.linked = value ? "true" : "false";
+  item.textContent = value ? `${label} ✓ ${value}` : `${label} · 미연결`;
+  return item;
+}
+
+// refreshDevMethods는 결과 칸을 건드리지 않고 로그인 수단을 다시 읽어 계정 구조를 갱신한다.
+async function refreshDevMethods() {
+  if (!state.dev.accessToken) {
+    state.dev.methods = null;
+    renderDevAccount();
+    return;
+  }
+  const result = await devRequest("GET", "/auth/login-methods", undefined, { auth: true, quiet: true });
+  state.dev.methods = result?.ok ? result.payload : null;
+  renderDevAccount();
+}
+
+async function devShowMethods() {
+  const result = await devRequest("GET", "/auth/login-methods", undefined, { auth: true });
+  if (result?.ok) {
+    state.dev.methods = result.payload;
+    renderDevAccount();
+  }
+}
+
+async function devUnlink(provider) {
+  const result = await devRequest("DELETE", `/auth/link/${provider}`, undefined, { auth: true });
+  if (result?.ok) {
+    await refreshDevMethods();
+  }
+}
+
+// devRequest는 테스트 계정 토큰으로 요청하고 상태·응답을 결과 칸에 보여 준다(quiet면
+// 보여 주지 않는다). apiFetch와 달리 401에서 관리자 로그인을 지우거나 토큰을 갱신하지 않는다.
+async function devRequest(method, path, body, { auth = false, quiet = false } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (auth) {
     if (!state.dev.accessToken) {
@@ -1137,7 +1206,9 @@ async function devRequest(method, path, body, { auth = false } = {}) {
   }
   const payload = parseJsonOrText(await response.text());
   const result = { status: response.status, ok: response.ok, payload };
-  showDevResult(`${method} ${path} → ${response.status}`, result.ok ? "ok" : "error", payload);
+  if (!quiet) {
+    showDevResult(`${method} ${path} → ${response.status}`, result.ok ? "ok" : "error", payload);
+  }
   return result;
 }
 
@@ -1180,14 +1251,16 @@ function devRequireFields(fields) {
 }
 
 async function devSignUp() {
+  const name = els.devName.value.trim();
   const email = els.devEmail.value.trim();
   const password = els.devPassword.value;
-  if (!devRequireFields([["이메일", email], ["비밀번호", password]])) {
+  if (!devRequireFields([["이름", name], ["이메일", email], ["비밀번호", password]])) {
     return;
   }
-  const result = await devRequest("POST", "/auth/native/sign-up", { email, password });
+  const result = await devRequest("POST", "/auth/v2/native/sign-up", { email, password, name });
   if (result?.ok) {
     state.dev.signupToken = result.payload?.signup_token || null;
+    state.dev.name = name;
   }
 }
 
@@ -1217,7 +1290,9 @@ function setDevLogin(pair, label) {
   state.dev.accessToken = pair?.access_token || null;
   state.dev.accountLabel = label;
   state.dev.setupToken = null;
+  state.dev.methods = null;
   renderDevAccount();
+  void refreshDevMethods();
 }
 
 // handleDevSocialLogin은 소셜 로그인 응답을 테스트 계정 상태에 반영한다. v2의
@@ -1307,7 +1382,10 @@ async function devLinkGoogle() {
     showDevMessage("구글 로그인 화면에서 ID 토큰을 먼저 받으세요.", "error");
     return;
   }
-  await devRequest("POST", "/auth/link/google", { id_token: state.dev.googleIdToken }, { auth: true });
+  const result = await devRequest("POST", "/auth/link/google", { id_token: state.dev.googleIdToken }, { auth: true });
+  if (result?.ok) {
+    await refreshDevMethods();
+  }
 }
 
 async function devApple(path, link) {
@@ -1319,6 +1397,8 @@ async function devApple(path, link) {
   const result = await devRequest("POST", path, { authorization_code: code, nonce }, { auth: link });
   if (!link) {
     handleDevSocialLogin(result, "애플", null);
+  } else if (result?.ok) {
+    await refreshDevMethods();
   }
 }
 

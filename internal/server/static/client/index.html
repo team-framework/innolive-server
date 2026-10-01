@@ -485,10 +485,13 @@
 
       <div id="devView" hidden>
         <section class="panel dev-account" aria-label="테스트 계정">
-          <span class="dev-account-label">테스트 계정</span>
-          <span id="devAccountState">없음</span>
-          <span class="dev-account-note">관리자 로그인과 별개 — 이 화면의 요청만 이 계정으로 보냅니다.</span>
-          <button id="devResetBtn" class="button button-small" type="button">초기화</button>
+          <div class="dev-account-head">
+            <span class="dev-account-label">테스트 계정</span>
+            <span id="devAccountState">없음</span>
+            <span class="dev-account-note">관리자 로그인과 별개로, 이 화면의 요청만 이 계정으로 보냅니다.</span>
+            <button id="devResetBtn" class="button button-small" type="button">초기화</button>
+          </div>
+          <ul id="devAccountTree" class="dev-tree" aria-label="계정 구조"></ul>
         </section>
         <div class="dev-layout">
           <nav class="panel dev-features" aria-label="개발 중 기능">
@@ -504,8 +507,9 @@
 
             <div class="dev-feature" data-dev-panel="email" hidden>
               <h2>이메일 가입·로그인</h2>
-              <p class="dev-hint">새 테스트 계정을 만들거나 기존 이메일 계정으로 로그인합니다. 가입 완료 응답에는 토큰이 없어 로그인을 따로 합니다.</p>
+              <p class="dev-hint">새 InnoLive 계정을 만들거나 기존 이메일 계정으로 로그인합니다. 가입은 v2(이름 필수)로 보냅니다. 가입 완료 응답에는 토큰이 없어 로그인을 따로 합니다.</p>
               <div class="dev-form">
+                <label class="field field-wide"><span>이름 (가입할 때만, 1~100자)</span><input id="devName" type="text" autocomplete="off" /></label>
                 <label class="field"><span>이메일</span><input id="devEmail" type="email" autocomplete="off" spellcheck="false" /></label>
                 <label class="field"><span>비밀번호 (8~72바이트)</span><input id="devPassword" type="password" autocomplete="new-password" /></label>
               </div>

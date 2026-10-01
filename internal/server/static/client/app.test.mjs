@@ -104,6 +104,10 @@ const buttonKeys = [
   "devResultBox",
   "devResultTitle",
   "devResult",
+  "devAccountTree",
+  "devName",
+  "devEmail",
+  "devPassword",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -214,7 +218,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp };`,
     context,
     { filename: appPath },
   );
@@ -1621,4 +1625,47 @@ test("개발중 기능을 고르면 그 기능 화면만 보인다", async () =>
   assert.equal(els.devPanels[1].hidden, false);
   assert.equal(els.devFeatureButtons[1].attributes["aria-current"], "true");
   assert.equal(els.devFeatureButtons[0].attributes["aria-current"], undefined);
+});
+
+test("개발중 계정 카드는 InnoLive 계정 아래에 로그인 수단 연결 상태를 그린다", async () => {
+  const { renderDevAccountTree, state, els } = await loadApp();
+  state.dev.accessToken = "dev-token";
+  state.dev.name = "홍길동";
+  state.dev.methods = { email: "member@example.com", providers: [{ provider: "google", email: "member@gmail.com" }] };
+
+  renderDevAccountTree();
+  const [root, email, google, apple] = els.devAccountTree.children;
+  assert.equal(root.textContent, "InnoLive 계정");
+  assert.equal(root.children[0].textContent, "홍길동 · member@example.com");
+  assert.equal(email.dataset.linked, "true");
+  assert.equal(google.textContent, "구글 ✓ member@gmail.com");
+  assert.equal(apple.dataset.linked, "false");
+
+  state.dev.accessToken = null;
+  state.dev.methods = null;
+  state.dev.setupToken = "setup-1";
+  renderDevAccountTree();
+  assert.equal(els.devAccountTree.children[0].textContent, "기존 소셜 계정 (이메일 계정 없음)");
+});
+
+test("개발중 이메일 가입은 이름을 필수로 v2 가입에 보낸다", async () => {
+  const calls = [];
+  const { devSignUp, state, els } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ path: new URL(url).pathname, body: JSON.parse(options.body) });
+      return jsonResponse({ status: "verification_email_sent", signup_token: "signup-1" });
+    },
+  });
+  els.devName.value = "";
+  els.devEmail.value = "member@example.com";
+  els.devPassword.value = "correct horse battery staple";
+  await devSignUp();
+  assert.equal(calls.length, 0);
+  assert.match(els.devResultTitle.textContent, /이름/);
+
+  els.devName.value = " 홍길동 ";
+  await devSignUp();
+  assert.equal(calls[0].path, "/auth/v2/native/sign-up");
+  assert.equal(calls[0].body.name, "홍길동");
+  assert.equal(state.dev.signupToken, "signup-1");
 });

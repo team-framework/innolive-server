@@ -20,13 +20,15 @@ func (v *stubGoogleVerifier) Verify(_ context.Context, rawToken string) (GoogleI
 }
 
 type stubGoogleAccounts struct {
-	user googleLoginUser
-	err  error
-	seen GoogleIdentity
+	user    googleLoginUser
+	err     error
+	seen    GoogleIdentity
+	created bool
 }
 
-func (a *stubGoogleAccounts) ResolveGoogleIdentity(_ context.Context, identity GoogleIdentity) (googleLoginUser, error) {
+func (a *stubGoogleAccounts) ResolveGoogleIdentity(_ context.Context, identity GoogleIdentity, createIfMissing bool) (googleLoginUser, error) {
 	a.seen = identity
+	a.created = createIfMissing
 	return a.user, a.err
 }
 

@@ -25,7 +25,14 @@ var (
 	ErrRefreshTokenRevoked = errors.New("refresh token revoked")
 	ErrRefreshTokenReused  = errors.New("refresh token reuse detected")
 	ErrUserInactive        = errors.New("user is not active")
+	ErrInvalidSetupToken   = errors.New("invalid account setup token")
 )
+
+// accountSetupTokenTTL은 기존 OAuth 전용 사용자가 이메일 계정을 만드는 데 쓰는
+// setup 토큰의 수명이다(#380). 인증 코드 발송까지만 쓰므로 짧게 둔다.
+const accountSetupTokenTTL = 10 * time.Minute
+
+const accountSetupTokenType = "account_setup"
 
 type TokenConfig struct {
 	AccessKey          []byte
@@ -451,4 +458,68 @@ func tokenOptionalString(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+// IssueAccountSetupToken은 이메일 계정이 없는 OAuth 전용 사용자에게 이메일 계정
+// 설정만 허용하는 짧은 토큰을 발급한다(#380). token_type이 달라 access 토큰
+// 검증은 이 토큰을 거절한다.
+func (s *TokenService) IssueAccountSetupToken(userID uuid.UUID) (string, error) {
+	now := s.now().UTC()
+	claims := AccessClaims{
+		TokenType: accountSetupTokenType,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    s.cfg.Issuer,
+			Subject:   userID.String(),
+			Audience:  jwt.ClaimStrings{s.cfg.Audience},
+			ExpiresAt: jwt.NewNumericDate(now.Add(accountSetupTokenTTL)),
+			NotBefore: jwt.NewNumericDate(now),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ID:        uuid.NewString(),
+		},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.cfg.AccessKey)
+	if err != nil {
+		return "", fmt.Errorf("sign account setup token: %w", err)
+	}
+	return signed, nil
+}
+
+// ValidateAccountSetupToken은 setup 토큰을 검증하고 사용자 ID를 돌려준다.
+func (s *TokenService) ValidateAccountSetupToken(raw string) (uuid.UUID, error) {
+	claims := &AccessClaims{}
+	token, err := jwt.ParseWithClaims(
+		raw,
+		claims,
+		func(token *jwt.Token) (any, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+			}
+			return s.cfg.AccessKey, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(s.cfg.Issuer),
+		jwt.WithAudience(s.cfg.Audience),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(s.cfg.ClockSkew),
+		jwt.WithTimeFunc(s.now),
+	)
+	if err != nil || !token.Valid || claims.TokenType != accountSetupTokenType {
+		return uuid.Nil, ErrInvalidSetupToken
+	}
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return uuid.Nil, ErrInvalidSetupToken
+	}
+	return userID, nil
+}
+
+// passwordSetupRequired는 이메일 계정 설정용 토큰을 실은 오류를 만든다. 토큰 발급
+// 실패는 그대로 감싸 내부 오류로 처리되게 한다.
+func (s *TokenService) passwordSetupRequired(userID uuid.UUID) error {
+	token, err := s.IssueAccountSetupToken(userID)
+	if err != nil {
+		return err
+	}
+	return &PasswordSetupRequiredError{SetupToken: token}
 }

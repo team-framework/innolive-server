@@ -10,7 +10,17 @@ import (
 
 const maxAppleLoginRequestBody = 16 << 10
 
+// handleAppleLogin은 v1 애플 로그인이다 — 처음 보는 신원이면 계정을 만든다.
 func (h *tokenHTTPHandler) handleAppleLogin(w http.ResponseWriter, r *http.Request) {
+	h.handleAppleLoginMode(w, r, false)
+}
+
+// handleAppleLoginV2는 연결된 신원만 로그인시키는 v2 애플 로그인이다(#380).
+func (h *tokenHTTPHandler) handleAppleLoginV2(w http.ResponseWriter, r *http.Request) {
+	h.handleAppleLoginMode(w, r, true)
+}
+
+func (h *tokenHTTPHandler) handleAppleLoginMode(w http.ResponseWriter, r *http.Request, v2 bool) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -25,8 +35,15 @@ func (h *tokenHTTPHandler) handleAppleLogin(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid Apple login request.")
 		return
 	}
-	pair, err := h.apple.Login(r.Context(), request.AuthorizationCode, request.Nonce, request.displayName(), requestClientInfo(r))
+	login := h.apple.Login
+	if v2 {
+		login = h.apple.LoginV2
+	}
+	pair, err := login(r.Context(), request.AuthorizationCode, request.Nonce, request.displayName(), requestClientInfo(r))
 	if err != nil {
+		if h.writeAccountLinkLoginError(w, r, err, "Apple") {
+			return
+		}
 		switch {
 		case errors.Is(err, ErrInvalidAppleIDToken), errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_apple_token", "Apple login could not be verified.")

@@ -354,10 +354,13 @@ func (j appleJWK) publicKey() *rsa.PublicKey {
 type appleLoginUser struct {
 	ID     uuid.UUID
 	Status UserStatus
+	// HasEmailAccount가 false면 #380 이전의 애플 전용 가입자다.
+	HasEmailAccount bool
 }
 
 type AppleAccountResolver interface {
-	ResolveAppleIdentity(context.Context, AppleIdentity, []byte, *int16) (appleLoginUser, error)
+	// createIfMissing이 true면 v1 로그인, false면 연결된 신원만 찾는 v2 로그인이다(#380).
+	ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16, createIfMissing bool) (appleLoginUser, error)
 }
 
 type gormAppleAccountResolver struct {
@@ -369,7 +372,7 @@ func NewGormAppleAccountResolver(db *gorm.DB) AppleAccountResolver {
 	return &gormAppleAccountResolver{db: db, now: func() time.Time { return time.Now().UTC() }}
 }
 
-func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16) (appleLoginUser, error) {
+func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, identity AppleIdentity, ciphertext []byte, version *int16, createIfMissing bool) (appleLoginUser, error) {
 	if s == nil || s.db == nil {
 		return appleLoginUser{}, errors.New("Apple account database is nil")
 	}
@@ -381,17 +384,13 @@ func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, ide
 		var account OAuthAccount
 		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("User").Where("provider = ? AND provider_subject = ?", OAuthProviderApple, identity.Subject).Take(&account)
 		if query.Error == nil {
-			if account.User == nil {
-				return errors.New("Apple OAuth account has no user")
-			}
-			if err := updateAppleAccount(tx, &account, identity, ciphertext, version, s.now()); err != nil {
-				return err
-			}
-			result = appleLoginUser{ID: account.UserID, Status: account.User.Status}
-			return nil
+			return s.loginExisting(tx, &account, identity, ciphertext, version, s.now(), &result)
 		}
 		if !errors.Is(query.Error, gorm.ErrRecordNotFound) {
 			return query.Error
+		}
+		if !createIfMissing {
+			return ErrAccountNotLinked
 		}
 		now := s.now()
 		user := newAppleUser(identity, now)
@@ -413,19 +412,27 @@ func (s *gormAppleAccountResolver) ResolveAppleIdentity(ctx context.Context, ide
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("User").Where("provider = ? AND provider_subject = ?", OAuthProviderApple, identity.Subject).Take(&account).Error; err != nil {
 			return err
 		}
-		if account.User == nil {
-			return errors.New("Apple OAuth account has no user")
-		}
-		if err := updateAppleAccount(tx, &account, identity, ciphertext, version, now); err != nil {
-			return err
-		}
-		result = appleLoginUser{ID: account.UserID, Status: account.User.Status}
-		return nil
+		return s.loginExisting(tx, &account, identity, ciphertext, version, now, &result)
 	})
 	if err != nil {
 		return appleLoginUser{}, err
 	}
 	return result, nil
+}
+
+func (s *gormAppleAccountResolver) loginExisting(tx *gorm.DB, account *OAuthAccount, identity AppleIdentity, ciphertext []byte, version *int16, now time.Time, result *appleLoginUser) error {
+	if account.User == nil {
+		return errors.New("Apple OAuth account has no user")
+	}
+	if err := updateAppleAccount(tx, account, identity, ciphertext, version, now); err != nil {
+		return err
+	}
+	hasEmail, err := userHasEmailAccount(tx, account.UserID)
+	if err != nil {
+		return err
+	}
+	*result = appleLoginUser{ID: account.UserID, Status: account.User.Status, HasEmailAccount: hasEmail}
+	return nil
 }
 
 func newAppleUser(identity AppleIdentity, now time.Time) User {
@@ -441,21 +448,15 @@ func appleVerifiedEmail(identity AppleIdentity) *string {
 	return googleOptionalString(identity.Email, 320)
 }
 
+// updateAppleAccount는 신원 정보만 갱신한다. users.email은 이메일 계정이 정본이라
+// 애플 이메일로 덮지 않는다(#380).
 func updateAppleAccount(tx *gorm.DB, account *OAuthAccount, identity AppleIdentity, ciphertext []byte, version *int16, now time.Time) error {
 	updates := map[string]any{"provider_email": googleOptionalString(identity.Email, 320), "email_verified": identity.EmailVerified, "is_private_email": identity.IsPrivateEmail, "last_login_at": now, "updated_at": now}
 	if len(ciphertext) > 0 {
 		updates["provider_refresh_token_ciphertext"] = ciphertext
 		updates["provider_token_key_version"] = version
 	}
-	if err := tx.Model(&OAuthAccount{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
-		return err
-	}
-	// Apple은 최초 인가 때만 사용자 이름을 보내므로, 이후 로그인에서 이미 저장한 표시
-	// 이름을 덮어쓰지 않는다.
-	if identity.EmailVerified {
-		return tx.Model(&User{}).Where("id = ?", account.UserID).Updates(map[string]any{"email": appleVerifiedEmail(identity), "updated_at": now}).Error
-	}
-	return nil
+	return tx.Model(&OAuthAccount{}).Where("id = ?", account.ID).Updates(updates).Error
 }
 
 type AppleLoginService struct {
@@ -464,6 +465,7 @@ type AppleLoginService struct {
 	accounts  AppleAccountResolver
 	tokens    *TokenService
 	cipher    *ProviderTokenCipher
+	links     *AccountLinkStore
 }
 
 func NewAppleLoginService(exchanger AppleAuthorizationExchanger, verifier AppleIdentityVerifier, accounts AppleAccountResolver, tokens *TokenService, cipher *ProviderTokenCipher) (*AppleLoginService, error) {
@@ -472,7 +474,18 @@ func NewAppleLoginService(exchanger AppleAuthorizationExchanger, verifier AppleI
 	}
 	return &AppleLoginService{exchanger: exchanger, verifier: verifier, accounts: accounts, tokens: tokens, cipher: cipher}, nil
 }
+
+// Login은 v1 애플 로그인이다. 처음 보는 신원이면 사용자를 만든다.
 func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
+	return s.login(ctx, authorizationCode, nonce, displayName, client, true)
+}
+
+// LoginV2는 연결된 신원만 로그인시킨다(#380).
+func (s *AppleLoginService) LoginV2(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo) (TokenPair, error) {
+	return s.login(ctx, authorizationCode, nonce, displayName, client, false)
+}
+
+func (s *AppleLoginService) login(ctx context.Context, authorizationCode, nonce, displayName string, client ClientInfo, legacy bool) (TokenPair, error) {
 	response, err := s.exchanger.Exchange(ctx, authorizationCode)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("exchange Apple authorization code: %w", err)
@@ -493,12 +506,18 @@ func (s *AppleLoginService) Login(ctx context.Context, authorizationCode, nonce,
 			return TokenPair{}, err
 		}
 	}
-	user, err := s.accounts.ResolveAppleIdentity(ctx, identity, ciphertext, version)
+	user, err := s.accounts.ResolveAppleIdentity(ctx, identity, ciphertext, version, legacy)
 	if err != nil {
+		if errors.Is(err, ErrAccountNotLinked) {
+			return TokenPair{}, err
+		}
 		return TokenPair{}, fmt.Errorf("resolve Apple account: %w", err)
 	}
 	if user.Status != UserStatusActive {
 		return TokenPair{}, ErrUserInactive
+	}
+	if !legacy && !user.HasEmailAccount {
+		return TokenPair{}, s.tokens.passwordSetupRequired(user.ID)
 	}
 	return s.tokens.IssuePair(ctx, user.ID, client)
 }
@@ -509,4 +528,40 @@ func appleDisplayName(value string) string {
 		return value
 	}
 	return string([]rune(value)[:100])
+}
+
+// SetAccountLinks는 로그인한 사용자에 애플을 연결하는 저장소를 붙인다(#380).
+func (s *AppleLoginService) SetAccountLinks(links *AccountLinkStore) { s.links = links }
+
+// Link는 애플 인가 코드를 교환·검증해 로그인한 사용자에 연결한다. 탈퇴 때 애플 권한
+// 취소에 쓰도록 refresh token 암호문을 함께 저장한다.
+func (s *AppleLoginService) Link(ctx context.Context, userID uuid.UUID, authorizationCode, nonce string) (LinkResult, error) {
+	if s.links == nil {
+		return LinkResult{}, errors.New("Apple account linking is not configured")
+	}
+	response, err := s.exchanger.Exchange(ctx, authorizationCode)
+	if err != nil {
+		return LinkResult{}, fmt.Errorf("exchange Apple authorization code: %w", err)
+	}
+	identity, err := s.verifier.Verify(ctx, response.IDToken, nonce)
+	if err != nil {
+		if errors.Is(err, ErrInvalidAppleIDToken) {
+			return LinkResult{}, err
+		}
+		return LinkResult{}, fmt.Errorf("verify Apple ID token: %w", err)
+	}
+	link := LinkIdentity{
+		Provider:       OAuthProviderApple,
+		Subject:        identity.Subject,
+		Email:          identity.Email,
+		EmailVerified:  identity.EmailVerified,
+		IsPrivateEmail: identity.IsPrivateEmail,
+	}
+	if strings.TrimSpace(response.RefreshToken) != "" {
+		link.RefreshToken, link.RefreshTokenKey, err = s.cipher.Encrypt(response.RefreshToken)
+		if err != nil {
+			return LinkResult{}, err
+		}
+	}
+	return s.links.Link(ctx, userID, link)
 }

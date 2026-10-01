@@ -10,7 +10,17 @@ import (
 
 const maxGoogleLoginRequestBody = 16 << 10
 
+// handleGoogleLogin은 v1 구글 로그인이다 — 처음 보는 신원이면 계정을 만든다.
 func (h *tokenHTTPHandler) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
+	h.handleGoogleLoginMode(w, r, false)
+}
+
+// handleGoogleLoginV2는 연결된 신원만 로그인시키는 v2 구글 로그인이다(#380).
+func (h *tokenHTTPHandler) handleGoogleLoginV2(w http.ResponseWriter, r *http.Request) {
+	h.handleGoogleLoginMode(w, r, true)
+}
+
+func (h *tokenHTTPHandler) handleGoogleLoginMode(w http.ResponseWriter, r *http.Request, v2 bool) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -26,8 +36,15 @@ func (h *tokenHTTPHandler) handleGoogleLogin(w http.ResponseWriter, r *http.Requ
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid Google login request.")
 		return
 	}
-	pair, err := h.google.Login(r.Context(), rawIDToken, requestClientInfo(r))
+	login := h.google.Login
+	if v2 {
+		login = h.google.LoginV2
+	}
+	pair, err := login(r.Context(), rawIDToken, requestClientInfo(r))
 	if err != nil {
+		if h.writeAccountLinkLoginError(w, r, err, "Google") {
+			return
+		}
 		switch {
 		case errors.Is(err, ErrInvalidGoogleIDToken), errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_google_token", "Google login could not be verified.")

@@ -46,7 +46,7 @@ type stubAppleAccounts struct {
 	version    *int16
 }
 
-func (s *stubAppleAccounts) ResolveAppleIdentity(_ context.Context, identity AppleIdentity, ciphertext []byte, version *int16) (appleLoginUser, error) {
+func (s *stubAppleAccounts) ResolveAppleIdentity(_ context.Context, identity AppleIdentity, ciphertext []byte, version *int16, _ bool) (appleLoginUser, error) {
 	s.identity, s.ciphertext, s.version = identity, ciphertext, version
 	return s.user, s.err
 }

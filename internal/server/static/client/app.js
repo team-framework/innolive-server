@@ -37,8 +37,10 @@ const state = {
   authEmail: null,
   // 로그인한 사용자가 ADMIN_USER_IDS에 있는지(#373). 관리자만 로그인 화면을 넘는다.
   isAdmin: false,
-  // 상단바에서 고른 화면: "stream"(송출 테스트) 또는 "admin"(어드민).
+  // 상단바에서 고른 화면: "stream"(송출 테스트) · "admin"(어드민) · "dev"(개발중).
   view: "stream",
+  // 개발중 탭의 테스트 계정 상태(#384). 관리자 로그인 토큰과 섞지 않는다.
+  dev: newDevState(),
   refreshPromise: null,
   signupToken: null,
   // 치지직 인가 요청에 실은 state. 콜백에서 돌아온 값과 대조한 뒤 폐기한다.
@@ -244,6 +246,40 @@ function bindElements() {
     "adminSearchUsersBtn",
     "adminUsersBody",
     "adminDetail",
+    "navDevBtn",
+    "devView",
+    "devAccountState",
+    "devResetBtn",
+    "devEmpty",
+    "devEmail",
+    "devPassword",
+    "devCode",
+    "devSignUpBtn",
+    "devSignInBtn",
+    "devVerifyBtn",
+    "devGoogleButton",
+    "devGoogleTokenState",
+    "devGoogleV2Btn",
+    "devGoogleV1Btn",
+    "devSetupState",
+    "devSetupEmail",
+    "devSetupPassword",
+    "devSetupCode",
+    "devSetupStartBtn",
+    "devSetupVerifyBtn",
+    "devSetupSignInBtn",
+    "devMethodsBtn",
+    "devLinkGoogleBtn",
+    "devUnlinkGoogleBtn",
+    "devUnlinkAppleBtn",
+    "devAppleCode",
+    "devAppleNonce",
+    "devAppleV2Btn",
+    "devAppleV1Btn",
+    "devAppleLinkBtn",
+    "devResultBox",
+    "devResultTitle",
+    "devResult",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -277,6 +313,8 @@ function bindEvents() {
   els.signOutBtn.addEventListener("click", () => void signOut());
   els.navStreamBtn.addEventListener("click", () => showView("stream"));
   els.navAdminBtn.addEventListener("click", () => showView("admin"));
+  els.navDevBtn.addEventListener("click", () => showView("dev"));
+  bindDevEvents();
   els.adminRefreshSessionsBtn.addEventListener("click", () => void refreshAdminSessions());
   els.adminSearchUsersBtn.addEventListener("click", () => void searchAdminUsers());
   els.adminUserQuery.addEventListener("keydown", (event) => {
@@ -891,6 +929,7 @@ function clearAuthState() {
   state.authEmail = null;
   state.isAdmin = false;
   state.view = "stream";
+  state.dev = newDevState();
   state.signupToken = null;
   els.verifyCode.value = "";
   renderAuth();
@@ -944,8 +983,10 @@ function renderAuth() {
   els.viewNav.hidden = !entered;
   els.streamView.hidden = !entered || state.view !== "stream";
   els.adminView.hidden = !entered || state.view !== "admin";
+  els.devView.hidden = !entered || state.view !== "dev";
   setCurrentTab(els.navStreamBtn, state.view === "stream");
   setCurrentTab(els.navAdminBtn, state.view === "admin");
+  setCurrentTab(els.navDevBtn, state.view === "dev");
   setPill(els.authState, signedIn ? "Auth ok" : "Auth idle", signedIn ? "ok" : "idle");
   els.signInBtn.hidden = signedIn || verifying;
   els.signUpBtn.hidden = signedIn || verifying;
@@ -987,6 +1028,297 @@ function showView(view) {
   if (view === "admin") {
     void refreshAdminSessions();
     void searchAdminUsers();
+  }
+  if (view === "dev") {
+    renderDevAccount();
+  }
+}
+
+// ---- 개발중 탭(#384) ------------------------------------------------------
+// 아직 앱에 없는 기능을 테스트 클라이언트에서 먼저 돌려 보는 화면이다. 요청은
+// 관리자 토큰이 아니라 이 화면의 테스트 계정 토큰으로만 보낸다.
+
+function newDevState() {
+  return {
+    feature: null,
+    accessToken: null,
+    accountLabel: null,
+    signupToken: null,
+    setupToken: null,
+    setupSignupToken: null,
+    googleIdToken: null,
+    googleEmail: null,
+    googleReady: false,
+  };
+}
+
+function bindDevEvents() {
+  els.devFeatureButtons = Array.from(document.querySelectorAll("[data-dev-feature]"));
+  els.devPanels = Array.from(document.querySelectorAll("[data-dev-panel]"));
+  for (const button of els.devFeatureButtons) {
+    button.addEventListener("click", () => selectDevFeature(button.dataset.devFeature));
+  }
+  els.devResetBtn.addEventListener("click", () => resetDevState());
+  els.devSignUpBtn.addEventListener("click", () => void devSignUp());
+  els.devVerifyBtn.addEventListener("click", () => void devVerify(state.dev.signupToken, els.devCode.value));
+  els.devSignInBtn.addEventListener("click", () => void devSignIn(els.devEmail.value, els.devPassword.value));
+  els.devGoogleV2Btn.addEventListener("click", () => void devGoogleLogin(true));
+  els.devGoogleV1Btn.addEventListener("click", () => void devGoogleLogin(false));
+  els.devSetupStartBtn.addEventListener("click", () => void devSetupStart());
+  els.devSetupVerifyBtn.addEventListener("click", () => void devVerify(state.dev.setupSignupToken, els.devSetupCode.value));
+  els.devSetupSignInBtn.addEventListener("click", () => void devSignIn(els.devSetupEmail.value, els.devSetupPassword.value));
+  els.devMethodsBtn.addEventListener("click", () => void devRequest("GET", "/auth/login-methods", undefined, { auth: true }));
+  els.devLinkGoogleBtn.addEventListener("click", () => void devLinkGoogle());
+  els.devUnlinkGoogleBtn.addEventListener("click", () => void devRequest("DELETE", "/auth/link/google", undefined, { auth: true }));
+  els.devUnlinkAppleBtn.addEventListener("click", () => void devRequest("DELETE", "/auth/link/apple", undefined, { auth: true }));
+  els.devAppleV2Btn.addEventListener("click", () => void devApple("/auth/v2/apple", false));
+  els.devAppleV1Btn.addEventListener("click", () => void devApple("/auth/apple", false));
+  els.devAppleLinkBtn.addEventListener("click", () => void devApple("/auth/link/apple", true));
+}
+
+function selectDevFeature(feature) {
+  state.dev.feature = feature;
+  els.devEmpty.hidden = Boolean(feature);
+  for (const panel of els.devPanels || []) {
+    panel.hidden = panel.dataset.devPanel !== feature;
+  }
+  for (const button of els.devFeatureButtons || []) {
+    if (button.dataset.devFeature === feature) {
+      button.setAttribute("aria-current", "true");
+    } else {
+      button.removeAttribute("aria-current");
+    }
+  }
+  if (feature === "google") {
+    void ensureDevGoogleButton();
+  }
+}
+
+function resetDevState() {
+  const feature = state.dev.feature;
+  state.dev = newDevState();
+  state.dev.feature = feature;
+  els.devResultBox.hidden = true;
+  renderDevAccount();
+}
+
+function renderDevAccount() {
+  const dev = state.dev;
+  els.devAccountState.textContent = dev.accessToken ? `${dev.accountLabel} 로그인됨` : "없음";
+  els.devSetupState.textContent = dev.setupToken
+    ? "setup_token 있음 (10분 유효) — 이메일·비밀번호를 정해 설정 코드를 받으세요."
+    : "setup_token 없음 — 구글 로그인 화면에서 기존 소셜 계정으로 v2 로그인하면 생깁니다.";
+  els.devGoogleTokenState.textContent = dev.googleIdToken
+    ? `ID 토큰 받음: ${dev.googleEmail || "이메일 없음"} (1시간 유효)`
+    : "ID 토큰 없음 — 위 구글 버튼으로 받으세요.";
+}
+
+// devRequest는 테스트 계정 토큰으로 요청하고 상태·응답을 결과 칸에 보여 준다.
+// apiFetch와 달리 401에서 관리자 로그인을 지우거나 토큰을 갱신하지 않는다.
+async function devRequest(method, path, body, { auth = false } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth) {
+    if (!state.dev.accessToken) {
+      showDevMessage("테스트 계정으로 먼저 로그인하세요.", "error");
+      return null;
+    }
+    headers.Authorization = `Bearer ${state.dev.accessToken}`;
+  }
+  let response;
+  try {
+    response = await fetch(apiUrl(path), {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    showDevMessage(`${method} ${path} 요청 실패: ${error.message}`, "error");
+    return null;
+  }
+  const payload = parseJsonOrText(await response.text());
+  const result = { status: response.status, ok: response.ok, payload };
+  showDevResult(`${method} ${path} → ${response.status}`, result.ok ? "ok" : "error", payload);
+  return result;
+}
+
+function showDevResult(title, kind, payload) {
+  els.devResultBox.hidden = false;
+  els.devResultTitle.textContent = title;
+  els.devResultTitle.dataset.state = kind;
+  els.devResult.textContent = payload === null || payload === undefined || payload === "" ? "(본문 없음)" : JSON.stringify(maskDevTokens(payload), null, 2);
+}
+
+function showDevMessage(text, kind) {
+  els.devResultBox.hidden = false;
+  els.devResultTitle.textContent = text;
+  els.devResultTitle.dataset.state = kind;
+  els.devResult.textContent = "";
+}
+
+// maskDevTokens는 응답의 토큰 값을 앞부분만 남겨 화면·캡처에 그대로 남지 않게 한다.
+function maskDevTokens(value) {
+  if (Array.isArray(value)) {
+    return value.map(maskDevTokens);
+  }
+  if (value && typeof value === "object") {
+    const masked = {};
+    for (const [key, item] of Object.entries(value)) {
+      masked[key] = key.endsWith("token") && typeof item === "string" && item.length > 12 ? `${item.slice(0, 12)}…` : maskDevTokens(item);
+    }
+    return masked;
+  }
+  return value;
+}
+
+function devRequireFields(fields) {
+  const missing = fields.filter(([, value]) => !String(value || "").trim()).map(([name]) => name);
+  if (missing.length > 0) {
+    showDevMessage(`입력 필요: ${missing.join(", ")}`, "error");
+    return false;
+  }
+  return true;
+}
+
+async function devSignUp() {
+  const email = els.devEmail.value.trim();
+  const password = els.devPassword.value;
+  if (!devRequireFields([["이메일", email], ["비밀번호", password]])) {
+    return;
+  }
+  const result = await devRequest("POST", "/auth/native/sign-up", { email, password });
+  if (result?.ok) {
+    state.dev.signupToken = result.payload?.signup_token || null;
+  }
+}
+
+async function devVerify(signupToken, code) {
+  if (!signupToken) {
+    showDevMessage("먼저 코드 받기를 하세요(signup_token 없음).", "error");
+    return;
+  }
+  if (!devRequireFields([["인증 코드", code]])) {
+    return;
+  }
+  await devRequest("POST", "/auth/native/verify-email", { signup_token: signupToken, verification_code: code.trim() });
+}
+
+async function devSignIn(email, password) {
+  email = String(email || "").trim();
+  if (!devRequireFields([["이메일", email], ["비밀번호", password]])) {
+    return;
+  }
+  const result = await devRequest("POST", "/auth/sign-in", { email, password });
+  if (result?.ok) {
+    setDevLogin(result.payload, email);
+  }
+}
+
+function setDevLogin(pair, label) {
+  state.dev.accessToken = pair?.access_token || null;
+  state.dev.accountLabel = label;
+  state.dev.setupToken = null;
+  renderDevAccount();
+}
+
+// handleDevSocialLogin은 소셜 로그인 응답을 테스트 계정 상태에 반영한다. v2의
+// password_setup_required면 setup_token을 저장하고 계정 설정 이메일을 미리 채운다.
+function handleDevSocialLogin(result, label, email) {
+  if (!result) {
+    return;
+  }
+  if (result.ok) {
+    setDevLogin(result.payload, label);
+    return;
+  }
+  if (result.payload?.error?.code === "password_setup_required") {
+    state.dev.setupToken = result.payload.setup_token || null;
+    if (email && !els.devSetupEmail.value) {
+      els.devSetupEmail.value = email;
+    }
+    renderDevAccount();
+  }
+}
+
+async function ensureDevGoogleButton() {
+  if (state.dev.googleReady) {
+    return;
+  }
+  if (!window.google?.accounts?.id) {
+    els.devGoogleTokenState.textContent = "Google 스크립트를 아직 불러오지 못했습니다. 잠시 후 다시 여세요.";
+    return;
+  }
+  let config;
+  try {
+    // 로그인 audience와 같은 웹 클라이언트 ID다(유튜브 연결 설정과 공유).
+    config = await apiFetch("/auth/youtube/config");
+  } catch (error) {
+    els.devGoogleTokenState.textContent = `구글 클라이언트 설정을 받지 못했습니다: ${error.message}`;
+    return;
+  }
+  window.google.accounts.id.initialize({
+    client_id: config.web_client_id,
+    callback: (response) => {
+      state.dev.googleIdToken = response?.credential || null;
+      state.dev.googleEmail = decodeJwtEmail(state.dev.googleIdToken);
+      renderDevAccount();
+    },
+  });
+  window.google.accounts.id.renderButton(els.devGoogleButton, { theme: "outline", size: "large", text: "signin_with" });
+  state.dev.googleReady = true;
+  renderDevAccount();
+}
+
+function decodeJwtEmail(token) {
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(part)).email || null;
+  } catch {
+    return null;
+  }
+}
+
+async function devGoogleLogin(v2) {
+  if (!state.dev.googleIdToken) {
+    showDevMessage("구글 버튼으로 ID 토큰을 먼저 받으세요.", "error");
+    return;
+  }
+  const result = await devRequest("POST", v2 ? "/auth/v2/google" : "/auth/google", { id_token: state.dev.googleIdToken });
+  handleDevSocialLogin(result, `구글(${state.dev.googleEmail || "이메일 없음"})`, state.dev.googleEmail);
+}
+
+async function devSetupStart() {
+  const email = els.devSetupEmail.value.trim();
+  const password = els.devSetupPassword.value;
+  if (!state.dev.setupToken) {
+    showDevMessage("setup_token이 없습니다. 기존 소셜 계정으로 v2 로그인부터 하세요.", "error");
+    return;
+  }
+  if (!devRequireFields([["이메일", email], ["비밀번호", password]])) {
+    return;
+  }
+  const result = await devRequest("POST", "/auth/native/account-setup", { setup_token: state.dev.setupToken, email, password });
+  if (result?.ok) {
+    state.dev.setupSignupToken = result.payload?.signup_token || null;
+  }
+}
+
+async function devLinkGoogle() {
+  if (!state.dev.googleIdToken) {
+    showDevMessage("구글 로그인 화면에서 ID 토큰을 먼저 받으세요.", "error");
+    return;
+  }
+  await devRequest("POST", "/auth/link/google", { id_token: state.dev.googleIdToken }, { auth: true });
+}
+
+async function devApple(path, link) {
+  const code = els.devAppleCode.value.trim();
+  const nonce = els.devAppleNonce.value.trim();
+  if (!devRequireFields([["authorization_code", code]])) {
+    return;
+  }
+  const result = await devRequest("POST", path, { authorization_code: code, nonce }, { auth: link });
+  if (!link) {
+    handleDevSocialLogin(result, "애플", null);
   }
 }
 

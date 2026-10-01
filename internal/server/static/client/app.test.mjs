@@ -94,6 +94,16 @@ const buttonKeys = [
   "adminUserQuery",
   "adminUsersBody",
   "adminDetail",
+  "navDevBtn",
+  "devView",
+  "devAccountState",
+  "devSetupState",
+  "devGoogleTokenState",
+  "devSetupEmail",
+  "devEmpty",
+  "devResultBox",
+  "devResultTitle",
+  "devResult",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -204,7 +214,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature };`,
     context,
     { filename: appPath },
   );
@@ -1543,4 +1553,72 @@ test("어드민 세션 강제 종료는 확인을 거절하면 요청하지 않�
   assert.deepEqual(Array.from(methods), ["DELETE /admin/sessions/s-1", "GET /admin/sessions"]);
   assert.match(els.adminDetail.textContent, /종료했습니다/);
   assert.equal(els.adminSessionCount.textContent, "0");
+});
+
+test("개발중 탭 요청은 관리자 토큰이 아닌 테스트 계정 토큰을 쓰고 401에도 관리자 로그인을 유지한다", async () => {
+  const seen = [];
+  const { devRequest, state, els } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      seen.push(options.headers?.Authorization || null);
+      return jsonResponse({ error: { code: "unauthorized" } }, 401);
+    },
+  });
+  state.accessToken = "admin-token";
+  state.isAdmin = true;
+
+  const missing = await devRequest("GET", "/auth/login-methods", undefined, { auth: true });
+  assert.equal(missing, null);
+  assert.equal(seen.length, 0, "dev request without a test account must not fall back to the admin token");
+  assert.match(els.devResultTitle.textContent, /먼저 로그인/);
+
+  state.dev.accessToken = "dev-token";
+  const result = await devRequest("GET", "/auth/login-methods", undefined, { auth: true });
+  assert.equal(result.status, 401);
+  assert.deepEqual(Array.from(seen), ["Bearer dev-token"]);
+  assert.equal(state.accessToken, "admin-token");
+  assert.equal(els.devResultTitle.dataset.state, "error");
+});
+
+test("v2 소셜 로그인 결과가 테스트 계정 상태에 반영된다", async () => {
+  const { handleDevSocialLogin, state, els } = await loadApp();
+  els.devSetupEmail.value = "";
+  handleDevSocialLogin(
+    { ok: false, status: 403, payload: { error: { code: "password_setup_required" }, setup_token: "setup-123" } },
+    "구글(legacy@gmail.com)",
+    "legacy@gmail.com",
+  );
+  assert.equal(state.dev.setupToken, "setup-123");
+  assert.equal(state.dev.accessToken, null);
+  assert.equal(els.devSetupEmail.value, "legacy@gmail.com");
+  assert.match(els.devSetupState.textContent, /setup_token 있음/);
+
+  handleDevSocialLogin({ ok: true, status: 200, payload: { access_token: "access-1" } }, "구글(member@gmail.com)", null);
+  assert.equal(state.dev.accessToken, "access-1");
+  assert.equal(state.dev.setupToken, null);
+  assert.match(els.devAccountState.textContent, /member@gmail.com/);
+});
+
+test("개발중 결과 표시는 토큰 값을 앞부분만 남긴다", async () => {
+  const { maskDevTokens } = await loadApp();
+  const masked = maskDevTokens({ access_token: "abcdefghijklmnopqrstuvwxyz", token_type: "Bearer", error: { code: "x" }, setup_token: "short" });
+  assert.equal(masked.access_token, "abcdefghijkl…");
+  assert.equal(masked.token_type, "Bearer");
+  assert.equal(masked.setup_token, "short");
+  assert.equal(masked.error.code, "x");
+});
+
+test("개발중 기능을 고르면 그 기능 화면만 보인다", async () => {
+  const { selectDevFeature, state, els } = await loadApp();
+  const panel = (name) => Object.assign(createElement(), { dataset: { devPanel: name }, hidden: true });
+  const button = (name) => Object.assign(createElement(), { dataset: { devFeature: name } });
+  els.devPanels = [panel("email"), panel("setup")];
+  els.devFeatureButtons = [button("email"), button("setup")];
+
+  selectDevFeature("setup");
+  assert.equal(state.dev.feature, "setup");
+  assert.equal(els.devEmpty.hidden, true);
+  assert.equal(els.devPanels[0].hidden, true);
+  assert.equal(els.devPanels[1].hidden, false);
+  assert.equal(els.devFeatureButtons[1].attributes["aria-current"], "true");
+  assert.equal(els.devFeatureButtons[0].attributes["aria-current"], undefined);
 });

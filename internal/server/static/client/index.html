@@ -16,6 +16,7 @@
         <nav class="view-nav" id="viewNav" aria-label="화면 전환" hidden>
           <button id="navStreamBtn" class="view-tab" type="button" aria-current="page">송출 테스트</button>
           <button id="navAdminBtn" class="view-tab" type="button">어드민</button>
+          <button id="navDevBtn" class="view-tab" type="button">개발중</button>
           <button id="signOutBtn" class="button button-small" type="button">로그아웃</button>
         </nav>
         <div class="status-strip" aria-live="polite">
@@ -480,6 +481,108 @@
           </div>
         </section>
         <p id="adminDetail" class="admin-detail" aria-live="polite"></p>
+      </div>
+
+      <div id="devView" hidden>
+        <section class="panel dev-account" aria-label="테스트 계정">
+          <span class="dev-account-label">테스트 계정</span>
+          <span id="devAccountState">없음</span>
+          <span class="dev-account-note">관리자 로그인과 별개 — 이 화면의 요청만 이 계정으로 보냅니다.</span>
+          <button id="devResetBtn" class="button button-small" type="button">초기화</button>
+        </section>
+        <div class="dev-layout">
+          <nav class="panel dev-features" aria-label="개발 중 기능">
+            <p class="dev-group">인증 v2 (#380)</p>
+            <button class="dev-feature-btn" type="button" data-dev-feature="email">이메일 가입·로그인</button>
+            <button class="dev-feature-btn" type="button" data-dev-feature="google">구글 로그인 v1·v2</button>
+            <button class="dev-feature-btn" type="button" data-dev-feature="setup">계정 설정 (기존 소셜 계정)</button>
+            <button class="dev-feature-btn" type="button" data-dev-feature="methods">로그인 수단 연결·해제</button>
+            <button class="dev-feature-btn" type="button" data-dev-feature="apple">애플 (코드 직접 입력)</button>
+          </nav>
+          <section class="panel dev-panel" aria-live="polite">
+            <p id="devEmpty" class="dev-hint">왼쪽에서 테스트할 기능을 고르세요.</p>
+
+            <div class="dev-feature" data-dev-panel="email" hidden>
+              <h2>이메일 가입·로그인</h2>
+              <p class="dev-hint">새 테스트 계정을 만들거나 기존 이메일 계정으로 로그인합니다. 가입 완료 응답에는 토큰이 없어 로그인을 따로 합니다.</p>
+              <div class="dev-form">
+                <label class="field"><span>이메일</span><input id="devEmail" type="email" autocomplete="off" spellcheck="false" /></label>
+                <label class="field"><span>비밀번호 (8~72바이트)</span><input id="devPassword" type="password" autocomplete="new-password" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devSignUpBtn" class="button" type="button">가입 코드 받기</button>
+                <button id="devSignInBtn" class="button button-primary" type="button">로그인</button>
+              </div>
+              <div class="dev-form">
+                <label class="field"><span>인증 코드</span><input id="devCode" type="text" inputmode="numeric" autocomplete="one-time-code" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devVerifyBtn" class="button" type="button">코드 확인</button>
+              </div>
+            </div>
+
+            <div class="dev-feature" data-dev-panel="google" hidden>
+              <h2>구글 로그인 v1·v2</h2>
+              <p class="dev-hint">구글 버튼으로 ID 토큰을 받은 뒤 v1·v2를 각각 호출합니다. v1은 처음 보는 구글이면 예전 방식 계정(이메일 계정 없음)을 만들어, 계정 설정·병합 테스트용 계정을 만들 때 씁니다.</p>
+              <div id="devGoogleButton" class="dev-google-button"></div>
+              <p id="devGoogleTokenState" class="dev-hint">ID 토큰 없음</p>
+              <div class="button-row">
+                <button id="devGoogleV2Btn" class="button button-primary" type="button">v2 로그인</button>
+                <button id="devGoogleV1Btn" class="button" type="button">v1 로그인 (예전 방식)</button>
+              </div>
+            </div>
+
+            <div class="dev-feature" data-dev-panel="setup" hidden>
+              <h2>계정 설정 (기존 소셜 계정)</h2>
+              <p class="dev-hint">v2 로그인이 password_setup_required를 주면 setup_token(10분)이 저장됩니다. 이메일·비밀번호를 정해 기존 계정에 이메일 계정을 붙입니다.</p>
+              <p id="devSetupState" class="dev-hint">setup_token 없음</p>
+              <div class="dev-form">
+                <label class="field"><span>이메일</span><input id="devSetupEmail" type="email" autocomplete="off" spellcheck="false" /></label>
+                <label class="field"><span>비밀번호</span><input id="devSetupPassword" type="password" autocomplete="new-password" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devSetupStartBtn" class="button" type="button">설정 코드 받기</button>
+              </div>
+              <div class="dev-form">
+                <label class="field"><span>인증 코드</span><input id="devSetupCode" type="text" inputmode="numeric" autocomplete="one-time-code" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devSetupVerifyBtn" class="button" type="button">코드 확인</button>
+                <button id="devSetupSignInBtn" class="button button-primary" type="button">이 이메일로 로그인</button>
+              </div>
+            </div>
+
+            <div class="dev-feature" data-dev-panel="methods" hidden>
+              <h2>로그인 수단 연결·해제</h2>
+              <p class="dev-hint">테스트 계정으로 로그인한 상태에서 씁니다. 구글 연결은 "구글 로그인" 화면에서 받은 ID 토큰을 씁니다. 예전 방식 계정의 구글을 연결하면 병합(merged: true)됩니다.</p>
+              <div class="button-row">
+                <button id="devMethodsBtn" class="button" type="button">로그인 수단 조회</button>
+                <button id="devLinkGoogleBtn" class="button button-primary" type="button">구글 연결</button>
+                <button id="devUnlinkGoogleBtn" class="button button-danger" type="button">구글 해제</button>
+                <button id="devUnlinkAppleBtn" class="button button-danger" type="button">애플 해제</button>
+              </div>
+            </div>
+
+            <div class="dev-feature" data-dev-panel="apple" hidden>
+              <h2>애플 (코드 직접 입력)</h2>
+              <p class="dev-hint">웹 테스트 클라이언트는 애플 로그인을 직접 띄울 수 없습니다. 앱에서 받은 authorization_code와 nonce를 붙여 넣어 호출합니다. 코드는 한 번만 쓸 수 있습니다.</p>
+              <div class="dev-form">
+                <label class="field field-wide"><span>authorization_code</span><input id="devAppleCode" type="text" autocomplete="off" spellcheck="false" /></label>
+                <label class="field field-wide"><span>nonce</span><input id="devAppleNonce" type="text" autocomplete="off" spellcheck="false" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devAppleV2Btn" class="button button-primary" type="button">v2 로그인</button>
+                <button id="devAppleV1Btn" class="button" type="button">v1 로그인 (예전 방식)</button>
+                <button id="devAppleLinkBtn" class="button" type="button">애플 연결</button>
+              </div>
+            </div>
+
+            <div id="devResultBox" class="dev-result-box" hidden>
+              <p id="devResultTitle" class="dev-result-title"></p>
+              <pre id="devResult" class="dev-result"></pre>
+            </div>
+          </section>
+        </div>
       </div>
     </main>
 

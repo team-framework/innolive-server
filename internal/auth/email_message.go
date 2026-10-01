@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"crypto/rand"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +12,15 @@ import (
 	"strings"
 	"time"
 )
+
+// mailLogoPNG는 innolive.studio 헤더 로고(innolive-client apps/landing/public/brand/
+// logo-header.svg)를 3배 해상도 PNG로 변환한 것이다. 메일 앱 대부분이 SVG를 그리지
+// 않아 PNG를 본문에 인라인 첨부(cid)한다 — 외부 이미지 차단과도 무관하다.
+//
+//go:embed assets/mail-logo.png
+var mailLogoPNG []byte
+
+const mailLogoContentID = "innolive-logo"
 
 // EmailPurpose는 인증 코드 메일의 용도다(#388). 용도마다 제목과 안내 문구가 다르다.
 type EmailPurpose string
@@ -74,20 +84,14 @@ func buildVerificationEmail(from, to, code string, purpose EmailPurpose, validFo
 		"InnoLive",
 	}, "\r\n")
 
-	// innolive.studio 랜딩과 같은 톤: 연회색 바탕, 검정 굵은 헤드라인, 어두운 박스 로고.
-	// 메일 앱은 SVG·웹폰트를 대부분 막으므로 로고는 글자와 표로 그린다.
+	// innolive.studio 랜딩과 같은 톤: 연회색 바탕, 랜딩 헤더 로고, 검정 굵은 헤드라인.
 	htmlBody := fmt.Sprintf(`<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"></head>
 <body style="margin:0;padding:0;background:#f8f8f8;">
 <table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="background:#f8f8f8;">
 <tr><td align="center" style="padding:40px 20px;">
 <table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="max-width:440px;font-family:'Wanted Sans','Pretendard',-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:#000000;word-break:keep-all;">
-<tr><td style="padding:0 4px 28px;">
-<table role="presentation" cellpadding="0" cellspacing="0"><tr>
-<td style="font-size:26px;font-weight:300;letter-spacing:-0.5px;color:#313131;line-height:32px;">Inno</td>
-<td style="padding-left:2px;"><span style="display:inline-block;background:#313131;border-radius:3px;padding:0 7px;font-size:26px;font-weight:500;letter-spacing:-0.5px;color:#ffffff;line-height:32px;">Live</span></td>
-</tr></table>
-</td></tr>
+<tr><td style="padding:0 4px 28px;"><img src="cid:innolive-logo" width="124" height="32" alt="InnoLive" style="display:block;border:0;width:124px;height:32px;"></td></tr>
 <tr><td style="background:#ffffff;border-radius:24px;padding:36px 28px;">
 <p style="margin:0;font-size:26px;font-weight:700;line-height:1.3;letter-spacing:-0.5px;color:#000000;">%s</p>
 <p style="margin:14px 0 0;font-size:16px;line-height:1.6;color:#313131;">%s</p>
@@ -101,30 +105,52 @@ func buildVerificationEmail(from, to, code string, purpose EmailPurpose, validFo
 </table>
 </body></html>`, html.EscapeString(content.title), html.EscapeString(content.intro), html.EscapeString(code), html.EscapeString(validity), html.EscapeString(content.ignore))
 
-	boundaryBytes := make([]byte, 12)
-	if _, err := rand.Read(boundaryBytes); err != nil {
+	alternative, err := mimeBoundary()
+	if err != nil {
 		return nil, err
 	}
-	boundary := "innolive-" + hex.EncodeToString(boundaryBytes)
+	related, err := mimeBoundary()
+	if err != nil {
+		return nil, err
+	}
 
+	// multipart/alternative 안에 텍스트와 multipart/related(HTML + 인라인 로고)를 둔다.
 	var message bytes.Buffer
 	message.WriteString("To: " + to + "\r\n")
 	message.WriteString("From: " + from + "\r\n")
 	message.WriteString("Subject: " + mime.BEncoding.Encode("UTF-8", content.subject) + "\r\n")
 	message.WriteString("MIME-Version: 1.0\r\n")
-	message.WriteString("Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n")
-	writeMIMEPart(&message, boundary, "text/plain; charset=UTF-8", text)
-	writeMIMEPart(&message, boundary, "text/html; charset=UTF-8", htmlBody)
-	message.WriteString("--" + boundary + "--\r\n")
+	message.WriteString("Content-Type: multipart/alternative; boundary=\"" + alternative + "\"\r\n\r\n")
+	writeMIMEPart(&message, alternative, "text/plain; charset=UTF-8", nil, []byte(text))
+	message.WriteString("--" + alternative + "\r\n")
+	message.WriteString("Content-Type: multipart/related; boundary=\"" + related + "\"\r\n\r\n")
+	writeMIMEPart(&message, related, "text/html; charset=UTF-8", nil, []byte(htmlBody))
+	writeMIMEPart(&message, related, "image/png", []string{
+		"Content-ID: <" + mailLogoContentID + ">",
+		"Content-Disposition: inline; filename=\"innolive.png\"",
+	}, mailLogoPNG)
+	message.WriteString("--" + related + "--\r\n")
+	message.WriteString("--" + alternative + "--\r\n")
 	return message.Bytes(), nil
 }
 
+func mimeBoundary() (string, error) {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return "innolive-" + hex.EncodeToString(random), nil
+}
+
 // writeMIMEPart는 본문을 base64로 76자마다 줄을 나눠 쓴다(SMTP 줄 길이 제한).
-func writeMIMEPart(message *bytes.Buffer, boundary, contentType, body string) {
+func writeMIMEPart(message *bytes.Buffer, boundary, contentType string, headers []string, body []byte) {
 	message.WriteString("--" + boundary + "\r\n")
 	message.WriteString("Content-Type: " + contentType + "\r\n")
+	for _, header := range headers {
+		message.WriteString(header + "\r\n")
+	}
 	message.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
-	encoded := base64.StdEncoding.EncodeToString([]byte(body))
+	encoded := base64.StdEncoding.EncodeToString(body)
 	for len(encoded) > 76 {
 		message.WriteString(encoded[:76] + "\r\n")
 		encoded = encoded[76:]

@@ -143,6 +143,10 @@ func TestVerificationEmailHasPurposeSubjectAndHTML(t *testing.T) {
 		if !strings.Contains(htmlPart, "482913") || !strings.Contains(htmlPart, "5분 동안 유효") {
 			t.Fatalf("%s html part missing code or validity", purpose)
 		}
+		// 로고는 SVG를 못 그리는 메일 앱을 위해 PNG를 인라인 첨부하고 cid로 참조한다.
+		if !strings.Contains(htmlPart, `src="cid:innolive-logo"`) || !strings.Contains(text, "Content-ID: <innolive-logo>") || !strings.Contains(text, "multipart/related") {
+			t.Fatalf("%s mail does not embed the logo inline", purpose)
+		}
 	}
 	if len(subjects) != 3 {
 		t.Fatalf("subjects are not purpose specific: %v", subjects)

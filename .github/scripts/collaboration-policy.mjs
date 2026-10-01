@@ -123,6 +123,21 @@ export function validateReadiness(pr, config = {}) {
   return result;
 }
 
+export async function validateLinkedIssue(pr, config, { repository, token, fetchImpl = fetch }) {
+  if (pr.number > 0 && pr.number <= (config.legacyPullRequestMaxNumber ?? 0)) return { errors: [], legacy: true };
+  const match = BRANCH.exec(pr.head?.ref ?? '');
+  if (!match) return { errors: [] };
+  if (!/^[\w.-]+\/[\w.-]+$/u.test(repository ?? '') || !token) return { errors: ['연결 Issue 검사 인증·저장소 정보 필요'] };
+  const response = await fetchImpl(`https://api.github.com/repos/${repository}/issues/${match[2]}`, {
+    headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' }
+  });
+  if (!response.ok) return { errors: [`연결 Issue #${match[2]} 조회 실패: HTTP ${response.status}`] };
+  const issue = await response.json();
+  if (issue.pull_request || String(issue.number) !== match[2]) return { errors: ['브랜치 번호는 실제 Issue에 연결 필요'] };
+  const result = validateIssue(issue, config);
+  return { ...result, errors: result.errors.map(message => `Issue #${match[2]}: ${message}`) };
+}
+
 export function validateEvent(payload, mode, config = {}) {
   if (mode === 'issue') return validateIssue(payload.issue ?? payload, config);
   if (mode === 'pr-format') return validatePullRequest(payload.pull_request ?? payload, config);
@@ -137,7 +152,9 @@ async function main() {
   try { config = JSON.parse(await readFile(configPath, 'utf8')); }
   catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
   const payload = JSON.parse(await readFile(eventPath, 'utf8'));
-  const result = validateEvent(payload, mode, config);
+  const result = mode === 'pr-issue'
+    ? await validateLinkedIssue(payload.pull_request ?? payload, config, { repository: process.env.GITHUB_REPOSITORY, token: process.env.GH_TOKEN })
+    : validateEvent(payload, mode, config);
   const report = result.legacy ? '기존 기록: 새 양식 소급 적용 제외' : result.errors.length ? result.errors.join('\n') : '검사 통과';
   if (process.env.GITHUB_STEP_SUMMARY) await writeFile(process.env.GITHUB_STEP_SUMMARY, `## ${mode}\n\n${report.split('\n').map(line => `- ${line}`).join('\n')}\n`, { flag: 'a' });
   console.log(report);

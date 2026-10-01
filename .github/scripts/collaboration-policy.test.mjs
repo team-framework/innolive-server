@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { validateIssue, validatePullRequest, validateReadiness, validateEvent } from './collaboration-policy.mjs';
+import { validateIssue, validatePullRequest, validateReadiness, validateEvent, validateLinkedIssue } from './collaboration-policy.mjs';
 
 const body = `## 변경 내용
 
@@ -104,6 +104,23 @@ test('Issue 선택 참고 항목 허용, 빈 참고와 영어 제목 거부', ()
   assert.deepEqual(validateIssue({ ...issue, body: issue.body + '\n## 참고\n\n- https://github.com/team-framework/innolive-client/issues/123\n' }).errors, []);
   assert.ok(validateIssue({ ...issue, body: issue.body + '\n## 참고\n' }).errors.length);
   assert.ok(validateIssue({ ...issue, title: 'fix: camera error' }).errors.length);
+});
+test('연결 Issue가 잘못된 양식이면 PR 검사 실패, 수정 후 통과', async () => {
+  const options = value => ({ repository: 'team-framework/innolive-client', token: 'test-token', fetchImpl: async url => {
+    assert.equal(url, 'https://api.github.com/repos/team-framework/innolive-client/issues/123');
+    return { ok: true, json: async () => value };
+  } });
+  assert.ok((await validateLinkedIssue(pr, {}, options({ ...issue, body: '서술형 본문' }))).errors.length);
+  assert.deepEqual((await validateLinkedIssue(pr, {}, options(issue))).errors, []);
+});
+test('기존 Issue는 소급 양식 검사 제외, PR 번호를 Issue 대신 연결하면 거부', async () => {
+  const options = value => ({ repository: 'team-framework/innolive-client', token: 'test-token', fetchImpl: async () => ({ ok: true, json: async () => value }) });
+  assert.deepEqual((await validateLinkedIssue(pr, { legacyIssueMaxNumber: 123 }, options({ ...issue, body: '기존 본문' }))).errors, []);
+  assert.ok((await validateLinkedIssue(pr, {}, options({ ...issue, pull_request: {} }))).errors.length);
+});
+test('연결 Issue 조회 실패는 검사 통과로 취급하지 않음', async () => {
+  const result = await validateLinkedIssue(pr, {}, { repository: 'team-framework/innolive-client', token: 'test-token', fetchImpl: async () => ({ ok: false, status: 404 }) });
+  assert.ok(result.errors.length);
 });
 test('검사 CLI의 종료 코드와 Actions 요약으로 실패·복구 확인', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'collaboration-policy-'));

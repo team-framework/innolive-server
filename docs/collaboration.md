@@ -87,7 +87,7 @@ Issue·브랜치·PR 타입은 `feat/fix/chore/refactor` 사용. 개별 커밋�
 
 ## 자동 검사와 적용 시점
 
-- `Collaboration / PR format`: 제목·브랜치·섹션 순서·개조식·문장형 종결·항목 수·이슈 연결 검사
+- `Collaboration / PR format`: 제목·브랜치·섹션 순서·개조식·문장형 종결·항목 수·이슈 연결 및 연결 Issue 본문 검사
 - `Collaboration / merge readiness`: Draft의 미완료 체크 허용, Ready PR의 미완료 체크 차단
 - `Collaboration / policy tests`: 검사기의 정상·거부·Draft·Ready 전환 회귀 검증
 - `Collaboration / Issue format`: 새 Issue의 본문 검사, 오류 시 `needs-format` 표시, 수정 후 표시 제거
@@ -98,6 +98,8 @@ Issue·브랜치·PR 타입은 `feat/fix/chore/refactor` 사용. 개별 커밋�
 ## 병합
 
 merge commit 사용, squash·rebase 비활성화. 병합 제목은 PR head 브랜치 전체 이름, 본문은 빈 값 지정.
+
+GitHub 기본 설정은 PR 제목·빈 본문 조합 사용. 웹의 기본 제목은 `merge: <head 브랜치>`를 지원하지 않으므로 아래 명령 또는 웹 제목 편집으로 직접 지정.
 
 ```bash
 head_branch=$(gh pr view --json headRefName --jq .headRefName)

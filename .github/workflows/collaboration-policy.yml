@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: collaboration-policy-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
@@ -54,6 +55,10 @@ jobs:
         with:
           node-version: '24'
       - run: node .github/scripts/collaboration-policy.mjs pr-format
+      - name: 연결 Issue 본문 확인
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/collaboration-policy.mjs pr-issue
 
   merge-readiness:
     if: github.event_name == 'pull_request'

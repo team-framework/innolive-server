@@ -27,6 +27,9 @@ func (h *tokenHTTPHandler) handleAppleLogin(w http.ResponseWriter, r *http.Reque
 	}
 	pair, err := h.apple.Login(r.Context(), request.AuthorizationCode, request.Nonce, request.displayName(), requestClientInfo(r))
 	if err != nil {
+		if h.writeAccountLinkLoginError(w, r, err, "Apple") {
+			return
+		}
 		switch {
 		case errors.Is(err, ErrInvalidAppleIDToken), errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_apple_token", "Apple login could not be verified.")

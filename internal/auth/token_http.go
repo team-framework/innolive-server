@@ -100,6 +100,7 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 		mux.Handle("/auth/native/sign-up", h.middleware(http.HandlerFunc(h.handleNativeEmailSignup)))
 		mux.Handle("/auth/native/verify-email", h.middleware(http.HandlerFunc(h.handleNativeEmailSignupVerification)))
 		mux.Handle("/auth/sign-in", h.middleware(http.HandlerFunc(h.handleEmailLogin)))
+		mux.Handle("/auth/native/account-setup", h.middleware(http.HandlerFunc(h.handleNativeAccountSetup)))
 	}
 	if h.withdrawal != nil {
 		mux.Handle("DELETE /auth/me", h.middleware(http.HandlerFunc(h.handleWithdrawal)))

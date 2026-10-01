@@ -28,6 +28,9 @@ func (h *tokenHTTPHandler) handleGoogleLogin(w http.ResponseWriter, r *http.Requ
 	}
 	pair, err := h.google.Login(r.Context(), rawIDToken, requestClientInfo(r))
 	if err != nil {
+		if h.writeAccountLinkLoginError(w, r, err, "Google") {
+			return
+		}
 		switch {
 		case errors.Is(err, ErrInvalidGoogleIDToken), errors.Is(err, ErrUserInactive):
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_google_token", "Google login could not be verified.")

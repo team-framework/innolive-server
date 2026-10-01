@@ -389,8 +389,9 @@ func (s *memoryPendingEmailSignupStore) Close() error          { return nil }
 func (s *memoryPendingEmailSignupStore) has(token string) bool { _, ok := s.pending[token]; return ok }
 
 type memoryEmailAccountStore struct {
-	user    *User
-	account *EmailAccount
+	user       *User
+	account    *EmailAccount
+	attachedTo uuid.UUID
 }
 
 func (s *memoryEmailAccountStore) EmailAlreadyRegistered(_ context.Context, email string) (bool, error) {
@@ -405,6 +406,19 @@ func (s *memoryEmailAccountStore) CreateEmailUser(_ context.Context, pending Pen
 	account := EmailAccount{UserID: user.ID, Email: pending.Email, PasswordHash: pending.PasswordHash, CreatedAt: now, UpdatedAt: now}
 	s.user, s.account = &user, &account
 	return user.ID, nil
+}
+func (s *memoryEmailAccountStore) EmailRegisteredToOther(_ context.Context, email string, userID uuid.UUID) (bool, error) {
+	return s.user != nil && s.user.ID != userID && s.user.Email != nil && *s.user.Email == email, nil
+}
+func (s *memoryEmailAccountStore) AttachEmailAccount(_ context.Context, userID uuid.UUID, pending PendingEmailSignup, now time.Time) error {
+	if s.account != nil {
+		return ErrEmailAlreadyRegistered
+	}
+	s.attachedTo = userID
+	user := User{ID: userID, Email: &pending.Email, Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+	account := EmailAccount{UserID: userID, Email: pending.Email, PasswordHash: pending.PasswordHash, CreatedAt: now, UpdatedAt: now}
+	s.user, s.account = &user, &account
+	return nil
 }
 func (s *memoryEmailAccountStore) FindEmailAccount(_ context.Context, email string) (EmailAccount, User, error) {
 	if s.account == nil || s.account.Email != email {

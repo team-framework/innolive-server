@@ -275,6 +275,9 @@ func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, 
 type PendingEmailSignup struct {
 	Email        string `json:"email"`
 	PasswordHash string `json:"password_hash"`
+	// UserID가 있으면 새 가입이 아니라 기존 OAuth 전용 사용자에 이메일 계정을 붙이는
+	// 설정이다(#380).
+	UserID string `json:"user_id,omitempty"`
 }
 
 type PendingEmailSignupStore interface {
@@ -411,6 +414,9 @@ type EmailAccountStore interface {
 	EmailAlreadyRegistered(context.Context, string) (bool, error)
 	CreateEmailUser(context.Context, PendingEmailSignup, time.Time) (uuid.UUID, error)
 	FindEmailAccount(context.Context, string) (EmailAccount, User, error)
+	// 아래 둘은 기존 OAuth 전용 사용자의 이메일 계정 설정용이다(#380).
+	EmailRegisteredToOther(context.Context, string, uuid.UUID) (bool, error)
+	AttachEmailAccount(context.Context, uuid.UUID, PendingEmailSignup, time.Time) error
 }
 
 type gormEmailAccountStore struct {
@@ -456,6 +462,59 @@ func (s *gormEmailAccountStore) CreateEmailUser(ctx context.Context, pending Pen
 		return nil
 	})
 	return userID, err
+}
+
+// EmailRegisteredToOther는 email이 userID가 아닌 사용자의 이메일 계정이거나 활성
+// 사용자 이메일인지 본다. 설정 중인 사용자 자신의 기존 이메일은 충돌로 보지 않는다.
+func (s *gormEmailAccountStore) EmailRegisteredToOther(ctx context.Context, email string, userID uuid.UUID) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrEmailDeliveryUnavailable
+	}
+	return emailRegisteredToOther(s.db.WithContext(ctx), email, userID)
+}
+
+func emailRegisteredToOther(db *gorm.DB, email string, userID uuid.UUID) (bool, error) {
+	var count int64
+	if err := db.Model(&EmailAccount{}).Where("email = ? AND user_id <> ?", email, userID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	if count != 0 {
+		return true, nil
+	}
+	err := db.Model(&User{}).Where("LOWER(email) = ? AND status = ? AND id <> ?", email, UserStatusActive, userID).Count(&count).Error
+	return count != 0, err
+}
+
+// AttachEmailAccount는 기존 사용자에 이메일 계정을 만들고 users.email을 그 이메일로
+// 맞춘다. 플랜·연결 계정·사용 기록은 사용자 행에 그대로 남는다.
+func (s *gormEmailAccountStore) AttachEmailAccount(ctx context.Context, userID uuid.UUID, pending PendingEmailSignup, now time.Time) error {
+	if s == nil || s.db == nil {
+		return ErrEmailDeliveryUnavailable
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockActiveUser(tx, userID); err != nil {
+			return err
+		}
+		hasEmail, err := userHasEmailAccount(tx, userID)
+		if err != nil {
+			return err
+		}
+		if hasEmail {
+			return ErrEmailAlreadyRegistered
+		}
+		taken, err := emailRegisteredToOther(tx, pending.Email, userID)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return ErrEmailAlreadyRegistered
+		}
+		account := EmailAccount{UserID: userID, Email: pending.Email, PasswordHash: pending.PasswordHash, CreatedAt: now, UpdatedAt: now}
+		if err := tx.Create(&account).Error; err != nil {
+			return err
+		}
+		return tx.Model(&User{}).Where("id = ?", userID).Updates(map[string]any{"email": pending.Email, "updated_at": now}).Error
+	})
 }
 
 func (s *gormEmailAccountStore) FindEmailAccount(ctx context.Context, email string) (EmailAccount, User, error) {
@@ -510,6 +569,39 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, cli
 	if alreadyRegistered {
 		return "", ErrEmailAlreadyRegistered
 	}
+	return s.sendVerification(ctx, email, password, clientIP, "")
+}
+
+// StartAccountSetup은 #380 이전 OAuth 전용 사용자가 이메일 계정을 만드는 절차를
+// 시작한다. 로그인이 내준 setup 토큰으로 사용자를 확인하고, 가입과 같은 인증 코드
+// 절차를 거친다. 확인은 기존 verify-email 엔드포인트가 이어 받는다.
+//
+// 이메일이 이미 다른 InnoLive 계정이면 ErrEmailAlreadyRegistered다 — 그 계정으로
+// 로그인해 OAuth를 연결하면 이 사용자가 그 계정으로 합쳐진다.
+func (s *EmailAuthService) StartAccountSetup(ctx context.Context, setupToken, email, password, clientIP string) (string, error) {
+	userID, err := s.tokens.ValidateAccountSetupToken(strings.TrimSpace(setupToken))
+	if err != nil {
+		return "", err
+	}
+	email, err = normalizeEmail(email)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
+	}
+	if err := validatePassword(password); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
+	}
+	taken, err := s.accounts.EmailRegisteredToOther(ctx, email, userID)
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		return "", ErrEmailAlreadyRegistered
+	}
+	return s.sendVerification(ctx, email, password, clientIP, userID.String())
+}
+
+// sendVerification은 가입과 계정 설정이 함께 쓰는 인증 코드 발송이다.
+func (s *EmailAuthService) sendVerification(ctx context.Context, email, password, clientIP, userID string) (string, error) {
 	// 비싼 bcrypt 해시와 SMTP 발송 전에 제한을 걸어, 반복 요청으로 한 주소에 폭탄을
 	// 보내거나 CPU를 태우지 못하게 한다.
 	if err := s.throttleSignup(ctx, clientIP, email); err != nil {
@@ -531,7 +623,7 @@ func (s *EmailAuthService) StartSignup(ctx context.Context, email, password, cli
 	if err != nil {
 		return "", err
 	}
-	pending := PendingEmailSignup{Email: email, PasswordHash: string(passwordHash)}
+	pending := PendingEmailSignup{Email: email, PasswordHash: string(passwordHash), UserID: userID}
 	if err := s.pending.Save(ctx, token, pending, string(codeHash), s.config.PendingUserTTL, s.config.CodeTTL); err != nil {
 		return "", fmt.Errorf("save pending email signup: %w", err)
 	}
@@ -603,7 +695,15 @@ func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code
 	if err != nil {
 		return err
 	}
-	if _, err := s.accounts.CreateEmailUser(ctx, pending, s.now().UTC()); err != nil {
+	if pending.UserID != "" {
+		userID, err := uuid.Parse(pending.UserID)
+		if err != nil {
+			return fmt.Errorf("decode account setup user: %w", err)
+		}
+		if err := s.accounts.AttachEmailAccount(ctx, userID, pending, s.now().UTC()); err != nil {
+			return err
+		}
+	} else if _, err := s.accounts.CreateEmailUser(ctx, pending, s.now().UTC()); err != nil {
 		return err
 	}
 	_ = s.limiter.ClearKey(ctx, codeAttemptKey(signupToken))

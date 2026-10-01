@@ -38,7 +38,7 @@ func TestGoogleLoginIssuesInnoLivePairForVerifiedSubject(t *testing.T) {
 		EmailVerified: true,
 		DisplayName:   "Inno User",
 	}}
-	accounts := &stubGoogleAccounts{user: googleLoginUser{ID: userID, Status: UserStatusActive}}
+	accounts := &stubGoogleAccounts{user: googleLoginUser{ID: userID, Status: UserStatusActive, HasEmailAccount: true}}
 	service, err := NewGoogleLoginService(verifier, accounts, testTokenService(newMemoryRefreshStore()))
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestGoogleLoginIssuesInnoLivePairForVerifiedSubject(t *testing.T) {
 
 func TestGoogleLoginRejectsInvalidTokenAndInactiveUser(t *testing.T) {
 	invalidVerifier := &stubGoogleVerifier{err: ErrInvalidGoogleIDToken}
-	activeAccounts := &stubGoogleAccounts{user: googleLoginUser{ID: uuid.New(), Status: UserStatusActive}}
+	activeAccounts := &stubGoogleAccounts{user: googleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true}}
 	invalidService, err := NewGoogleLoginService(invalidVerifier, activeAccounts, testTokenService(newMemoryRefreshStore()))
 	if err != nil {
 		t.Fatal(err)

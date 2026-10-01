@@ -117,6 +117,9 @@ func googleClaimBool(value any) bool {
 type googleLoginUser struct {
 	ID     uuid.UUID
 	Status UserStatus
+	// HasEmailAccount가 false면 #380 이전의 구글 전용 가입자다. 로그인 대신 이메일
+	// 계정 설정을 요구한다.
+	HasEmailAccount bool
 }
 
 type GoogleAccountResolver interface {
@@ -132,9 +135,9 @@ func NewGormGoogleAccountResolver(db *gorm.DB) GoogleAccountResolver {
 	return &gormGoogleAccountResolver{db: db, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// ResolveGoogleIdentity는 이메일이 아니라 플랫폼 subject로 계정을 찾는다. 새
-// subject면 provider/subject 고유 인덱스 덕에 동시 첫 로그인이 OAuth 계정 하나와
-// 내부 사용자 하나로 모인다.
+// ResolveGoogleIdentity는 이메일이 아니라 플랫폼 subject로 연결된 계정을 찾는다.
+// 연결되지 않은 subject면 사용자를 만들지 않고 ErrAccountNotLinked다(#380) — 구글은
+// 로그인한 InnoLive 계정에 연결한 뒤에만 로그인 수단이 된다.
 func (s *gormGoogleAccountResolver) ResolveGoogleIdentity(ctx context.Context, identity GoogleIdentity) (googleLoginUser, error) {
 	if s == nil || s.db == nil {
 		return googleLoginUser{}, errors.New("Google account database is nil")
@@ -150,88 +153,29 @@ func (s *gormGoogleAccountResolver) ResolveGoogleIdentity(ctx context.Context, i
 			Preload("User").
 			Where("provider = ? AND provider_subject = ?", OAuthProviderGoogle, identity.Subject).
 			Take(&account)
-		if query.Error == nil {
-			if account.User == nil {
-				return errors.New("Google OAuth account has no user")
-			}
-			if err := updateGoogleAccount(tx, &account, identity, s.now()); err != nil {
-				return err
-			}
-			result = googleLoginUser{ID: account.UserID, Status: account.User.Status}
-			return nil
+		if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+			return ErrAccountNotLinked
 		}
-		if !errors.Is(query.Error, gorm.ErrRecordNotFound) {
+		if query.Error != nil {
 			return query.Error
-		}
-
-		now := s.now()
-		user := newGoogleUser(identity, now)
-		if err := tx.Create(&user).Error; err != nil {
-			return err
-		}
-		account = newGoogleOAuthAccount(user.ID, identity, now)
-		created := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "provider"}, {Name: "provider_subject"}},
-			DoNothing: true,
-		}).Create(&account)
-		if created.Error != nil {
-			return created.Error
-		}
-		if created.RowsAffected == 1 {
-			result = googleLoginUser{ID: user.ID, Status: user.Status}
-			return nil
-		}
-
-		// 동시 요청이 계정을 만들었다. 이 트랜잭션 안에서 참조되지 않은 사용자를 지우고
-		// 이긴 쪽의 계정을 쓴다.
-		if err := tx.Delete(&user).Error; err != nil {
-			return err
-		}
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Preload("User").
-			Where("provider = ? AND provider_subject = ?", OAuthProviderGoogle, identity.Subject).
-			Take(&account).Error; err != nil {
-			return err
 		}
 		if account.User == nil {
 			return errors.New("Google OAuth account has no user")
 		}
-		if err := updateGoogleAccount(tx, &account, identity, now); err != nil {
+		if err := updateGoogleAccount(tx, &account, identity, s.now()); err != nil {
 			return err
 		}
-		result = googleLoginUser{ID: account.UserID, Status: account.User.Status}
+		hasEmail, err := userHasEmailAccount(tx, account.UserID)
+		if err != nil {
+			return err
+		}
+		result = googleLoginUser{ID: account.UserID, Status: account.User.Status, HasEmailAccount: hasEmail}
 		return nil
 	})
 	if err != nil {
 		return googleLoginUser{}, err
 	}
 	return result, nil
-}
-
-func newGoogleUser(identity GoogleIdentity, now time.Time) User {
-	return User{
-		ID:              uuid.New(),
-		Email:           googleVerifiedEmail(identity),
-		DisplayName:     googleOptionalString(identity.DisplayName, 100),
-		ProfileImageURL: googleOptionalString(identity.ProfileURL, 0),
-		Status:          UserStatusActive,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-}
-
-func newGoogleOAuthAccount(userID uuid.UUID, identity GoogleIdentity, now time.Time) OAuthAccount {
-	return OAuthAccount{
-		ID:              uuid.New(),
-		UserID:          userID,
-		Provider:        OAuthProviderGoogle,
-		ProviderSubject: identity.Subject,
-		ProviderEmail:   googleOptionalString(identity.Email, 320),
-		EmailVerified:   identity.EmailVerified,
-		LastLoginAt:     now,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
 }
 
 func updateGoogleAccount(tx *gorm.DB, account *OAuthAccount, identity GoogleIdentity, now time.Time) error {
@@ -244,22 +188,14 @@ func updateGoogleAccount(tx *gorm.DB, account *OAuthAccount, identity GoogleIden
 	if err := tx.Model(&OAuthAccount{}).Where("id = ?", account.ID).Updates(accountUpdates).Error; err != nil {
 		return err
 	}
+	// 이메일 계정이 있으면 users.email은 그 계정의 이메일이 정본이다. 구글 이메일로
+	// 덮지 않고 표시 이름·사진만 갱신한다.
 	userUpdates := map[string]any{
 		"display_name":      googleOptionalString(identity.DisplayName, 100),
 		"profile_image_url": googleOptionalString(identity.ProfileURL, 0),
 		"updated_at":        now,
 	}
-	if identity.EmailVerified {
-		userUpdates["email"] = googleVerifiedEmail(identity)
-	}
 	return tx.Model(&User{}).Where("id = ?", account.UserID).Updates(userUpdates).Error
-}
-
-func googleVerifiedEmail(identity GoogleIdentity) *string {
-	if !identity.EmailVerified {
-		return nil
-	}
-	return googleOptionalString(identity.Email, 320)
 }
 
 func googleOptionalString(value string, limit int) *string {
@@ -278,6 +214,7 @@ type GoogleLoginService struct {
 	verifier GoogleIdentityVerifier
 	accounts GoogleAccountResolver
 	tokens   *TokenService
+	links    *AccountLinkStore
 }
 
 func NewGoogleLoginService(verifier GoogleIdentityVerifier, accounts GoogleAccountResolver, tokens *TokenService) (*GoogleLoginService, error) {
@@ -297,10 +234,39 @@ func (s *GoogleLoginService) Login(ctx context.Context, rawIDToken string, clien
 	}
 	user, err := s.accounts.ResolveGoogleIdentity(ctx, identity)
 	if err != nil {
+		if errors.Is(err, ErrAccountNotLinked) {
+			return TokenPair{}, err
+		}
 		return TokenPair{}, fmt.Errorf("resolve Google account: %w", err)
 	}
 	if user.Status != UserStatusActive {
 		return TokenPair{}, ErrUserInactive
 	}
+	if !user.HasEmailAccount {
+		return TokenPair{}, s.tokens.passwordSetupRequired(user.ID)
+	}
 	return s.tokens.IssuePair(ctx, user.ID, client)
+}
+
+// SetAccountLinks는 로그인한 사용자에 구글을 연결하는 저장소를 붙인다(#380).
+func (s *GoogleLoginService) SetAccountLinks(links *AccountLinkStore) { s.links = links }
+
+// Link는 구글 ID 토큰을 검증해 로그인한 사용자에 연결한다.
+func (s *GoogleLoginService) Link(ctx context.Context, userID uuid.UUID, rawIDToken string) (LinkResult, error) {
+	if s.links == nil {
+		return LinkResult{}, errors.New("Google account linking is not configured")
+	}
+	identity, err := s.verifier.Verify(ctx, rawIDToken)
+	if err != nil {
+		if errors.Is(err, ErrInvalidGoogleIDToken) {
+			return LinkResult{}, ErrInvalidGoogleIDToken
+		}
+		return LinkResult{}, fmt.Errorf("verify Google ID token: %w", err)
+	}
+	return s.links.Link(ctx, userID, LinkIdentity{
+		Provider:      OAuthProviderGoogle,
+		Subject:       identity.Subject,
+		Email:         identity.Email,
+		EmailVerified: identity.EmailVerified,
+	})
 }

@@ -22,7 +22,7 @@ func testAppleLoginHTTPHandler(t *testing.T, verifier AppleIdentityVerifier) htt
 	service, err := NewAppleLoginService(
 		&stubAppleExchanger{response: AppleTokenResponse{IDToken: "apple-id-token", RefreshToken: "apple-refresh-token"}},
 		verifier,
-		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive}},
+		&stubAppleAccounts{user: appleLoginUser{ID: uuid.New(), Status: UserStatusActive, HasEmailAccount: true}},
 		tokens,
 		&ProviderTokenCipher{key: []byte("0123456789abcdef0123456789abcdef")},
 	)

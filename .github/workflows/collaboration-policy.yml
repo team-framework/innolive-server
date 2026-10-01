@@ -1,0 +1,107 @@
+name: Collaboration Policy
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review, converted_to_draft]
+  issues:
+    types: [opened, edited, reopened]
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/collaboration-policy*
+      - .github/workflows/collaboration-policy.yml
+      - sync/**
+      - tests/**
+      - package.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collaboration-policy-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy-tests:
+    if: github.event_name != 'issues'
+    name: Collaboration / policy tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test .github/scripts/collaboration-policy.test.mjs
+      - if: github.repository == 'team-framework/framework-agent-harness-sync'
+        run: npm ci
+      - if: github.repository == 'team-framework/framework-agent-harness-sync'
+        run: npm test
+      - if: github.repository == 'team-framework/framework-agent-harness-sync'
+        run: npm run typecheck
+
+  pr-format:
+    if: github.event_name == 'pull_request'
+    name: Collaboration / PR format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node .github/scripts/collaboration-policy.mjs pr-format
+
+  merge-readiness:
+    if: github.event_name == 'pull_request'
+    name: Collaboration / merge readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node .github/scripts/collaboration-policy.mjs pr-readiness
+
+  issue-format:
+    if: github.event_name == 'issues'
+    name: Collaboration / Issue format
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - id: validate
+        continue-on-error: true
+        run: node .github/scripts/collaboration-policy.mjs issue
+      - name: 양식 수정 필요 표시
+        uses: actions/github-script@v7
+        env:
+          VALIDATION_OUTCOME: ${{ steps.validate.outcome }}
+        with:
+          script: |
+            const params = { ...context.repo, issue_number: context.issue.number };
+            const { data: issue } = await github.rest.issues.get(params);
+            const hasLabel = issue.labels.some(label => (typeof label === 'string' ? label : label.name) === 'needs-format');
+            if (process.env.VALIDATION_OUTCOME === 'failure') {
+              try {
+                await github.rest.issues.createLabel({ ...context.repo, name: 'needs-format', color: 'B60205', description: '공통 Issue 본문 양식 수정 필요' });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+              if (!hasLabel) await github.rest.issues.addLabels({ ...params, labels: ['needs-format'] });
+              core.setFailed('Issue 본문 양식 수정 필요: 검사 요약 확인');
+            } else if (hasLabel) {
+              await github.rest.issues.removeLabel({ ...params, name: 'needs-format' });
+            }

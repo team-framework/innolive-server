@@ -11,6 +11,12 @@ loadtest/results/
 # 로컬 전용 (공개 레포에서 제외)
 /CLAUDE.md
 /docs/
+
+# 공통 협업 지침만 추적
+!/CLAUDE.md
+!/docs/
+/docs/*
+!/docs/collaboration.md
 secrets/
 *.p8
 

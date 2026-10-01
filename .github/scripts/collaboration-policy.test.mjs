@@ -60,7 +60,11 @@ test('미완료 항목이 있는 Issue는 진행 추적 허용', () => assert.de
 test('GitHub 웹 Issue Form의 H3 섹션도 같은 양식으로 검사', () => assert.deepEqual(validateIssue({ ...issue, body: issue.body.replaceAll('## ', '### ') }).errors, []));
 test('Issue의 완료 기준 누락 거부', () => assert.ok(validateIssue({ ...issue, body: issue.body.split('## 완료 기준')[0] }).errors.length));
 test('본문 서술형 문단 거부', () => assert.ok(validatePullRequest({ ...pr, body: body.replace('- 카메라 중복 세션 생성 차단', '카메라 중복 세션 생성 차단') }).errors.length));
-test('명사형 종결과 다른 말투 거부', () => assert.ok(validatePullRequest({ ...pr, body: body.replace('생성 차단', '생성을 차단했습니다.') }).errors.length));
+test('명사형 종결과 다른 말투 거부', () => {
+  for (const prose of ['생성을 차단했습니다.', '생성을 차단해요.', '생성을 차단한다.', '생성을 차단했다.', '생성을 차단해주세요.']) {
+    assert.ok(validatePullRequest({ ...pr, body: body.replace('생성 차단', prose) }).errors.length, prose);
+  }
+});
 test('코드 안의 종결 표현은 문체 검사에서 제외', () => assert.deepEqual(validatePullRequest({ ...pr, body: body.replace('생성 차단', '생성 차단: `했습니다`') }).errors, []));
 test('구현 과정 섹션 추가 거부', () => assert.ok(validatePullRequest({ ...pr, body: body + '\n## 구현 과정\n\n- 함수 추가\n' }).errors.length));
 test('변경 항목 4개 이상 거부', () => assert.ok(validatePullRequest({ ...pr, body: body.replace('- 카메라 중복 세션 생성 차단', '- 카메라 세션 정리\n- 카메라 권한 확인\n- 카메라 입력 교체\n- 카메라 오류 안내') }).errors.length));

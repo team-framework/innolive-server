@@ -5,7 +5,7 @@ const ISSUE_HEADINGS = ['작업 내용', '작업 체크리스트', '완료 기�
 const PR_HEADINGS = ['변경 내용', '검증 결과', '머지 체크리스트', '관련 이슈'];
 const ISSUE_TITLE = /^(feat|fix|chore|refactor): \S.*$/u;
 const BRANCH = /^(feat|fix|chore|refactor)\/[a-z0-9]+(?:-[a-z0-9]+)*\/#([1-9]\d*)$/u;
-const POLITE_ENDING = /(?:했습니다|하였습니다|되었습니다|합니다|됩니다|입니다|습니다|했어요|해요|이에요|예요|있어요|없어요|할게요)[.!。]*$/u;
+const SENTENCE_ENDING = /(?:했습니다|하였습니다|되었습니다|합니다|됩니다|입니다|습니다|했어요|해요|이에요|예요|있어요|없어요|할게요|주세요|줘요|한다|했다|하였다|된다|되었다|됐다|있다|없다|이다|였다)[.!。]*$/u;
 const PLACEHOLDER = /^(?:핵심 변경 사항|실행한 검증과 결과|검증 결과 입력|작업 내용 입력|완료 조건 입력|관련 이슈 입력|TODO|TBD|내용 입력|\.{3})$/iu;
 
 function error(errors, message) { errors.push(message); }
@@ -50,7 +50,7 @@ function bullets(lines = [], name, errors, { max = Infinity, checklist = false, 
     const text = checklist ? match[2] : match[1];
     if (PLACEHOLDER.test(text.trim())) error(errors, `${name}: 예시 문구 대신 실제 내용 작성`);
     const prose = text.replace(/`[^`]*`/gu, '').replace(/\[([^\]]+)\]\([^)]+\)/gu, '$1').trim();
-    if (POLITE_ENDING.test(prose)) error(errors, `${name}: 명사형 종결 사용`);
+    if (SENTENCE_ENDING.test(prose)) error(errors, `${name}: 명사형 종결 사용`);
     if (!allowLinks && /^https?:\/\//u.test(text)) error(errors, `${name}: 링크 대신 핵심 내용 작성`);
     items.push({ text, checked: checklist && match[1].toLowerCase() === 'x' });
   }

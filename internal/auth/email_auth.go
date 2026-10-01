@@ -191,7 +191,8 @@ func emailIntEnv(key string, fallback int) (int, error) {
 }
 
 type VerificationEmailSender interface {
-	SendVerificationCode(context.Context, string, string) error
+	// SendVerificationCode는 용도(가입·계정 설정·비밀번호 변경)에 맞는 인증 코드 메일을 보낸다.
+	SendVerificationCode(ctx context.Context, recipient, code string, purpose EmailPurpose) error
 }
 
 type smtpVerificationEmailSender struct {
@@ -205,7 +206,7 @@ func NewSMTPVerificationEmailSender(config EmailAuthConfig) (VerificationEmailSe
 	return &smtpVerificationEmailSender{config: config}, nil
 }
 
-func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, recipient, code string) error {
+func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, recipient, code string, purpose EmailPurpose) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -258,13 +259,12 @@ func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, 
 	if s.config.SenderName != "" {
 		from = (&mail.Address{Name: s.config.SenderName, Address: s.config.SenderAddress}).String()
 	}
-	message := "To: " + recipient + "\r\n" +
-		"From: " + from + "\r\n" +
-		"Subject: InnoLive 이메일 인증 코드\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
-		"InnoLive 회원가입 인증 코드입니다.\r\n\r\n" + code + "\r\n"
-	if _, err := writer.Write([]byte(message)); err != nil {
+	message, err := buildVerificationEmail(from, recipient, code, purpose, s.config.CodeTTL)
+	if err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if _, err := writer.Write(message); err != nil {
 		_ = writer.Close()
 		return err
 	}
@@ -281,6 +281,20 @@ type PendingEmailSignup struct {
 	UserID string `json:"user_id,omitempty"`
 	// Name은 가입 v2가 받는 표시 이름이다(#386). v1 가입은 비어 있다.
 	Name string `json:"name,omitempty"`
+	// Purpose는 이 대기 상태의 용도다(#388). 비어 있으면 가입·계정 설정(UserID 유무로 구분)이고,
+	// password_reset이면 비밀번호 변경이다. 용도가 다른 확인 엔드포인트에서는 거절한다.
+	Purpose EmailPurpose `json:"purpose,omitempty"`
+}
+
+func (p PendingEmailSignup) mailPurpose() EmailPurpose {
+	switch {
+	case p.Purpose != "":
+		return p.Purpose
+	case p.UserID != "":
+		return EmailPurposeAccountSetup
+	default:
+		return EmailPurposeSignup
+	}
 }
 
 type PendingEmailSignupStore interface {
@@ -420,6 +434,8 @@ type EmailAccountStore interface {
 	// 아래 둘은 기존 OAuth 전용 사용자의 이메일 계정 설정용이다(#380).
 	EmailRegisteredToOther(context.Context, string, uuid.UUID) (bool, error)
 	AttachEmailAccount(context.Context, uuid.UUID, PendingEmailSignup, time.Time) error
+	// ResetPassword는 비밀번호를 바꾸고 그 사용자의 refresh 세션을 모두 폐기한다(#388).
+	ResetPassword(ctx context.Context, userID uuid.UUID, email, passwordHash string, now time.Time) error
 }
 
 type gormEmailAccountStore struct {
@@ -520,6 +536,27 @@ func (s *gormEmailAccountStore) AttachEmailAccount(ctx context.Context, userID u
 	})
 }
 
+func (s *gormEmailAccountStore) ResetPassword(ctx context.Context, userID uuid.UUID, email, passwordHash string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return ErrEmailDeliveryUnavailable
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockActiveUser(tx, userID); err != nil {
+			return err
+		}
+		updated := tx.Model(&EmailAccount{}).Where("user_id = ? AND email = ?", userID, email).Updates(map[string]any{"password_hash": passwordHash, "updated_at": now})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected == 0 {
+			// 코드를 받는 사이 이메일 계정이 바뀌었거나 사라졌다.
+			return ErrEmailVerificationInvalid
+		}
+		return tx.Model(&RefreshSession{}).Where("user_id = ? AND revoked_at IS NULL", userID).
+			Updates(map[string]any{"revoked_at": now, "revoke_reason": "password_changed"}).Error
+	})
+}
+
 func (s *gormEmailAccountStore) FindEmailAccount(ctx context.Context, email string) (EmailAccount, User, error) {
 	if s == nil || s.db == nil {
 		return EmailAccount{}, User{}, ErrEmailDeliveryUnavailable
@@ -586,7 +623,7 @@ func (s *EmailAuthService) startSignup(ctx context.Context, email, password, nam
 	if alreadyRegistered {
 		return "", ErrEmailAlreadyRegistered
 	}
-	return s.sendVerification(ctx, email, password, clientIP, "", name)
+	return s.sendVerification(ctx, password, clientIP, PendingEmailSignup{Email: email, Name: name})
 }
 
 // StartAccountSetup은 #380 이전 OAuth 전용 사용자가 이메일 계정을 만드는 절차를
@@ -614,14 +651,20 @@ func (s *EmailAuthService) StartAccountSetup(ctx context.Context, setupToken, em
 	if taken {
 		return "", ErrEmailAlreadyRegistered
 	}
-	return s.sendVerification(ctx, email, password, clientIP, userID.String(), "")
+	return s.sendVerification(ctx, password, clientIP, PendingEmailSignup{Email: email, UserID: userID.String()})
 }
 
 // sendVerification은 가입과 계정 설정이 함께 쓰는 인증 코드 발송이다.
-func (s *EmailAuthService) sendVerification(ctx context.Context, email, password, clientIP, userID, name string) (string, error) {
+// pending에는 이메일·용도 등을 채워 넘기고, 비밀번호 해시는 여기서 채운다.
+func (s *EmailAuthService) sendVerification(ctx context.Context, password, clientIP string, pending PendingEmailSignup) (string, error) {
+	email := pending.Email
 	// 비싼 bcrypt 해시와 SMTP 발송 전에 제한을 걸어, 반복 요청으로 한 주소에 폭탄을
 	// 보내거나 CPU를 태우지 못하게 한다.
-	if err := s.throttleSignup(ctx, clientIP, email); err != nil {
+	throttleKey := email
+	if pending.Purpose == EmailPurposePasswordReset {
+		throttleKey = string(EmailPurposePasswordReset) + ":" + email
+	}
+	if err := s.throttleEmailCode(ctx, clientIP, throttleKey); err != nil {
 		return "", err
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), s.config.BcryptCost)
@@ -640,20 +683,23 @@ func (s *EmailAuthService) sendVerification(ctx context.Context, email, password
 	if err != nil {
 		return "", err
 	}
-	pending := PendingEmailSignup{Email: email, PasswordHash: string(passwordHash), UserID: userID, Name: name}
+	pending.PasswordHash = string(passwordHash)
 	if err := s.pending.Save(ctx, token, pending, string(codeHash), s.config.PendingUserTTL, s.config.CodeTTL); err != nil {
 		return "", fmt.Errorf("save pending email signup: %w", err)
 	}
-	if err := s.sender.SendVerificationCode(ctx, email, code); err != nil {
+	if err := s.sender.SendVerificationCode(ctx, email, code, pending.mailPurpose()); err != nil {
 		_ = s.pending.Delete(ctx, token)
 		return "", fmt.Errorf("send verification email: %w", err)
 	}
 	return token, nil
 }
 
-// throttleSignup은 재발송 간격과 이메일별·IP별 요청 상한을 적용한다. 재발송이
+// throttleEmailCode는 재발송 간격과 이메일별·IP별 요청 상한을 적용한다. 재발송이
 // 너무 이르거나 상한을 넘으면 ErrEmailSignupThrottled다.
-func (s *EmailAuthService) throttleSignup(ctx context.Context, clientIP, email string) error {
+//
+// 비밀번호 변경은 가입과 이메일 한도를 나눈다(#388). 가입 직후 1분 안에 비밀번호를
+// 바꾸려 해도 막히지 않게 호출자가 key 앞에 용도를 붙인다.
+func (s *EmailAuthService) throttleEmailCode(ctx context.Context, clientIP, email string) error {
 	fresh, err := s.limiter.SetIfAbsent(ctx, signupResendKey(email), s.config.SignupResendInterval)
 	if err != nil {
 		return err
@@ -683,32 +729,7 @@ func (s *EmailAuthService) throttleSignup(ctx context.Context, clientIP, email s
 // CompleteSignup은 검증만 하고 토큰을 발급하지 않는다. Clash처럼 클라이언트는 이메일
 // 인증 뒤 별도 로그인 엔드포인트로 로그인한다.
 func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code string) error {
-	if !validEmailVerificationCode(code) || strings.TrimSpace(signupToken) == "" {
-		return ErrEmailVerificationInvalid
-	}
-	// 비교하기 전에 시도를 세어 여섯 자리 코드를 무차별 대입하지 못하게 한다. 상한을
-	// 넘으면 코드를 버리므로 그 뒤에는 맞게 추측해도 실패한다.
-	attempts, err := s.limiter.Increment(ctx, codeAttemptKey(signupToken), s.config.CodeTTL)
-	if err != nil {
-		return err
-	}
-	if attempts > int64(s.config.CodeMaxAttempts) {
-		_ = s.pending.Delete(ctx, signupToken)
-		return ErrEmailVerificationInvalid
-	}
-	codeHash, err := s.pending.VerificationCodeHash(ctx, signupToken)
-	if err != nil {
-		return err
-	}
-	if bcrypt.CompareHashAndPassword([]byte(codeHash), []byte(code)) != nil {
-		return ErrEmailVerificationInvalid
-	}
-	// GETDEL은 원자적이라 맞는 코드 뒤에 진행할 수 있는 동시 요청은 정확히 하나다.
-	// PostgreSQL 쓰기 전에 일부러 먼저 소비한다.
-	if _, err := s.pending.ConsumeVerificationCode(ctx, signupToken); err != nil {
-		return err
-	}
-	pending, err := s.pending.PendingUser(ctx, signupToken)
+	pending, err := s.consumeVerification(ctx, signupToken, code, false)
 	if err != nil {
 		return err
 	}
@@ -725,6 +746,89 @@ func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code
 	}
 	_ = s.limiter.ClearKey(ctx, codeAttemptKey(signupToken))
 	return s.pending.Delete(ctx, signupToken)
+}
+
+// consumeVerification은 코드를 확인하고 소비한 뒤 대기 상태를 돌려준다. passwordReset은
+// 이 토큰이 비밀번호 변경용이어야 하는지다 — 용도가 다르면 코드를 소비하기 전에 거절해
+// 가입 확인과 비밀번호 변경 토큰을 서로 쓰지 못하게 한다(#388).
+func (s *EmailAuthService) consumeVerification(ctx context.Context, token, code string, passwordReset bool) (PendingEmailSignup, error) {
+	if !validEmailVerificationCode(code) || strings.TrimSpace(token) == "" {
+		return PendingEmailSignup{}, ErrEmailVerificationInvalid
+	}
+	// 비교하기 전에 시도를 세어 여섯 자리 코드를 무차별 대입하지 못하게 한다. 상한을
+	// 넘으면 코드를 버리므로 그 뒤에는 맞게 추측해도 실패한다.
+	attempts, err := s.limiter.Increment(ctx, codeAttemptKey(token), s.config.CodeTTL)
+	if err != nil {
+		return PendingEmailSignup{}, err
+	}
+	if attempts > int64(s.config.CodeMaxAttempts) {
+		_ = s.pending.Delete(ctx, token)
+		return PendingEmailSignup{}, ErrEmailVerificationInvalid
+	}
+	pending, err := s.pending.PendingUser(ctx, token)
+	if err != nil {
+		return PendingEmailSignup{}, err
+	}
+	if (pending.Purpose == EmailPurposePasswordReset) != passwordReset {
+		return PendingEmailSignup{}, ErrEmailVerificationInvalid
+	}
+	codeHash, err := s.pending.VerificationCodeHash(ctx, token)
+	if err != nil {
+		return PendingEmailSignup{}, err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(codeHash), []byte(code)) != nil {
+		return PendingEmailSignup{}, ErrEmailVerificationInvalid
+	}
+	// GETDEL은 원자적이라 맞는 코드 뒤에 진행할 수 있는 동시 요청은 정확히 하나다.
+	// PostgreSQL 쓰기 전에 일부러 먼저 소비한다.
+	if _, err := s.pending.ConsumeVerificationCode(ctx, token); err != nil {
+		return PendingEmailSignup{}, err
+	}
+	return pending, nil
+}
+
+// StartPasswordReset은 로그인 여부와 관계없이 이메일 인증으로 비밀번호를 바꾸는 절차를
+// 시작한다(#388). 새 비밀번호를 미리 받아 해시만 대기 상태에 둔다. 가입 여부를 드러내지
+// 않도록 이메일 계정이 없어도 같은 모양의 토큰을 돌려주되 메일은 보내지 않는다.
+func (s *EmailAuthService) StartPasswordReset(ctx context.Context, email, newPassword, clientIP string) (string, error) {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
+	}
+	if err := validatePassword(newPassword); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrEmailSignupInvalid, err)
+	}
+	_, user, err := s.accounts.FindEmailAccount(ctx, email)
+	if errors.Is(err, ErrEmailCredentialsInvalid) || (err == nil && user.Status != UserStatusActive) {
+		if err := s.throttleEmailCode(ctx, clientIP, string(EmailPurposePasswordReset)+":"+email); err != nil {
+			return "", err
+		}
+		return newSignupToken()
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.sendVerification(ctx, newPassword, clientIP, PendingEmailSignup{Email: email, UserID: user.ID.String(), Purpose: EmailPurposePasswordReset})
+}
+
+// CompletePasswordReset은 코드를 확인해 비밀번호를 바꾸고, 모든 기기의 refresh 세션을
+// 끊은 뒤 요청한 기기에만 새 토큰을 준다.
+func (s *EmailAuthService) CompletePasswordReset(ctx context.Context, resetToken, code string, client ClientInfo) (TokenPair, error) {
+	pending, err := s.consumeVerification(ctx, resetToken, code, true)
+	if err != nil {
+		return TokenPair{}, err
+	}
+	userID, err := uuid.Parse(pending.UserID)
+	if err != nil {
+		return TokenPair{}, fmt.Errorf("decode password reset user: %w", err)
+	}
+	if err := s.accounts.ResetPassword(ctx, userID, pending.Email, pending.PasswordHash, s.now().UTC()); err != nil {
+		return TokenPair{}, err
+	}
+	_ = s.limiter.ClearKey(ctx, codeAttemptKey(resetToken))
+	_ = s.limiter.ClearKey(ctx, loginFailureKey(pending.Email))
+	_ = s.pending.Delete(ctx, resetToken)
+	return s.tokens.IssuePair(ctx, userID, client)
 }
 
 func (s *EmailAuthService) Login(ctx context.Context, email, password string, client ClientInfo) (TokenPair, error) {

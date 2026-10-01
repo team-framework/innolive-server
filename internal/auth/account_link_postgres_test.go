@@ -393,3 +393,44 @@ func TestPostgresEmailSignupStoresName(t *testing.T) {
 		t.Fatalf("stored name = %v, %v", user.DisplayName, err)
 	}
 }
+
+// 비밀번호를 바꾸면 그 사용자의 모든 refresh 세션이 폐기된다(#388).
+func TestPostgresResetPasswordRevokesAllRefreshSessions(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	ctx := context.Background()
+	member := createLinkTestUser(t, db, "member@example.com", plan.Spark)
+	other := createLinkTestUser(t, db, "other@example.com", plan.Spark)
+	tokens := newTokenService(&gormRefreshStore{db: db}, testTokenService(newMemoryRefreshStore()).cfg)
+	phone, err := tokens.IssuePair(ctx, member, ClientInfo{UserAgent: "phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	laptop, err := tokens.IssuePair(ctx, member, ClientInfo{UserAgent: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	untouched, err := tokens.IssuePair(ctx, other, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accounts := NewGormEmailAccountStore(db)
+	if err := accounts.ResetPassword(ctx, member, "member@example.com", "new-hash", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for name, pair := range map[string]TokenPair{"phone": phone, "laptop": laptop} {
+		if _, err := tokens.Rotate(ctx, pair.RefreshToken, ClientInfo{}); err == nil {
+			t.Fatalf("%s refresh token still works after password reset", name)
+		}
+	}
+	if _, err := tokens.Rotate(ctx, untouched.RefreshToken, ClientInfo{}); err != nil {
+		t.Fatalf("another user's refresh token was revoked: %v", err)
+	}
+	var account EmailAccount
+	if err := db.Where("user_id = ?", member).Take(&account).Error; err != nil || account.PasswordHash != "new-hash" {
+		t.Fatalf("password hash = %q, %v", account.PasswordHash, err)
+	}
+	if err := accounts.ResetPassword(ctx, member, "changed@example.com", "x", time.Now().UTC()); err == nil {
+		t.Fatal("reset with a stale email must fail")
+	}
+}

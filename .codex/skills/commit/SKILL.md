@@ -1,33 +1,23 @@
-# 커밋 작성
+---
+name: commit
+description: Framework 저장소의 목적별 커밋 작성 시 한국어 제목과 변경 종류에 맞는 타입 적용.
+---
 
-커밋은 한 가지 목적의 변경만 담고, 제목은 한국어로 작성해요.
+# Commit 작성
 
-## 형식
+[공통 작성 규칙](../../../docs/collaboration.md)의 커밋 타입을 따른다.
 
-```text
-<type>: <변경 내용>
-```
-
-`type`은 `feat`, `fix`, `chore`, `refactor` 중 하나이며, 이슈 및 브랜치의 유형과 맞춰요.
-
-예시:
-
-```text
-feat: 다운로드 버튼과 진행 상태 추가
-fix: 로그인 후 잘못된 경로 이동 수정
-chore: 테스트 의존성 업데이트
-refactor: 인증 토큰 검증 로직 분리
-```
-
-## 확인 후 커밋
-
-변경 파일과 테스트 결과를 확인한 뒤 커밋해요.
+- 형식은 `<type>: <한국어 변경 내용>`
+- 타입은 `feat/fix/refactor/hotfix/docs/style/remove/test/chore/comment`
+- 한 커밋에 한 가지 목적. 개별 커밋 타입은 Issue·브랜치 타입과 달라도 됨
+- 기능 브랜치에서도 오류 수정은 `fix`, 문서는 `docs`, 테스트는 `test`로 구분
+- 코드 식별자와 전문 용어는 실제 표기 유지
+- 커밋 전 변경 파일·검증 범위·`git diff --check` 확인
+- 관련 없는 파일·비밀 정보·생성물 제외
 
 ```bash
 git status --short
 git diff --check
 git add <변경한-파일>
-git commit -m "feat: 다운로드 버튼과 진행 상태 추가"
+git commit -m "fix: 얼굴 등록 카메라 세션 충돌 수정"
 ```
-
-관련 없는 파일, 비밀 정보, 생성물은 커밋하지 않아요.

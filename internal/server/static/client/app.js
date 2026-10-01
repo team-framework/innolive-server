@@ -279,6 +279,11 @@ function bindElements() {
     "devAppleV2Btn",
     "devAppleV1Btn",
     "devAppleLinkBtn",
+    "devAccountRefreshBtn",
+    "devTokenRefreshBtn",
+    "devLogoutBtn",
+    "devWithdrawBtn",
+    "devV1CheckBtn",
     "devResultBox",
     "devResultTitle",
     "devResult",
@@ -1044,6 +1049,7 @@ function newDevState() {
   return {
     feature: null,
     accessToken: null,
+    refreshToken: null,
     accountLabel: null,
     signupToken: null,
     setupToken: null,
@@ -1053,6 +1059,9 @@ function newDevState() {
     googleReady: false,
     // GET /auth/login-methods 결과. 계정 구조 카드를 그린다.
     methods: null,
+    // 병합 결과 확인용: GET /users/me/usage(플랜)와 GET /auth/streaming/accounts(송출 연결).
+    usage: null,
+    streamingAccounts: null,
     // 가입 화면에서 입력한 이름. 조회 API가 이름을 주지 않아 화면 표시에만 쓴다.
     name: null,
   };
@@ -1080,6 +1089,11 @@ function bindDevEvents() {
   els.devAppleV2Btn.addEventListener("click", () => void devApple("/auth/v2/apple", false));
   els.devAppleV1Btn.addEventListener("click", () => void devApple("/auth/apple", false));
   els.devAppleLinkBtn.addEventListener("click", () => void devApple("/auth/link/apple", true));
+  els.devAccountRefreshBtn.addEventListener("click", () => void refreshDevMethods());
+  els.devTokenRefreshBtn.addEventListener("click", () => void devRefreshToken());
+  els.devLogoutBtn.addEventListener("click", () => void devLogout());
+  els.devWithdrawBtn.addEventListener("click", () => void devWithdraw());
+  els.devV1CheckBtn.addEventListener("click", () => void devCheckV1Routes());
 }
 
 function selectDevFeature(feature) {
@@ -1130,13 +1144,21 @@ function renderDevAccountTree() {
     root.className = "dev-tree-root";
     root.textContent = "InnoLive 계정";
     const detail = document.createElement("small");
-    detail.textContent = [dev.name, dev.methods.email || "이메일 계정 없음"].filter(Boolean).join(" · ");
+    const plan = dev.usage?.plan ? `플랜 ${dev.usage.plan}` : null;
+    detail.textContent = [dev.name, dev.methods.email || "이메일 계정 없음", plan].filter(Boolean).join(" · ");
     root.append(detail);
     items.push(root);
     items.push(devTreeChild("이메일 로그인", dev.methods.email));
     const linked = new Map((dev.methods.providers || []).map((item) => [item.provider, item]));
     items.push(devTreeChild("구글", linked.has("google") ? linked.get("google").email || "연결됨" : null));
     items.push(devTreeChild("애플", linked.has("apple") ? linked.get("apple").email || "연결됨" : null));
+    if (dev.streamingAccounts) {
+      const streams = new Map(dev.streamingAccounts.map((item) => [item.provider, item]));
+      for (const [provider, label] of [["youtube", "송출 · 유튜브"], ["chzzk", "송출 · 치지직"]]) {
+        const account = streams.get(provider);
+        items.push(devTreeChild(label, account ? account.channel_title || account.channel_id || "연결됨" : null));
+      }
+    }
   } else if (dev.setupToken) {
     const root = document.createElement("li");
     root.className = "dev-tree-root";
@@ -1155,16 +1177,98 @@ function devTreeChild(label, value) {
   return item;
 }
 
-// refreshDevMethods는 결과 칸을 건드리지 않고 로그인 수단을 다시 읽어 계정 구조를 갱신한다.
+// refreshDevMethods는 결과 칸을 건드리지 않고 로그인 수단·플랜·송출 연결을 다시 읽어
+// 계정 구조를 갱신한다. 병합 뒤 플랜 승계와 송출 연결 이동을 여기서 확인한다.
 async function refreshDevMethods() {
   if (!state.dev.accessToken) {
     state.dev.methods = null;
+    state.dev.usage = null;
+    state.dev.streamingAccounts = null;
     renderDevAccount();
     return;
   }
-  const result = await devRequest("GET", "/auth/login-methods", undefined, { auth: true, quiet: true });
-  state.dev.methods = result?.ok ? result.payload : null;
+  const [methods, usage, streams] = await Promise.all([
+    devRequest("GET", "/auth/login-methods", undefined, { auth: true, quiet: true }),
+    devRequest("GET", "/users/me/usage", undefined, { auth: true, quiet: true }),
+    devRequest("GET", "/auth/streaming/accounts", undefined, { auth: true, quiet: true }),
+  ]);
+  state.dev.methods = methods?.ok ? methods.payload : null;
+  state.dev.usage = usage?.ok ? usage.payload : null;
+  state.dev.streamingAccounts = streams?.ok && Array.isArray(streams.payload) ? streams.payload : null;
   renderDevAccount();
+}
+
+// devRefreshToken은 테스트 계정의 refresh token으로 토큰 쌍을 교체한다. 기존 refresh
+// token은 교체되어 다시 쓸 수 없다.
+async function devRefreshToken() {
+  if (!state.dev.refreshToken) {
+    showDevMessage("refresh token이 없습니다. 테스트 계정으로 로그인하세요.", "error");
+    return;
+  }
+  const result = await devRequest("POST", "/auth/refresh", { refresh_token: state.dev.refreshToken });
+  if (result?.ok) {
+    state.dev.accessToken = result.payload?.access_token || null;
+    state.dev.refreshToken = result.payload?.refresh_token || null;
+    renderDevAccount();
+  }
+}
+
+async function devLogout() {
+  if (!state.dev.refreshToken) {
+    showDevMessage("로그인한 테스트 계정이 없습니다.", "error");
+    return;
+  }
+  const result = await devRequest("POST", "/auth/logout", { refresh_token: state.dev.refreshToken });
+  if (result?.ok) {
+    clearDevLogin();
+  }
+}
+
+// devWithdraw는 확인을 받은 뒤 테스트 계정을 탈퇴시킨다. 되돌릴 수 없다.
+async function devWithdraw(confirmWithdraw = (message) => window.confirm(message)) {
+  if (!state.dev.accessToken) {
+    showDevMessage("로그인한 테스트 계정이 없습니다.", "error");
+    return;
+  }
+  const label = state.dev.methods?.email || state.dev.accountLabel;
+  if (!confirmWithdraw(`${label} 계정을 탈퇴시킵니다. 이메일 계정·로그인 연결·송출 연결이 모두 삭제되며 되돌릴 수 없습니다. 계속할까요?`)) {
+    return;
+  }
+  const result = await devRequest("DELETE", "/auth/me", undefined, { auth: true });
+  if (result?.ok) {
+    clearDevLogin();
+  }
+}
+
+function clearDevLogin() {
+  state.dev.accessToken = null;
+  state.dev.refreshToken = null;
+  state.dev.accountLabel = null;
+  state.dev.methods = null;
+  state.dev.usage = null;
+  state.dev.streamingAccounts = null;
+  renderDevAccount();
+}
+
+const DEV_V1_ROUTES = ["/auth/google", "/auth/apple", "/auth/native/sign-up"];
+
+// devCheckV1Routes는 v1 경로가 남아 있는지 본다. 빈 JSON을 보내 구글·애플 같은 외부
+// 호출 없이 400(있음)과 404(제거됨)만 가른다.
+async function devCheckV1Routes() {
+  const rows = [];
+  for (const path of DEV_V1_ROUTES) {
+    let status = "요청 실패";
+    try {
+      const response = await fetch(apiUrl(path), { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      status = response.status;
+    } catch (error) {
+      status = `요청 실패: ${error.message}`;
+    }
+    rows.push({ path, status, state: status === 404 ? "제거됨" : status === 400 ? "남아 있음" : "확인 필요" });
+  }
+  const removed = rows.every((row) => row.state === "제거됨");
+  showDevResult(removed ? "v1 경로 모두 제거됨" : "v1 경로 점검 결과", removed ? "ok" : "error", rows);
+  return rows;
 }
 
 async function devShowMethods() {
@@ -1288,6 +1392,7 @@ async function devSignIn(email, password) {
 
 function setDevLogin(pair, label) {
   state.dev.accessToken = pair?.access_token || null;
+  state.dev.refreshToken = pair?.refresh_token || null;
   state.dev.accountLabel = label;
   state.dev.setupToken = null;
   state.dev.methods = null;

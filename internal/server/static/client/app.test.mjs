@@ -218,7 +218,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes };`,
     context,
     { filename: appPath },
   );
@@ -1668,4 +1668,65 @@ test("개발중 이메일 가입은 이름을 필수로 v2 가입에 보낸다",
   assert.equal(calls[0].path, "/auth/v2/native/sign-up");
   assert.equal(calls[0].body.name, "홍길동");
   assert.equal(state.dev.signupToken, "signup-1");
+});
+
+test("개발중 계정 카드에 병합 확인용 플랜과 송출 연결이 함께 보인다", async () => {
+  const { renderDevAccountTree, state, els } = await loadApp();
+  state.dev.accessToken = "dev-token";
+  state.dev.methods = { email: "member@example.com", providers: [] };
+  state.dev.usage = { plan: "plasma" };
+  state.dev.streamingAccounts = [{ provider: "youtube", channel_title: "내 채널" }];
+
+  renderDevAccountTree();
+  const items = els.devAccountTree.children;
+  assert.match(items[0].children[0].textContent, /플랜 plasma/);
+  const labels = items.map((item) => item.textContent);
+  assert.ok(labels.includes("송출 · 유튜브 ✓ 내 채널"));
+  assert.ok(labels.includes("송출 · 치지직 · 미연결"));
+});
+
+test("개발중 토큰 갱신·로그아웃·탈퇴는 테스트 계정 상태만 바꾼다", async () => {
+  const calls = [];
+  const { devRefreshToken, devLogout, devWithdraw, state } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      calls.push(`${options.method} ${path}`);
+      if (path === "/auth/refresh") {
+        return jsonResponse({ access_token: "access-2", refresh_token: "refresh-2" });
+      }
+      if (options.method === "DELETE" || path === "/auth/logout") {
+        return { ok: true, status: 204, headers: new Headers(), async text() { return ""; } };
+      }
+      return jsonResponse({});
+    },
+  });
+  state.accessToken = "admin-token";
+  state.dev.accessToken = "access-1";
+  state.dev.refreshToken = "refresh-1";
+
+  await devRefreshToken();
+  assert.equal(state.dev.accessToken, "access-2");
+  assert.equal(state.dev.refreshToken, "refresh-2");
+
+  await devWithdraw(() => false);
+  assert.ok(!calls.includes("DELETE /auth/me"), "declined withdrawal must not send a request");
+  await devWithdraw(() => true);
+  assert.ok(calls.includes("DELETE /auth/me"));
+  assert.equal(state.dev.accessToken, null);
+  assert.equal(state.accessToken, "admin-token");
+
+  state.dev.accessToken = "access-3";
+  state.dev.refreshToken = "refresh-3";
+  await devLogout();
+  assert.ok(calls.includes("POST /auth/logout"));
+  assert.equal(state.dev.refreshToken, null);
+});
+
+test("v1 종료 점검은 400을 남아 있음, 404를 제거됨으로 가른다", async () => {
+  const { devCheckV1Routes, els } = await loadApp({
+    fetchImpl: async (url) => jsonResponse({}, new URL(url).pathname === "/auth/native/sign-up" ? 400 : 404),
+  });
+  const rows = await devCheckV1Routes();
+  assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.state))), ["제거됨", "제거됨", "남아 있음"]);
+  assert.equal(els.devResultTitle.dataset.state, "error");
 });

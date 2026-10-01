@@ -20,7 +20,6 @@ const body = `## 변경 내용
 - [x] 변경 범위 확인
 - [x] 회귀 테스트 완료
 - [ ] 실기기 반복 진입 확인
-- [x] 리뷰 반영 및 미해결 의견 확인
 
 ## 관련 이슈
 
@@ -53,8 +52,20 @@ test('체크 후 같은 PR의 머지 검사 통과', () => {
   assert.deepEqual(validateReadiness({ ...pr, draft: false, body: body.replace('- [ ]', '- [x]') }).errors, []);
 });
 test('필수 공통 확인 항목 삭제로 머지 검사를 우회하지 못함', () => {
-  assert.ok(validatePullRequest({ ...pr, body: body.replace('- [x] 리뷰 반영 및 미해결 의견 확인\n', '') }).errors.length);
+  assert.ok(validatePullRequest({ ...pr, body: body.replace('- [x] 변경 범위 확인\n', '') }).errors.length);
   assert.ok(validatePullRequest({ ...pr, body: body.replace('- [x] 회귀 테스트 완료\n- [ ] 실기기 반복 진입 확인\n', '') }).errors.length);
+});
+test('리뷰 없는 Ready PR과 기존 미완료 리뷰 체크는 머지 허용', () => {
+  const ready = { ...pr, draft: false, body: body.replace('- [ ]', '- [x]') };
+  assert.deepEqual(validateReadiness(ready).errors, []);
+  const legacyReview = ready.body.replace('## 관련 이슈', '- [ ] 리뷰 반영 및 미해결 의견 확인\n\n## 관련 이슈');
+  assert.deepEqual(validateReadiness({ ...ready, body: legacyReview }).errors, []);
+});
+test('변경 범위와 검증 한 개만으로 Ready PR 머지 허용', () => {
+  const minimal = body.replace('- [ ] 실기기 반복 진입 확인\n', '');
+  assert.deepEqual(validateReadiness({ ...pr, draft: false, body: minimal }).errors, []);
+  const reviewOnly = minimal.replace('- [x] 회귀 테스트 완료', '- [ ] 리뷰 반영 및 미해결 의견 확인');
+  assert.ok(validatePullRequest({ ...pr, body: reviewOnly }).errors.length);
 });
 test('미완료 항목이 있는 Issue는 진행 추적 허용', () => assert.deepEqual(validateIssue(issue).errors, []));
 test('GitHub 웹 Issue Form의 H3 섹션도 같은 양식으로 검사', () => assert.deepEqual(validateIssue({ ...issue, body: issue.body.replaceAll('## ', '### ') }).errors, []));

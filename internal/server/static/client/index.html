@@ -502,6 +502,7 @@
             <button class="dev-feature-btn" type="button" data-dev-feature="methods">로그인 수단 연결·해제</button>
             <button class="dev-feature-btn" type="button" data-dev-feature="apple">애플 (코드 직접 입력)</button>
             <button class="dev-feature-btn" type="button" data-dev-feature="account">계정 관리 (토큰·탈퇴)</button>
+            <button class="dev-feature-btn" type="button" data-dev-feature="password">비밀번호 변경</button>
             <button class="dev-feature-btn" type="button" data-dev-feature="v1check">v1 종료 점검</button>
           </nav>
           <section class="panel dev-panel" aria-live="polite">
@@ -593,6 +594,24 @@
                 <button id="devWithdrawBtn" class="button button-danger" type="button">탈퇴</button>
               </div>
               <p class="dev-hint">탈퇴는 되돌릴 수 없습니다. 이메일 계정·연결된 구글·애플·송출 연결이 모두 삭제되고, 애플은 권한도 취소됩니다.</p>
+            </div>
+
+            <div class="dev-feature" data-dev-panel="password" hidden>
+              <h2>비밀번호 변경</h2>
+              <p class="dev-hint">로그인 여부와 관계없이 이메일 인증 코드를 거쳐 바꿉니다. 바꾸면 모든 기기에서 로그아웃되고 이 화면의 테스트 계정만 새 토큰으로 로그인됩니다. 없는 이메일이어도 같은 응답이 옵니다(메일은 안 감).</p>
+              <div class="dev-form">
+                <label class="field"><span>이메일</span><input id="devResetEmail" type="email" autocomplete="off" spellcheck="false" /></label>
+                <label class="field"><span>새 비밀번호 (8~72바이트)</span><input id="devResetPassword" type="password" autocomplete="new-password" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devResetStartBtn" class="button" type="button">변경 코드 받기</button>
+              </div>
+              <div class="dev-form">
+                <label class="field"><span>인증 코드</span><input id="devResetCode" type="text" inputmode="numeric" autocomplete="one-time-code" /></label>
+              </div>
+              <div class="button-row">
+                <button id="devResetVerifyBtn" class="button button-primary" type="button">코드 확인하고 변경</button>
+              </div>
             </div>
 
             <div class="dev-feature" data-dev-panel="v1check" hidden>

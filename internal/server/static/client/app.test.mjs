@@ -108,6 +108,9 @@ const buttonKeys = [
   "devName",
   "devEmail",
   "devPassword",
+  "devResetEmail",
+  "devResetPassword",
+  "devResetCode",
 ];
 const sessionDetailKeys = [
   "sessionJson",
@@ -218,7 +221,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify };`,
     context,
     { filename: appPath },
   );
@@ -1729,4 +1732,40 @@ test("v1 종료 점검은 400을 남아 있음, 404를 제거됨으로 가른다
   const rows = await devCheckV1Routes();
   assert.deepEqual(JSON.parse(JSON.stringify(rows.map((row) => row.state))), ["제거됨", "제거됨", "남아 있음"]);
   assert.equal(els.devResultTitle.dataset.state, "error");
+});
+
+test("개발중 비밀번호 변경은 코드 확인 후 새 토큰으로 테스트 계정을 로그인시킨다", async () => {
+  const calls = [];
+  const { devPasswordResetStart, devPasswordResetVerify, state, els } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      calls.push({ path, body: options.body ? JSON.parse(options.body) : null, auth: options.headers?.Authorization || null });
+      if (path === "/auth/password/reset") {
+        return jsonResponse({ status: "verification_email_sent", reset_token: "reset-1" });
+      }
+      if (path === "/auth/password/reset/verify") {
+        return jsonResponse({ access_token: "access-new", refresh_token: "refresh-new" });
+      }
+      return jsonResponse({});
+    },
+  });
+  els.devResetCode.value = "";
+  await devPasswordResetVerify();
+  assert.equal(calls.length, 0, "verify without a reset token must not send a request");
+
+  els.devResetEmail.value = "member@example.com";
+  els.devResetPassword.value = "new password 456";
+  await devPasswordResetStart();
+  assert.equal(calls[0].path, "/auth/password/reset");
+  assert.equal(calls[0].body.new_password, "new password 456");
+  assert.equal(calls[0].auth, null, "password reset must not need a logged-in token");
+  assert.equal(state.dev.resetToken, "reset-1");
+
+  els.devResetCode.value = "123456";
+  await devPasswordResetVerify();
+  assert.equal(calls[1].path, "/auth/password/reset/verify");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].body)), { reset_token: "reset-1", verification_code: "123456" });
+  assert.equal(state.dev.accessToken, "access-new");
+  assert.equal(state.dev.refreshToken, "refresh-new");
+  assert.equal(state.dev.resetToken, null);
 });

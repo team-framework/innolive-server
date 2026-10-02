@@ -1160,9 +1160,22 @@ function renderDevAccountTree() {
     root.append(detail);
     items.push(root);
     items.push(devTreeChild("이메일 로그인", dev.methods.email));
-    const linked = new Map((dev.methods.providers || []).map((item) => [item.provider, item]));
-    items.push(devTreeChild("구글", linked.has("google") ? linked.get("google").email || "연결됨" : null));
-    items.push(devTreeChild("애플", linked.has("apple") ? linked.get("apple").email || "연결됨" : null));
+    // 구글은 여러 개 연결할 수 있어(#392) 연결마다 한 줄과 개별 해제 버튼을 둔다.
+    const providers = dev.methods.providers || [];
+    const googles = providers.filter((item) => item.provider === "google");
+    if (googles.length === 0) {
+      items.push(devTreeChild("구글", null));
+    }
+    googles.forEach((item, index) => {
+      const label = googles.length > 1 ? `구글 ${index + 1}` : "구글";
+      const child = devTreeChild(label, item.email || "연결됨");
+      if (item.id) {
+        child.append(devTreeUnlinkButton(() => void devUnlink("google", item.id)));
+      }
+      items.push(child);
+    });
+    const apple = providers.find((item) => item.provider === "apple");
+    items.push(devTreeChild("애플", apple ? apple.email || "연결됨" : null));
     if (dev.streamingAccounts) {
       const streams = new Map(dev.streamingAccounts.map((item) => [item.provider, item]));
       for (const [provider, label] of [["youtube", "송출 · 유튜브"], ["chzzk", "송출 · 치지직"]]) {
@@ -1186,6 +1199,15 @@ function devTreeChild(label, value) {
   item.dataset.linked = value ? "true" : "false";
   item.textContent = value ? `${label} ✓ ${value}` : `${label} · 미연결`;
   return item;
+}
+
+function devTreeUnlinkButton(onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dev-tree-unlink";
+  button.textContent = "해제";
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 // refreshDevMethods는 결과 칸을 건드리지 않고 로그인 수단·플랜·송출 연결을 다시 읽어
@@ -1319,8 +1341,11 @@ async function devShowMethods() {
   }
 }
 
-async function devUnlink(provider) {
-  const result = await devRequest("DELETE", `/auth/link/${provider}`, undefined, { auth: true });
+// devUnlink는 id가 있으면 그 연결만, 없으면 공급자 연결을 끊는다. 구글이 여러 개인데
+// id 없이 끊으면 서버가 409 multiple_links로 거절한다.
+async function devUnlink(provider, id) {
+  const path = id ? `/auth/link/${provider}/${encodeURIComponent(id)}` : `/auth/link/${provider}`;
+  const result = await devRequest("DELETE", path, undefined, { auth: true });
   if (result?.ok) {
     await refreshDevMethods();
   }

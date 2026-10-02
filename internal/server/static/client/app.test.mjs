@@ -1651,6 +1651,40 @@ test("개발중 계정 카드는 InnoLive 계정 아래에 로그인 수단 연�
   assert.equal(els.devAccountTree.children[0].textContent, "기존 소셜 계정 (이메일 계정 없음)");
 });
 
+test("개발중 계정 카드는 구글 연결을 하나씩 그리고 연결 ID로 해제한다", async () => {
+  const calls = [];
+  const { renderDevAccountTree, state, els } = await loadApp({
+    fetchImpl: async (url, options = {}) => {
+      calls.push(`${options.method || "GET"} ${new URL(url).pathname}`);
+      if (options.method === "DELETE") {
+        return { ok: true, status: 204, headers: new Headers(), async text() { return ""; } };
+      }
+      return jsonResponse({ email: "member@example.com", providers: [] });
+    },
+  });
+  state.dev.accessToken = "dev-token";
+  state.dev.methods = {
+    email: "member@example.com",
+    providers: [
+      { id: "link-1", provider: "google", email: "first@gmail.com" },
+      { id: "link-2", provider: "google", email: "second@gmail.com" },
+    ],
+  };
+
+  renderDevAccountTree();
+  const labels = els.devAccountTree.children.map((item) => item.textContent);
+  assert.ok(labels.includes("구글 1 ✓ first@gmail.com"));
+  assert.ok(labels.includes("구글 2 ✓ second@gmail.com"));
+  assert.ok(labels.includes("애플 · 미연결"));
+
+  const second = els.devAccountTree.children.find((item) => item.textContent.startsWith("구글 2"));
+  const [unlink] = second.children;
+  assert.equal(unlink.textContent, "해제");
+  await unlink.listeners.click[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(calls.includes("DELETE /auth/link/google/link-2"), calls.join(", "));
+});
+
 test("개발중 이메일 가입은 이름을 필수로 v2 가입에 보낸다", async () => {
   const calls = [];
   const { devSignUp, state, els } = await loadApp({

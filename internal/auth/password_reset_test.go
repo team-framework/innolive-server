@@ -1,12 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/mail"
 	"strings"
 	"testing"
 	"time"
@@ -167,4 +169,43 @@ func decodeHTMLPart(t *testing.T, message string) string {
 		t.Fatal(err)
 	}
 	return string(decoded)
+}
+
+func TestVerificationEmailHasDateMessageIDAndRelatedType(t *testing.T) {
+	first, err := buildVerificationEmail("InnoLive <no-reply@innolive.studio>", "member@example.com", "482913", EmailPurposeSignup, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := mail.ReadMessage(bytes.NewReader(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parsed.Header.Date(); err != nil {
+		t.Fatalf("Date header: %v", err)
+	}
+	messageID := parsed.Header.Get("Message-ID")
+	if !strings.HasPrefix(messageID, "<") || !strings.HasSuffix(messageID, "@innolive.studio>") {
+		t.Fatalf("Message-ID = %q", messageID)
+	}
+	if !strings.Contains(string(first), `multipart/related; type="text/html"; boundary=`) {
+		t.Fatal("multipart/related has no type=text/html")
+	}
+
+	second, err := buildVerificationEmail("InnoLive <no-reply@innolive.studio>", "member@example.com", "482913", EmailPurposeSignup, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedSecond, err := mail.ReadMessage(bytes.NewReader(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedSecond.Header.Get("Message-ID") == messageID {
+		t.Fatal("Message-ID reused across mails")
+	}
+}
+
+func TestVerificationEmailRejectsInvalidSender(t *testing.T) {
+	if _, err := buildVerificationEmail("not-an-address", "member@example.com", "482913", EmailPurposeSignup, 5*time.Minute); err == nil {
+		t.Fatal("invalid sender accepted")
+	}
 }

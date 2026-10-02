@@ -29,8 +29,8 @@ func (s *Session) AddNotice(code string, at time.Time) bool {
 }
 
 // SetBroadcastRemaining은 "현재 방식으로 더 방송할 수 있는 시간"을 싣는다(#276).
-// 한도 점검 루프가 주기마다 갱신하고, 방송이 없으면 nil로 비운다. nil은 무제한이거나
-// 방송 중이 아님이다.
+// 한도 점검 루프가 방송 중에 주기마다 갱신한다. 방송이 없을 때는 차감이 없으므로
+// 마지막 값을 유지한다(#394). nil은 무제한이거나 아직 계산하지 않음이다.
 func (s *Session) SetBroadcastRemaining(remaining *time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -40,6 +40,13 @@ func (s *Session) SetBroadcastRemaining(remaining *time.Duration) {
 	}
 	seconds := int64(remaining.Seconds())
 	s.broadcastRemaining = &seconds
+}
+
+// HasBroadcastRemaining은 남은 시간이 한 번이라도 계산됐는지다.
+func (s *Session) HasBroadcastRemaining() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.broadcastRemaining != nil
 }
 
 // MediaIdleSince는 입력 없음 시계의 시작점이다 — 마지막 처리 프레임과, 송출 시작·

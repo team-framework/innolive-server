@@ -418,6 +418,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, internalError())
 		return
 	}
+	// 첫 응답부터 남은 시간을 싣는다(#394) — 한도 점검 주기를 기다리면 null이 나간다.
+	s.fillIdleBroadcastRemaining(r.Context(), liveSession, time.Now())
 	// owner_token은 여기서 정확히 한 번만 돌려주고 다시 노출하지 않는다.
 	writeJSON(w, http.StatusCreated, struct {
 		session.Response

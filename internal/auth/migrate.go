@@ -13,6 +13,9 @@ func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 		return errors.New("GORM database is nil")
 	}
 
+	if err := dropOAuthUserProviderUnique(ctx, db); err != nil {
+		return err
+	}
 	if err := db.WithContext(ctx).AutoMigrate(
 		&User{},
 		&OAuthAccount{},
@@ -23,5 +26,24 @@ func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("auto migrate authentication schema: %w", err)
 	}
 
+	return nil
+}
+
+// dropOAuthUserProviderUnique는 사용자·공급자 1:1 제약을 지운다(#392). AutoMigrate는
+// 기존 인덱스를 지우지 않는다. SQL 마이그레이션은 제약으로, AutoMigrate는 고유
+// 인덱스로 만들었으므로 두 형태를 모두 지운다. 애플 1개 제약은 AutoMigrate가
+// 부분 고유 인덱스로 다시 만든다.
+func dropOAuthUserProviderUnique(ctx context.Context, db *gorm.DB) error {
+	if !db.Migrator().HasTable(&OAuthAccount{}) {
+		return nil
+	}
+	for _, statement := range []string{
+		"ALTER TABLE oauth_accounts DROP CONSTRAINT IF EXISTS uidx_oauth_user_provider",
+		"DROP INDEX IF EXISTS uidx_oauth_user_provider",
+	} {
+		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
+			return fmt.Errorf("drop oauth user provider unique: %w", err)
+		}
+	}
 	return nil
 }

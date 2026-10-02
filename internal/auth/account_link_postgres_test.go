@@ -83,8 +83,21 @@ func TestPostgresLinkAddsIdentityAndRejectsConflicts(t *testing.T) {
 	if result, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "member-google"}); err != nil || result.MergedUserID != nil {
 		t.Fatalf("relink own identity = %+v, %v", result, err)
 	}
-	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "second-google"}); !errors.Is(err, ErrProviderAlreadyLinked) {
-		t.Fatalf("second google identity error = %v", err)
+	// 구글은 여러 개 연결할 수 있다(#392). 상한을 넘는 연결은 거절한다.
+	for i := 2; i <= maxGoogleLogins; i++ {
+		if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "google-" + string(rune('0'+i))}); err != nil {
+			t.Fatalf("link google #%d: %v", i, err)
+		}
+	}
+	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "one-too-many"}); !errors.Is(err, ErrGoogleLinkLimit) {
+		t.Fatalf("google over limit error = %v, want ErrGoogleLinkLimit", err)
+	}
+	// 애플은 계정당 1개다.
+	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderApple, Subject: "member-apple"}); err != nil {
+		t.Fatalf("link apple: %v", err)
+	}
+	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderApple, Subject: "second-apple"}); !errors.Is(err, ErrProviderAlreadyLinked) {
+		t.Fatalf("second apple identity error = %v", err)
 	}
 	// 이메일 계정을 가진 다른 사용자의 신원은 가져오지 못한다.
 	fresh := createLinkTestUser(t, db, "fresh@example.com", plan.Spark)
@@ -176,6 +189,115 @@ func TestPostgresMergeRejectsWhenProvidersCollide(t *testing.T) {
 	}
 }
 
+func TestPostgresMergeMovesGoogleUnlessOverLimit(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	store := NewAccountLinkStore(db)
+	ctx := context.Background()
+	member := createLinkTestUser(t, db, "member@example.com", plan.Spark)
+	createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "member-google")
+	legacy := createLinkTestUser(t, db, "", plan.Spark)
+	createLinkTestIdentity(t, db, legacy, OAuthProviderGoogle, "legacy-google")
+
+	// 구글끼리는 겹쳐도 병합한다.
+	if result, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "legacy-google"}); err != nil || result.MergedUserID == nil {
+		t.Fatalf("google merge = %+v, %v", result, err)
+	}
+	var googles int64
+	db.Model(&OAuthAccount{}).Where("user_id = ? AND provider = ?", member, OAuthProviderGoogle).Count(&googles)
+	if googles != 2 {
+		t.Fatalf("google links after merge = %d, want 2", googles)
+	}
+
+	// 병합 후 상한을 넘으면 병합 전체를 거절한다.
+	for i := 3; i <= maxGoogleLogins; i++ {
+		createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "member-google-"+string(rune('0'+i)))
+	}
+	full := createLinkTestUser(t, db, "", plan.Spark)
+	createLinkTestIdentity(t, db, full, OAuthProviderGoogle, "full-google")
+	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "full-google"}); !errors.Is(err, ErrGoogleLinkLimit) {
+		t.Fatalf("merge over limit error = %v, want ErrGoogleLinkLimit", err)
+	}
+	var remaining int64
+	db.Model(&User{}).Where("id = ?", full).Count(&remaining)
+	if remaining != 1 {
+		t.Fatal("rejected merge deleted the legacy user")
+	}
+}
+
+func TestPostgresUnlinkByIDWhenSeveralGoogleLinks(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	store := NewAccountLinkStore(db)
+	ctx := context.Background()
+	member := createLinkTestUser(t, db, "member@example.com", plan.Spark)
+	createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "first-google")
+	createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "second-google")
+	other := createLinkTestUser(t, db, "other@example.com", plan.Spark)
+	createLinkTestIdentity(t, db, other, OAuthProviderGoogle, "other-google")
+
+	if err := store.Unlink(ctx, member, OAuthProviderGoogle, nil); !errors.Is(err, ErrMultipleLinks) {
+		t.Fatalf("unlink without id error = %v, want ErrMultipleLinks", err)
+	}
+	var foreign OAuthAccount
+	db.Where("provider_subject = ?", "other-google").Take(&foreign)
+	if err := store.Unlink(ctx, member, OAuthProviderGoogle, &foreign.ID); !errors.Is(err, ErrIdentityNotLinked) {
+		t.Fatalf("unlink other user's link error = %v, want ErrIdentityNotLinked", err)
+	}
+	methods, err := store.Methods(ctx, member)
+	if err != nil || len(methods.Providers) != 2 || methods.Providers[0].ID == uuid.Nil {
+		t.Fatalf("methods = %+v, %v", methods, err)
+	}
+	if err := store.Unlink(ctx, member, OAuthProviderGoogle, &methods.Providers[0].ID); err != nil {
+		t.Fatalf("unlink by id: %v", err)
+	}
+	// 하나 남으면 id 없이도 끊을 수 있다.
+	if err := store.Unlink(ctx, member, OAuthProviderGoogle, nil); err != nil {
+		t.Fatalf("unlink last google without id: %v", err)
+	}
+}
+
+// 기동 시 AutoMigrate가 옛 사용자·공급자 고유 키를 제약·인덱스 어느 형태든 지우고
+// 애플 전용 부분 고유 인덱스로 바꾼다(#392).
+func TestPostgresAutoMigrateSwapsOAuthUserProviderUnique(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL migration integration test")
+	}
+	for _, legacy := range []string{
+		"ALTER TABLE oauth_accounts ADD CONSTRAINT uidx_oauth_user_provider UNIQUE (user_id, provider)",
+		"CREATE UNIQUE INDEX uidx_oauth_user_provider ON oauth_accounts (user_id, provider)",
+	} {
+		db := newPostgresRefreshTestDB(t, databaseURL)
+		ctx := context.Background()
+		if err := AutoMigrate(ctx, db); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec("DROP INDEX uidx_oauth_user_apple").Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(legacy).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := AutoMigrate(ctx, db); err != nil {
+			t.Fatalf("auto migrate over %q: %v", legacy, err)
+		}
+		var names []string
+		db.Raw("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'oauth_accounts'").Scan(&names)
+		joined := strings.Join(names, ",")
+		if strings.Contains(joined, "uidx_oauth_user_provider") || !strings.Contains(joined, "uidx_oauth_user_apple") {
+			t.Fatalf("indexes after %q = %s", legacy, joined)
+		}
+
+		user := createLinkTestUser(t, db, "", plan.Spark)
+		createLinkTestIdentity(t, db, user, OAuthProviderGoogle, "google-a")
+		createLinkTestIdentity(t, db, user, OAuthProviderGoogle, "google-b")
+		createLinkTestIdentity(t, db, user, OAuthProviderApple, "apple-a")
+		second := newLinkedOAuthAccount(user, LinkIdentity{Provider: OAuthProviderApple, Subject: "apple-b"}, time.Now().UTC())
+		if err := db.Create(&second).Error; err == nil {
+			t.Fatalf("database accepted a second apple link after %q", legacy)
+		}
+	}
+}
+
 func TestPostgresUnlinkKeepsLastLoginMethod(t *testing.T) {
 	db := newAccountLinkTestDB(t)
 	store := NewAccountLinkStore(db)
@@ -185,13 +307,13 @@ func TestPostgresUnlinkKeepsLastLoginMethod(t *testing.T) {
 	legacy := createLinkTestUser(t, db, "", plan.Spark)
 	createLinkTestIdentity(t, db, legacy, OAuthProviderGoogle, "legacy-google")
 
-	if err := store.Unlink(ctx, legacy, OAuthProviderGoogle); !errors.Is(err, ErrLastLoginMethod) {
+	if err := store.Unlink(ctx, legacy, OAuthProviderGoogle, nil); !errors.Is(err, ErrLastLoginMethod) {
 		t.Fatalf("unlink last method error = %v", err)
 	}
-	if err := store.Unlink(ctx, member, OAuthProviderApple); !errors.Is(err, ErrIdentityNotLinked) {
+	if err := store.Unlink(ctx, member, OAuthProviderApple, nil); !errors.Is(err, ErrIdentityNotLinked) {
 		t.Fatalf("unlink missing provider error = %v", err)
 	}
-	if err := store.Unlink(ctx, member, OAuthProviderGoogle); err != nil {
+	if err := store.Unlink(ctx, member, OAuthProviderGoogle, nil); err != nil {
 		t.Fatalf("unlink google: %v", err)
 	}
 	methods, err := store.Methods(ctx, member)
@@ -321,6 +443,29 @@ func TestPostgresLinkHTTPMergesAndClosesMergedSessions(t *testing.T) {
 	methods := serveLinkRequest(t, handler, http.MethodGet, "/auth/login-methods", pair.AccessToken, nil)
 	if methods.Code != http.StatusOK || !strings.Contains(methods.Body.String(), `"provider":"google"`) || !strings.Contains(methods.Body.String(), "member@example.com") {
 		t.Fatalf("login methods = %d %s", methods.Code, methods.Body.String())
+	}
+	var linked struct {
+		Providers []struct {
+			ID string `json:"id"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(methods.Body.Bytes(), &linked); err != nil || len(linked.Providers) != 1 || linked.Providers[0].ID == "" {
+		t.Fatalf("login methods id = %+v, %v", linked, err)
+	}
+	createLinkTestIdentity(t, db, member, OAuthProviderGoogle, "member-second-google")
+	if response := serveLinkRequest(t, handler, http.MethodDelete, "/auth/link/google", pair.AccessToken, nil); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"multiple_links"`) {
+		t.Fatalf("unlink without id = %d %s", response.Code, response.Body.String())
+	}
+	if response := serveLinkRequest(t, handler, http.MethodDelete, "/auth/link/google/not-a-uuid", pair.AccessToken, nil); response.Code != http.StatusBadRequest {
+		t.Fatalf("unlink bad id = %d", response.Code)
+	}
+	if response := serveLinkRequest(t, handler, http.MethodDelete, "/auth/link/google/"+uuid.NewString(), pair.AccessToken, nil); response.Code != http.StatusNotFound {
+		t.Fatalf("unlink unknown id = %d", response.Code)
+	}
+	var second OAuthAccount
+	db.Where("provider_subject = ?", "member-second-google").Take(&second)
+	if response := serveLinkRequest(t, handler, http.MethodDelete, "/auth/link/google/"+second.ID.String(), pair.AccessToken, nil); response.Code != http.StatusNoContent {
+		t.Fatalf("unlink by id = %d %s", response.Code, response.Body.String())
 	}
 	// 연결한 뒤에는 v2 구글 로그인이 이메일 계정 사용자로 들어간다.
 	if _, err := google.LoginV2(context.Background(), "google-id-token", ClientInfo{}); err != nil {

@@ -1130,6 +1130,17 @@ dd {
   border-top: 2px solid var(--border);
 }
 
+.dev-tree-unlink {
+  margin-left: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
 .dev-tree-child[data-linked="true"] {
   color: var(--ok);
 }

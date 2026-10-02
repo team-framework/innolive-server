@@ -92,6 +92,7 @@ func MountAccountLinkHTTP(next http.Handler, service *TokenService, links *Accou
 		mux.Handle("POST /auth/link/apple", h.middleware(http.HandlerFunc(link.handleLinkApple)))
 	}
 	mux.Handle("DELETE /auth/link/{provider}", h.middleware(http.HandlerFunc(link.handleUnlink)))
+	mux.Handle("DELETE /auth/link/{provider}/{id}", h.middleware(http.HandlerFunc(link.handleUnlink)))
 	mux.Handle("GET /auth/login-methods", h.middleware(http.HandlerFunc(link.handleLoginMethods)))
 	preflight := h.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	mux.Handle("OPTIONS /auth/link/", preflight)
@@ -153,6 +154,8 @@ func (h *accountLinkHandler) writeLinkError(w http.ResponseWriter, r *http.Reque
 	switch {
 	case errors.Is(err, ErrProviderAlreadyLinked):
 		h.writeError(w, r, http.StatusConflict, "provider_already_linked", "Another "+provider+" account is already linked. Unlink it first.")
+	case errors.Is(err, ErrGoogleLinkLimit):
+		h.writeError(w, r, http.StatusConflict, "google_link_limit", "Up to 5 Google accounts can be linked.")
 	case errors.Is(err, ErrIdentityLinkedElsewhere):
 		h.writeError(w, r, http.StatusConflict, "identity_linked_elsewhere", "This "+provider+" account is linked to another InnoLive account.")
 	case errors.Is(err, ErrUserInactive):
@@ -185,11 +188,22 @@ func (h *accountLinkHandler) handleUnlink(w http.ResponseWriter, r *http.Request
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "provider must be google or apple.")
 		return
 	}
-	switch err := h.links.Unlink(r.Context(), userID, provider); {
+	var linkID *uuid.UUID
+	if raw := r.PathValue("id"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid link id.")
+			return
+		}
+		linkID = &parsed
+	}
+	switch err := h.links.Unlink(r.Context(), userID, provider, linkID); {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, ErrIdentityNotLinked):
 		h.writeError(w, r, http.StatusNotFound, "not_linked", "This login is not linked.")
+	case errors.Is(err, ErrMultipleLinks):
+		h.writeError(w, r, http.StatusConflict, "multiple_links", "Several accounts of this provider are linked. Unlink one by id.")
 	case errors.Is(err, ErrLastLoginMethod):
 		h.writeError(w, r, http.StatusConflict, "last_login_method", "Set an email and password before unlinking the last login.")
 	case errors.Is(err, ErrUserInactive):

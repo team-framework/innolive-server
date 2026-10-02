@@ -48,13 +48,14 @@ func (User) TableName() string {
 type OAuthAccount struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey"`
 
-	UserID uuid.UUID `gorm:"type:uuid;not null;index;uniqueIndex:uidx_oauth_user_provider,priority:1"`
+	// 애플은 계정당 1개(uidx_oauth_user_apple), 구글은 여러 개 연결할 수 있다(#392).
+	UserID uuid.UUID `gorm:"type:uuid;not null;index;uniqueIndex:uidx_oauth_user_apple,where:provider = 'apple'"`
 
 	// AutoMigrate가 users에 대한 외래 키를 생성하기 위한 association이다.
 	// 조회할 때 명시적으로 Preload하지 않으면 자동 조회되지는 않는다.
 	User *User `gorm:"foreignKey:UserID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 
-	Provider OAuthProvider `gorm:"type:varchar(20);not null;uniqueIndex:uidx_oauth_provider_subject,priority:1;uniqueIndex:uidx_oauth_user_provider,priority:2;check:chk_oauth_provider,provider IN ('google','apple')"`
+	Provider OAuthProvider `gorm:"type:varchar(20);not null;uniqueIndex:uidx_oauth_provider_subject,priority:1;check:chk_oauth_provider,provider IN ('google','apple')"`
 
 	// Google 또는 Apple ID Token의 sub 값이다.
 	ProviderSubject string `gorm:"type:varchar(255);not null;uniqueIndex:uidx_oauth_provider_subject,priority:2"`

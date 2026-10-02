@@ -158,9 +158,10 @@ type Response struct {
 	BroadcastResolution string `json:"broadcast_resolution"`
 	// Notices는 방송 한도 알림이다(#275). 코드별로 한 번씩 쌓인다.
 	Notices []Notice `json:"notices"`
-	// BroadcastRemainingSeconds는 방송 중일 때 현재 송출 방식으로 더 방송할 수 있는
-	// 시간이다(#276). 월 잔여 ÷ 현재 배수와 1회 잔여 중 작은 값이다. 방송 중이 아니거나
-	// 무제한이면 null이다. 한도 점검 주기(15초)마다 갱신된다.
+	// BroadcastRemainingSeconds는 현재 송출 방식으로 더 방송할 수 있는
+	// 시간이다(#276). 월 잔여 ÷ 현재 배수와 1회 잔여 중 작은 값이다. 방송 중에는 한도
+	// 점검 주기(15초)마다 갱신되고, 방송 전에는 대상 하나 기준으로, 송출이 멈춘 뒤에는
+	// 마지막 값으로 실린다(#394). 무제한·게스트 세션은 null이다.
 	BroadcastRemainingSeconds *int64 `json:"broadcast_remaining_seconds"`
 	// ResolutionSwitch는 방송 중 해상도 전환(#283)의 진행 상태다. 전환한 적이
 	// 없으면 null이다.

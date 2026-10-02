@@ -418,6 +418,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, internalError())
 		return
 	}
+	// 첫 응답부터 남은 시간을 싣는다(#394) — 한도 점검 주기를 기다리면 null이 나간다.
+	s.fillIdleBroadcastRemaining(r.Context(), liveSession, time.Now())
 	// owner_token은 여기서 정확히 한 번만 돌려주고 다시 노출하지 않는다.
 	writeJSON(w, http.StatusCreated, struct {
 		session.Response
@@ -647,6 +649,11 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	if len(failures) == len(providers) {
 		writeError(w, *firstFailure)
 		return
+	}
+	// 실제로 라이브가 된 대상 수로 남은 시간을 곧바로 맞춘다(#394) — 다음 한도
+	// 점검까지 방송 전 1배 값이 보이지 않게 한다.
+	if targets, _ := liveSession.BroadcastActivity(); len(targets) > 0 {
+		s.refreshBroadcastRemaining(r.Context(), liveSession, time.Now(), len(targets))
 	}
 	response := liveSession.Response()
 	writeJSON(w, http.StatusOK, struct {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"testing"
@@ -172,5 +173,82 @@ func TestBroadcastRemaining(t *testing.T) {
 		if got == nil || *got != test.want {
 			t.Fatalf("%s: got %v, want %v", test.name, got, test.want)
 		}
+	}
+}
+
+type failingUsageLedger struct{}
+
+func (failingUsageLedger) Month(context.Context, uuid.UUID, time.Time, time.Time, time.Time) ([]usage.SessionCharge, error) {
+	return nil, errors.New("ledger down")
+}
+
+// 방송 전에도 남은 시간이 실리고, 송출이 없는 동안은 한도 점검이 값을 비우지 않는다(#394).
+func TestIdleBroadcastRemainingIsFilledAndKept(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		plan       plan.Plan
+		resolution string
+		ledger     UsageLedger
+		want       int64 // -1 = null
+	}{
+		// Spark 월 5h 중 4h 사용 → 월 잔여 1h가 1회 2h보다 작다.
+		{"720p는 1배", plan.Spark, session.Resolution720p, monthlyUsageLedger{used: 4 * time.Hour}, 3600},
+		// Beam 월 120h 중 110h 사용, FHD 2배 → 5h(1회 8h보다 작다).
+		{"FHD는 2배", plan.Beam, session.ResolutionFHD, monthlyUsageLedger{used: 110 * time.Hour}, 5 * 3600},
+		{"무제한은 null", plan.Glow, session.Resolution720p, monthlyUsageLedger{}, -1},
+		{"원장 실패는 null", plan.Spark, session.Resolution720p, failingUsageLedger{}, -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, manager, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+				auth.StreamingProviderYouTube: &stubStreamingProvider{},
+			})
+			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
+			application.usageLedger = test.ledger
+			live, _, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", test.resolution, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			application.fillIdleBroadcastRemaining(context.Background(), live, time.Now())
+			got := live.Response().BroadcastRemainingSeconds
+			if test.want < 0 {
+				if got != nil {
+					t.Fatalf("got %d, want null", *got)
+				}
+				return
+			}
+			if got == nil || *got != test.want {
+				t.Fatalf("got %v, want %d", got, test.want)
+			}
+			// 방송 중이 아닌 점검은 마지막 값을 그대로 둔다.
+			kept := 42 * time.Minute
+			live.SetBroadcastRemaining(&kept)
+			application.enforceLimits(context.Background(), time.Now())
+			if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != int64(kept.Seconds()) {
+				t.Fatalf("after idle check got %v, want %d kept", got, int64(kept.Seconds()))
+			}
+		})
+	}
+}
+
+// go-live 뒤에는 방송 전 1배 값을 실제 대상 수 배수로 덮어쓴다(#394).
+func TestRefreshBroadcastRemainingUsesLiveTargetCount(t *testing.T) {
+	_, manager, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{},
+	})
+	manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return plan.Beam, nil })
+	// Beam 월 120h 중 110h 사용 → 잔여 10h.
+	application.usageLedger = monthlyUsageLedger{used: 110 * time.Hour}
+	live, _, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.ResolutionFHD, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.fillIdleBroadcastRemaining(context.Background(), live, time.Now())
+	if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != 5*3600 {
+		t.Fatalf("before go-live got %v, want FHD single 5h", got)
+	}
+	// FHD 동시 송출(2대상)은 3배 → 10h/3.
+	application.refreshBroadcastRemaining(context.Background(), live, time.Now(), 2)
+	if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != int64((10*time.Hour/3).Seconds()) {
+		t.Fatalf("after go-live got %v, want %d", got, int64((10 * time.Hour / 3).Seconds()))
 	}
 }

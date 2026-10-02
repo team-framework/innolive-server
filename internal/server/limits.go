@@ -127,7 +127,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		}
 		targets, unpaused := live.BroadcastActivity()
 		if len(targets) == 0 {
-			live.SetBroadcastRemaining(nil)
+			s.fillIdleBroadcastRemaining(ctx, live, now)
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
@@ -156,7 +156,6 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			}
 			continue
 		}
-		live.SetBroadcastRemaining(nil)
 		for _, provider := range targets {
 			_, broadcast, phase, err := s.sessions.StopStreamWithReason(live.ID, decision.stopReason, provider)
 			if err != nil {
@@ -168,6 +167,35 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		s.logger.Warn("broadcast stopped by limit", "session_id", live.ID, "plan", live.Plan, "reason", decision.stopReason,
 			"on_air_seconds", int64(onAir.Seconds()), "used_seconds", int64(used.Seconds()))
 	}
+}
+
+// fillIdleBroadcastRemaining은 방송 중이 아닌 세션의 남은 시간을 채운다(#394).
+// 송출이 없으면 차감도 없으므로 이미 값이 있으면 그대로 둔다. 처음 채울 때는 송출
+// 대상 하나(현재 해상도) 기준이다.
+func (s *Server) fillIdleBroadcastRemaining(ctx context.Context, live *session.Session, now time.Time) {
+	if live.HasBroadcastRemaining() {
+		return
+	}
+	s.refreshBroadcastRemaining(ctx, live, now, 1)
+}
+
+// refreshBroadcastRemaining은 송출 대상 targets개·현재 해상도 배수로 남은 시간을 다시
+// 계산한다. 원장·플랜이 없거나 한도가 없는 세션은 건너뛴다.
+func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Session, now time.Time, targets int) {
+	if s.usageLedger == nil || live.Plan == "" || live.UserID == uuid.Nil {
+		return
+	}
+	if policy, _ := live.Plan.Policy(); policy.MonthlyBroadcast <= 0 && policy.MaxPerBroadcast <= 0 {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
+	onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, live.CreatedAt, now)
+	cancel()
+	if err != nil {
+		s.logger.Error("broadcast remaining refresh failed", "session_id", live.ID, "error", err)
+		return
+	}
+	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
 }
 
 // broadcastUsage는 이 세션의 실제 방송 시간과 이번 달 누적 차감을 원장에서 읽는다.

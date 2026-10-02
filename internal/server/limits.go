@@ -171,9 +171,18 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 
 // fillIdleBroadcastRemaining은 방송 중이 아닌 세션의 남은 시간을 채운다(#394).
 // 송출이 없으면 차감도 없으므로 이미 값이 있으면 그대로 둔다. 처음 채울 때는 송출
-// 대상 하나(현재 해상도) 기준이다. 원장·플랜이 없거나 한도가 없는 세션은 건너뛴다.
+// 대상 하나(현재 해상도) 기준이다.
 func (s *Server) fillIdleBroadcastRemaining(ctx context.Context, live *session.Session, now time.Time) {
-	if s.usageLedger == nil || live.Plan == "" || live.UserID == uuid.Nil || live.HasBroadcastRemaining() {
+	if live.HasBroadcastRemaining() {
+		return
+	}
+	s.refreshBroadcastRemaining(ctx, live, now, 1)
+}
+
+// refreshBroadcastRemaining은 송출 대상 targets개·현재 해상도 배수로 남은 시간을 다시
+// 계산한다. 원장·플랜이 없거나 한도가 없는 세션은 건너뛴다.
+func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Session, now time.Time, targets int) {
+	if s.usageLedger == nil || live.Plan == "" || live.UserID == uuid.Nil {
 		return
 	}
 	if policy, _ := live.Plan.Policy(); policy.MonthlyBroadcast <= 0 && policy.MaxPerBroadcast <= 0 {
@@ -183,10 +192,10 @@ func (s *Server) fillIdleBroadcastRemaining(ctx context.Context, live *session.S
 	onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, live.CreatedAt, now)
 	cancel()
 	if err != nil {
-		s.logger.Error("broadcast remaining fill failed", "session_id", live.ID, "error", err)
+		s.logger.Error("broadcast remaining refresh failed", "session_id", live.ID, "error", err)
 		return
 	}
-	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, 1)))
+	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
 }
 
 // broadcastUsage는 이 세션의 실제 방송 시간과 이번 달 누적 차감을 원장에서 읽는다.

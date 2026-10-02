@@ -229,3 +229,26 @@ func TestIdleBroadcastRemainingIsFilledAndKept(t *testing.T) {
 		})
 	}
 }
+
+// go-live 뒤에는 방송 전 1배 값을 실제 대상 수 배수로 덮어쓴다(#394).
+func TestRefreshBroadcastRemainingUsesLiveTargetCount(t *testing.T) {
+	_, manager, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+		auth.StreamingProviderYouTube: &stubStreamingProvider{},
+	})
+	manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return plan.Beam, nil })
+	// Beam 월 120h 중 110h 사용 → 잔여 10h.
+	application.usageLedger = monthlyUsageLedger{used: 110 * time.Hour}
+	live, _, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.ResolutionFHD, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.fillIdleBroadcastRemaining(context.Background(), live, time.Now())
+	if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != 5*3600 {
+		t.Fatalf("before go-live got %v, want FHD single 5h", got)
+	}
+	// FHD 동시 송출(2대상)은 3배 → 10h/3.
+	application.refreshBroadcastRemaining(context.Background(), live, time.Now(), 2)
+	if got := live.Response().BroadcastRemainingSeconds; got == nil || *got != int64((10*time.Hour/3).Seconds()) {
+		t.Fatalf("after go-live got %v, want %d", got, int64((10 * time.Hour / 3).Seconds()))
+	}
+}

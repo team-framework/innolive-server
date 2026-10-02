@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"mime"
+	"net/mail"
 	"strings"
 	"time"
 )
@@ -113,17 +114,23 @@ func buildVerificationEmail(from, to, code string, purpose EmailPurpose, validFo
 	if err != nil {
 		return nil, err
 	}
+	messageID, err := newMessageID(from)
+	if err != nil {
+		return nil, err
+	}
 
 	// multipart/alternative 안에 텍스트와 multipart/related(HTML + 인라인 로고)를 둔다.
 	var message bytes.Buffer
 	message.WriteString("To: " + to + "\r\n")
 	message.WriteString("From: " + from + "\r\n")
 	message.WriteString("Subject: " + mime.BEncoding.Encode("UTF-8", content.subject) + "\r\n")
+	message.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
+	message.WriteString("Message-ID: " + messageID + "\r\n")
 	message.WriteString("MIME-Version: 1.0\r\n")
 	message.WriteString("Content-Type: multipart/alternative; boundary=\"" + alternative + "\"\r\n\r\n")
 	writeMIMEPart(&message, alternative, "text/plain; charset=UTF-8", nil, []byte(text))
 	message.WriteString("--" + alternative + "\r\n")
-	message.WriteString("Content-Type: multipart/related; boundary=\"" + related + "\"\r\n\r\n")
+	message.WriteString("Content-Type: multipart/related; type=\"text/html\"; boundary=\"" + related + "\"\r\n\r\n")
 	writeMIMEPart(&message, related, "text/html; charset=UTF-8", nil, []byte(htmlBody))
 	writeMIMEPart(&message, related, "image/png", []string{
 		"Content-ID: <" + mailLogoContentID + ">",
@@ -140,6 +147,21 @@ func mimeBoundary() (string, error) {
 		return "", err
 	}
 	return "innolive-" + hex.EncodeToString(random), nil
+}
+
+// newMessageID는 발신 주소의 도메인으로 Message-ID를 만든다. 발송 업체가 헤더를
+// 대신 붙여 준다는 보장이 없어 직접 넣는다(#397).
+func newMessageID(from string) (string, error) {
+	address, err := mail.ParseAddress(from)
+	if err != nil {
+		return "", fmt.Errorf("parse sender address: %w", err)
+	}
+	domain := address.Address[strings.LastIndex(address.Address, "@")+1:]
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return "<" + hex.EncodeToString(random) + "@" + domain + ">", nil
 }
 
 // writeMIMEPart는 본문을 base64로 76자마다 줄을 나눠 쓴다(SMTP 줄 길이 제한).

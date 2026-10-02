@@ -18,8 +18,12 @@ var (
 	// ErrAccountNotLinked는 어느 InnoLive 계정에도 연결되지 않은 구글·애플 신원이다.
 	// 로그인은 사용자를 만들지 않고 이 오류로 거절한다.
 	ErrAccountNotLinked = errors.New("identity is not linked to an InnoLive account")
-	// ErrProviderAlreadyLinked는 사용자에게 같은 공급자의 다른 신원이 이미 있다.
+	// ErrProviderAlreadyLinked는 사용자에게 다른 애플 신원이 이미 있다. 애플은 계정당 1개다.
 	ErrProviderAlreadyLinked = errors.New("provider is already linked to this account")
+	// ErrGoogleLinkLimit은 구글 로그인 연결이 상한(maxGoogleLogins)에 닿았다(#392).
+	ErrGoogleLinkLimit = errors.New("google login link limit reached")
+	// ErrMultipleLinks는 같은 공급자 연결이 여러 개라 해제할 연결 ID가 필요하다.
+	ErrMultipleLinks = errors.New("multiple links for provider; link id required")
 	// ErrIdentityLinkedElsewhere는 신원이 이메일 계정을 가진 다른 사용자에 붙어 있다.
 	ErrIdentityLinkedElsewhere = errors.New("identity is linked to another InnoLive account")
 	// ErrIdentityNotLinked는 해제하려는 공급자가 연결돼 있지 않다.
@@ -27,6 +31,9 @@ var (
 	// ErrLastLoginMethod는 해제하면 로그인할 수단이 남지 않는다.
 	ErrLastLoginMethod = errors.New("cannot unlink the last login method")
 )
+
+// maxGoogleLogins는 InnoLive 계정 하나에 연결할 수 있는 구글 로그인 수다(#392).
+const maxGoogleLogins = 5
 
 // PasswordSetupRequiredError는 연결된 신원이지만 사용자에게 이메일 계정이 없는
 // 경우다(#380 이전 OAuth 전용 가입자). 이메일 계정 설정용 짧은 토큰을 싣는다.
@@ -61,6 +68,7 @@ type LoginMethods struct {
 }
 
 type LinkedMethod struct {
+	ID       uuid.UUID     `json:"id"`
 	Provider OAuthProvider `json:"provider"`
 	Email    *string       `json:"email"`
 	LinkedAt time.Time     `json:"linked_at"`
@@ -93,7 +101,7 @@ func (s *AccountLinkStore) Link(ctx context.Context, userID uuid.UUID, identity 
 			Take(&existing)
 		switch {
 		case errors.Is(query.Error, gorm.ErrRecordNotFound):
-			if err := ensureProviderFree(tx, userID, identity.Provider); err != nil {
+			if err := ensureProviderFree(tx, userID, identity.Provider, 1); err != nil {
 				return err
 			}
 			account := newLinkedOAuthAccount(userID, identity, now)
@@ -127,7 +135,8 @@ func (s *AccountLinkStore) Link(ctx context.Context, userID uuid.UUID, identity 
 }
 
 // Unlink는 공급자 연결을 끊는다. 이메일 계정이 없으면 로그인 수단이 사라지므로 거절한다.
-func (s *AccountLinkStore) Unlink(ctx context.Context, userID uuid.UUID, provider OAuthProvider) error {
+// linkID가 nil이면 그 공급자 연결이 하나일 때만 끊는다 — 여러 개면 ErrMultipleLinks.
+func (s *AccountLinkStore) Unlink(ctx context.Context, userID uuid.UUID, provider OAuthProvider, linkID *uuid.UUID) error {
 	if s == nil || s.db == nil {
 		return errors.New("account link database is nil")
 	}
@@ -142,7 +151,19 @@ func (s *AccountLinkStore) Unlink(ctx context.Context, userID uuid.UUID, provide
 		if !hasEmail {
 			return ErrLastLoginMethod
 		}
-		deleted := tx.Where("user_id = ? AND provider = ?", userID, provider).Delete(&OAuthAccount{})
+		scope := tx.Where("user_id = ? AND provider = ?", userID, provider)
+		if linkID != nil {
+			scope = scope.Where("id = ?", *linkID)
+		} else {
+			var count int64
+			if err := tx.Model(&OAuthAccount{}).Where("user_id = ? AND provider = ?", userID, provider).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 1 {
+				return ErrMultipleLinks
+			}
+		}
+		deleted := scope.Delete(&OAuthAccount{})
 		if deleted.Error != nil {
 			return deleted.Error
 		}
@@ -168,11 +189,11 @@ func (s *AccountLinkStore) Methods(ctx context.Context, userID uuid.UUID) (Login
 		return LoginMethods{}, err
 	}
 	var accounts []OAuthAccount
-	if err := db.Where("user_id = ?", userID).Order("provider").Find(&accounts).Error; err != nil {
+	if err := db.Where("user_id = ?", userID).Order("provider, created_at").Find(&accounts).Error; err != nil {
 		return LoginMethods{}, err
 	}
 	for _, account := range accounts {
-		methods.Providers = append(methods.Providers, LinkedMethod{Provider: account.Provider, Email: account.ProviderEmail, LinkedAt: account.CreatedAt})
+		methods.Providers = append(methods.Providers, LinkedMethod{ID: account.ID, Provider: account.Provider, Email: account.ProviderEmail, LinkedAt: account.CreatedAt})
 	}
 	return methods, nil
 }
@@ -192,10 +213,19 @@ func lockActiveUser(tx *gorm.DB, userID uuid.UUID) error {
 	return nil
 }
 
-func ensureProviderFree(tx *gorm.DB, userID uuid.UUID, provider OAuthProvider) error {
+// ensureProviderFree는 userID에 provider 신원 adding개를 더 붙일 수 있는지 본다.
+// 애플은 계정당 1개, 구글은 maxGoogleLogins개까지다(#392). 호출자가 사용자 행을
+// 잠근 트랜잭션 안에서 부르므로 세기와 추가 사이에 다른 연결이 끼어들지 않는다.
+func ensureProviderFree(tx *gorm.DB, userID uuid.UUID, provider OAuthProvider, adding int) error {
 	var count int64
 	if err := tx.Model(&OAuthAccount{}).Where("user_id = ? AND provider = ?", userID, provider).Count(&count).Error; err != nil {
 		return err
+	}
+	if provider == OAuthProviderGoogle {
+		if int(count)+adding > maxGoogleLogins {
+			return ErrGoogleLinkLimit
+		}
+		return nil
 	}
 	if count != 0 {
 		return ErrProviderAlreadyLinked
@@ -212,7 +242,7 @@ func userHasEmailAccount(tx *gorm.DB, userID uuid.UUID) (bool, error) {
 }
 
 // mergeUser는 이메일 계정이 없는 from 사용자를 into로 합치고 from을 지운다(#380 결정 a).
-//   - OAuth 신원: 모두 into로 옮긴다. into에 같은 공급자가 이미 있으면 병합 전체를 거절한다
+//   - OAuth 신원: 모두 into로 옮긴다. 애플이 양쪽에 있거나 구글이 상한을 넘으면 병합 전체를 거절한다
 //   - 송출 계정: into에 없는 플랫폼만 옮기고, 겹치면 into 것을 남긴다
 //   - 사용 기록(usage_sessions): into로 옮긴다
 //   - 플랜: 둘 중 높은 것
@@ -231,8 +261,12 @@ func mergeUser(tx *gorm.DB, from, into uuid.UUID, now time.Time) error {
 	if err := tx.Where("user_id = ?", from).Find(&fromAccounts).Error; err != nil {
 		return err
 	}
+	adding := map[OAuthProvider]int{}
 	for _, account := range fromAccounts {
-		if err := ensureProviderFree(tx, into, account.Provider); err != nil {
+		adding[account.Provider]++
+	}
+	for provider, count := range adding {
+		if err := ensureProviderFree(tx, into, provider, count); err != nil {
 			return err
 		}
 	}

@@ -57,6 +57,8 @@ func (h *tokenHTTPHandler) handleYouTubeConnect(w http.ResponseWriter, r *http.R
 		case errors.Is(err, ErrYouTubeAuthCodeRejected):
 			h.logYouTubeConnectFailure(r, "auth_code_rejected", err, "code_source", source)
 			h.writeError(w, r, http.StatusBadRequest, "invalid_auth_code", "The authorization code was rejected. Sign in with Google again.")
+		case errors.Is(err, ErrStreamingAccountLimit):
+			h.writeError(w, r, http.StatusConflict, "youtube_channel_limit", "Up to 5 YouTube channels can be connected. Disconnect one first.")
 		case errors.Is(err, ErrYouTubeChannelMissing):
 			h.logYouTubeConnectFailure(r, "channel_missing", err, "code_source", source)
 			h.writeError(w, r, http.StatusUnprocessableEntity, "youtube_channel_missing", "The Google account has no YouTube channel.")

@@ -15,7 +15,7 @@ import (
 )
 
 // TestPostgresStreamingAccountUpsert는 메모리 대역이 할 수 없는 PostgreSQL 고유 부분을
-// 검증한다. ON CONFLICT (user_id, provider) upsert 경로, 고유 인덱스, 행 잠금 refresh
+// 검증한다. ON CONFLICT (user_id, channel_id) WHERE provider='youtube' upsert 경로, 고유 인덱스, 행 잠금 refresh
 // token 갱신. TEST_DATABASE_URL을 주면 돌고, 매번 격리된 임시 스키마를 쓴다.
 func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
@@ -48,11 +48,11 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 재연결: 같은 (user, provider)는 새 행이 아니라 기존 행 갱신이어야 한다.
+	// 재연결: 같은 채널은 새 행이 아니라 기존 행 갱신이어야 한다(#390).
 	second := StreamingAccount{
 		UserID:                 user.ID,
 		Provider:               StreamingProviderYouTube,
-		ChannelID:              "UCsecond",
+		ChannelID:              "UCfirst",
 		RefreshTokenCiphertext: []byte{4, 5, 6},
 	}
 	if err := store.Upsert(ctx, second); err != nil {
@@ -65,12 +65,11 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if updated.ID != created.ID {
 		t.Fatalf("re-connect created a new row: %s -> %s", created.ID, updated.ID)
 	}
-	if updated.ChannelID != "UCsecond" || string(updated.RefreshTokenCiphertext) != string([]byte{4, 5, 6}) {
+	if updated.ChannelID != "UCfirst" || updated.ChannelTitle != nil || string(updated.RefreshTokenCiphertext) != string([]byte{4, 5, 6}) {
 		t.Fatalf("re-connect did not replace channel/token: %+v", updated)
 	}
 
-	// 재연결은 이전 채널에 만든 재사용 스트림을 초기화해야 한다 — 안 그러면
-	// 다음 Prepare가 남의 채널 스트림 키를 재사용한다.
+	// 재연결은 재사용 스트림을 초기화한다 — 다음 Prepare가 새로 만든다.
 	if err := store.UpdateStreamInfo(ctx, updated.ID, StreamInfo{
 		StreamID:              "stream-of-first-channel",
 		RtmpsIngestionAddress: "rtmps://a.example/live2",
@@ -81,7 +80,7 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if err := store.Upsert(ctx, StreamingAccount{
 		UserID:                 user.ID,
 		Provider:               StreamingProviderYouTube,
-		ChannelID:              "UCthird",
+		ChannelID:              "UCfirst",
 		RefreshTokenCiphertext: []byte{1, 1, 1},
 	}); err != nil {
 		t.Fatal(err)
@@ -129,7 +128,7 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if marked.ReconnectRequiredAt == nil {
 		t.Fatal("ReconnectRequiredAt not persisted")
 	}
-	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderYouTube, ChannelID: "UCsecond"}); err != nil {
+	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderYouTube, ChannelID: "UCfirst"}); err != nil {
 		t.Fatal(err)
 	}
 	cleared, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
@@ -171,6 +170,145 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	}
 	if err := store.Upsert(ctx, StreamingAccount{UserID: disabled.ID, Provider: StreamingProviderYouTube, ChannelID: "UCx"}); !errors.Is(err, ErrUserInactive) {
 		t.Fatalf("disabled user upsert error = %v, want ErrUserInactive", err)
+	}
+}
+
+// 유튜브는 채널 단위로 여러 개(상한 5), 치지직은 1개다(#390). 채널이 여러 개면
+// 연결 ID를 지정해야 조회되고, 지정이 없으면 서버가 대신 고르지 않는다.
+func TestPostgresStreamingAccountsYouTubeChannelsPerUser(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL streaming account integration test")
+	}
+	db := newPostgresStreamingTestDB(t, databaseURL)
+	now := time.Now().UTC()
+	user := User{ID: uuid.New(), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+	other := User{ID: uuid.New(), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&[]User{user, other}).Error; err != nil {
+		t.Fatal(err)
+	}
+	store := NewGormStreamingAccountStore(db)
+	ctx := context.Background()
+	youtube := func(userID uuid.UUID, channel string) StreamingAccount {
+		return StreamingAccount{UserID: userID, Provider: StreamingProviderYouTube, ChannelID: channel, RefreshTokenCiphertext: []byte(channel)}
+	}
+
+	if err := store.Upsert(ctx, youtube(user.ID, "UC1")); err != nil {
+		t.Fatal(err)
+	}
+	only, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
+	if err != nil || only.ChannelID != "UC1" {
+		t.Fatalf("single channel get = %+v, %v", only, err)
+	}
+	if err := store.Upsert(ctx, youtube(user.ID, "UC2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, user.ID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountSelectionRequired) {
+		t.Fatalf("get without selection error = %v, want ErrStreamingAccountSelectionRequired", err)
+	}
+	listed, err := store.ListByUser(ctx, user.ID)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("list = %d, %v", len(listed), err)
+	}
+	second := listed[1]
+	if second.ChannelID != "UC2" {
+		t.Fatalf("list order = %s, want connection order", second.ChannelID)
+	}
+	picked, err := store.Get(WithStreamingAccount(ctx, second.ID), user.ID, StreamingProviderYouTube)
+	if err != nil || picked.ID != second.ID {
+		t.Fatalf("selected get = %+v, %v", picked, err)
+	}
+	// 남의 연결 ID로는 조회되지 않는다.
+	if _, err := store.Get(WithStreamingAccount(ctx, second.ID), other.ID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatalf("foreign account get error = %v, want ErrStreamingAccountNotFound", err)
+	}
+
+	// 같은 채널 재연결은 행을 늘리지 않고, 상한은 새 채널에만 걸린다.
+	for _, channel := range []string{"UC3", "UC4", "UC5", "UC2"} {
+		if err := store.Upsert(ctx, youtube(user.ID, channel)); err != nil {
+			t.Fatalf("upsert %s: %v", channel, err)
+		}
+	}
+	if err := store.Upsert(ctx, youtube(user.ID, "UC6")); !errors.Is(err, ErrStreamingAccountLimit) {
+		t.Fatalf("sixth channel error = %v, want ErrStreamingAccountLimit", err)
+	}
+	// 다른 사용자는 같은 채널을 따로 연결할 수 있다(브랜드 채널 공동 관리).
+	if err := store.Upsert(ctx, youtube(other.ID, "UC1")); err != nil {
+		t.Fatalf("other user same channel: %v", err)
+	}
+
+	// 치지직은 사용자당 1개 — 다른 채널로 재연결해도 같은 행을 갱신한다.
+	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderChzzk, ChannelID: "chzzk-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderChzzk, ChannelID: "chzzk-b"}); err != nil {
+		t.Fatal(err)
+	}
+	chzzk, err := store.Get(ctx, user.ID, StreamingProviderChzzk)
+	if err != nil || chzzk.ChannelID != "chzzk-b" {
+		t.Fatalf("chzzk reconnect = %+v, %v", chzzk, err)
+	}
+	var count int64
+	db.Model(&StreamingAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 6 {
+		t.Fatalf("rows = %d, want 5 youtube + 1 chzzk", count)
+	}
+}
+
+// 기동 시 AutoMigrate가 옛 사용자·플랫폼 고유 키를 제약·인덱스 어느 형태든 지우고
+// 플랫폼별 부분 고유 인덱스로 바꾼다(#390).
+func TestPostgresAutoMigrateSwapsStreamingUserProviderUnique(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL migration integration test")
+	}
+	for _, legacy := range []string{
+		"ALTER TABLE streaming_accounts ADD CONSTRAINT uidx_streaming_user_provider UNIQUE (user_id, provider)",
+		"CREATE UNIQUE INDEX uidx_streaming_user_provider ON streaming_accounts (user_id, provider)",
+	} {
+		db := newPostgresRefreshTestDB(t, databaseURL)
+		ctx := context.Background()
+		if err := AutoMigrate(ctx, db); err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range []string{"DROP INDEX uidx_streaming_user_chzzk", "DROP INDEX uidx_streaming_user_youtube_channel", legacy} {
+			if err := db.Exec(statement).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := AutoMigrate(ctx, db); err != nil {
+			t.Fatalf("auto migrate over %q: %v", legacy, err)
+		}
+		var names []string
+		db.Raw("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'streaming_accounts'").Scan(&names)
+		joined := strings.Join(names, ",")
+		if strings.Contains(joined, "uidx_streaming_user_provider") || !strings.Contains(joined, "uidx_streaming_user_chzzk") || !strings.Contains(joined, "uidx_streaming_user_youtube_channel") {
+			t.Fatalf("indexes after %q = %s", legacy, joined)
+		}
+
+		now := time.Now().UTC()
+		user := User{ID: uuid.New(), Status: UserStatusActive, CreatedAt: now, UpdatedAt: now}
+		if err := db.Create(&user).Error; err != nil {
+			t.Fatal(err)
+		}
+		insert := func(provider StreamingProvider, channel string) error {
+			return db.Create(&StreamingAccount{ID: uuid.New(), UserID: user.ID, Provider: provider, ChannelID: channel, ConnectedAt: now, CreatedAt: now, UpdatedAt: now}).Error
+		}
+		if err := insert(StreamingProviderYouTube, "UC1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := insert(StreamingProviderYouTube, "UC2"); err != nil {
+			t.Fatalf("second youtube channel rejected after %q: %v", legacy, err)
+		}
+		if err := insert(StreamingProviderYouTube, "UC1"); err == nil {
+			t.Fatalf("database accepted the same youtube channel twice after %q", legacy)
+		}
+		if err := insert(StreamingProviderChzzk, "c1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := insert(StreamingProviderChzzk, "c2"); err == nil {
+			t.Fatalf("database accepted a second chzzk link after %q", legacy)
+		}
 	}
 }
 

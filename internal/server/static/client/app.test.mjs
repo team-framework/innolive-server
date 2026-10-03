@@ -1096,6 +1096,8 @@ test("유튜브 채널이 여러 개면 고른 채널로 준비하고 그 채널
   assert.equal(els.youtubeChannelRow.hidden, false);
   assert.deepEqual(els.youtubeChannel.children.map((option) => option.textContent), ["본 채널", "브랜드 채널"]);
   assert.equal(els.youtubeChannel.value, "yt-1");
+  assert.equal(els.connectYoutubeBtn.textContent, "YouTube 채널 추가 연결");
+  assert.equal(els.disconnectYoutubeBtn.textContent, "선택한 YouTube 채널 해제");
 
   els.youtubeChannel.value = "yt-2";
   await prepareTargetWithConfirm("s-1", "youtube");

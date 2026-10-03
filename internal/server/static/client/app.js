@@ -1853,6 +1853,9 @@ async function connectYoutube() {
     client_id: config.web_client_id,
     scope: config.scope,
     ux_mode: "popup",
+    // 매번 계정·채널 선택 화면을 띄운다. 채널을 하나 더 연결하려면 다른 구글 계정이나
+    // 브랜드 채널을 골라야 한다(#390).
+    select_account: true,
     callback: (response) => {
       if (!response.code) {
         setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
@@ -1874,7 +1877,12 @@ async function connectYoutube() {
           await refreshStreamingAccounts().catch(() => null);
         } catch (error) {
           setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
-          setYoutubeDetail(`연결 실패: ${error.message}`, true);
+          setYoutubeDetail(
+            error.payload?.error?.code === "youtube_channel_limit"
+              ? "유튜브 채널은 5개까지 연결할 수 있습니다. 하나를 해제한 뒤 다시 연결하세요."
+              : `연결 실패: ${error.message}`,
+            true,
+          );
           logEvent("error", "YouTube connect failed", { message: error.message });
         }
       })();
@@ -2017,7 +2025,11 @@ async function refreshStreamingAccounts() {
   renderYoutubeChannels(list.filter((account) => account?.provider === "youtube"));
   const chzzk = list.find((account) => account?.provider === "chzzk");
   els.disconnectChzzkBtn.hidden = !chzzk;
-  els.disconnectYoutubeBtn.hidden = !list.some((account) => account?.provider === "youtube");
+  const youtubeConnected = list.some((account) => account?.provider === "youtube");
+  els.disconnectYoutubeBtn.hidden = !youtubeConnected;
+  // 연결돼 있으면 같은 버튼이 채널 추가 연결이 된다(#390).
+  els.connectYoutubeBtn.textContent = youtubeConnected ? "YouTube 채널 추가 연결" : "YouTube 계정 연결";
+  els.disconnectYoutubeBtn.textContent = youtubeConnected && els.youtubeChannel.children.length > 1 ? "선택한 YouTube 채널 해제" : "YouTube 연결 해제";
   if (chzzk) {
     const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
     setChzzkDetail(

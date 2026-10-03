@@ -569,3 +569,42 @@ func TestYouTubeRateLimitIsDistinguished(t *testing.T) {
 		t.Fatalf("error = %v, want ErrPlatformRateLimited", err)
 	}
 }
+
+// channelTokens는 ctx에 실린 연결마다 다른 토큰을 준다(#390).
+type channelTokens map[uuid.UUID]string
+
+func (c channelTokens) AccessToken(ctx context.Context, _ uuid.UUID) (string, error) {
+	accountID, ok := auth.StreamingAccountFromContext(ctx)
+	if !ok {
+		return "", auth.ErrStreamingAccountSelectionRequired
+	}
+	return c[accountID], nil
+}
+
+// 탈퇴·해제 정리는 채널마다 그 채널의 토큰으로 재사용 스트림을 지운다(#390). 사용자
+// 기준 토큰을 쓰면 채널이 여러 개일 때 남의 채널 스트림을 지우려다 실패한다.
+func TestCleanupStreamingResourcesUsesEachChannelToken(t *testing.T) {
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Query().Get("id")] = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	userID, first, second := uuid.New(), uuid.New(), uuid.New()
+	provider, err := NewYouTubeProvider(channelTokens{first: "at-first", second: "at-second"}, newMemoryStore(), testCipher(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBase = server.URL
+	for id, stream := range map[uuid.UUID]string{first: "stream-first", second: "stream-second"} {
+		streamID := stream
+		account := auth.StreamingAccount{ID: id, UserID: userID, Provider: auth.StreamingProviderYouTube, StreamID: &streamID}
+		if err := provider.CleanupStreamingResources(context.Background(), account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen["stream-first"] != "Bearer at-first" || seen["stream-second"] != "Bearer at-second" {
+		t.Fatalf("cleanup tokens = %v, want each channel's own token", seen)
+	}
+}

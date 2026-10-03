@@ -66,6 +66,8 @@ const buttonKeys = [
   "youtubeTitle",
   "youtubePrivacy",
   "youtubeCategory",
+  "youtubeChannel",
+  "youtubeChannelRow",
   "youtubeThumbnail",
   "youtubeDescription",
   "youtubeMadeForKids",
@@ -1068,6 +1070,43 @@ test("유튜브 연결 해제 버튼은 연결돼 있을 때만 보이고 DELETE
   await disconnectYoutube();
   assert.ok(calls.includes("DELETE /auth/streaming/accounts/youtube"));
   assert.equal(els.disconnectYoutubeBtn.hidden, true);
+});
+
+test("유튜브 채널이 여러 개면 고른 채널로 준비하고 그 채널만 해제한다", async () => {
+  const calls = [];
+  let accounts = [
+    { id: "yt-1", provider: "youtube", channel_title: "본 채널" },
+    { id: "yt-2", provider: "youtube", channel_title: "브랜드 채널" },
+  ];
+  const { prepareTargetWithConfirm, disconnectYoutube, refreshStreamingAccounts, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const path = new URL(url).pathname;
+      calls.push({ method: options?.method || "GET", path, body: options?.body ? JSON.parse(options.body) : undefined });
+      if (path === "/auth/streaming/accounts") {
+        return jsonResponse(accounts);
+      }
+      if (options?.method === "DELETE") {
+        accounts = accounts.filter((account) => !path.endsWith(account.id));
+      }
+      return jsonResponse({ session_id: "s-1", items: [] });
+    },
+  });
+  state.accessToken = "access-token";
+  await refreshStreamingAccounts();
+  assert.equal(els.youtubeChannelRow.hidden, false);
+  assert.deepEqual(els.youtubeChannel.children.map((option) => option.textContent), ["본 채널", "브랜드 채널"]);
+  assert.equal(els.youtubeChannel.value, "yt-1");
+
+  els.youtubeChannel.value = "yt-2";
+  await prepareTargetWithConfirm("s-1", "youtube");
+  assert.deepEqual(calls.find((call) => call.path === "/sessions/s-1/stream/prepare").body, { provider: "youtube", account_id: "yt-2" });
+  // 치지직 준비에는 유튜브 채널을 싣지 않는다.
+  await prepareTargetWithConfirm("s-1", "chzzk");
+  assert.deepEqual(calls.filter((call) => call.path === "/sessions/s-1/stream/prepare").at(-1).body, { provider: "chzzk" });
+
+  await disconnectYoutube();
+  assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/auth/streaming/accounts/youtube/yt-2"));
+  assert.deepEqual(els.youtubeChannel.children.map((option) => option.value), ["yt-1"]);
 });
 
 test("직전 방송 값 불러오기를 끄면 카드를 채우지 않는다", async () => {

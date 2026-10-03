@@ -68,6 +68,7 @@ const buttonKeys = [
   "youtubeCategory",
   "youtubeChannel",
   "youtubeChannelRow",
+  "disconnectYoutubeChannel",
   "youtubeThumbnail",
   "youtubeDescription",
   "youtubeMadeForKids",
@@ -1067,7 +1068,7 @@ test("유튜브 연결 해제 버튼은 연결돼 있을 때만 보이고 DELETE
   state.accessToken = "access-token";
   await refreshStreamingAccounts();
   assert.equal(els.disconnectYoutubeBtn.hidden, false);
-  await disconnectYoutube();
+  await disconnectYoutube(() => true);
   assert.ok(calls.includes("DELETE /auth/streaming/accounts/youtube"));
   assert.equal(els.disconnectYoutubeBtn.hidden, true);
 });
@@ -1097,7 +1098,8 @@ test("유튜브 채널이 여러 개면 고른 채널로 준비하고 그 채널
   assert.deepEqual(els.youtubeChannel.children.map((option) => option.textContent), ["본 채널", "브랜드 채널"]);
   assert.equal(els.youtubeChannel.value, "yt-1");
   assert.equal(els.connectYoutubeBtn.textContent, "YouTube 채널 추가 연결");
-  assert.equal(els.disconnectYoutubeBtn.textContent, "선택한 YouTube 채널 해제");
+  assert.equal(els.disconnectYoutubeBtn.textContent, "이 채널 연결 해제");
+  assert.equal(els.disconnectYoutubeChannel.hidden, false);
 
   els.youtubeChannel.value = "yt-2";
   await prepareTargetWithConfirm("s-1", "youtube");
@@ -1106,8 +1108,18 @@ test("유튜브 채널이 여러 개면 고른 채널로 준비하고 그 채널
   await prepareTargetWithConfirm("s-1", "chzzk");
   assert.deepEqual(calls.filter((call) => call.path === "/sessions/s-1/stream/prepare").at(-1).body, { provider: "chzzk" });
 
-  await disconnectYoutube();
+  // 해제할 채널은 해제 버튼 옆 목록에서 따로 고르고, 확인을 거절하면 보내지 않는다.
+  els.disconnectYoutubeChannel.value = "yt-2";
+  const asked = [];
+  await disconnectYoutube((message) => {
+    asked.push(message);
+    return false;
+  });
+  assert.equal(calls.some((call) => call.method === "DELETE"), false);
+  assert.match(asked[0], /브랜드 채널/);
+  await disconnectYoutube(() => true);
   assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/auth/streaming/accounts/youtube/yt-2"));
+  assert.equal(els.disconnectYoutubeChannel.hidden, true);
   assert.deepEqual(els.youtubeChannel.children.map((option) => option.value), ["yt-1"]);
 });
 

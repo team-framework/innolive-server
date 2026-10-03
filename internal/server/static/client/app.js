@@ -189,6 +189,7 @@ function bindElements() {
     "connectChzzkBtn",
     "disconnectChzzkBtn",
     "disconnectYoutubeBtn",
+    "disconnectYoutubeChannel",
     "loadBroadcastDefaults",
     "chzzkCallbackRow",
     "chzzkCallbackUrl",
@@ -2029,7 +2030,8 @@ async function refreshStreamingAccounts() {
   els.disconnectYoutubeBtn.hidden = !youtubeConnected;
   // 연결돼 있으면 같은 버튼이 채널 추가 연결이 된다(#390).
   els.connectYoutubeBtn.textContent = youtubeConnected ? "YouTube 채널 추가 연결" : "YouTube 계정 연결";
-  els.disconnectYoutubeBtn.textContent = youtubeConnected && els.youtubeChannel.children.length > 1 ? "선택한 YouTube 채널 해제" : "YouTube 연결 해제";
+  els.disconnectYoutubeBtn.textContent =
+    youtubeConnected && els.disconnectYoutubeChannel.children.length > 1 ? "이 채널 연결 해제" : "YouTube 연결 해제";
   if (chzzk) {
     const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
     setChzzkDetail(
@@ -2056,6 +2058,20 @@ function renderYoutubeChannels(channels) {
   els.youtubeChannel.replaceChildren(...options);
   els.youtubeChannel.value = channels.some((account) => account.id === previous) ? previous : channels[0]?.id || "";
   els.youtubeChannelRow.hidden = channels.length === 0;
+  // 해제할 채널은 송출 채널과 따로 고른다 — 해제 버튼 옆 목록에서 고른 채널만 끊는다.
+  const previousTarget = els.disconnectYoutubeChannel.value;
+  els.disconnectYoutubeChannel.replaceChildren(
+    ...channels.map((account) => {
+      const option = document.createElement("option");
+      option.value = account.id;
+      option.textContent = account.channel_title || account.channel_id || "이름 없는 채널";
+      return option;
+    }),
+  );
+  els.disconnectYoutubeChannel.value = channels.some((account) => account.id === previousTarget)
+    ? previousTarget
+    : channels[0]?.id || "";
+  els.disconnectYoutubeChannel.hidden = channels.length < 2;
 }
 
 // youtubeAccountId는 송출할 유튜브 채널의 연결 ID다. 채널이 없으면 undefined.
@@ -2069,9 +2085,14 @@ function withYoutubeAccount(body, providers) {
   return accountId && providers.includes("youtube") ? { ...body, account_id: accountId } : body;
 }
 
-async function disconnectYoutube() {
+async function disconnectYoutube(confirmDisconnect = (message) => window.confirm(message)) {
+  const select = els.disconnectYoutubeChannel;
+  const accountId = select?.value || undefined;
+  const title = [...(select?.options || select?.children || [])].find((option) => option.value === accountId)?.textContent;
+  if (accountId && !confirmDisconnect(`YouTube 채널 "${title || accountId}" 연결을 해제할까요?`)) {
+    return;
+  }
   try {
-    const accountId = youtubeAccountId();
     const path = accountId ? `/auth/streaming/accounts/youtube/${encodeURIComponent(accountId)}` : "/auth/streaming/accounts/youtube";
     await apiFetch(path, { method: "DELETE" });
     els.disconnectYoutubeBtn.hidden = true;

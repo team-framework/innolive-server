@@ -306,14 +306,27 @@ func (s *memoryStreamingAccountStore) ListByUser(_ context.Context, userID uuid.
 	return accounts, nil
 }
 
-func (s *memoryStreamingAccountStore) Get(_ context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error) {
+// Get은 gorm 구현과 같은 규칙을 따른다: ctx의 연결 ID가 있으면 그 연결, 없으면
+// 연결이 하나일 때만 그것(#390).
+func (s *memoryStreamingAccountStore) Get(ctx context.Context, userID uuid.UUID, provider StreamingProvider) (StreamingAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	account, ok := s.accounts[streamingKey(userID, provider)]
-	if !ok {
-		return StreamingAccount{}, ErrStreamingAccountNotFound
+	selected, hasSelection := StreamingAccountFromContext(ctx)
+	var matches []StreamingAccount
+	for _, account := range s.accounts {
+		if account.UserID != userID || account.Provider != provider || (hasSelection && account.ID != selected) {
+			continue
+		}
+		matches = append(matches, account)
 	}
-	return account, nil
+	switch len(matches) {
+	case 0:
+		return StreamingAccount{}, ErrStreamingAccountNotFound
+	case 1:
+		return matches[0], nil
+	default:
+		return StreamingAccount{}, ErrStreamingAccountSelectionRequired
+	}
 }
 
 func (s *memoryStreamingAccountStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
@@ -550,6 +563,67 @@ func TestYouTubeAccessTokenProviderSerializesRefresh(t *testing.T) {
 	oauth.mu.Unlock()
 	if refreshedWith != "rt-secret" {
 		t.Fatalf("refreshed with %q, want decrypted refresh token", refreshedWith)
+	}
+}
+
+// 채널마다 다른 refresh token을 주는 인가 대역. 토큰이 채널 간에 섞이면 드러난다.
+type perChannelYouTubeAuthorizer struct {
+	stubYouTubeAuthorizer
+}
+
+func (s *perChannelYouTubeAuthorizer) RefreshAccessToken(_ context.Context, refreshToken string) (YouTubeTokenResponse, error) {
+	s.refreshCalls.Add(1)
+	return YouTubeTokenResponse{AccessToken: "at-for-" + refreshToken, ExpiresIn: 3600}, nil
+}
+
+// 토큰 캐시는 채널(연결) 단위다(#390). 한 사용자의 두 채널이 서로의 토큰을 받지
+// 않고, 채널이 여러 개인데 지정이 없으면 고르지 않는다.
+func TestYouTubeAccessTokenProviderCachesPerChannel(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	ids := map[string]uuid.UUID{}
+	for _, channel := range []string{"UC1", "UC2"} {
+		ciphertext, version, err := cipher.Encrypt("rt-" + channel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := uuid.New()
+		ids[channel] = id
+		store.accounts[channel] = StreamingAccount{ID: id, UserID: userID, Provider: StreamingProviderYouTube, ChannelID: channel, RefreshTokenCiphertext: ciphertext, TokenKeyVersion: version}
+	}
+	oauth := &perChannelYouTubeAuthorizer{}
+	provider, err := NewYouTubeAccessTokenProvider(oauth, store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	for range 2 {
+		for _, channel := range []string{"UC1", "UC2"} {
+			token, err := provider.AccessToken(WithStreamingAccount(ctx, ids[channel]), userID)
+			if err != nil || token != "at-for-rt-"+channel {
+				t.Fatalf("token for %s = %q, %v", channel, token, err)
+			}
+		}
+	}
+	if calls := oauth.refreshCalls.Load(); calls != 2 {
+		t.Fatalf("refresh calls = %d, want one per channel", calls)
+	}
+	if _, err := provider.AccessToken(ctx, userID); !errors.Is(err, ErrStreamingAccountSelectionRequired) {
+		t.Fatalf("unselected token error = %v, want ErrStreamingAccountSelectionRequired", err)
+	}
+	// 남의 사용자가 이 연결 ID를 대도 캐시된 토큰을 받지 못한다.
+	if _, err := provider.AccessToken(WithStreamingAccount(ctx, ids["UC1"]), uuid.New()); !errors.Is(err, ErrStreamingNotConnected) {
+		t.Fatalf("foreign user token error = %v, want ErrStreamingNotConnected", err)
+	}
+	// 해제(캐시 비우기) 뒤에는 남은 채널도 다시 발급받는다.
+	provider.ClearCachedToken(userID)
+	if _, err := provider.AccessToken(WithStreamingAccount(ctx, ids["UC2"]), userID); err != nil {
+		t.Fatal(err)
+	}
+	if calls := oauth.refreshCalls.Load(); calls != 3 {
+		t.Fatalf("refresh calls after clear = %d, want 3", calls)
 	}
 }
 

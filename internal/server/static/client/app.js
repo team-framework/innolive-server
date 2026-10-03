@@ -224,6 +224,8 @@ function bindElements() {
     "youtubeTitle",
     "youtubePrivacy",
     "youtubeCategory",
+    "youtubeChannel",
+    "youtubeChannelRow",
     "youtubeThumbnail",
     "youtubeDescription",
     "youtubeMadeForKids",
@@ -339,6 +341,14 @@ function bindEvents() {
   els.completeChzzkBtn.addEventListener("click", () => void completeChzzkConnect());
   els.disconnectChzzkBtn.addEventListener("click", () => void disconnectChzzk());
   els.disconnectYoutubeBtn.addEventListener("click", () => void disconnectYoutube());
+  // 직전 방송 값은 채널마다 다르다 — 채널을 바꾸면 그 채널 값으로 다시 채운다(#390).
+  els.youtubeChannel.addEventListener("change", () => {
+    state.platformDefaultsLoaded.delete("youtube");
+    const sessionId = state.session?.session_id;
+    if (sessionId) {
+      void applyPlatformDefaults(sessionId, "youtube");
+    }
+  });
   // 새로고침·탭 닫기면 세션을 지운다. 그대로 두면 서버가 망 복구를 기다리며 약
   // 50초 세션을 쥐고 있어 다시 시작할 때 409가 난다.
   window.addEventListener("pagehide", () => closeSessionOnPageHide());
@@ -1843,6 +1853,9 @@ async function connectYoutube() {
     client_id: config.web_client_id,
     scope: config.scope,
     ux_mode: "popup",
+    // 매번 계정·채널 선택 화면을 띄운다. 채널을 하나 더 연결하려면 다른 구글 계정이나
+    // 브랜드 채널을 골라야 한다(#390).
+    select_account: true,
     callback: (response) => {
       if (!response.code) {
         setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
@@ -1864,7 +1877,12 @@ async function connectYoutube() {
           await refreshStreamingAccounts().catch(() => null);
         } catch (error) {
           setBroadcastStatus(els.broadcastAccounts, "연결 실패", "error");
-          setYoutubeDetail(`연결 실패: ${error.message}`, true);
+          setYoutubeDetail(
+            error.payload?.error?.code === "youtube_channel_limit"
+              ? "유튜브 채널은 5개까지 연결할 수 있습니다. 하나를 해제한 뒤 다시 연결하세요."
+              : `연결 실패: ${error.message}`,
+            true,
+          );
           logEvent("error", "YouTube connect failed", { message: error.message });
         }
       })();
@@ -2004,9 +2022,14 @@ async function refreshStreamingAccounts() {
     list.length ? list.map(describe).join(" · ") : "연결된 계정 없음",
     list.length ? "ok" : "warn",
   );
+  renderYoutubeChannels(list.filter((account) => account?.provider === "youtube"));
   const chzzk = list.find((account) => account?.provider === "chzzk");
   els.disconnectChzzkBtn.hidden = !chzzk;
-  els.disconnectYoutubeBtn.hidden = !list.some((account) => account?.provider === "youtube");
+  const youtubeConnected = list.some((account) => account?.provider === "youtube");
+  els.disconnectYoutubeBtn.hidden = !youtubeConnected;
+  // 연결돼 있으면 같은 버튼이 채널 추가 연결이 된다(#390).
+  els.connectYoutubeBtn.textContent = youtubeConnected ? "YouTube 채널 추가 연결" : "YouTube 계정 연결";
+  els.disconnectYoutubeBtn.textContent = youtubeConnected && els.youtubeChannel.children.length > 1 ? "선택한 YouTube 채널 해제" : "YouTube 연결 해제";
   if (chzzk) {
     const title = chzzk.channel_title || chzzk.channel_id || "알 수 없는 채널";
     setChzzkDetail(
@@ -2019,9 +2042,38 @@ async function refreshStreamingAccounts() {
   }
 }
 
+// renderYoutubeChannels는 연결된 유튜브 채널을 송출 채널 목록에 채운다(#390). 방송은
+// 고른 채널 하나로만 나간다. 고르던 채널이 남아 있으면 선택을 유지한다.
+function renderYoutubeChannels(channels) {
+  const previous = els.youtubeChannel.value;
+  const options = channels.map((account) => {
+    const option = document.createElement("option");
+    option.value = account.id;
+    option.textContent =
+      (account.channel_title || account.channel_id || "이름 없는 채널") + (account.reconnect_required ? " (재연결 필요)" : "");
+    return option;
+  });
+  els.youtubeChannel.replaceChildren(...options);
+  els.youtubeChannel.value = channels.some((account) => account.id === previous) ? previous : channels[0]?.id || "";
+  els.youtubeChannelRow.hidden = channels.length === 0;
+}
+
+// youtubeAccountId는 송출할 유튜브 채널의 연결 ID다. 채널이 없으면 undefined.
+function youtubeAccountId() {
+  return els.youtubeChannel?.value || undefined;
+}
+
+// withYoutubeAccount는 유튜브가 들어가는 요청에 고른 채널을 싣는다.
+function withYoutubeAccount(body, providers) {
+  const accountId = youtubeAccountId();
+  return accountId && providers.includes("youtube") ? { ...body, account_id: accountId } : body;
+}
+
 async function disconnectYoutube() {
   try {
-    await apiFetch("/auth/streaming/accounts/youtube", { method: "DELETE" });
+    const accountId = youtubeAccountId();
+    const path = accountId ? `/auth/streaming/accounts/youtube/${encodeURIComponent(accountId)}` : "/auth/streaming/accounts/youtube";
+    await apiFetch(path, { method: "DELETE" });
     els.disconnectYoutubeBtn.hidden = true;
     logEvent("ok", "YouTube account disconnected");
     await refreshStreamingAccounts().catch(() => null);
@@ -2466,7 +2518,9 @@ async function applyPlatformDefaults(sessionId, provider) {
   }
   const untouched = (field) => !state.touchedBroadcastFields.has(`${provider}:${field}`);
   try {
-    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}`);
+    const accountId = provider === "youtube" ? youtubeAccountId() : undefined;
+    const query = accountId ? `&account_id=${encodeURIComponent(accountId)}` : "";
+    const defaults = await apiFetch(`/sessions/${sessionId}/broadcast/defaults?provider=${provider}${query}`);
     state.platformDefaultsLoaded.add(provider);
     if (provider === "chzzk") {
       if (untouched("title")) {
@@ -2935,7 +2989,9 @@ async function prepareTargetWithConfirm(sessionId, provider, confirmConcurrent =
   const request = (allowConcurrent) =>
     apiFetch(`/sessions/${sessionId}/stream/prepare`, {
       method: "POST",
-      body: JSON.stringify(allowConcurrent ? { provider, allow_concurrent: true } : { provider }),
+      body: JSON.stringify(
+        withYoutubeAccount(allowConcurrent ? { provider, allow_concurrent: true } : { provider }, [provider]),
+      ),
     });
   try {
     return await request(false);
@@ -3035,7 +3091,7 @@ async function changeBroadcastMode() {
         await savePlatformSettings(sessionId, provider);
       }
     }
-    const body = { resolution: els.broadcastResolution.value, targets };
+    const body = withYoutubeAccount({ resolution: els.broadcastResolution.value, targets }, targets);
     const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
       method: "PUT",
       body: JSON.stringify(body),
@@ -3128,7 +3184,7 @@ async function acceptUpgradeOffer(option, confirmRestart = (message) => window.c
       logEvent("ok", "Upgrade option selected", { session_id: sessionId, mode: option.mode });
       return;
     }
-    const body = { resolution: option.resolution, targets: option.targets };
+    const body = withYoutubeAccount({ resolution: option.resolution, targets: option.targets }, option.targets);
     const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
       method: "PUT",
       body: JSON.stringify(body),
@@ -3154,7 +3210,7 @@ async function confirmUpgradeOption() {
         await savePlatformSettings(sessionId, provider);
       }
     }
-    const body = { resolution: option.resolution, targets: option.targets };
+    const body = withYoutubeAccount({ resolution: option.resolution, targets: option.targets }, option.targets);
     const session = await apiFetch(`/sessions/${sessionId}/broadcast-mode`, {
       method: "PUT",
       body: JSON.stringify(body),

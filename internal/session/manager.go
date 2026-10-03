@@ -81,6 +81,10 @@ type StreamState struct {
 type TargetState struct {
 	Provider string      `json:"provider"`
 	Stream   StreamState `json:"stream"`
+	// AccountID·ChannelTitle은 이 대상이 송출하는 채널이다(#390). 유튜브 채널이 여러
+	// 개일 때 "○○ 채널로 송출 중"을 보여 주는 데 쓴다. 준비 전에는 비어 있다.
+	AccountID    *uuid.UUID `json:"account_id,omitempty"`
+	ChannelTitle string     `json:"channel_title,omitempty"`
 }
 
 // PeerRecoveryStatus는 WebRTC 입력 연결의 네트워크 복구 단계다. RTMP egress의
@@ -848,8 +852,9 @@ func (m *Manager) List() []*Session {
 
 // ProviderInUse는 사용자의 세션 중 그 플랫폼 대상이 준비·라이브 중이거나 송출
 // 방식을 전환하는 중인지다(#348). 전환 중에는 대상이 잠깐 비었다가 다시 열리므로
-// 사용 중으로 본다.
-func (m *Manager) ProviderInUse(userID uuid.UUID, provider string) bool {
+// 사용 중으로 본다. accountID를 주면 그 연결(채널)로 나가는 방송만 센다(#390) —
+// 아직 연결이 정해지지 않은 준비 구간과 연결 ID 없는 방송은 안전하게 사용 중으로 본다.
+func (m *Manager) ProviderInUse(userID uuid.UUID, provider string, accountID uuid.UUID) bool {
 	for _, s := range m.List() {
 		if s.UserID != userID {
 			continue
@@ -860,6 +865,10 @@ func (m *Manager) ProviderInUse(userID uuid.UUID, provider string) bool {
 		s.mu.RLock()
 		target := s.targets[provider]
 		busy := target != nil && target.phase != BroadcastPhaseIdle
+		if busy && accountID != uuid.Nil && target.platformBroadcast != nil &&
+			target.platformBroadcast.AccountID != uuid.Nil && target.platformBroadcast.AccountID != accountID {
+			busy = false
+		}
 		s.mu.RUnlock()
 		if busy {
 			return true
@@ -2054,7 +2063,13 @@ func targetStatesLocked(s *Session) []TargetState {
 	sort.Strings(providers)
 	states := make([]TargetState, 0, len(providers))
 	for _, provider := range providers {
-		states = append(states, TargetState{Provider: provider, Stream: targetStreamLocked(s, *s.targets[provider])})
+		state := TargetState{Provider: provider, Stream: targetStreamLocked(s, *s.targets[provider])}
+		if broadcast := s.targets[provider].platformBroadcast; broadcast != nil && broadcast.AccountID != uuid.Nil {
+			accountID := broadcast.AccountID
+			state.AccountID = &accountID
+			state.ChannelTitle = broadcast.ChannelTitle
+		}
+		states = append(states, state)
 	}
 	return states
 }

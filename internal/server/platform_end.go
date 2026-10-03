@@ -68,7 +68,7 @@ func (s *Server) stopPlatformEndedTargets(ctx context.Context, live *session.Ses
 		if broadcast.BroadcastID == "" || !s.platformEnds.due(live.ID+"/"+provider, now, interval) {
 			continue
 		}
-		checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
+		checkCtx, cancel := context.WithTimeout(auth.WithStreamingAccount(ctx, broadcast.AccountID), limitCheckInterval)
 		ended, err := checker.BroadcastEnded(checkCtx, live.UserID, broadcast.BroadcastID)
 		cancel()
 		if err != nil {

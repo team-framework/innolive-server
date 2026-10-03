@@ -10,6 +10,8 @@ import (
 
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
+
+	"github.com/google/uuid"
 )
 
 // 방송 중 송출 방식 전환(#283 해상도, #300 대상 구성). 유튜브·치지직 모두 같은
@@ -56,7 +58,7 @@ func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Req
 	}
 	liveTargets, _ := liveSession.BroadcastActivity()
 	if len(liveTargets) > 0 {
-		s.startBroadcastSwitch(w, liveSession, resolution, liveTargets)
+		s.startBroadcastSwitch(w, liveSession, resolution, liveTargets, uuid.Nil)
 		return
 	}
 	if liveSession.Resolution() == resolution {
@@ -89,6 +91,9 @@ func (s *Server) handlePutBroadcastMode(w http.ResponseWriter, r *http.Request, 
 	request := struct {
 		Resolution string   `json:"resolution"`
 		Targets    []string `json:"targets"`
+		// AccountID는 방송 중 새로 추가하는 유튜브 대상의 채널 연결 ID다(#390).
+		// 이미 송출 중인 유튜브는 원래 채널을 이어 가므로 쓰지 않는다.
+		AccountID string `json:"account_id"`
 	}{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
@@ -127,7 +132,24 @@ func (s *Server) handlePutBroadcastMode(w http.ResponseWriter, r *http.Request, 
 		writeError(w, apiError{Status: http.StatusConflict, Code: "broadcast_not_live", Message: "Change the broadcast mode while live. Before going live, prepare the targets you want.", Details: map[string]any{"session_id": liveSession.ID}})
 		return
 	}
-	s.startBroadcastSwitch(w, liveSession, resolution, targets)
+	youtubeAccount := uuid.Nil
+	youtube := string(auth.StreamingProviderYouTube)
+	if slices.Contains(targets, youtube) && !slices.Contains(liveTargets, youtube) {
+		requested, invalid := parseAccountID(request.AccountID)
+		if invalid != nil {
+			writeError(w, *invalid)
+			return
+		}
+		// 추가할 유튜브 채널을 방송을 건드리기 전에 확정한다 — 전환 도중에 채널을
+		// 고르라는 실패가 나면 기존 대상만 끊긴 채로 남는다.
+		ctx, failure := s.streamingAccountContext(r.Context(), liveSession.UserID, auth.StreamingProviderYouTube, requested)
+		if failure != nil {
+			writeError(w, *failure)
+			return
+		}
+		youtubeAccount, _ = auth.StreamingAccountFromContext(ctx)
+	}
+	s.startBroadcastSwitch(w, liveSession, resolution, targets, youtubeAccount)
 }
 
 func switchInProgressError(sessionID string) apiError {
@@ -140,7 +162,10 @@ func broadcastBusyError(sessionID string) apiError {
 
 // startBroadcastSwitch는 방송 중 송출 방식 전환을 검증하고 시작한다. 플랜과 자리는
 // 전환 뒤 구성으로 판정하며, 방송을 건드리기 전에 거절한다.
-func (s *Server) startBroadcastSwitch(w http.ResponseWriter, liveSession *session.Session, resolution string, targets []string) {
+//
+// youtubeAccount는 새로 추가하는 유튜브 대상의 채널이다. 이미 송출 중인 유튜브는
+// 해상도가 바뀌어 새 방송을 열더라도 원래 채널을 이어 간다(#390).
+func (s *Server) startBroadcastSwitch(w http.ResponseWriter, liveSession *session.Session, resolution string, targets []string, youtubeAccount uuid.UUID) {
 	liveTargets, _ := liveSession.BroadcastActivity()
 	slices.Sort(liveTargets)
 	targets = slices.Clone(targets)
@@ -166,7 +191,16 @@ func (s *Server) startBroadcastSwitch(w http.ResponseWriter, liveSession *sessio
 		writeError(w, switchInProgressError(liveSession.ID))
 		return
 	}
-	go s.runBroadcastSwitch(liveSession, resolution, liveTargets, targets, pausedAfterSwitch(liveTargets, liveSession.PausedTargets(), targets))
+	accounts := map[string]uuid.UUID{}
+	for _, provider := range liveTargets {
+		if broadcast, _ := liveSession.PlatformBroadcast(provider); broadcast.AccountID != uuid.Nil {
+			accounts[provider] = broadcast.AccountID
+		}
+	}
+	if youtube := string(auth.StreamingProviderYouTube); youtubeAccount != uuid.Nil && accounts[youtube] == uuid.Nil {
+		accounts[youtube] = youtubeAccount
+	}
+	go s.runBroadcastSwitch(liveSession, resolution, liveTargets, targets, pausedAfterSwitch(liveTargets, liveSession.PausedTargets(), targets), accounts)
 	writeJSON(w, http.StatusAccepted, liveSession.Response())
 }
 
@@ -190,7 +224,7 @@ func pausedAfterSwitch(live, paused, to []string) []string {
 // 한 대상이 실패해도 나머지는 계속하고 되돌리지 않는다(동시 발사와 같은 규칙).
 // 유튜브를 먼저 열고, 방금 끝낸 치지직은 이전 방송이 닫힐 때까지 기다렸다가 연다.
 // 멈춰 있던 대상(paused)은 새 방송을 연 뒤 다시 멈춘다.
-func (s *Server) runBroadcastSwitch(liveSession *session.Session, resolution string, from, to, paused []string) {
+func (s *Server) runBroadcastSwitch(liveSession *session.Session, resolution string, from, to, paused []string, accounts map[string]uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), resolutionSwitchTimeout)
 	defer cancel()
 	// 화질 올리기 제안을 승낙한 전환이면 새 송출이 보류분을 먼저 쓴다. 남은 것은
@@ -243,13 +277,13 @@ func (s *Server) runBroadcastSwitch(liveSession *session.Session, resolution str
 			delayed = append(delayed, provider)
 			continue
 		}
-		if failure := s.reopenTarget(ctx, liveSession, provider, slices.Contains(paused, provider)); failure != nil {
+		if failure := s.reopenTarget(auth.WithStreamingAccount(ctx, accounts[provider]), liveSession, provider, slices.Contains(paused, provider)); failure != nil {
 			fail(provider, failure.Code)
 		}
 	}
 	if len(delayed) > 0 && s.waitResolutionSwitch(ctx, liveSession, time.Until(stoppedAt.Add(resolutionSwitchChzzkWait))) {
 		for _, provider := range delayed {
-			if failure := s.reopenTarget(ctx, liveSession, provider, slices.Contains(paused, provider)); failure != nil {
+			if failure := s.reopenTarget(auth.WithStreamingAccount(ctx, accounts[provider]), liveSession, provider, slices.Contains(paused, provider)); failure != nil {
 				fail(provider, failure.Code)
 			}
 		}

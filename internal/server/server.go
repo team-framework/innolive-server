@@ -453,10 +453,17 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		// AllowConcurrent는 채널이 이미 다른 도구로 라이브 중이어도 방송을 하나 더
 		// 연다는 사용자 확인이다(#361).
 		AllowConcurrent bool `json:"allow_concurrent"`
+		// AccountID는 송출할 유튜브 채널의 연결 ID다(#390). 연결이 하나면 생략한다.
+		AccountID string `json:"account_id"`
 	}{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
 		writeError(w, badRequest("Invalid stream prepare request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	requestedAccount, invalid := parseAccountID(request.AccountID)
+	if invalid != nil {
+		writeError(w, *invalid)
 		return
 	}
 	// 요청의 provider는 이 호출이 준비할 대상이다(#233). 생략하면 세션이
@@ -467,13 +474,19 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if providerName == "" {
 		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
+	// 송출 채널을 먼저 확정한다. 이후 확인·준비는 모두 이 채널로 간다.
+	ctx, failure := s.streamingAccountContext(r.Context(), liveSession.UserID, providerName, requestedAccount)
+	if failure != nil {
+		writeError(w, *failure)
+		return
+	}
 	if !request.AllowConcurrent {
-		if conflict := s.channelAlreadyLive(r.Context(), liveSession, providerName); conflict != nil {
+		if conflict := s.channelAlreadyLive(ctx, liveSession, providerName); conflict != nil {
 			writeError(w, *conflict)
 			return
 		}
 	}
-	warnings, failure := s.prepareTarget(r.Context(), liveSession, providerName)
+	warnings, failure := s.prepareTarget(ctx, liveSession, providerName)
 	if failure != nil {
 		writeError(w, *failure)
 		return
@@ -498,6 +511,10 @@ func (s *Server) channelAlreadyLive(ctx context.Context, liveSession *session.Se
 		return nil
 	}
 	ids, err := checker.ActiveBroadcasts(ctx, liveSession.UserID)
+	if errors.Is(err, auth.ErrStreamingAccountSelectionRequired) {
+		// 채널을 고르지 않은 요청이다 — 준비가 youtube_channel_required로 답한다.
+		return nil
+	}
 	if err != nil {
 		s.logger.Warn("active broadcast check failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
 		return nil
@@ -590,9 +607,11 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 		s.ownBroadcasts.add(prepared.BroadcastID)
 	}
 	preparedRecord := session.PlatformBroadcast{
-		Provider:    string(prepared.Provider),
-		BroadcastID: prepared.BroadcastID,
-		StreamID:    prepared.StreamID,
+		Provider:     string(prepared.Provider),
+		BroadcastID:  prepared.BroadcastID,
+		StreamID:     prepared.StreamID,
+		AccountID:    prepared.AccountID,
+		ChannelTitle: prepared.ChannelTitle,
 	}
 	if err != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
@@ -687,6 +706,7 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 		Provider:    providerName,
 		BroadcastID: broadcast.BroadcastID,
 		StreamID:    broadcast.StreamID,
+		AccountID:   broadcast.AccountID,
 	}
 	if err := provider.GoLive(ctx, liveSession.UserID, prepared); err != nil {
 		// 전환에 실패했으면 준비 상태로 되돌린다. 그 사이 중지가 들어왔다면
@@ -808,6 +828,7 @@ func (s *Server) endLiveBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 		Provider:    providerName,
 		BroadcastID: broadcast.BroadcastID,
 		StreamID:    broadcast.StreamID,
+		AccountID:   broadcast.AccountID,
 	})
 	if err != nil {
 		s.logger.Warn("end superseded live broadcast failed", "user_id", userID, "broadcast_id", broadcast.BroadcastID, "error", err)
@@ -859,6 +880,7 @@ func (s *Server) disposeBroadcastWithContext(parent context.Context, userID uuid
 		Provider:    providerName,
 		BroadcastID: broadcast.BroadcastID,
 		StreamID:    broadcast.StreamID,
+		AccountID:   broadcast.AccountID,
 	}
 	var err error
 	switch phase {
@@ -906,6 +928,7 @@ func (s *Server) discardBroadcast(userID uuid.UUID, broadcast session.PlatformBr
 		Provider:    providerName,
 		BroadcastID: broadcast.BroadcastID,
 		StreamID:    broadcast.StreamID,
+		AccountID:   broadcast.AccountID,
 	})
 	if err != nil {
 		s.logger.Warn("discard prepared broadcast failed", "user_id", userID, "provider", providerName, "broadcast_id", broadcast.BroadcastID, "error", err)
@@ -944,6 +967,8 @@ func broadcastPhaseError(phase session.BroadcastPhase, sessionID string) *apiErr
 // prepareError는 플랫폼 준비 실패를 응답 오류로 옮긴다.
 func (s *Server) prepareError(err error, sessionID string, providerName auth.StreamingProvider) *apiError {
 	switch {
+	case errors.Is(err, auth.ErrStreamingAccountSelectionRequired):
+		return youtubeChannelRequiredError(providerName)
 	case errors.Is(err, auth.ErrStreamingNotConnected):
 		return &apiError{Status: http.StatusConflict, Code: "streaming_not_connected", Message: "Connect a streaming account before starting a stream.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, auth.ErrStreamingReconnectRequired):
@@ -1119,8 +1144,15 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 		providerName = auth.StreamingProviderYouTube
 	}
 	defaults := streaming.FallbackDefaults()
+	// 직전 방송 값은 채널마다 다르다 — account_id로 고른 채널의 값을 읽는다(#390).
+	requestedAccount, invalid := parseAccountID(r.URL.Query().Get("account_id"))
+	if invalid != nil {
+		writeError(w, *invalid)
+		return
+	}
+	ctx := auth.WithStreamingAccount(r.Context(), requestedAccount)
 	if provider := s.streaming[providerName]; provider != nil {
-		if loaded, err := provider.Defaults(r.Context(), liveSession.UserID); err != nil {
+		if loaded, err := provider.Defaults(ctx, liveSession.UserID); err != nil {
 			// 계정 미연결·권한·네트워크 어느 쪽이든 사용자가 할 일은 같다:
 			// 폴백값으로 폼을 열고 직접 채운다.
 			s.logger.Info("load broadcast defaults failed", "session_id", liveSession.ID, "provider", providerName, "error", err)

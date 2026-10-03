@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"inno-live-server/internal/auth"
+
 	"github.com/google/uuid"
 )
 
@@ -36,7 +38,7 @@ func (p *YouTubeProvider) UpdateLive(ctx context.Context, userID uuid.UUID, prep
 	if prepared.BroadcastID == "" {
 		return errors.New("youtube live update requires a broadcast id")
 	}
-	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	accessToken, err := p.tokens.AccessToken(auth.WithStreamingAccount(ctx, prepared.AccountID), userID)
 	if err != nil {
 		return err
 	}

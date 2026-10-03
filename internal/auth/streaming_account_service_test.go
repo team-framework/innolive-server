@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -87,7 +88,7 @@ func disconnectFixture(t *testing.T, cleanupErr, revokeErr error) (*StreamingAcc
 // → ③행 삭제 순서가 지켜져야 한다(#88 — 토큰을 먼저 폐기하면 ①이 불가능).
 func TestDisconnectRunsStepsInOrder(t *testing.T) {
 	service, store, userID, order := disconnectFixture(t, nil, nil)
-	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"cleanup", "revoke:rt-secret", "delete", "clear-cache"}
@@ -119,7 +120,7 @@ func TestDisconnectContinuesWhenPlatformStepsFail(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			service, store, userID, order := disconnectFixture(t, tc.cleanupErr, tc.revokeErr)
-			if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
+			if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); err != nil {
 				t.Fatalf("Disconnect must succeed despite platform failures: %v", err)
 			}
 			if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
@@ -149,7 +150,7 @@ func TestDisconnectWithoutHooksDeletesRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Get(context.Background(), userID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
@@ -159,7 +160,7 @@ func TestDisconnectWithoutHooksDeletesRow(t *testing.T) {
 
 func TestDisconnectNotConnected(t *testing.T) {
 	service, _, _, _ := disconnectFixture(t, nil, nil)
-	if err := service.Disconnect(context.Background(), uuid.New(), StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
+	if err := service.Disconnect(context.Background(), uuid.New(), StreamingProviderYouTube, nil); !errors.Is(err, ErrStreamingAccountNotFound) {
 		t.Fatalf("error = %v, want ErrStreamingAccountNotFound", err)
 	}
 }
@@ -336,10 +337,10 @@ func TestRevokeTokenTreatsAlreadyInvalidAsSuccess(t *testing.T) {
 // 방송에 쓰이는 플랫폼은 해제하지 않는다 — 플랫폼 단계도 행 삭제도 하지 않는다(#348).
 func TestDisconnectRejectedWhileProviderInUse(t *testing.T) {
 	service, store, userID, order := disconnectFixture(t, nil, nil)
-	service.SetInUseChecker(func(id uuid.UUID, provider StreamingProvider) bool {
+	service.SetInUseChecker(func(id uuid.UUID, provider StreamingProvider, _ uuid.UUID) bool {
 		return id == userID && provider == StreamingProviderYouTube
 	})
-	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountInUse) {
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); !errors.Is(err, ErrStreamingAccountInUse) {
 		t.Fatalf("err = %v, want ErrStreamingAccountInUse", err)
 	}
 	if len(*order) != 0 {
@@ -349,8 +350,53 @@ func TestDisconnectRejectedWhileProviderInUse(t *testing.T) {
 		t.Fatalf("account row must be kept: %v", err)
 	}
 
-	service.SetInUseChecker(func(uuid.UUID, StreamingProvider) bool { return false })
-	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube); err != nil {
+	service.SetInUseChecker(func(uuid.UUID, StreamingProvider, uuid.UUID) bool { return false })
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 유튜브 채널이 여러 개면 연결 ID로 하나만 해제하고, 방송에 고정된 채널만 막는다(#390).
+func TestDisconnectYouTubeChannelByID(t *testing.T) {
+	service, store, userID, order := disconnectFixture(t, nil, nil)
+	first, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher := testProviderTokenCipher(t)
+	ciphertext, version, err := cipher.Encrypt("rt-second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := uuid.New()
+	store.accounts["second"] = StreamingAccount{ID: secondID, UserID: userID, Provider: StreamingProviderYouTube, ChannelID: "UCsecond", RefreshTokenCiphertext: ciphertext, TokenKeyVersion: version}
+	var checked []uuid.UUID
+	service.SetInUseChecker(func(_ uuid.UUID, _ StreamingProvider, accountID uuid.UUID) bool {
+		checked = append(checked, accountID)
+		return accountID == first.ID
+	})
+
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, nil); !errors.Is(err, ErrStreamingAccountSelectionRequired) {
+		t.Fatalf("disconnect without id error = %v, want ErrStreamingAccountSelectionRequired", err)
+	}
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, &first.ID); !errors.Is(err, ErrStreamingAccountInUse) {
+		t.Fatalf("disconnect live channel error = %v, want ErrStreamingAccountInUse", err)
+	}
+	foreign := uuid.New()
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, &foreign); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatalf("disconnect unknown id error = %v, want ErrStreamingAccountNotFound", err)
+	}
+	if err := service.Disconnect(context.Background(), userID, StreamingProviderYouTube, &secondID); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 2 || checked[1] != secondID {
+		t.Fatalf("in-use checks = %v, want per-channel ids", checked)
+	}
+	if got := strings.Join(*order, ","); got != "cleanup,revoke:rt-second,delete,clear-cache" {
+		t.Fatalf("order = %s", got)
+	}
+	remaining, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
+	if err != nil || remaining.ID != first.ID {
+		t.Fatalf("remaining = %+v, %v; want the live channel kept", remaining, err)
 	}
 }

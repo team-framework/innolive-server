@@ -117,7 +117,7 @@ func (s *Server) handlePatchLiveBroadcast(w http.ResponseWriter, r *http.Request
 		return
 	}
 	broadcast, _ := liveSession.PlatformBroadcast(string(providerName))
-	prepared := streaming.PreparedBroadcast{Provider: providerName, BroadcastID: broadcast.BroadcastID, StreamID: broadcast.StreamID}
+	prepared := streaming.PreparedBroadcast{Provider: providerName, BroadcastID: broadcast.BroadcastID, StreamID: broadcast.StreamID, AccountID: broadcast.AccountID}
 	if err := updater.UpdateLive(r.Context(), liveSession.UserID, prepared, update); err != nil {
 		writeError(w, s.liveUpdateError(err, liveSession.ID, providerName))
 		return

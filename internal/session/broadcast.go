@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // 방송 설정 한계값. 제목·설명은 YouTube liveBroadcasts.insert의 문자 수 제한,
@@ -196,6 +198,12 @@ type PlatformBroadcast struct {
 	Provider    string
 	BroadcastID string
 	StreamID    string
+	// AccountID는 이 방송을 내보내는 송출 연결(채널)이다(#390). 유튜브는 채널이
+	// 여러 개일 수 있어, 라이브 전환·종료·설정 변경·상태 확인이 모두 준비 때 고른
+	// 이 연결로 간다. 비어 있으면 그 플랫폼 연결이 하나뿐이던 때의 방송이다.
+	AccountID uuid.UUID
+	// ChannelTitle은 준비 시점의 채널 이름이다. 응답 표시용이다.
+	ChannelTitle string
 	// IngestURL은 egress를 준비 시점이 아니라 라이브 전환 시점에 붙이는
 	// 플랫폼(치지직)에서만 채워진다. 스트림키가 들어 있으므로 응답·로그에
 	// 싣지 않는다.

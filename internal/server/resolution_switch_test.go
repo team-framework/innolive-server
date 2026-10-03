@@ -38,6 +38,12 @@ func newLiveSwitchFixture(t *testing.T, chzzkWait time.Duration) liveSwitchFixtu
 // newModeSwitchFixture는 플랜·시작 해상도·시작 대상을 골라 라이브를 세운다.
 func newModeSwitchFixture(t *testing.T, chzzkWait time.Duration, owner plan.Plan, resolution string, targets ...string) liveSwitchFixture {
 	t.Helper()
+	return newConfiguredModeSwitchFixture(t, chzzkWait, owner, resolution, nil, targets...)
+}
+
+// newConfiguredModeSwitchFixture는 준비 전에 플랫폼 대역을 고칠 수 있다.
+func newConfiguredModeSwitchFixture(t *testing.T, chzzkWait time.Duration, owner plan.Plan, resolution string, configure func(youtube, chzzk *stubStreamingProvider), targets ...string) liveSwitchFixture {
+	t.Helper()
 	previousWait, previousRetry := resolutionSwitchChzzkWait, resolutionSwitchRetryInterval
 	resolutionSwitchChzzkWait, resolutionSwitchRetryInterval = chzzkWait, 20*time.Millisecond
 	t.Cleanup(func() { resolutionSwitchChzzkWait, resolutionSwitchRetryInterval = previousWait, previousRetry })
@@ -45,6 +51,9 @@ func newModeSwitchFixture(t *testing.T, chzzkWait time.Duration, owner plan.Plan
 	output := t.TempDir()
 	youtube := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderYouTube, BroadcastID: "yt-1", IngestURL: filepath.Join(output, "youtube.flv")}}
 	chzzk := &stubStreamingProvider{prepared: streaming.PreparedBroadcast{Provider: auth.StreamingProviderChzzk, IngestURL: filepath.Join(output, "chzzk.flv")}}
+	if configure != nil {
+		configure(youtube, chzzk)
+	}
 	server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{
 		auth.StreamingProviderYouTube: youtube,
 		auth.StreamingProviderChzzk:   chzzk,
@@ -372,6 +381,35 @@ func TestBroadcastModeAddsTargetWithoutTouchingLiveOne(t *testing.T) {
 	}
 	if prepare, goLive, _ := fixture.chzzk.calls(); prepare != 1 || goLive != 1 {
 		t.Fatalf("chzzk calls prepare=%d goLive=%d, want opened once", prepare, goLive)
+	}
+}
+
+// 해상도를 바꿔 새 방송을 열어도 유튜브는 준비 때 고른 채널로 다시 연다(#390).
+func TestResolutionSwitchReopensYouTubeOnPinnedChannel(t *testing.T) {
+	pinned := uuid.New()
+	fixture := newConfiguredModeSwitchFixture(t, 50*time.Millisecond, plan.Plasma, session.Resolution720p, func(youtube, _ *stubStreamingProvider) {
+		youtube.prepared.AccountID = pinned
+	}, "youtube")
+	if status, payload := fixture.putResolution(t, "fhd"); status != http.StatusAccepted {
+		t.Fatalf("status = %d %v", status, payload)
+	}
+	if _, state := fixture.waitSwitch(t); state["status"] != "done" || state["failed_targets"] != nil {
+		t.Fatalf("state = %v, want done", state)
+	}
+	fixture.youtube.mu.Lock()
+	accounts := slices.Clone(fixture.youtube.preparedAccounts)
+	lastGoLive := fixture.youtube.lastGoLive
+	fixture.youtube.mu.Unlock()
+	if len(accounts) != 2 || accounts[1] != pinned {
+		t.Fatalf("prepare accounts = %v, want reopen on %v", accounts, pinned)
+	}
+	if lastGoLive.AccountID != pinned {
+		t.Fatalf("go live account = %v, want %v", lastGoLive.AccountID, pinned)
+	}
+	final := getSessionPayload(t, fixture.baseURL, fixture.sessionID, fixture.ownerToken)
+	targets, _ := final["targets"].([]any)
+	if len(targets) != 1 || targets[0].(map[string]any)["account_id"] != pinned.String() {
+		t.Fatalf("targets = %v, want pinned account in response", targets)
 	}
 }
 

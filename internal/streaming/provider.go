@@ -59,6 +59,11 @@ type PreparedBroadcast struct {
 	IngestURL   string
 	BroadcastID string
 	StreamID    string
+	// AccountID는 방송을 내보내는 송출 연결(채널)이다(#390). 이후 이 방송의 플랫폼
+	// 호출(라이브 전환·종료·설정 변경)은 이 연결의 토큰으로만 나간다.
+	AccountID uuid.UUID
+	// ChannelTitle은 준비 시점의 채널 이름이다(응답 표시용).
+	ChannelTitle string
 	// Warnings는 선택 항목(카테고리·썸네일) 반영 실패 목록이다.
 	Warnings []Warning
 }

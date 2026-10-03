@@ -236,6 +236,17 @@ func TestPostgresStreamingAccountsYouTubeChannelsPerUser(t *testing.T) {
 	if err := store.Upsert(ctx, youtube(other.ID, "UC1")); err != nil {
 		t.Fatalf("other user same channel: %v", err)
 	}
+	// 같은 채널을 다른 계정도 연결했는지 — 해제 때 권한 취소 여부를 가른다(#404).
+	mine, err := store.Get(WithStreamingAccount(ctx, listed[0].ID), user.ID, StreamingProviderYouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared, err := store.ChannelSharedWith(ctx, mine); err != nil || !shared {
+		t.Fatalf("UC1 shared = %v, %v; want true", shared, err)
+	}
+	if shared, err := store.ChannelSharedWith(ctx, second); err != nil || shared {
+		t.Fatalf("UC2 shared = %v, %v; want false", shared, err)
+	}
 
 	// 치지직은 사용자당 1개 — 다른 채널로 재연결해도 같은 행을 갱신한다.
 	if err := store.Upsert(ctx, StreamingAccount{UserID: user.ID, Provider: StreamingProviderChzzk, ChannelID: "chzzk-a"}); err != nil {

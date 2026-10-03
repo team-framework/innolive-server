@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -398,5 +399,57 @@ func TestDisconnectYouTubeChannelByID(t *testing.T) {
 	remaining, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
 	if err != nil || remaining.ID != first.ID {
 		t.Fatalf("remaining = %+v, %v; want the live channel kept", remaining, err)
+	}
+}
+
+// 같은 채널을 다른 InnoLive 계정도 연결했으면 해제·탈퇴는 내 연결 행만 지우고
+// 플랫폼 권한은 취소하지 않는다(#404). 마지막 연결이 사라질 때만 취소한다.
+func TestSharedChannelSkipsRevokeUntilLastConnection(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	store := newMemoryStreamingAccountStore()
+	owners := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	for _, owner := range owners {
+		ciphertext, version, err := cipher.Encrypt("rt-" + owner.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.accounts[owner.String()] = StreamingAccount{ID: uuid.New(), UserID: owner, Provider: StreamingProviderYouTube, ChannelID: "UCshared", RefreshTokenCiphertext: ciphertext, TokenKeyVersion: version}
+	}
+	var revoked []string
+	hooks := map[StreamingProvider]StreamingDisconnectHooks{
+		StreamingProviderYouTube: {RevokeToken: func(_ context.Context, refreshToken string) error {
+			revoked = append(revoked, refreshToken)
+			return nil
+		}},
+	}
+	service, err := NewStreamingAccountService(store, testUserStatusChecker{status: UserStatusActive}, cipher, hooks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := service.Disconnect(ctx, owners[0], StreamingProviderYouTube, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CleanupForWithdrawal(ctx, owners[1]); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked) != 0 {
+		t.Fatalf("revoked = %v, want none while another account uses the channel", revoked)
+	}
+	if _, err := store.Get(ctx, owners[0], StreamingProviderYouTube); !errors.Is(err, ErrStreamingAccountNotFound) {
+		t.Fatalf("disconnected row must be gone: %v", err)
+	}
+	if _, err := store.Get(ctx, owners[2], StreamingProviderYouTube); err != nil {
+		t.Fatalf("other account connection must stay: %v", err)
+	}
+	// 탈퇴 정리는 행을 남기고(탈퇴 트랜잭션이 지운다) 외부 정리만 한다 — 여기선 직접 지운다.
+	delete(store.accounts, owners[1].String())
+
+	if err := service.Disconnect(ctx, owners[2], StreamingProviderYouTube, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(revoked, []string{"rt-" + owners[2].String()}) {
+		t.Fatalf("revoked = %v, want the last connection revoked", revoked)
 	}
 }

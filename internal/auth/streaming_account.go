@@ -154,6 +154,10 @@ type StreamingAccountStore interface {
 	// UpdateChannel은 플랫폼 쪽 채널 표시 정보를 갱신한다(사용자가 채널명을
 	// 바꾼 경우의 신선도 유지 — 연결·방송 준비 시점에만 호출된다).
 	UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error
+	// ChannelSharedWith는 같은 플랫폼 채널을 연결한 다른 행(다른 InnoLive 계정)이
+	// 있는지다. 플랫폼 권한 취소는 채널 단위로 걸려, 남이 쓰는 채널이면 취소하지
+	// 않는다(#404).
+	ChannelSharedWith(ctx context.Context, account StreamingAccount) (bool, error)
 }
 
 type gormStreamingAccountStore struct {
@@ -276,6 +280,19 @@ func (s *gormStreamingAccountStore) UpdateStreamInfo(ctx context.Context, id uui
 			"updated_at":                     now,
 		}).Error
 	})
+}
+
+func (s *gormStreamingAccountStore) ChannelSharedWith(ctx context.Context, account StreamingAccount) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("streaming account database is nil")
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("provider = ? AND channel_id = ? AND id <> ?", account.Provider, account.ChannelID, account.ID).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *gormStreamingAccountStore) UpdateChannel(ctx context.Context, id uuid.UUID, channelID string, channelTitle *string) error {

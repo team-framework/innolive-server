@@ -435,20 +435,29 @@ func (s *YouTubeConnectService) refreshTokenExpiry(token YouTubeTokenResponse) *
 }
 
 // YouTubeAccessTokenProvider는 저장된 refresh token으로 access token을
-// 발급·캐시한다. 갱신은 사용자 단위로 직렬화한다 — 한 사용자의 방송 세션
-// 여러 개가 동시에 만료를 만나도 토큰 엔드포인트 호출은 한 번만 나간다.
+// 발급·캐시한다. 캐시와 갱신은 연결(채널) 단위다(#390) — 사용자 단위로 두면 채널이
+// 여러 개일 때 다른 채널의 토큰을 돌려준다. 한 채널의 방송 세션 여러 개가 동시에
+// 만료를 만나도 토큰 엔드포인트 호출은 한 번만 나간다.
 type YouTubeAccessTokenProvider struct {
 	oauth  YouTubeAuthorizer
 	store  StreamingAccountStore
 	cipher *ProviderTokenCipher
 	now    func() time.Time
 
-	mu    sync.Mutex
-	users map[uuid.UUID]*userAccessToken
+	mu       sync.Mutex
+	accounts map[uuid.UUID]*accountAccessToken
 }
 
+// userAccessToken은 사용자당 연결이 하나인 플랫폼(치지직)의 토큰 캐시다.
 type userAccessToken struct {
 	mu        sync.Mutex
+	token     string
+	expiresAt time.Time
+}
+
+type accountAccessToken struct {
+	mu        sync.Mutex
+	userID    uuid.UUID
 	token     string
 	expiresAt time.Time
 }
@@ -458,26 +467,36 @@ func NewYouTubeAccessTokenProvider(oauth YouTubeAuthorizer, store StreamingAccou
 		return nil, errors.New("YouTube token provider dependencies must not be nil")
 	}
 	return &YouTubeAccessTokenProvider{
-		oauth:  oauth,
-		store:  store,
-		cipher: cipher,
-		now:    func() time.Time { return time.Now().UTC() },
-		users:  make(map[uuid.UUID]*userAccessToken),
+		oauth:    oauth,
+		store:    store,
+		cipher:   cipher,
+		now:      func() time.Time { return time.Now().UTC() },
+		accounts: make(map[uuid.UUID]*accountAccessToken),
 	}, nil
 }
 
-// AccessToken은 유효한 access token을 돌려준다. 캐시가 만료 여유(60초) 안에
-// 있으면 그대로 쓰고, 아니면 refresh token으로 갱신한다.
+// AccessToken은 유효한 access token을 돌려준다. 어느 채널인지는 ctx의 연결 ID
+// (WithStreamingAccount)로 정하고, 없으면 연결이 하나일 때만 그 채널이다. 캐시가
+// 만료 여유(60초) 안에 있으면 그대로 쓰고, 아니면 refresh token으로 갱신한다.
 func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uuid.UUID) (string, error) {
-	state := p.userState(userID)
-	// 사용자 단위 락: 같은 사용자의 동시 호출은 첫 갱신을 기다렸다가 캐시를
-	// 재사용한다. 다른 사용자끼리는 서로 막지 않는다.
+	// 연결부터 확정한다. 지운 연결·남의 연결 ID는 여기서 걸러져 캐시에 닿지 않는다.
+	selected, err := p.store.Get(ctx, userID, StreamingProviderYouTube)
+	if err != nil {
+		if errors.Is(err, ErrStreamingAccountNotFound) {
+			return "", ErrStreamingNotConnected
+		}
+		return "", err
+	}
+	state := p.accountState(selected.ID, userID)
+	// 연결 단위 락: 같은 채널의 동시 호출은 첫 갱신을 기다렸다가 캐시를 재사용한다.
+	// 다른 채널끼리는 서로 막지 않는다.
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.token != "" && p.now().Before(state.expiresAt.Add(-accessTokenExpirySlack)) {
 		return state.token, nil
 	}
-	account, err := p.store.Get(ctx, userID, StreamingProviderYouTube)
+	// 락을 잡은 뒤 다시 읽는다 — 그 사이 다른 호출이 refresh token을 교체했을 수 있다.
+	account, err := p.store.Get(WithStreamingAccount(ctx, selected.ID), userID, StreamingProviderYouTube)
 	if err != nil {
 		if errors.Is(err, ErrStreamingAccountNotFound) {
 			return "", ErrStreamingNotConnected
@@ -522,33 +541,38 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	return state.token, nil
 }
 
-// ClearCachedToken은 계정 삭제 뒤 메모리의 access token을 잊는다. refresh token은
-// 탈퇴 트랜잭션이 지우고, 이 캐시까지 버려 삭제된 계정이 실행 중인 프로세스에
-// 쓸 수 있는 플랫폼 자격 정보를 남기지 않게 한다.
+// ClearCachedToken은 계정 삭제·연결 해제 뒤 그 사용자의 모든 채널 access token을
+// 잊는다. refresh token은 탈퇴 트랜잭션이 지우고, 이 캐시까지 버려 삭제된 계정이
+// 실행 중인 프로세스에 쓸 수 있는 플랫폼 자격 정보를 남기지 않게 한다. 남은 채널은
+// 다음 호출에서 다시 발급받는다.
 func (p *YouTubeAccessTokenProvider) ClearCachedToken(userID uuid.UUID) {
 	if p == nil || userID == uuid.Nil {
 		return
 	}
 	p.mu.Lock()
-	state := p.users[userID]
-	delete(p.users, userID)
-	p.mu.Unlock()
-	if state == nil {
-		return
+	var cleared []*accountAccessToken
+	for accountID, state := range p.accounts {
+		if state.userID == userID {
+			cleared = append(cleared, state)
+			delete(p.accounts, accountID)
+		}
 	}
-	state.mu.Lock()
-	state.token = ""
-	state.expiresAt = time.Time{}
-	state.mu.Unlock()
+	p.mu.Unlock()
+	for _, state := range cleared {
+		state.mu.Lock()
+		state.token = ""
+		state.expiresAt = time.Time{}
+		state.mu.Unlock()
+	}
 }
 
-func (p *YouTubeAccessTokenProvider) userState(userID uuid.UUID) *userAccessToken {
+func (p *YouTubeAccessTokenProvider) accountState(accountID, userID uuid.UUID) *accountAccessToken {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	state := p.users[userID]
+	state := p.accounts[accountID]
 	if state == nil {
-		state = &userAccessToken{}
-		p.users[userID] = state
+		state = &accountAccessToken{userID: userID}
+		p.accounts[accountID] = state
 	}
 	return state
 }

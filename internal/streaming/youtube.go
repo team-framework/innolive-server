@@ -129,11 +129,13 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 	// 여기까지가 필수 경로다. 카테고리·썸네일은 선택 항목이라 실패해도
 	// 방송을 되돌리지 않고 경고로만 알린다.
 	return PreparedBroadcast{
-		Provider:    auth.StreamingProviderYouTube,
-		IngestURL:   ingestAddress + "/" + streamName,
-		BroadcastID: broadcastID,
-		StreamID:    streamID,
-		Warnings:    p.applyOptionalSettings(ctx, accessToken, broadcastID, options),
+		Provider:     auth.StreamingProviderYouTube,
+		IngestURL:    ingestAddress + "/" + streamName,
+		BroadcastID:  broadcastID,
+		StreamID:     streamID,
+		AccountID:    account.ID,
+		ChannelTitle: channelTitleOf(account),
+		Warnings:     p.applyOptionalSettings(ctx, accessToken, broadcastID, options),
 	}, nil
 }
 
@@ -146,7 +148,7 @@ func (p *YouTubeProvider) GoLive(ctx context.Context, userID uuid.UUID, prepared
 	if prepared.BroadcastID == "" {
 		return errors.New("prepared broadcast has no id")
 	}
-	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	accessToken, err := p.tokens.AccessToken(auth.WithStreamingAccount(ctx, prepared.AccountID), userID)
 	if err != nil {
 		return err
 	}
@@ -160,7 +162,7 @@ func (p *YouTubeProvider) EndLive(ctx context.Context, userID uuid.UUID, prepare
 	if prepared.BroadcastID == "" {
 		return errors.New("prepared broadcast has no id")
 	}
-	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	accessToken, err := p.tokens.AccessToken(auth.WithStreamingAccount(ctx, prepared.AccountID), userID)
 	if err != nil {
 		return err
 	}
@@ -178,7 +180,7 @@ func (p *YouTubeProvider) Stop(ctx context.Context, userID uuid.UUID, prepared P
 	if prepared.BroadcastID == "" {
 		return nil
 	}
-	accessToken, err := p.tokens.AccessToken(ctx, userID)
+	accessToken, err := p.tokens.AccessToken(auth.WithStreamingAccount(ctx, prepared.AccountID), userID)
 	if err != nil {
 		return err
 	}
@@ -311,6 +313,20 @@ type VideoCategory struct {
 // Categories는 한국 지역에서 방송(동영상)에 지정할 수 있는 카테고리 목록이다.
 // videoCategories.list는 1 unit이고, 지정할 수 없는(assignable=false) 항목은 뺀다.
 func (p *YouTubeProvider) Categories(ctx context.Context, userID uuid.UUID) ([]VideoCategory, error) {
+	// 카테고리 목록은 채널과 무관하다(지역 기준). 채널이 여러 개여도 아무 연결의
+	// 토큰으로 읽는다(#390).
+	if _, ok := auth.StreamingAccountFromContext(ctx); !ok {
+		accounts, err := p.store.ListByUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		for _, account := range accounts {
+			if account.Provider == auth.StreamingProviderYouTube {
+				ctx = auth.WithStreamingAccount(ctx, account.ID)
+				break
+			}
+		}
+	}
 	accessToken, err := p.tokens.AccessToken(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -354,7 +370,7 @@ func (p *YouTubeProvider) CleanupStreamingResources(ctx context.Context, account
 	if account.StreamID == nil || *account.StreamID == "" {
 		return nil
 	}
-	accessToken, err := p.tokens.AccessToken(ctx, account.UserID)
+	accessToken, err := p.tokens.AccessToken(auth.WithStreamingAccount(ctx, account.ID), account.UserID)
 	if err != nil {
 		return fmt.Errorf("obtain access token for stream cleanup: %w", err)
 	}
@@ -685,4 +701,11 @@ func decodeYouTubeAPIError(response *http.Response) error {
 		}
 	}
 	return apiStatusError{status: response.StatusCode, message: payload.Error.Message}
+}
+
+func channelTitleOf(account auth.StreamingAccount) string {
+	if account.ChannelTitle == nil {
+		return ""
+	}
+	return *account.ChannelTitle
 }

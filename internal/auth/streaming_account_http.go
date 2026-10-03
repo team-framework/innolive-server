@@ -65,9 +65,20 @@ func (h *tokenHTTPHandler) handleDisconnectStreamingAccount(w http.ResponseWrite
 		return
 	}
 	provider := StreamingProvider(r.PathValue("provider"))
-	err := h.streamingAccounts.Disconnect(r.Context(), userID, provider)
+	var accountID *uuid.UUID
+	if raw := r.PathValue("id"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid streaming account id.")
+			return
+		}
+		accountID = &parsed
+	}
+	err := h.streamingAccounts.Disconnect(r.Context(), userID, provider, accountID)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrStreamingAccountSelectionRequired):
+			h.writeError(w, r, http.StatusConflict, "multiple_streaming_accounts", "Several channels of this provider are connected. Disconnect one by id.")
 		case errors.Is(err, ErrStreamingAccountInUse):
 			h.writeError(w, r, http.StatusConflict, "streaming_account_in_use", "End the broadcast on this platform before disconnecting the account.")
 		case errors.Is(err, ErrWithdrawalInProgress):

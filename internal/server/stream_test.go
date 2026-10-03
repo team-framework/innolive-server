@@ -50,13 +50,15 @@ type stubStreamingProvider struct {
 	categoriesErr  error
 	liveUpdates    []streaming.LiveUpdate
 	liveUpdateErr  error
+	// preparedAccounts는 준비 호출마다 ctx에 실린 송출 연결 ID다(#390).
+	preparedAccounts []uuid.UUID
 }
 
 func (s *stubStreamingProvider) Categories(context.Context, uuid.UUID) ([]streaming.VideoCategory, error) {
 	return s.categories, s.categoriesErr
 }
 
-func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
+func (s *stubStreamingProvider) Prepare(ctx context.Context, _ uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
 	// prepareEntered/prepareRelease는 플랫폼 왕복 구간을 테스트가 붙잡아
 	// 그동안의 동시 요청을 확인할 수 있게 한다.
 	if s.prepareEntered != nil {
@@ -69,6 +71,8 @@ func (s *stubStreamingProvider) Prepare(_ context.Context, _ uuid.UUID, options 
 	defer s.mu.Unlock()
 	s.prepareCalls++
 	s.lastOptions = options
+	account, _ := auth.StreamingAccountFromContext(ctx)
+	s.preparedAccounts = append(s.preparedAccounts, account)
 	return s.prepared, s.prepareErr
 }
 

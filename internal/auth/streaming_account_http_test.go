@@ -206,3 +206,43 @@ func TestListStreamingAccountsReconnectRequired(t *testing.T) {
 		})
 	}
 }
+
+// 유튜브 채널이 여러 개면 목록에 연결 id가 실리고, 해제는 id로 하나씩 한다(#390).
+func TestDisconnectStreamingAccountByIDHTTP(t *testing.T) {
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	firstID, secondID := uuid.New(), uuid.New()
+	store.accounts["first"] = StreamingAccount{ID: firstID, UserID: userID, Provider: StreamingProviderYouTube, ChannelID: "UC1", ConnectedAt: time.Now().UTC()}
+	store.accounts["second"] = StreamingAccount{ID: secondID, UserID: userID, Provider: StreamingProviderYouTube, ChannelID: "UC2", ConnectedAt: time.Now().UTC()}
+	tokens, handler := testStreamingAccountsHandler(t, store, UserStatusActive)
+	pair, err := tokens.IssuePair(context.Background(), userID, ClientInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := listStreamingAccounts(t, handler, pair.AccessToken)
+	if !strings.Contains(listed.Body.String(), firstID.String()) || !strings.Contains(listed.Body.String(), secondID.String()) {
+		t.Fatalf("list must carry connection ids: %s", listed.Body.String())
+	}
+	disconnect := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodDelete, path, nil)
+		request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := disconnect("/auth/streaming/accounts/youtube"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "multiple_streaming_accounts") {
+		t.Fatalf("disconnect without id = %d %s", response.Code, response.Body.String())
+	}
+	if response := disconnect("/auth/streaming/accounts/youtube/not-a-uuid"); response.Code != http.StatusBadRequest {
+		t.Fatalf("disconnect bad id = %d", response.Code)
+	}
+	if response := disconnect("/auth/streaming/accounts/youtube/" + uuid.NewString()); response.Code != http.StatusNotFound {
+		t.Fatalf("disconnect unknown id = %d", response.Code)
+	}
+	if response := disconnect("/auth/streaming/accounts/youtube/" + secondID.String()); response.Code != http.StatusNoContent {
+		t.Fatalf("disconnect by id = %d %s", response.Code, response.Body.String())
+	}
+	if response := disconnect("/auth/streaming/accounts/youtube"); response.Code != http.StatusNoContent {
+		t.Fatalf("disconnect last channel without id = %d %s", response.Code, response.Body.String())
+	}
+}

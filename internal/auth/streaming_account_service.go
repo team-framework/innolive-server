@@ -13,6 +13,8 @@ import (
 // StreamingAccountSummary는 연결 목록 조회 API의 응답 항목이다. 플랫폼 중립
 // 형태라 치지직이 붙어도 배열 항목만 늘어난다(#88).
 type StreamingAccountSummary struct {
+	// ID는 연결 ID다. 유튜브 채널이 여러 개면 방송 준비·해제에 이 값을 쓴다(#390).
+	ID           uuid.UUID         `json:"id"`
 	Provider     StreamingProvider `json:"provider"`
 	ChannelID    string            `json:"channel_id"`
 	ChannelTitle string            `json:"channel_title"`
@@ -47,7 +49,7 @@ type StreamingAccountService struct {
 	gate   interface {
 		BeginOperation(uuid.UUID) (func(), bool)
 	}
-	inUse func(userID uuid.UUID, provider StreamingProvider) bool
+	inUse func(userID uuid.UUID, provider StreamingProvider, accountID uuid.UUID) bool
 }
 
 // ErrStreamingAccountInUse는 그 플랫폼으로 방송을 준비·송출하는 중이라 연결을
@@ -55,9 +57,10 @@ type StreamingAccountService struct {
 // 플랫폼 방송은 정리하지 못한다.
 var ErrStreamingAccountInUse = errors.New("streaming account is in use by an active broadcast")
 
-// SetInUseChecker는 플랫폼이 방송에 쓰이는 중인지 알려 줄 함수를 붙인다. auth는
-// 세션을 모르므로 조립 단계에서 주입한다.
-func (s *StreamingAccountService) SetInUseChecker(inUse func(userID uuid.UUID, provider StreamingProvider) bool) {
+// SetInUseChecker는 연결이 방송에 쓰이는 중인지 알려 줄 함수를 붙인다. auth는
+// 세션을 모르므로 조립 단계에서 주입한다. 유튜브는 채널이 여러 개일 수 있어 연결
+// ID까지 넘긴다 — 방송에 고정된 채널만 해제를 막는다(#390).
+func (s *StreamingAccountService) SetInUseChecker(inUse func(userID uuid.UUID, provider StreamingProvider, accountID uuid.UUID) bool) {
 	if s != nil {
 		s.inUse = inUse
 	}
@@ -96,7 +99,10 @@ func (s *StreamingAccountService) SetUserOperationGate(gate interface {
 // ①플랫폼 리소스 삭제 → ②플랫폼 권한 취소 → ③DB 행 삭제. 토큰을 먼저
 // 폐기하면 ①을 못 하므로 순서를 바꾸면 안 되고, ①·②가 실패해도 ③은
 // 수행한다 — 이미 토큰이 무효화된 연결을 해제하는 것이 정상 시나리오다.
-func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UUID, provider StreamingProvider) error {
+//
+// accountID가 nil이면 그 플랫폼 연결이 하나일 때만 해제한다. 유튜브 채널이 여러
+// 개인데 지정이 없으면 ErrStreamingAccountSelectionRequired.
+func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UUID, provider StreamingProvider, accountID *uuid.UUID) error {
 	release, admitted := s.beginOperation(userID)
 	if !admitted {
 		return ErrWithdrawalInProgress
@@ -106,12 +112,15 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 	if err := s.ensureActive(ctx, userID); err != nil {
 		return err
 	}
-	if s.inUse != nil && s.inUse(userID, provider) {
-		return ErrStreamingAccountInUse
+	if accountID != nil {
+		ctx = WithStreamingAccount(ctx, *accountID)
 	}
 	account, err := s.store.Get(ctx, userID, provider)
 	if err != nil {
 		return err
+	}
+	if s.inUse != nil && s.inUse(userID, provider, account.ID) {
+		return ErrStreamingAccountInUse
 	}
 	hooks := s.hooks[provider]
 	if hooks.CleanupResources != nil {
@@ -211,6 +220,7 @@ func (s *StreamingAccountService) List(ctx context.Context, userID uuid.UUID) ([
 	summaries := make([]StreamingAccountSummary, 0, len(accounts))
 	for _, account := range accounts {
 		summary := StreamingAccountSummary{
+			ID:                account.ID,
 			Provider:          account.Provider,
 			ChannelID:         account.ChannelID,
 			ConnectedAt:       account.ConnectedAt,

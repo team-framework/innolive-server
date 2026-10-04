@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "attemptId": "12345678-1234-4234-8234-123456789abc",
+  "event": "failed",
+  "role": "guest",
+  "locale": "ko",
+  "retry": true,
+  "stage": "first_frame",
+  "elapsedMs": 15500,
+  "code": "timeout",
+  "browser": "safari",
+  "release": "example-release"
+}

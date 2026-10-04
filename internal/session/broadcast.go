@@ -222,9 +222,25 @@ func (m *Manager) BeginBroadcastPrepare(id string, providers ...string) (*Sessio
 // 포함한 점유 대상 수를 같은 잠금 구간에서 함께 돌려준다. 선점 뒤 따로 세면
 // 동시에 들어온 두 대상이 서로를 세어 둘 다 플랜 게이트에 거절된다(#308).
 func (m *Manager) BeginBroadcastPrepareCounted(id string, providers ...string) (*Session, int, error) {
+	return m.BeginBroadcastPrepareOnChannel(id, "", providers...)
+}
+
+// BeginBroadcastPrepareOnChannel은 준비 구간을 선점하면서 송출할 플랫폼 채널도
+// 선점한다(#406). 같은 채널로 다른 사용자가 준비·송출 중이면 거절한다 — 한 채널은
+// 동시에 한 InnoLive 계정만 송출한다. 같은 사용자의 다른 세션은 막지 않는다(이미
+// 라이브 확인이 묻는다). channel이 비면 채널 선점 없이 종전과 같다.
+func (m *Manager) BeginBroadcastPrepareOnChannel(id, channel string, providers ...string) (*Session, int, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, 0, err
+	}
+	provider := s.targetProvider(providers)
+	if channel != "" {
+		m.channelMu.Lock()
+		defer m.channelMu.Unlock()
+		if m.channelInUseByOtherUser(s.UserID, provider, channel) {
+			return nil, 0, ErrChannelInUseByOtherAccount
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -239,8 +255,27 @@ func (m *Manager) BeginBroadcastPrepareCounted(id string, providers ...string) (
 		return nil, 0, ErrBroadcastLive
 	}
 	t.phase = BroadcastPhasePreparing
+	t.channel = channel
 	s.UpdatedAt = time.Now().UTC()
 	return s, s.busyTargetCountLocked(), nil
+}
+
+// channelInUseByOtherUser는 다른 사용자의 세션이 같은 채널 대상을 준비·송출 중인지다.
+// channelMu를 쥔 호출자만 부른다.
+func (m *Manager) channelInUseByOtherUser(userID uuid.UUID, provider, channel string) bool {
+	for _, other := range m.List() {
+		if other.UserID == userID {
+			continue
+		}
+		other.mu.RLock()
+		target := other.targets[provider]
+		busy := target != nil && target.phase != BroadcastPhaseIdle && target.channel == channel
+		other.mu.RUnlock()
+		if busy {
+			return true
+		}
+	}
+	return false
 }
 
 // ResetBroadcastPreparation은 선점한 준비 구간을 되돌린다. 플랫폼 준비가

@@ -45,6 +45,9 @@ var (
 	ErrBroadcastNotPrepared = errors.New("the platform broadcast is not prepared")
 	ErrBroadcastLive        = errors.New("the platform broadcast is already live")
 	ErrBroadcastGoingLive   = errors.New("the platform broadcast is switching to live")
+	// ErrChannelInUseByOtherAccount는 같은 플랫폼 채널로 다른 InnoLive 계정이
+	// 준비·송출 중이다. 한 채널은 동시에 한 계정만 송출한다(#406).
+	ErrChannelInUseByOtherAccount = errors.New("the channel is broadcasting from another account")
 )
 
 type Timing struct {
@@ -305,7 +308,10 @@ type Manager struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
-	pending  int
+	// channelMu는 채널 선점 판정(다른 계정이 같은 채널로 송출 중인지)과 선점을
+	// 한 덩어리로 만든다. 세션 잠금보다 먼저 잡는다(#406).
+	channelMu sync.Mutex
+	pending   int
 	// pendingUsers는 아직 sessions에 등록되지 않은 생성 중인 세션의 소유자다.
 	// 사용자별 상한은 세션을 map에 넣기 한참 전에 검사하므로, 예약 없이는 같은
 	// 사용자의 동시 요청이 모두 검사를 통과한다. 상한이 1이라 한 사용자의 예약은
@@ -1096,6 +1102,9 @@ type streamTarget struct {
 	// 사실만 남겨두고 전환 결과를 받은 쪽이 방송을 종료시킨다. 대상마다
 	// 따로 둔다 — 한쪽 중지가 다른 쪽의 라이브 전환을 취소하면 안 된다.
 	goLiveStopRequested bool
+	// channel은 이 대상이 준비 때 선점한 플랫폼 채널 키다(#406). phase가 idle이
+	// 아닐 때만 의미가 있다 — 다음 선점이 덮어쓴다.
+	channel string
 	// usageID는 실사용 기록에서 이 egress 한 세대를 가리키는 식별자다.
 	usageID string
 }

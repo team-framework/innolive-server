@@ -19,20 +19,21 @@ type ConnectionChecker interface {
 // AccountResolver는 이 요청이 쓸 송출 연결 ID를 확정한다(#390). ctx에 실린 연결
 // ID(auth.WithStreamingAccount)가 있으면 그 연결이 사용자 것인지 확인하고, 없으면
 // 연결이 하나일 때만 그것을 고른다. 유튜브 채널이 여러 개인데 지정이 없으면
-// auth.ErrStreamingAccountSelectionRequired다.
+// auth.ErrStreamingAccountSelectionRequired다. 플랫폼 채널 ID도 함께 돌려준다 — 한
+// 채널은 동시에 한 InnoLive 계정만 송출하므로 준비 때 채널을 선점한다(#406).
 type AccountResolver interface {
-	ResolveAccount(ctx context.Context, userID uuid.UUID) (uuid.UUID, error)
+	ResolveAccount(ctx context.Context, userID uuid.UUID) (accountID uuid.UUID, channelID string, err error)
 }
 
-func (p *YouTubeProvider) ResolveAccount(ctx context.Context, userID uuid.UUID) (uuid.UUID, error) {
+func (p *YouTubeProvider) ResolveAccount(ctx context.Context, userID uuid.UUID) (uuid.UUID, string, error) {
 	account, err := p.store.Get(ctx, userID, auth.StreamingProviderYouTube)
 	if errors.Is(err, auth.ErrStreamingAccountNotFound) {
-		return uuid.Nil, auth.ErrStreamingNotConnected
+		return uuid.Nil, "", auth.ErrStreamingNotConnected
 	}
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
-	return account.ID, nil
+	return account.ID, account.ChannelID, nil
 }
 
 func (p *YouTubeProvider) Connected(ctx context.Context, userID uuid.UUID) (bool, error) {

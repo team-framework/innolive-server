@@ -551,7 +551,17 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	// 플랫폼을 부르기 전에 준비 구간을 선점한다. 방송을 만든 뒤 거절하면
 	// 채널에 빈 방송이 남고, 선점하지 않으면 플랫폼 왕복 중에 들어온
 	// PUT /broadcast가 통과해 저장값과 실제 방송이 갈린다.
-	_, busyTargets, err := s.sessions.BeginBroadcastPrepareCounted(liveSession.ID, string(providerName))
+	// 한 유튜브 채널은 동시에 한 InnoLive 계정만 송출한다(#406). 채널 선점은 준비
+	// 선점과 같은 잠금에서 판정해, 두 계정이 동시에 준비해도 하나만 통과한다.
+	channel, failure := s.broadcastChannel(ctx, liveSession.UserID, providerName)
+	if failure != nil {
+		return nil, failure
+	}
+	_, busyTargets, err := s.sessions.BeginBroadcastPrepareOnChannel(liveSession.ID, channel, string(providerName))
+	if errors.Is(err, session.ErrChannelInUseByOtherAccount) {
+		s.logger.Info("stream prepare rejected: channel in use by another account", "session_id", liveSession.ID, "provider", providerName)
+		return nil, channelInUseError(providerName)
+	}
 	if err != nil {
 		return nil, broadcastBeginError(err, liveSession.ID)
 	}

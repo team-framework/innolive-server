@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -398,5 +399,45 @@ func TestDisconnectYouTubeChannelByID(t *testing.T) {
 	remaining, err := store.Get(context.Background(), userID, StreamingProviderYouTube)
 	if err != nil || remaining.ID != first.ID {
 		t.Fatalf("remaining = %+v, %v; want the live channel kept", remaining, err)
+	}
+}
+
+// 탈퇴는 유튜브 채널이 여러 개여도 채널마다 리소스를 지우고 그 채널의 토큰을 취소한다(#390).
+func TestCleanupForWithdrawalHandlesEveryYouTubeChannel(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	store := newMemoryStreamingAccountStore()
+	userID := uuid.New()
+	for _, channel := range []string{"UC1", "UC2"} {
+		ciphertext, version, err := cipher.Encrypt("rt-" + channel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamID := "stream-" + channel
+		store.accounts[channel] = StreamingAccount{ID: uuid.New(), UserID: userID, Provider: StreamingProviderYouTube, ChannelID: channel, StreamID: &streamID, RefreshTokenCiphertext: ciphertext, TokenKeyVersion: version}
+	}
+	var cleaned, revoked []string
+	hooks := map[StreamingProvider]StreamingDisconnectHooks{
+		StreamingProviderYouTube: {
+			CleanupResources: func(_ context.Context, account StreamingAccount) error {
+				cleaned = append(cleaned, *account.StreamID)
+				return nil
+			},
+			RevokeToken: func(_ context.Context, refreshToken string) error {
+				revoked = append(revoked, refreshToken)
+				return nil
+			},
+		},
+	}
+	service, err := NewStreamingAccountService(store, testUserStatusChecker{status: UserStatusActive}, cipher, hooks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CleanupForWithdrawal(context.Background(), userID); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(cleaned)
+	slices.Sort(revoked)
+	if !slices.Equal(cleaned, []string{"stream-UC1", "stream-UC2"}) || !slices.Equal(revoked, []string{"rt-UC1", "rt-UC2"}) {
+		t.Fatalf("cleaned = %v, revoked = %v; want both channels", cleaned, revoked)
 	}
 }

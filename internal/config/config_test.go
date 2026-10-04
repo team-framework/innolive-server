@@ -398,3 +398,20 @@ func TestValidateBroadcastIdleTimeout(t *testing.T) {
 		t.Fatalf("0 disables the idle stop and must be valid: %v", err)
 	}
 }
+
+func TestExperienceQualityKey(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("EXPERIENCE_QUALITY_INGEST_KEY", "")
+	cfg, err := Load()
+	if err != nil || cfg.ExperienceQualityIngestKey != "" {
+		t.Fatalf("disabled: %v", err)
+	}
+	t.Setenv("EXPERIENCE_QUALITY_INGEST_KEY", "short")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted short collector key")
+	}
+	t.Setenv("EXPERIENCE_QUALITY_INGEST_KEY", "test-service-key-at-least-32-characters")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -118,6 +118,7 @@ type Config struct {
 	GuestQueueTrustedProxies   []string
 	PprofEnabled               bool
 	LogLevel                   string
+	ExperienceQualityIngestKey string
 	DatabaseURL                string
 	DatabaseMaxOpenConns       int
 	DatabaseMaxIdleConns       int
@@ -214,6 +215,7 @@ func Load() (Config, error) {
 		PprofEnabled:               envBool("PPROF_ENABLED", false),
 		UDPMuxPort:                 envInt("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                   strings.ToUpper(env("LOG_LEVEL", "INFO")),
+		ExperienceQualityIngestKey: strings.TrimSpace(os.Getenv("EXPERIENCE_QUALITY_INGEST_KEY")),
 		DatabaseURL:                strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		DatabaseMaxOpenConns:       envInt("DATABASE_MAX_OPEN_CONNS", 10),
 		DatabaseMaxIdleConns:       envInt("DATABASE_MAX_IDLE_CONNS", 5),
@@ -410,6 +412,9 @@ func (c Config) Validate() error {
 				return errors.New("AI_GRPC_TARGETS must not contain empty addresses")
 			}
 		}
+	}
+	if c.ExperienceQualityIngestKey != "" && len(c.ExperienceQualityIngestKey) < 32 {
+		return errors.New("EXPERIENCE_QUALITY_INGEST_KEY must contain at least 32 characters")
 	}
 	if c.DatabaseURL == "" {
 		return errors.New("DATABASE_URL must not be empty")

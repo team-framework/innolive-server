@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 
+	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/usage"
 
 	"gorm.io/gorm"
@@ -27,7 +29,13 @@ func Run(
 		if err := auth.AutoMigrate(ctx, db); err != nil {
 			return err
 		}
-		return usage.AutoMigrate(ctx, db)
+		if err := usage.AutoMigrate(ctx, db); err != nil {
+			return err
+		}
+		if err := experiencequality.AutoMigrate(ctx, db); err != nil {
+			return err
+		}
+		return analytics.AutoMigrate(ctx, db)
 
 	case config.DatabaseMigrationModeVersioned:
 		return runVersioned(databaseURL)

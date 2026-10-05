@@ -20,8 +20,10 @@ import (
 	"github.com/google/uuid"
 
 	"inno-live-server/internal/ai"
+	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
@@ -1444,4 +1446,20 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		fmt.Fprintln(w, `{}`)
 	}
+}
+
+// SetExperienceQuality registers only the server-to-server collector, before serving requests.
+func (s *Server) SetExperienceQuality(store experiencequality.EventStore) {
+	if store == nil || s.cfg.ExperienceQualityIngestKey == "" {
+		return
+	}
+	s.mux.Handle("POST /experience-quality", experiencequality.NewHandler(store, s.cfg.ExperienceQualityIngestKey))
+}
+
+// SetAnalytics registers the service-only generic event collector.
+func (s *Server) SetAnalytics(store analytics.EventStore) {
+	if store == nil || s.cfg.ExperienceQualityIngestKey == "" {
+		return
+	}
+	s.mux.Handle("POST /analytics/events", analytics.NewHandler(store, s.cfg.ExperienceQualityIngestKey))
 }

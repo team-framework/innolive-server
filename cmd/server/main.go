@@ -14,10 +14,12 @@ import (
 	"github.com/google/uuid"
 
 	"inno-live-server/internal/ai"
+	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/database"
 	"inno-live-server/internal/database/migration"
+	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
@@ -548,6 +550,12 @@ func main() {
 	limitContext, stopLimitEnforcer := context.WithCancel(context.Background())
 	defer stopLimitEnforcer()
 	go application.RunLimitEnforcer(limitContext)
+	qualityStore := experiencequality.NewStore(databaseConnection.DB)
+	application.SetExperienceQuality(qualityStore)
+	go qualityStore.RunRetention(limitContext, logger)
+	analyticsStore := analytics.NewStore(databaseConnection.DB)
+	application.SetAnalytics(analyticsStore)
+	go analyticsStore.RunRetention(limitContext, logger)
 	if youtubeConnect != nil {
 		youtubeConnect.SetUserOperationGate(withdrawal)
 	}

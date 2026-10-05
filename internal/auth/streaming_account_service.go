@@ -95,7 +95,8 @@ func (s *StreamingAccountService) SetUserOperationGate(gate interface {
 	}
 }
 
-// Disconnect는 연결을 해제한다. 세 단계를 순서대로 수행한다(#88):
+// Disconnect는 연결을 해제한다. 세 단계를 순서대로 수행한다(#88). 같은 채널을
+// 다른 InnoLive 계정도 연결했으면 ②를 건너뛴다(#404):
 // ①플랫폼 리소스 삭제 → ②플랫폼 권한 취소 → ③DB 행 삭제. 토큰을 먼저
 // 폐기하면 ①을 못 하므로 순서를 바꾸면 안 되고, ①·②가 실패해도 ③은
 // 수행한다 — 이미 토큰이 무효화된 연결을 해제하는 것이 정상 시나리오다.
@@ -129,7 +130,17 @@ func (s *StreamingAccountService) Disconnect(ctx context.Context, userID uuid.UU
 				"provider", provider, "user_id", userID, "error", err)
 		}
 	}
-	if hooks.RevokeToken != nil && s.cipher != nil && len(account.RefreshTokenCiphertext) > 0 {
+	shared, err := s.store.ChannelSharedWith(ctx, account)
+	if err != nil {
+		// 모르면 취소하지 않는다 — 남의 연결을 끊는 것보다 권한을 남기는 편이 낫다.
+		s.logger.Warn("streaming shared channel check failed; skipping revoke",
+			"provider", provider, "user_id", userID, "error", err)
+		shared = true
+	} else if shared {
+		s.logger.Info("streaming channel linked by another account; skipping revoke",
+			"provider", provider, "user_id", userID)
+	}
+	if !shared && hooks.RevokeToken != nil && s.cipher != nil && len(account.RefreshTokenCiphertext) > 0 {
 		refreshToken, err := s.cipher.Decrypt(account.RefreshTokenCiphertext, account.TokenKeyVersion)
 		if err != nil {
 			s.logger.Warn("streaming refresh token decrypt failed; skipping revoke",
@@ -184,6 +195,19 @@ func (s *StreamingAccountService) CleanupForWithdrawal(ctx context.Context, user
 			}
 		}
 		if hooks.RevokeToken == nil || len(account.RefreshTokenCiphertext) == 0 {
+			continue
+		}
+		// 플랫폼 권한은 채널 단위다. 같은 채널을 다른 InnoLive 계정도 연결했으면
+		// 취소하지 않는다 — 이 계정의 연결 행은 탈퇴가 지운다(#404).
+		shared, err := s.store.ChannelSharedWith(ctx, account)
+		if err != nil {
+			return fmt.Errorf("check shared %s channel: %w", account.Provider, err)
+		}
+		if shared {
+			if s.logger != nil {
+				s.logger.Info("streaming channel linked by another account; skipping revoke",
+					"provider", account.Provider, "user_id", userID)
+			}
 			continue
 		}
 		if s.cipher == nil {

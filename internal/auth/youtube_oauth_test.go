@@ -838,3 +838,14 @@ func TestYouTubeExchangeErrorWithoutDetailStaysStable(t *testing.T) {
 		t.Fatalf("status was dropped: %q", got)
 	}
 }
+
+func (s *memoryStreamingAccountStore) ChannelSharedWith(_ context.Context, account StreamingAccount) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, other := range s.accounts {
+		if other.ID != account.ID && other.Provider == account.Provider && other.ChannelID == account.ChannelID {
+			return true, nil
+		}
+	}
+	return false, nil
+}

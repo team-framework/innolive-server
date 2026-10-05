@@ -608,3 +608,14 @@ func TestCleanupStreamingResourcesUsesEachChannelToken(t *testing.T) {
 		t.Fatalf("cleanup tokens = %v, want each channel's own token", seen)
 	}
 }
+
+func (s *memoryStore) ChannelSharedWith(_ context.Context, account auth.StreamingAccount) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, other := range s.accounts {
+		if other.ID != account.ID && other.Provider == account.Provider && other.ChannelID == account.ChannelID {
+			return true, nil
+		}
+	}
+	return false, nil
+}

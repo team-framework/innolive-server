@@ -16,23 +16,34 @@ import (
 type channelSelectingProvider struct {
 	stubStreamingProvider
 	channels        []uuid.UUID
+	channelIDs      map[uuid.UUID]string
 	preparedAccount uuid.UUID
 }
 
-func (p *channelSelectingProvider) ResolveAccount(ctx context.Context, _ uuid.UUID) (uuid.UUID, error) {
+func (p *channelSelectingProvider) ResolveAccount(ctx context.Context, _ uuid.UUID) (uuid.UUID, string, error) {
 	if selected, ok := auth.StreamingAccountFromContext(ctx); ok {
 		for _, id := range p.channels {
 			if id == selected {
-				return id, nil
+				return id, p.channelOf(id), nil
 			}
 		}
-		return uuid.Nil, auth.ErrStreamingNotConnected
+		return uuid.Nil, "", auth.ErrStreamingNotConnected
 	}
 	if len(p.channels) > 1 {
-		return uuid.Nil, auth.ErrStreamingAccountSelectionRequired
+		return uuid.Nil, "", auth.ErrStreamingAccountSelectionRequired
 	}
-	return p.channels[0], nil
+	return p.channels[0], p.channelOf(p.channels[0]), nil
 }
+
+// channelOf는 연결의 유튜브 채널 ID다. channelIDs가 없으면 연결마다 다른 채널이다.
+func (p *channelSelectingProvider) channelOf(id uuid.UUID) string {
+	if channel, ok := p.channelIDs[id]; ok {
+		return channel
+	}
+	return "UC-" + id.String()
+}
+
+var _ streaming.AccountResolver = (*channelSelectingProvider)(nil)
 
 func (p *channelSelectingProvider) Prepare(ctx context.Context, userID uuid.UUID, options streaming.PrepareOptions) (streaming.PreparedBroadcast, error) {
 	prepared, err := p.stubStreamingProvider.Prepare(ctx, userID, options)
@@ -96,5 +107,43 @@ func TestPrepareStreamUsesOnlyYouTubeChannelWithoutAccountID(t *testing.T) {
 	prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if provider.preparedAccount != only {
 		t.Fatalf("prepared on %v, want the only channel %v", provider.preparedAccount, only)
+	}
+}
+
+// 한 유튜브 채널은 동시에 한 InnoLive 계정만 송출한다(#406). 다른 계정이 같은 채널로
+// 준비·송출 중이면 플랫폼에 닿기 전에 409로 거절한다.
+func TestPrepareStreamRejectsChannelUsedByOtherAccount(t *testing.T) {
+	accountA, accountB := uuid.New(), uuid.New()
+	provider := &channelSelectingProvider{
+		stubStreamingProvider: stubStreamingProvider{prepared: streaming.PreparedBroadcast{
+			Provider: auth.StreamingProviderYouTube, IngestURL: "rtmps://a.example/live2/secret", BroadcastID: "bid-1",
+		}},
+		channels:   []uuid.UUID{accountB},
+		channelIDs: map[uuid.UUID]string{accountA: "UCshared", accountB: "UCshared"},
+	}
+	server, manager := newStreamTestApplicationWithManager(t, map[auth.StreamingProvider]streaming.Provider{auth.StreamingProviderYouTube: provider})
+	holder, _, err := manager.CreateForUserWithResolution(uuid.New(), "youtube", "", "720p", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(holder.ID, "youtube/UCshared", "youtube"); err != nil {
+		t.Fatal(err)
+	}
+	created, ownerToken := createTestSession(t, server.URL, nil)
+	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+
+	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	if response.StatusCode != http.StatusConflict || streamErrorCode(payload) != "channel_in_use_by_other_account" {
+		t.Fatalf("shared channel prepare = %d %v", response.StatusCode, payload)
+	}
+	if provider.prepareCalls != 0 {
+		t.Fatal("rejected prepare reached the platform")
+	}
+
+	// 다른 계정의 방송이 끝나면 준비할 수 있다.
+	manager.ResetBroadcastPreparation(holder.ID, "youtube")
+	prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	if provider.prepareCalls != 1 {
+		t.Fatalf("prepare calls = %d, want 1 after the channel is free", provider.prepareCalls)
 	}
 }

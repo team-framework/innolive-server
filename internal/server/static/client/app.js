@@ -3371,6 +3371,16 @@ function renderBroadcastStartError(error) {
     setBroadcastStatus(els.broadcastPlatformState, "플랫폼 요청 한도 초과 · 잠시 후 다시", "error");
     return;
   }
+  if (code === "channel_in_use_by_other_account") {
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastPlatformState, "다른 InnoLive 계정이 이 채널로 방송 중", "error");
+    return;
+  }
+  if (code === "youtube_channel_required") {
+    setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
+    setBroadcastStatus(els.broadcastPlatformState, "송출할 YouTube 채널을 고르세요", "warn");
+    return;
+  }
   if (code === "live_streaming_blocked") {
     setBroadcastStatus(els.broadcastRtmpState, "시작 안 함");
     setBroadcastStatus(els.broadcastPlatformState, "채널 라이브 권한 없음", "error");

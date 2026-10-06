@@ -187,3 +187,35 @@ func TestProviderInUse(t *testing.T) {
 		t.Fatal("other provider or user must not be in use")
 	}
 }
+
+// 한 채널은 동시에 한 사용자만 송출한다(#406). 다른 사용자의 같은 채널 준비는 거절하고,
+// 다른 채널은 막지 않는다. 방송이 끝나면 다시 쓸 수 있다.
+func TestBeginBroadcastPrepareOnChannelIsExclusivePerUser(t *testing.T) {
+	manager, owner := newUpgradeTestManager(t, 0)
+	create := func(userID uuid.UUID) *Session {
+		t.Helper()
+		live, _, err := manager.CreateForUserWithResolution(userID, DefaultProvider, "", Resolution720p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return live
+	}
+	other := create(uuid.New())
+
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(owner.ID, "youtube/UC1", "youtube"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC1", "youtube"); !errors.Is(err, ErrChannelInUseByOtherAccount) {
+		t.Fatalf("other user same channel error = %v, want ErrChannelInUseByOtherAccount", err)
+	}
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC2", "youtube"); err != nil {
+		t.Fatalf("other channel must not be blocked: %v", err)
+	}
+	manager.ResetBroadcastPreparation(other.ID, "youtube")
+
+	// 선점한 방송이 끝나면(idle) 다른 사용자가 같은 채널을 쓸 수 있다.
+	manager.ResetBroadcastPreparation(owner.ID, "youtube")
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC1", "youtube"); err != nil {
+		t.Fatalf("channel must be free after the broadcast ends: %v", err)
+	}
+}

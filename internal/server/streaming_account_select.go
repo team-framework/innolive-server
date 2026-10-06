@@ -37,11 +37,34 @@ func (s *Server) streamingAccountContext(ctx context.Context, userID uuid.UUID, 
 	if !ok {
 		return ctx, nil
 	}
-	accountID, err := resolver.ResolveAccount(auth.WithStreamingAccount(ctx, requested), userID)
+	accountID, _, err := resolver.ResolveAccount(auth.WithStreamingAccount(ctx, requested), userID)
 	if err != nil {
 		return ctx, s.prepareError(err, "", providerName)
 	}
 	return auth.WithStreamingAccount(ctx, accountID), nil
+}
+
+// broadcastChannel은 이 준비가 선점할 플랫폼 채널 키다(#406). 유튜브만 채널을
+// 선점한다 — 연결 ID는 ctx에 이미 실려 있다(streamingAccountContext·전환 경로).
+func (s *Server) broadcastChannel(ctx context.Context, userID uuid.UUID, providerName auth.StreamingProvider) (string, *apiError) {
+	if providerName != auth.StreamingProviderYouTube {
+		return "", nil
+	}
+	resolver, ok := s.streaming[providerName].(streaming.AccountResolver)
+	if !ok {
+		return "", nil
+	}
+	_, channelID, err := resolver.ResolveAccount(ctx, userID)
+	if err != nil {
+		return "", s.prepareError(err, "", providerName)
+	}
+	return string(providerName) + "/" + channelID, nil
+}
+
+func channelInUseError(providerName auth.StreamingProvider) *apiError {
+	return &apiError{Status: http.StatusConflict, Code: "channel_in_use_by_other_account",
+		Message: "Another InnoLive account is broadcasting to this channel. Try again after that broadcast ends.",
+		Details: map[string]any{"provider": providerName}}
 }
 
 func youtubeChannelRequiredError(providerName auth.StreamingProvider) *apiError {

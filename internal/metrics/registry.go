@@ -71,6 +71,8 @@ type Registry struct {
 	rtpOutOfOrder       map[string]uint64
 	rtpPacketsDiscarded map[string]uint64
 	rtpFramesAssembled  map[string]uint64
+	mosaicFrames        map[string]uint64
+	mosaicObjects       map[string]uint64
 	processing          map[string]*histogram
 	aiDuration          map[string]*histogram
 	stageDuration       map[string]*histogram
@@ -97,6 +99,8 @@ func New() *Registry {
 		rtpOutOfOrder:       make(map[string]uint64),
 		rtpPacketsDiscarded: make(map[string]uint64),
 		rtpFramesAssembled:  make(map[string]uint64),
+		mosaicFrames:        make(map[string]uint64),
+		mosaicObjects:       make(map[string]uint64),
 		processing:          make(map[string]*histogram),
 		aiDuration:          make(map[string]*histogram),
 		stageDuration:       make(map[string]*histogram),
@@ -253,6 +257,17 @@ func (r *Registry) IncRTPFramesAssembled(mode string) {
 	r.increment(r.rtpFramesAssembled, mode)
 }
 
+// ObserveMosaic은 AI 처리에 성공한 프레임 하나의 블러 분류(kind)와 객체 수를
+// 더한다(#412). 객체 수는 블러한 얼굴·번호판과 화이트리스트로 제외한 얼굴이다.
+func (r *Registry) ObserveMosaic(kind string, faces, plates, whitelistedFaces int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mosaicFrames[kind]++
+	r.mosaicObjects["face"] += uint64(faces)
+	r.mosaicObjects["number_plate"] += uint64(plates)
+	r.mosaicObjects["whitelisted_face"] += uint64(whitelistedFaces)
+}
+
 func (r *Registry) ObserveProcessing(mode string, duration time.Duration) {
 	r.observe(r.processing, mode, duration)
 }
@@ -358,6 +373,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCounters(w, "innolive_rtp_ingress_packets_dropped_total", "Number of oldest RTP packets discarded because the ingress queue was full.", r.rtpIngressDropped)
 	writeLabeledCounters(w, "innolive_rtp_out_of_order_total", "Number of duplicate or late RTP packets not tracked as missing.", r.rtpOutOfOrder)
 	writeLabeledCounters(w, "innolive_rtp_packets_discarded_total", "Number of RTP packets discarded while assembling complete video frames.", r.rtpPacketsDiscarded)
+	writeLabeledCountersWithKey(w, "innolive_mosaic_frames_total", "Number of AI-processed frames by what was blurred (face_only, plate_only, both, none).", "kind", r.mosaicFrames)
+	writeLabeledCountersWithKey(w, "innolive_mosaic_objects_total", "Number of objects in AI-processed frames, counted per frame (blurred face, number_plate, or whitelisted_face left unblurred).", "object", r.mosaicObjects)
 	writeLabeledCounters(w, "innolive_rtp_frames_assembled_total", "Number of complete VP8 frames assembled from RTP packets.", r.rtpFramesAssembled)
 	writeHistograms(w, "innolive_frame_processing_duration_seconds", "Time spent processing one complete video frame.", "mode", r.processing)
 	writeHistograms(w, "innolive_ai_duration_seconds", "Round-trip time spent in the external AI service.", "mode", r.aiDuration)

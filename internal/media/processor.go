@@ -73,6 +73,9 @@ type Processor struct {
 	lastProbeAt           time.Time
 	blackoutMu            sync.Mutex
 	blackoutData          []byte
+
+	// mosaicTally는 세션의 블러 분류 누계다(#412). 없으면 Prometheus 카운터만 센다.
+	mosaicTally atomic.Pointer[MosaicTally]
 }
 
 func NewProcessor(
@@ -347,7 +350,23 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 	if len(response.GetData()) == 0 {
 		return nil, errors.New("AI processing returned an empty frame")
 	}
+	p.recordMosaic(response.GetFaces())
 	return response.GetData(), nil
+}
+
+// SetMosaicTally는 이 Processor가 블러 분류를 더할 세션 누계를 정한다.
+func (p *Processor) SetMosaicTally(tally *MosaicTally) {
+	p.mosaicTally.Store(tally)
+}
+
+// recordMosaic은 AI 처리에 성공한 프레임의 객체 목록을 블러 기준으로 분류해
+// 서버 합계와 세션 누계에 더한다.
+func (p *Processor) recordMosaic(objects []*aiv1.FaceMetadata) {
+	counts := classifyMosaic(objects)
+	p.metrics.ObserveMosaic(counts.kind(), counts.faces, counts.plates, counts.whitelistedFaces)
+	if tally := p.mosaicTally.Load(); tally != nil {
+		tally.record(counts)
+	}
 }
 
 // serveBlackout은 이 세션에 캐시한 검은 프레임을 돌려준다. 검은 프레임을 만들 수

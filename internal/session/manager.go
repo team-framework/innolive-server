@@ -226,6 +226,9 @@ type Session struct {
 	// 채워진다 — 동시 송출(#233)이 둘째를 넣는다.
 	targets   map[string]*streamTarget
 	processor *media.Processor
+	// mosaic은 세션 수명 동안의 얼굴·번호판 블러 누계다(#412). 파이프라인이
+	// 다시 만들어져도 이어서 세고, 세션 종료 로그에 요약을 남긴다.
+	mosaic *media.MosaicTally
 	// aiInputPaused는 방송 pause 의도를 보존한다. egress가 재구성·재연결 중인
 	// 경우와 카메라 트랙이 교체되는 경우에도 새 카메라 프레임을 AI worker로
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
@@ -716,6 +719,7 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 	}
 	s.baseCtx = ctx
 	s.egressFanout = media.NewEgressFanout()
+	s.mosaic = media.NewMosaicTally()
 	// 대상은 세션 생성과 함께 만들어 둔다 — 읽기 잠금만 쥔 경로에서 지연
 	// 생성하면 targets 맵을 쓰기와 경합시킨다.
 	s.targets = map[string]*streamTarget{provider: {phase: BroadcastPhaseIdle}}
@@ -1915,6 +1919,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		processor.SuspendAIInput()
 	}
 	processor.SetAnonymizationEnabled(s.anonymizationEnabled)
+	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor
 	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 	// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
@@ -2143,7 +2148,27 @@ func (s *Session) close(reason string, logger *slog.Logger) {
 	s.Status = "closed"
 	s.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
+	logMosaicSummary(logger, s.ID, s.mosaic)
 	logger.Info("closed live session", "session_id", s.ID, "reason", reason)
+}
+
+// logMosaicSummary는 방송 1회의 얼굴·번호판 블러 누계를 남긴다(#412).
+// Prometheus 카운터는 세션 구분이 없어 동시 방송이 섞이므로 방송 단위 분석은
+// 이 로그로 한다. 프레임 수는 AI 처리에 성공한 프레임만 센다.
+func logMosaicSummary(logger *slog.Logger, sessionID string, tally *media.MosaicTally) {
+	if tally == nil {
+		return
+	}
+	summary := tally.Summary()
+	logger.Info("session mosaic summary",
+		"session_id", sessionID,
+		"frames_face_only", summary.FaceOnlyFrames,
+		"frames_plate_only", summary.PlateOnlyFrames,
+		"frames_both", summary.BothFrames,
+		"frames_none", summary.NoneFrames,
+		"face_objects", summary.FaceObjects,
+		"number_plate_objects", summary.PlateObjects,
+		"whitelisted_face_objects", summary.WhitelistedFaceObjects)
 }
 
 func buildICEServers(cfg config.Config) []webrtc.ICEServer {

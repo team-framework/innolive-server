@@ -326,6 +326,13 @@ func TestGuestReferenceUploadDoesNotRepopulateAfterSessionDelete(t *testing.T) {
 	if entries := worker.snapshot(); len(entries) != 0 {
 		t.Fatalf("worker retains entries after guest session deletion: %v", entries)
 	}
+	// 세션 종료 정리 고루틴도 저장 파일을 쓴다. 끝나기 전에 테스트가 끝나면 임시
+	// 폴더 삭제와 겹쳐 실패한다(#414).
+	waitContext, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWait()
+	if err := application.WaitGuestCleanup(waitContext); err != nil {
+		t.Fatalf("guest cleanup did not finish: %v", err)
+	}
 	if status := application.references.status(live.AIClientID); status.Count != 0 {
 		t.Fatalf("reference store count = %d, want 0", status.Count)
 	}

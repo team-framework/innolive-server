@@ -180,3 +180,42 @@ func testGoogleLoginHTTPHandlerWithAccounts(t *testing.T, verifier GoogleIdentit
 	}
 	return MountAuthHTTP(http.NotFoundHandler(), tokens, google, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
 }
+
+// 계정 설정 도중 예전 계정이 병합·탈퇴되면 500이 아니라 409로 답하고, 그 가입 세션은
+// 버린다(E21) — 같은 세션으로는 다시 성공할 수 없다.
+func TestAccountSetupVerifyAfterTargetGoneReturnsConflict(t *testing.T) {
+	pending := newMemoryPendingEmailSignupStore()
+	accounts := &memoryEmailAccountStore{}
+	sender := &recordingVerificationEmailSender{}
+	tokens := testTokenService(newMemoryRefreshStore())
+	service := newTestEmailAuthService(t, pending, accounts, sender, tokens)
+	config, _ := NewTokenHTTPConfig(false, nil)
+	handler := MountAuthHTTPWithServices(http.NotFoundHandler(), tokens, nil, nil, service, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), config)
+	setupToken, err := tokens.IssueAccountSetupToken(uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/account-setup", map[string]string{"setup_token": setupToken, "email": "legacy@example.com", "password": "correct horse battery staple"}, nil)
+	var started struct {
+		SignupToken string `json:"signup_token"`
+	}
+	_ = json.Unmarshal(start.Body.Bytes(), &started)
+	if start.Code != http.StatusOK || started.SignupToken == "" {
+		t.Fatalf("account setup = %d %s", start.Code, start.Body.String())
+	}
+
+	accounts.attachErr = ErrUserInactive
+	verify := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/verify-email", map[string]string{"signup_token": started.SignupToken, "verification_code": sender.code}, nil)
+	if verify.Code != http.StatusConflict || !strings.Contains(verify.Body.String(), `"account_setup_target_gone"`) {
+		t.Fatalf("verify after target gone = %d %s", verify.Code, verify.Body.String())
+	}
+	// 세션을 버렸으므로 같은 토큰·코드로 다시 보내도 성공하지 않는다.
+	accounts.attachErr = nil
+	retry := serveEmailJSON(t, handler, http.MethodPost, "/auth/native/verify-email", map[string]string{"signup_token": started.SignupToken, "verification_code": sender.code}, nil)
+	if retry.Code != http.StatusBadRequest {
+		t.Fatalf("retry with discarded session = %d %s", retry.Code, retry.Body.String())
+	}
+	if accounts.account != nil {
+		t.Fatal("retry attached an email account to the gone user")
+	}
+}

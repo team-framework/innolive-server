@@ -579,3 +579,17 @@ func TestPostgresResetPasswordRevokesAllRefreshSessions(t *testing.T) {
 		t.Fatal("reset with a stale email must fail")
 	}
 }
+
+// 계정 설정 대상이 지워졌으면 이메일 계정을 붙이지 않고 ErrUserInactive다(E21의 근거).
+func TestPostgresAttachEmailAccountToDeletedUser(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	store := NewGormEmailAccountStore(db)
+	legacy := createLinkTestUser(t, db, "", plan.Spark)
+	if err := db.Where("id = ?", legacy).Delete(&User{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := store.AttachEmailAccount(context.Background(), legacy, PendingEmailSignup{Email: "legacy@example.com", PasswordHash: "hash"}, time.Now().UTC())
+	if !errors.Is(err, ErrUserInactive) {
+		t.Fatalf("attach to deleted user error = %v, want ErrUserInactive", err)
+	}
+}

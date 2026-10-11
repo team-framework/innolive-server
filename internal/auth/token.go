@@ -26,6 +26,9 @@ var (
 	ErrRefreshTokenReused  = errors.New("refresh token reuse detected")
 	ErrUserInactive        = errors.New("user is not active")
 	ErrInvalidSetupToken   = errors.New("invalid account setup token")
+	// ErrAccountSetupTargetGone은 계정 설정 도중 이메일을 붙일 예전 계정이 병합·탈퇴·
+	// 정지돼 더는 붙일 수 없다는 뜻이다(E21). 같은 가입 세션으로는 다시 성공할 수 없다.
+	ErrAccountSetupTargetGone = errors.New("account setup target is no longer active")
 )
 
 // accountSetupTokenTTL은 기존 OAuth 전용 사용자가 이메일 계정을 만드는 데 쓰는

@@ -138,6 +138,8 @@ func (h *tokenHTTPHandler) handleEmailSignupVerificationMode(w http.ResponseWrit
 			h.writeError(w, r, http.StatusBadRequest, "invalid_verification_code", "Verification code is invalid or expired.")
 		case errors.Is(err, ErrEmailAlreadyRegistered):
 			h.writeError(w, r, http.StatusConflict, "email_already_registered", "Email is already registered.")
+		case errors.Is(err, ErrAccountSetupTargetGone):
+			h.writeError(w, r, http.StatusConflict, "account_setup_target_gone", "The account being set up is no longer available. Sign in with Google or Apple again.")
 		case errors.Is(err, ErrEmailDeliveryUnavailable):
 			h.writeError(w, r, http.StatusServiceUnavailable, "email_auth_unavailable", "Email authentication is temporarily unavailable.")
 		default:

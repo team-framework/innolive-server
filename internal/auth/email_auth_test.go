@@ -397,6 +397,8 @@ type memoryEmailAccountStore struct {
 	account    *EmailAccount
 	attachedTo uuid.UUID
 	resets     int
+	// attachErr는 계정 설정 대상이 사라진 경우(E21) 같은 저장소 실패를 흉내 낸다.
+	attachErr error
 }
 
 func (s *memoryEmailAccountStore) EmailAlreadyRegistered(_ context.Context, email string) (bool, error) {
@@ -425,6 +427,9 @@ func (s *memoryEmailAccountStore) EmailRegisteredToOther(_ context.Context, emai
 	return s.user != nil && s.user.ID != userID && s.user.Email != nil && *s.user.Email == email, nil
 }
 func (s *memoryEmailAccountStore) AttachEmailAccount(_ context.Context, userID uuid.UUID, pending PendingEmailSignup, now time.Time) error {
+	if s.attachErr != nil {
+		return s.attachErr
+	}
 	if s.account != nil {
 		return ErrEmailAlreadyRegistered
 	}

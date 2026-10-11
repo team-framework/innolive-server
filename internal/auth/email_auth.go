@@ -739,6 +739,13 @@ func (s *EmailAuthService) CompleteSignup(ctx context.Context, signupToken, code
 			return fmt.Errorf("decode account setup user: %w", err)
 		}
 		if err := s.accounts.AttachEmailAccount(ctx, userID, pending, s.now().UTC()); err != nil {
+			if errors.Is(err, ErrUserInactive) {
+				// 붙일 계정이 사라졌다(E21). 재시도해도 같으므로 가입 세션을 버린다.
+				if deleteErr := s.pending.Delete(ctx, signupToken); deleteErr != nil {
+					return fmt.Errorf("discard account setup for gone user: %w", deleteErr)
+				}
+				return ErrAccountSetupTargetGone
+			}
 			return err
 		}
 	} else if _, err := s.accounts.CreateEmailUser(ctx, pending, s.now().UTC()); err != nil {

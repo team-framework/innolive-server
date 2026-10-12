@@ -16,6 +16,7 @@ import (
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
+	"inno-live-server/internal/billing"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/database"
 	"inno-live-server/internal/database/migration"
@@ -556,6 +557,8 @@ func main() {
 	analyticsStore := analytics.NewStore(databaseConnection.DB)
 	application.SetAnalytics(analyticsStore)
 	go analyticsStore.RunRetention(limitContext, logger)
+	// 결제 구독 만료(#422): 기간이 끝난 구독을 만료로 바꾸고 플랜을 다시 계산한다.
+	go billing.NewService(databaseConnection.DB).RunExpiry(limitContext, logger, 10*time.Minute)
 	if youtubeConnect != nil {
 		youtubeConnect.SetUserOperationGate(withdrawal)
 	}

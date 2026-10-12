@@ -547,6 +547,8 @@ func main() {
 	application.SetPlanStore(auth.NewPlanStore(databaseConnection.DB))
 	// 월 방송 시간 사용 내역(#274). 월 한도가 플랜에서 오므로 플랜 저장소 뒤에 붙인다.
 	application.SetUsageLedger(usage.NewLedger(databaseConnection.DB))
+	// 온디바이스 직접 송출 하트비트(#434).
+	application.SetHeartbeatStore(usage.NewHeartbeatStore(databaseConnection.DB))
 	// 방송 한도 집행(#275): 1회 최대·월 방송 시간·입력 없음. 종료 시 함께 멈춘다.
 	limitContext, stopLimitEnforcer := context.WithCancel(context.Background())
 	defer stopLimitEnforcer()

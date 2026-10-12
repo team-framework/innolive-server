@@ -79,7 +79,7 @@ func (r heartbeatRequest) missingField() string {
 }
 
 // handleHeartbeat은 온디바이스 직접 송출 중인 앱의 상태 보고를 받는다(#434).
-// 판정(입력 없음·한도 종료)은 #436에서 붙는다. 응답은 세션의 알림과 남은
+// 연결된 대상이 있는 보고가 입력 없음 시계를 연다(#436). 응답은 세션의 알림과 남은
 // 시간을 함께 실어 앱이 세션을 따로 조회하지 않게 한다.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	if liveSession.AIProcessing != session.AIProcessingOnDevice {
@@ -87,6 +87,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, liveSes
 		return
 	}
 	if len(liveSession.DirectLiveTargets()) == 0 {
+		// 서버가 방금 모든 대상을 끝냈다면 라이브 대상은 없지만 앱은 아직 송출
+		// 중이다. 끊을 대상을 알려야 하므로 거절하지 않는다(#436).
+		if stops := liveSession.TakeDirectStops(); len(stops) > 0 {
+			writeHeartbeatResponse(w, liveSession, stops)
+			return
+		}
 		writeError(w, heartbeatNotApplicable(liveSession.ID, "The session has no live broadcast target."))
 		return
 	}
@@ -126,17 +132,29 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, liveSes
 		Platform:         request.Platform,
 		Payload:          string(raw),
 	}
+	// 입력 없음 시계는 저장 성공과 무관하게 연다 — DB 장애로 방송이 끊기면 안 된다.
+	// 연결된 대상이 없는 보고는 송출 중이 아니므로 시계를 열지 않는다.
+	if connected > 0 {
+		liveSession.MarkHeartbeat(heartbeat.ReceivedAt)
+	}
 	if err := s.heartbeats.SaveHeartbeat(r.Context(), heartbeat); err != nil {
 		s.logger.Error("save heartbeat failed", "session_id", liveSession.ID, "error", err)
 		writeError(w, internalError())
 		return
+	}
+	writeHeartbeatResponse(w, liveSession, liveSession.TakeDirectStops())
+}
+
+func writeHeartbeatResponse(w http.ResponseWriter, liveSession *session.Session, stops []string) {
+	if stops == nil {
+		stops = []string{}
 	}
 	response := liveSession.Response()
 	writeJSON(w, http.StatusOK, struct {
 		StopTargets               []string         `json:"stop_targets"`
 		Notices                   []session.Notice `json:"notices"`
 		BroadcastRemainingSeconds *int64           `json:"broadcast_remaining_seconds"`
-	}{StopTargets: []string{}, Notices: response.Notices, BroadcastRemainingSeconds: response.BroadcastRemainingSeconds})
+	}{StopTargets: stops, Notices: response.Notices, BroadcastRemainingSeconds: response.BroadcastRemainingSeconds})
 }
 
 func heartbeatNotApplicable(sessionID, message string) apiError {

@@ -686,7 +686,11 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	}
 	// 실제로 라이브가 된 대상 수로 남은 시간을 곧바로 맞춘다(#394) — 다음 한도
 	// 점검까지 방송 전 1배 값이 보이지 않게 한다.
-	if targets, _ := liveSession.BroadcastActivity(); len(targets) > 0 {
+	targets, _ := liveSession.BroadcastActivity()
+	if direct := liveSession.DirectLiveTargets(); len(direct) > 0 {
+		targets = direct
+	}
+	if len(targets) > 0 {
 		s.refreshBroadcastRemaining(r.Context(), liveSession, time.Now(), len(targets))
 	}
 	response := liveSession.Response()

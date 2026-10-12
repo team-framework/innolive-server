@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sort"
 	"time"
 
 	"inno-live-server/internal/media"
@@ -102,4 +103,44 @@ func (s *Session) DirectLiveTargets() []string {
 		}
 	}
 	return live
+}
+
+// MarkHeartbeat는 앱이 직접 송출 중임을 알린 시각을 남긴다(#436). 연결된 대상이
+// 없는 보고는 부르지 않는다 — 끊긴 채 보고만 오는 상태도 입력 없음이다.
+func (s *Session) MarkHeartbeat(at time.Time) {
+	s.heartbeatNano.Store(at.UnixNano())
+}
+
+// HeartbeatIdleSince는 직접 송출의 입력 없음 시계가 시작된 시각이다. 마지막
+// 하트비트와 라이브 전환 중 늦은 쪽이다.
+func (s *Session) HeartbeatIdleSince() time.Time {
+	latest := s.heartbeatNano.Load()
+	if latest == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, latest)
+}
+
+// TakeDirectStops는 서버가 끝낸 직접 송출 대상을 넘기고 비운다(#436). 앱은 이
+// 대상의 연결을 끊는다 — 치지직은 앱이 끊어야 방송이 끝난다.
+func (s *Session) TakeDirectStops() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.directStops) == 0 {
+		return nil
+	}
+	stops := make([]string, 0, len(s.directStops))
+	for provider := range s.directStops {
+		stops = append(stops, provider)
+	}
+	sort.Strings(stops)
+	s.directStops = nil
+	return stops
+}
+
+// HasDirectStops는 앱에 아직 알리지 않은 종료 대상이 있는지다.
+func (s *Session) HasDirectStops() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.directStops) > 0
 }

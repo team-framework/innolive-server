@@ -388,6 +388,7 @@ func (m *Manager) CompleteGoLive(id string, providers ...string) (aborted bool, 
 		// 라이브 전환을 송출 시작으로 보고 여기서 연다.
 		t.usageID = uuid.NewString()
 		m.recordUsage(UsageEvent{Kind: UsageBroadcastStarted, SessionID: s.ID, BroadcastID: t.usageID, Provider: s.targetProvider(providers)})
+		s.heartbeatNano.Store(time.Now().UnixNano())
 	}
 	if t.usageID != "" {
 		m.recordUsage(UsageEvent{Kind: UsageBroadcastLive, BroadcastID: t.usageID})

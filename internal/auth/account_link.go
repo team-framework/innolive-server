@@ -288,6 +288,16 @@ func mergeUser(tx *gorm.DB, from, into uuid.UUID, now time.Time) error {
 		}
 	}
 
+	// 결제 구독도 옮긴다 — 남기면 예전 계정 삭제와 함께 지워져 갱신 결제가 갈 곳을
+	// 잃는다. billing 패키지가 auth에 의존하므로 테이블 이름으로 옮긴다.
+	for _, table := range []string{"billing_subscriptions", "billing_events"} {
+		if tx.Migrator().HasTable(table) {
+			if err := tx.Exec("UPDATE "+table+" SET user_id = ? WHERE user_id = ?", into, from).Error; err != nil {
+				return fmt.Errorf("move %s: %w", table, err)
+			}
+		}
+	}
+
 	if higherPlan(fromUser.Plan, intoUser.Plan) {
 		if err := tx.Model(&User{}).Where("id = ?", into).Updates(map[string]any{"plan": fromUser.Plan, "updated_at": now}).Error; err != nil {
 			return fmt.Errorf("carry merged plan: %w", err)

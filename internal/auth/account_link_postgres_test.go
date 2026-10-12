@@ -593,3 +593,32 @@ func TestPostgresAttachEmailAccountToDeletedUser(t *testing.T) {
 		t.Fatalf("attach to deleted user error = %v, want ErrUserInactive", err)
 	}
 }
+
+func TestPostgresLinkMergeMovesBillingRows(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	// billing 패키지는 auth에 의존하므로 같은 외래 키 동작만 가진 테이블로 대신한다.
+	for _, table := range []string{"billing_subscriptions", "billing_events"} {
+		if err := db.Exec("CREATE TABLE " + table + " (id uuid PRIMARY KEY, user_id uuid REFERENCES users (id) ON DELETE CASCADE)").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	member := createLinkTestUser(t, db, "member@example.com", plan.Spark)
+	legacy := createLinkTestUser(t, db, "", plan.Beam)
+	createLinkTestIdentity(t, db, legacy, OAuthProviderGoogle, "legacy-google")
+	rowIDs := map[string]uuid.UUID{"billing_subscriptions": uuid.New(), "billing_events": uuid.New()}
+	for table, id := range rowIDs {
+		if err := db.Exec("INSERT INTO "+table+" (id, user_id) VALUES (?, ?)", id, legacy).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := NewAccountLinkStore(db).Link(context.Background(), member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "legacy-google"}); err != nil {
+		t.Fatalf("merge link: %v", err)
+	}
+	for table, id := range rowIDs {
+		var owner string
+		if err := db.Raw("SELECT user_id::text FROM "+table+" WHERE id = ?", id).Scan(&owner).Error; err != nil || owner != member.String() {
+			t.Fatalf("%s owner = %q, %v, want member", table, owner, err)
+		}
+	}
+}

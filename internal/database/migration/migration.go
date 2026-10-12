@@ -7,6 +7,7 @@ import (
 
 	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
+	"inno-live-server/internal/billing"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/usage"
@@ -30,6 +31,9 @@ func Run(
 			return err
 		}
 		if err := usage.AutoMigrate(ctx, db); err != nil {
+			return err
+		}
+		if err := billing.AutoMigrate(ctx, db); err != nil {
 			return err
 		}
 		if err := experiencequality.AutoMigrate(ctx, db); err != nil {

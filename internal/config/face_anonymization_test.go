@@ -2,37 +2,27 @@ package config
 
 import "testing"
 
-// TestFaceAnonymizationDefaultsToBlur: env를 주지 않은 배포는 종전 blur를 그대로 쓴다.
+// TestFaceSwapDisabledByDefault: env를 주지 않은 배포는 합성을 고를 수 없다.
 // 합성은 AI 서버에 모델·프리셋이 준비된 배포에서만 켠다.
-func TestFaceAnonymizationDefaultsToBlur(t *testing.T) {
+func TestFaceSwapDisabledByDefault(t *testing.T) {
 	setRequiredEnv(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AIFaceAnonymization != FaceAnonymizationBlur {
-		t.Fatalf("AIFaceAnonymization = %q, want blur", cfg.AIFaceAnonymization)
+	if cfg.AIFaceSwapEnabled {
+		t.Fatal("AIFaceSwapEnabled = true, want false")
 	}
 }
 
-func TestFaceAnonymizationFromEnv(t *testing.T) {
+func TestFaceSwapEnabledFromEnv(t *testing.T) {
 	setRequiredEnv(t)
-	t.Setenv("AI_FACE_ANONYMIZATION", "face_swap")
+	t.Setenv("AI_FACE_SWAP_ENABLED", "true")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AIFaceAnonymization != FaceAnonymizationFaceSwap {
-		t.Fatalf("AIFaceAnonymization = %q, want face_swap", cfg.AIFaceAnonymization)
-	}
-}
-
-// TestValidateRejectsUnknownFaceAnonymization: 오타가 기동 시점에 걸려야 한다.
-// 런타임에는 조용히 blur로 동작해 합성이 꺼진 줄 모른다.
-func TestValidateRejectsUnknownFaceAnonymization(t *testing.T) {
-	cfg := validConfig()
-	cfg.AIFaceAnonymization = "swap"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected an unknown face anonymization to be rejected")
+	if !cfg.AIFaceSwapEnabled {
+		t.Fatal("AIFaceSwapEnabled = false, want true")
 	}
 }

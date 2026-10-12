@@ -657,7 +657,7 @@ func main() {
 			"privacy_mode", cfg.PrivacyMode,
 			"ai_targets", cfg.AITargets,
 			"wire_format", cfg.AIWireFormat,
-			"face_anonymization", cfg.AIFaceAnonymization,
+			"face_swap_enabled", cfg.AIFaceSwapEnabled,
 			"max_sessions", cfg.MaxSessions,
 			"ffmpeg_spawn_concurrency",
 			cfg.FFmpegSpawnConcurrency,

@@ -2225,7 +2225,9 @@ func logMosaicSummary(logger *slog.Logger, sessionID string, tally *media.Mosaic
 		"frames_none", summary.NoneFrames,
 		"face_objects", summary.FaceObjects,
 		"number_plate_objects", summary.PlateObjects,
-		"whitelisted_face_objects", summary.WhitelistedFaceObjects)
+		"whitelisted_face_objects", summary.WhitelistedFaceObjects,
+		"swapped_face_objects", summary.SwappedFaceObjects,
+		"blur_fallback_face_objects", summary.BlurFallbackFaceObjects)
 }
 
 func buildICEServers(cfg config.Config) []webrtc.ICEServer {

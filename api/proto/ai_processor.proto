@@ -43,6 +43,35 @@ message VideoChunk {
   uint32 height = 9;
   // Pixel format of data when it is raw (e.g. "yuv420p"). Empty means data is a self-describing JPEG.
   string pix_fmt = 10;
+  // Explicit opt-in. Zero/omitted keeps Gaussian blur and loads no experimental models.
+  // Fixed for the lifetime of a ProcessVideo RPC.
+  FaceAnonymizationMode anonymization_mode = 11;
+}
+
+enum FaceAnonymizationMode {
+  FACE_ANONYMIZATION_MODE_BLUR = 0;
+  FACE_ANONYMIZATION_MODE_FACE_SWAP = 1;
+  // Extract attributes and match presets, while rendering blur.
+  FACE_ANONYMIZATION_MODE_FACE_METADATA = 2;
+}
+
+message FaceAttributes {
+  string gender = 1;
+  string age = 2;
+  string glasses = 3;
+  string exp = 4;
+  map<string, float> confidence = 5;
+}
+
+message FaceAnonymization {
+  FaceAttributes attributes = 1;
+  // Stable gender/age/identity slot within one BoT-SORT track and RPC.
+  string identity_key = 2;
+  // Current gender/age/identity/glasses/exp variant; empty when unavailable.
+  string preset_key = 3;
+  // swapped, metadata_only, or blur_fallback.
+  string status = 4;
+  string fallback_reason = 5;
 }
 
 enum VideoOutputMode {
@@ -105,6 +134,7 @@ message FaceMetadata {
   string class_name = 8;
   float mask_area_px = 9;
   bool whitelisted = 10;
+  FaceAnonymization anonymization = 11;
 }
 
 message FrameStats {

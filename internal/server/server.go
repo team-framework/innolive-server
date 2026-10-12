@@ -57,6 +57,7 @@ type Server struct {
 	admins            map[uuid.UUID]struct{}
 	usageLedger       UsageLedger
 	heartbeats        HeartbeatStore
+	platformTimes     PlatformTimesRecorder
 	guestQueue        *GuestQueue
 	guestReference    *guestReferenceGate
 	guestCleanup      sync.WaitGroup

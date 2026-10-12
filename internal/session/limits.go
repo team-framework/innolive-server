@@ -86,3 +86,20 @@ func (s *Session) BroadcastActivity() (live []string, unpaused int) {
 	}
 	return live, unpaused
 }
+
+// DirectLiveTargets는 온디바이스 세션에서 앱이 직접 송출 중인(egress 없는)
+// 라이브 대상이다(#434). BroadcastActivity는 egress가 있는 대상만 센다.
+func (s *Session) DirectLiveTargets() []string {
+	if s.AIProcessing != AIProcessingOnDevice {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var live []string
+	for provider, t := range s.targets {
+		if t.phase == BroadcastPhaseLive && t.egress == nil {
+			live = append(live, provider)
+		}
+	}
+	return live
+}

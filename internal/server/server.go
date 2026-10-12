@@ -56,6 +56,7 @@ type Server struct {
 	plans             PlanStore
 	admins            map[uuid.UUID]struct{}
 	usageLedger       UsageLedger
+	heartbeats        HeartbeatStore
 	guestQueue        *GuestQueue
 	guestReference    *guestReferenceGate
 	guestCleanup      sync.WaitGroup

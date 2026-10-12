@@ -95,7 +95,7 @@ func AutoMigrate(ctx context.Context, db *gorm.DB) error {
 	if db == nil {
 		return errors.New("GORM database is nil")
 	}
-	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}, &Pause{}, &ResolutionChange{}); err != nil {
+	if err := db.WithContext(ctx).AutoMigrate(&Session{}, &Broadcast{}, &Pause{}, &ResolutionChange{}, &Heartbeat{}); err != nil {
 		return fmt.Errorf("auto migrate usage schema: %w", err)
 	}
 	return nil

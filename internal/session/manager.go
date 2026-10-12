@@ -267,6 +267,13 @@ type Session struct {
 	broadcastRemaining *int64
 	lastMediaFrameNano atomic.Int64
 	mediaIdleResetNano atomic.Int64
+	// heartbeatNano는 앱이 직접 송출 중임을 마지막으로 알린 시각이다(#436).
+	// 라이브 전환에서도 다시 시작한다 — 첫 하트비트 전의 공백을 입력 없음으로
+	// 보지 않는다.
+	heartbeatNano atomic.Int64
+	// directStops는 서버가 끝낸 직접 송출 대상과 사유다(#436). 앱만 연결을 끊을
+	// 수 있으므로 다음 하트비트 응답으로 넘기고 비운다. Session.mu로 보호한다.
+	directStops map[string]string
 	// videoTrack·pipelineDone은 해상도 변경(#283)이 같은 트랙으로 파이프라인을
 	// 다시 띄우는 데 쓴다. pipelineDone은 현재 파이프라인이 끝나면 닫힌다.
 	// resolutionMu는 변경 요청을 하나씩 처리한다.
@@ -1415,6 +1422,13 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 			return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 		}
 		if t.phase == BroadcastPhasePrepared || (s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseLive) {
+			if t.phase == BroadcastPhaseLive && reason != "user_requested" {
+				// 사용자가 아니라 서버가 끝낸 직접 송출은 앱이 모르므로 알린다.
+				if s.directStops == nil {
+					s.directStops = make(map[string]string)
+				}
+				s.directStops[provider] = reason
+			}
 			m.endDirectUsageLocked(t, reason)
 			broadcast, phase := takeBroadcastLocked(s, provider)
 			s.UpdatedAt = time.Now().UTC()

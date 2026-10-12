@@ -126,6 +126,15 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			continue
 		}
 		targets, unpaused := live.BroadcastActivity()
+		idleSince := live.MediaIdleSince()
+		// 앱이 직접 송출하는 대상은 egress가 없어 위 판정에 잡히지 않는다(#436).
+		// 일시정지가 없으므로 모두 멈추지 않은 대상이고, 입력 없음은 서버가 받는
+		// 영상이 아니라 하트비트로 판단한다.
+		direct := live.DirectLiveTargets()
+		if len(direct) > 0 {
+			targets, unpaused = direct, len(direct)
+			idleSince = live.HeartbeatIdleSince()
+		}
 		if len(targets) == 0 {
 			s.fillIdleBroadcastRemaining(ctx, live, now)
 			continue
@@ -137,7 +146,6 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			s.logger.Error("limit check failed", "session_id", live.ID, "error", err)
 			continue
 		}
-		idleSince := live.MediaIdleSince()
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
 		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
 		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
@@ -150,6 +158,11 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		if decision.stopReason == "" {
 			s.stopPlatformEndedTargets(ctx, live, targets, now)
 			s.noticeYouTubeQuotaLowFor(live, targets, now)
+			if len(direct) > 0 {
+				// 화질 올리기는 서버 egress를 갈아 끼우는 동작이라 직접 송출에는
+				// 제안하지 않는다.
+				continue
+			}
 			addable := s.addableProviders(ctx, live, targets)
 			if candidate, ok := upgradeCandidateFor(live, targets, addable, onAir, used); ok {
 				upgrades = append(upgrades, candidate)

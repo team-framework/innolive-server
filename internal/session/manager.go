@@ -88,6 +88,9 @@ type TargetState struct {
 	// 개일 때 "○○ 채널로 송출 중"을 보여 주는 데 쓴다. 준비 전에는 비어 있다.
 	AccountID    *uuid.UUID `json:"account_id,omitempty"`
 	ChannelTitle string     `json:"channel_title,omitempty"`
+	// VideoID는 유튜브 방송의 영상 ID다(#420). 유튜브는 방송 ID가 곧 영상 ID라, 앱이
+	// 팝아웃 채팅(live_chat?v=)을 띄우는 데 쓴다. 준비 전과 치지직 대상은 비어 있다.
+	VideoID string `json:"video_id,omitempty"`
 }
 
 // PeerRecoveryStatus는 WebRTC 입력 연결의 네트워크 복구 단계다. RTMP egress의
@@ -553,6 +556,9 @@ func (m *Manager) Create(metadata map[string]string) (*Session, string, error) {
 // DefaultProvider는 송출 플랫폼을 지정하지 않은 세션이 쓰는 값이다. 기존
 // 클라이언트는 provider를 보내지 않으므로 종전 동작(유튜브)이 유지된다.
 const DefaultProvider = "youtube"
+
+// youtubeProvider는 유튜브 대상 이름이다. 영상 ID처럼 유튜브에만 있는 응답 필드를 가른다.
+const youtubeProvider = "youtube"
 
 // CreateForUser는 userID가 소유하는 세션을 만든다. AI client ID는 요청 metadata로
 // 받지 않고 여기서 계산해, 얼굴 whitelist와 미디어 스트림이 항상 같은 인증 범위를
@@ -2082,6 +2088,9 @@ func targetStatesLocked(s *Session) []TargetState {
 			accountID := broadcast.AccountID
 			state.AccountID = &accountID
 			state.ChannelTitle = broadcast.ChannelTitle
+		}
+		if broadcast := s.targets[provider].platformBroadcast; broadcast != nil && provider == youtubeProvider {
+			state.VideoID = broadcast.BroadcastID
 		}
 		states = append(states, state)
 	}

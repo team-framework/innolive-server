@@ -219,3 +219,36 @@ func TestBeginBroadcastPrepareOnChannelIsExclusivePerUser(t *testing.T) {
 		t.Fatalf("channel must be free after the broadcast ends: %v", err)
 	}
 }
+
+// 유튜브 대상은 준비 후 영상 ID(= 방송 ID)를 응답에 싣는다(#420). 준비 전과 치지직은 비어 있다.
+func TestTargetStateCarriesYouTubeVideoIDAfterPrepare(t *testing.T) {
+	manager, live := newUpgradeTestManager(t, 0)
+	videoID := func(provider string) (string, bool) {
+		for _, target := range live.Response().Targets {
+			if target.Provider == provider {
+				return target.VideoID, true
+			}
+		}
+		return "", false
+	}
+	for _, provider := range []string{"youtube", "chzzk"} {
+		if _, err := manager.BeginBroadcastPrepare(live.ID, provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, ok := videoID("youtube"); !ok || id != "" {
+		t.Fatalf("preparing youtube video_id = %q (found %v), want empty", id, ok)
+	}
+	if _, err := manager.MarkBroadcastPrepared(live.ID, PlatformBroadcast{Provider: "youtube", BroadcastID: "yt-video-1"}, "youtube"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MarkBroadcastPrepared(live.ID, PlatformBroadcast{Provider: "chzzk", BroadcastID: "chzzk-live"}, "chzzk"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _ := videoID("youtube"); id != "yt-video-1" {
+		t.Fatalf("prepared youtube video_id = %q, want yt-video-1", id)
+	}
+	if id, _ := videoID("chzzk"); id != "" {
+		t.Fatalf("chzzk video_id = %q, want empty", id)
+	}
+}

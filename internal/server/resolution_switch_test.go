@@ -411,6 +411,10 @@ func TestResolutionSwitchReopensYouTubeOnPinnedChannel(t *testing.T) {
 	if len(targets) != 1 || targets[0].(map[string]any)["account_id"] != pinned.String() {
 		t.Fatalf("targets = %v, want pinned account in response", targets)
 	}
+	// 앱은 이 영상 ID로 유튜브 팝아웃 채팅을 띄운다(#420).
+	if targets[0].(map[string]any)["video_id"] != "yt-1" {
+		t.Fatalf("targets = %v, want youtube video_id", targets)
+	}
 }
 
 // 빠지는 대상만 끝낸다(720p 동시 → 720p 단독).

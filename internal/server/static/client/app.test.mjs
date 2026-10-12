@@ -37,7 +37,6 @@ const buttonKeys = [
   "completeChzzkBtn",
   "chzzkDetail",
   "broadcastResolution",
-  "faceAnonymization",
   "youtubeApplyLiveBtn",
   "chzzkApplyLiveBtn",
   "upgradeOffer",
@@ -1889,28 +1888,4 @@ test("카메라 권한 응답이 늦으면 10초 뒤 주소창 확인을 안내�
   grant(new FakeMediaStream());
   await opening;
   assert.ok(clearedTimers.includes(scheduledTimers.indexOf(hint) + 1), "hint timer must be cleared after the answer");
-});
-
-test("세션 생성 요청에 고른 얼굴 가림 방식을 싣는다", async () => {
-  const bodies = [];
-  const { createSession, state, els } = await loadApp({
-    fetchImpl: async (url, options) => {
-      const path = String(url).replace("https://example.test", "");
-      if (options?.method === "POST" && path === "/sessions") {
-        bodies.push(JSON.parse(options.body));
-        return jsonResponse({ session_id: "s-1", owner_token: "owner-1", face_anonymization: "face_swap" });
-      }
-      return jsonResponse({});
-    },
-  });
-  for (const id of ["sessionLabel", "resolutionSelect", "cameraSelect", "sendAudio"]) {
-    els[id] = { value: "", checked: false, dataset: {} };
-  }
-  state.accessToken = "access-token";
-  els.platformYoutube.checked = true;
-  els.faceAnonymization.value = "face_swap";
-
-  const session = await createSession();
-  assert.equal(bodies[0].face_anonymization, "face_swap");
-  assert.equal(session.face_anonymization, "face_swap");
 });

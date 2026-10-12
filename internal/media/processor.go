@@ -364,7 +364,6 @@ func (p *Processor) SetMosaicTally(tally *MosaicTally) {
 func (p *Processor) recordMosaic(objects []*aiv1.FaceMetadata) {
 	counts := classifyMosaic(objects)
 	p.metrics.ObserveMosaic(counts.kind(), counts.faces, counts.plates, counts.whitelistedFaces)
-	p.metrics.ObserveFaceAnonymization(counts.swappedFaces, counts.blurFallbackFaces)
 	if tally := p.mosaicTally.Load(); tally != nil {
 		tally.record(counts)
 	}

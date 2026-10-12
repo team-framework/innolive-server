@@ -197,7 +197,6 @@ function bindElements() {
     "completeChzzkBtn",
     "chzzkDetail",
     "broadcastResolution",
-    "faceAnonymization",
     "youtubeApplyLiveBtn",
     "chzzkApplyLiveBtn",
     "upgradeOffer",
@@ -2478,8 +2477,6 @@ async function createSession() {
     body: JSON.stringify({
       provider: selectedPlatforms()[0] || "youtube",
       broadcast_resolution: els.broadcastResolution.value,
-      // 얼굴 가림 방식은 세션 생성에서만 정한다. 합성이 꺼진 서버는 503으로 거절한다.
-      face_anonymization: els.faceAnonymization.value,
       metadata,
     }),
   };
@@ -2501,7 +2498,6 @@ async function createSession() {
   logEvent("ok", "Session created", {
     session_id: session.session_id,
     broadcast_resolution: session.broadcast_resolution,
-    face_anonymization: session.face_anonymization,
     metadata: session.metadata,
   });
   await applyBroadcastDefaults(session.session_id);

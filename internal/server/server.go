@@ -337,9 +337,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		// 송출 해상도(720p·fhd)는 세션 생성에서만 받는다 — 디코더가 트랙
 		// 도착 즉시 이 해상도로 뜨므로 prepare에서는 늦다(#271).
 		BroadcastResolution string `json:"broadcast_resolution"`
-		// 얼굴 가림 방식(blur·face_swap)도 세션 생성에서만 받는다 — AI 스트림
-		// 수명 동안 고정이다.
-		FaceAnonymization string `json:"face_anonymization"`
 	}{Metadata: map[string]string{}}
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := decodeOptionalJSON(r.Body, &request); err != nil {
@@ -378,25 +375,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	liveSession, ownerToken, err := s.sessions.CreateForUserWithFaceAnonymization(userID, string(providerName), request.AIProcessing, strings.TrimSpace(request.BroadcastResolution), strings.TrimSpace(request.FaceAnonymization), request.Metadata)
+	liveSession, ownerToken, err := s.sessions.CreateForUserWithResolution(userID, string(providerName), request.AIProcessing, strings.TrimSpace(request.BroadcastResolution), request.Metadata)
 	if errors.Is(err, session.ErrInvalidResolution) {
 		writeError(w, badRequest("broadcast_resolution must be 720p or fhd.", map[string]any{"field": "broadcast_resolution"}))
 		return
 	}
 	if errors.Is(err, session.ErrInvalidAIProcessing) {
 		writeError(w, badRequest("ai_processing must be server or on_device.", map[string]any{"field": "ai_processing"}))
-		return
-	}
-	if errors.Is(err, session.ErrInvalidFaceAnonymization) {
-		writeError(w, badRequest("face_anonymization must be blur, or face_swap for server processing.", map[string]any{"field": "face_anonymization"}))
-		return
-	}
-	if errors.Is(err, session.ErrFaceSwapUnavailable) {
-		writeError(w, apiError{
-			Status:  http.StatusServiceUnavailable,
-			Code:    "face_swap_unavailable",
-			Message: "Face swap is not available on this server.",
-		})
 		return
 	}
 	if errors.Is(err, session.ErrCapacityExceeded) {

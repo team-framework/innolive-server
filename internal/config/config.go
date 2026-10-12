@@ -65,17 +65,14 @@ const (
 )
 
 type Config struct {
-	HTTPAddr          string
-	PrivacyMode       PrivacyMode
-	PrivacyFixedDelay time.Duration
-	AIAddress         string
-	AITargets         []string
-	AITimeout         time.Duration
-	AIInsecure        bool
-	AIWireFormat      WireFormat
-	// AIFaceSwapEnabled는 세션이 얼굴 합성을 고를 수 있는지다. AI 서버에 합성
-	// 모델과 프리셋이 준비된 배포에서만 켠다. 꺼져 있으면 모든 세션이 blur다.
-	AIFaceSwapEnabled          bool
+	HTTPAddr                   string
+	PrivacyMode                PrivacyMode
+	PrivacyFixedDelay          time.Duration
+	AIAddress                  string
+	AITargets                  []string
+	AITimeout                  time.Duration
+	AIInsecure                 bool
+	AIWireFormat               WireFormat
 	AIFailurePolicy            AIFailurePolicy
 	AITimeoutLatchThreshold    int
 	AIPreflightTimeout         time.Duration
@@ -168,7 +165,6 @@ func Load() (Config, error) {
 		AIAddress:                  env("AI_GRPC_ADDR", "localhost:50051"),
 		AIInsecure:                 envBool("AI_GRPC_INSECURE", true),
 		AIWireFormat:               WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
-		AIFaceSwapEnabled:          envBool("AI_FACE_SWAP_ENABLED", false),
 		AIFailurePolicy:            AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
 		AITimeoutLatchThreshold:    envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		AIPreflightTimeout:         envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),

@@ -28,8 +28,6 @@ import (
 var (
 	ErrInvalidAIProcessing       = errors.New("invalid AI processing mode")
 	ErrOnDeviceProcessing        = errors.New("anonymization is controlled on device")
-	ErrInvalidFaceAnonymization  = errors.New("invalid face anonymization")
-	ErrFaceSwapUnavailable       = errors.New("face swap is not enabled on this server")
 	ErrNotFound                  = errors.New("session not found")
 	ErrCapacityExceeded          = errors.New("session capacity exceeded")
 	ErrUserSessionExists         = errors.New("user already has an active session")
@@ -137,26 +135,17 @@ const (
 	AIProcessingOnDevice = "on_device"
 )
 
-// 얼굴 가림 방식이다. 세션 생성 때 정하고 바꾸지 않는다 — AI 계약상 합성 모드는
-// ProcessVideo 한 RPC 동안 고정이다.
-const (
-	FaceAnonymizationBlur     = "blur"
-	FaceAnonymizationFaceSwap = "face_swap"
-)
-
 type Response struct {
-	AIProcessing string `json:"ai_processing"`
-	// FaceAnonymization은 서버 처리 세션의 얼굴 가림 방식(blur·face_swap)이다.
-	FaceAnonymization string              `json:"face_anonymization"`
-	SessionID         string              `json:"session_id"`
-	Provider          string              `json:"provider"`
-	Status            string              `json:"status"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
-	Metadata          map[string]string   `json:"metadata"`
-	Peer              PeerConnectionState `json:"peer_connection"`
-	Timing            Timing              `json:"timing"`
-	Media             struct {
+	AIProcessing string              `json:"ai_processing"`
+	SessionID    string              `json:"session_id"`
+	Provider     string              `json:"provider"`
+	Status       string              `json:"status"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
+	Metadata     map[string]string   `json:"metadata"`
+	Peer         PeerConnectionState `json:"peer_connection"`
+	Timing       Timing              `json:"timing"`
+	Media        struct {
 		RawVideoTrack          *TrackState `json:"raw_video_track"`
 		ProcessedVideoTrack    *TrackState `json:"processed_video_track"`
 		VideoSenderActive      bool        `json:"video_sender_active"`
@@ -193,10 +182,8 @@ type Response struct {
 
 type Session struct {
 	AIProcessing string
-	// FaceAnonymization은 생성 시점에 정해지고 바뀌지 않으므로 mu 없이 읽는다.
-	FaceAnonymization string
-	privacyMode       config.PrivacyMode
-	mu                sync.RWMutex
+	privacyMode  config.PrivacyMode
+	mu           sync.RWMutex
 
 	ID     string
 	UserID uuid.UUID
@@ -626,12 +613,6 @@ func (m *Manager) CreateForUserWithAIProcessing(userID uuid.UUID, provider, proc
 // CreateForUserWithResolution은 송출 해상도까지 정해 세션을 만든다(#271). 빈
 // resolution은 720p다.
 func (m *Manager) CreateForUserWithResolution(userID uuid.UUID, provider, processing, resolution string, metadata map[string]string) (*Session, string, error) {
-	return m.CreateForUserWithFaceAnonymization(userID, provider, processing, resolution, "", metadata)
-}
-
-// CreateForUserWithFaceAnonymization은 얼굴 가림 방식까지 정해 세션을 만든다. 빈
-// 값은 blur다. face_swap은 서버 처리 세션에서만, 합성이 켜진 배포에서만 받는다.
-func (m *Manager) CreateForUserWithFaceAnonymization(userID uuid.UUID, provider, processing, resolution, faceAnonymization string, metadata map[string]string) (*Session, string, error) {
 	resolution, err := normalizeResolution(resolution)
 	if err != nil {
 		return nil, "", err
@@ -642,22 +623,7 @@ func (m *Manager) CreateForUserWithFaceAnonymization(userID uuid.UUID, provider,
 	if processing != AIProcessingServer && processing != AIProcessingOnDevice {
 		return nil, "", ErrInvalidAIProcessing
 	}
-	switch faceAnonymization {
-	case "":
-		faceAnonymization = FaceAnonymizationBlur
-	case FaceAnonymizationBlur:
-	case FaceAnonymizationFaceSwap:
-		// 온디바이스 세션은 서버가 영상을 처리하지 않아 합성을 적용할 곳이 없다.
-		if processing != AIProcessingServer {
-			return nil, "", ErrInvalidFaceAnonymization
-		}
-		if !m.cfg.AIFaceSwapEnabled {
-			return nil, "", ErrFaceSwapUnavailable
-		}
-	default:
-		return nil, "", ErrInvalidFaceAnonymization
-	}
-	return m.create(userID, "", provider, processing, resolution, faceAnonymization, metadata)
+	return m.create(userID, "", provider, processing, resolution, metadata)
 }
 
 // CreateForGuest는 서버가 발급한 guest identity가 소유하는 세션을 만든다.
@@ -667,10 +633,10 @@ func (m *Manager) CreateForGuest(guestID string, metadata map[string]string) (*S
 	if strings.TrimSpace(guestID) == "" {
 		return nil, "", errors.New("guest ID is required")
 	}
-	return m.create(uuid.Nil, guestID, DefaultProvider, AIProcessingServer, Resolution720p, FaceAnonymizationBlur, metadata)
+	return m.create(uuid.Nil, guestID, DefaultProvider, AIProcessingServer, Resolution720p, metadata)
 }
 
-func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolution, faceAnonymization string, metadata map[string]string) (*Session, string, error) {
+func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolution string, metadata map[string]string) (*Session, string, error) {
 	if strings.TrimSpace(provider) == "" {
 		provider = DefaultProvider
 	}
@@ -768,7 +734,6 @@ func (m *Manager) create(userID uuid.UUID, guestID, provider, processing, resolu
 	}
 	s := &Session{
 		AIProcessing:         processing,
-		FaceAnonymization:    faceAnonymization,
 		privacyMode:          privacyMode,
 		ID:                   id,
 		UserID:               userID,
@@ -1985,7 +1950,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
 		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
 		// 스트림 식별자를 선택할 수 없게 한다.
-		aiStream = client.NewStream(trackCtx, s.AIClientID, s.FaceAnonymization == FaceAnonymizationFaceSwap)
+		aiStream = client.NewStream(trackCtx, s.AIClientID)
 	}
 	transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 		Gate:           m.spawnGate,
@@ -2071,16 +2036,15 @@ func (s *Session) Response() Response {
 	t := s.readTarget(s.Provider)
 	defer s.mu.RUnlock()
 	response := Response{
-		AIProcessing:      s.AIProcessing,
-		FaceAnonymization: s.FaceAnonymization,
-		SessionID:         s.ID,
-		Provider:          s.Provider,
-		Status:            s.Status,
-		CreatedAt:         s.CreatedAt,
-		UpdatedAt:         s.UpdatedAt,
-		Metadata:          copyMetadata(s.Metadata),
-		Timing:            s.Timing,
-		Stream:            s.Stream,
+		AIProcessing: s.AIProcessing,
+		SessionID:    s.ID,
+		Provider:     s.Provider,
+		Status:       s.Status,
+		CreatedAt:    s.CreatedAt,
+		UpdatedAt:    s.UpdatedAt,
+		Metadata:     copyMetadata(s.Metadata),
+		Timing:       s.Timing,
+		Stream:       s.Stream,
 	}
 	response.BroadcastResolution = s.BroadcastResolution
 	response.ResolutionSwitch = s.resolutionSwitchSnapshotLocked()
@@ -2261,9 +2225,7 @@ func logMosaicSummary(logger *slog.Logger, sessionID string, tally *media.Mosaic
 		"frames_none", summary.NoneFrames,
 		"face_objects", summary.FaceObjects,
 		"number_plate_objects", summary.PlateObjects,
-		"whitelisted_face_objects", summary.WhitelistedFaceObjects,
-		"swapped_face_objects", summary.SwappedFaceObjects,
-		"blur_fallback_face_objects", summary.BlurFallbackFaceObjects)
+		"whitelisted_face_objects", summary.WhitelistedFaceObjects)
 }
 
 func buildICEServers(cfg config.Config) []webrtc.ICEServer {

@@ -396,7 +396,8 @@ func (m *Manager) SetPlanResolver(resolver func(context.Context, uuid.UUID) (pla
 func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 	s.mu.Lock()
 	pending := make([]pendingBroadcast, 0, len(s.targets))
-	for provider := range s.targets {
+	for provider, t := range s.targets {
+		m.endDirectUsageLocked(t, "session_closed")
 		broadcast, phase := takeBroadcastLocked(s, provider)
 		pending = append(pending, pendingBroadcast{broadcast: broadcast, phase: phase})
 	}
@@ -404,6 +405,17 @@ func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 	for _, item := range pending {
 		m.disposeBroadcast(s.UserID, item.broadcast, item.phase)
 	}
+}
+
+// endDirectUsageLocked는 앱이 직접 송출하던 대상(egress 없음)의 송출 세대를
+// 닫는다(#435). egress가 있는 대상은 runEgress가 닫으므로 건드리지 않는다.
+// Session.mu를 가진 호출자만 쓴다.
+func (m *Manager) endDirectUsageLocked(t *streamTarget, reason string) {
+	if t.egress != nil || t.usageID == "" {
+		return
+	}
+	m.recordUsage(UsageEvent{Kind: UsageBroadcastEnded, BroadcastID: t.usageID, Reason: reason})
+	t.usageID = ""
 }
 
 // pendingBroadcast는 세션에서 떼어낸, 아직 플랫폼에서 치우지 않은 방송이다.
@@ -1403,6 +1415,7 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 			return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 		}
 		if t.phase == BroadcastPhasePrepared || (s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseLive) {
+			m.endDirectUsageLocked(t, reason)
 			broadcast, phase := takeBroadcastLocked(s, provider)
 			s.UpdatedAt = time.Now().UTC()
 			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)

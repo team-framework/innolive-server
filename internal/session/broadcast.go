@@ -383,6 +383,12 @@ func (m *Manager) CompleteGoLive(id string, providers ...string) (aborted bool, 
 	}
 	t.phase = BroadcastPhaseLive
 	s.UpdatedAt = time.Now().UTC()
+	if s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.usageID == "" {
+		// 앱이 직접 송출하는 대상은 egress가 없어 송출 세대가 열리지 않는다(#435).
+		// 라이브 전환을 송출 시작으로 보고 여기서 연다.
+		t.usageID = uuid.NewString()
+		m.recordUsage(UsageEvent{Kind: UsageBroadcastStarted, SessionID: s.ID, BroadcastID: t.usageID, Provider: s.targetProvider(providers)})
+	}
 	if t.usageID != "" {
 		m.recordUsage(UsageEvent{Kind: UsageBroadcastLive, BroadcastID: t.usageID})
 	}

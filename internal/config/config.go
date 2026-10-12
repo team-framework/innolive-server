@@ -36,6 +36,15 @@ const (
 	WireFormatRaw  WireFormat = "raw"
 )
 
+// FaceAnonymization은 AI가 얼굴을 가리는 방식이다. 기본값 blur는 종전 동작이고,
+// face_swap은 AI 서버에 합성 모델과 프리셋이 준비된 배포에서만 켠다.
+type FaceAnonymization string
+
+const (
+	FaceAnonymizationBlur     FaceAnonymization = "blur"
+	FaceAnonymizationFaceSwap FaceAnonymization = "face_swap"
+)
+
 // EgressVideoEncoder는 RTMP 송출 인코더를 고른다. 기본값은 종전 그대로
 // libx264(CPU)이고, nvenc는 GPU 인코딩이라 GPU가 노출된 배포에서만 켠다.
 //
@@ -73,6 +82,7 @@ type Config struct {
 	AITimeout                  time.Duration
 	AIInsecure                 bool
 	AIWireFormat               WireFormat
+	AIFaceAnonymization        FaceAnonymization
 	AIFailurePolicy            AIFailurePolicy
 	AITimeoutLatchThreshold    int
 	AIPreflightTimeout         time.Duration
@@ -165,6 +175,7 @@ func Load() (Config, error) {
 		AIAddress:                  env("AI_GRPC_ADDR", "localhost:50051"),
 		AIInsecure:                 envBool("AI_GRPC_INSECURE", true),
 		AIWireFormat:               WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
+		AIFaceAnonymization:        FaceAnonymization(env("AI_FACE_ANONYMIZATION", string(FaceAnonymizationBlur))),
 		AIFailurePolicy:            AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
 		AITimeoutLatchThreshold:    envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		AIPreflightTimeout:         envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
@@ -282,6 +293,11 @@ func (c Config) Validate() error {
 	case "", WireFormatJPEG, WireFormatRaw: // 비면 뒤에서 jpeg로 본다
 	default:
 		return fmt.Errorf("AI_FRAME_WIRE_FORMAT must be jpeg or raw: %q", c.AIWireFormat)
+	}
+	switch c.AIFaceAnonymization {
+	case "", FaceAnonymizationBlur, FaceAnonymizationFaceSwap: // 비면 blur로 본다
+	default:
+		return fmt.Errorf("AI_FACE_ANONYMIZATION must be blur or face_swap: %q", c.AIFaceAnonymization)
 	}
 	switch c.EgressVideoEncoder {
 	case "", EgressVideoEncoderX264, EgressVideoEncoderNVENC: // 비면 뒤에서 x264로 본다

@@ -1950,7 +1950,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
 		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
 		// 스트림 식별자를 선택할 수 없게 한다.
-		aiStream = client.NewStream(trackCtx, s.AIClientID)
+		aiStream = client.NewStream(trackCtx, s.AIClientID, m.cfg.AIFaceAnonymization == config.FaceAnonymizationFaceSwap)
 	}
 	transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 		Gate:           m.spawnGate,

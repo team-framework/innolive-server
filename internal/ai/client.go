@@ -54,8 +54,15 @@ func (c *Client) Ready() bool { return c.conn.GetState() == connectivity.Ready }
 
 func (c *Client) Address() string { return c.address }
 
-func (c *Client) NewStream(ctx context.Context, sessionID string) *Stream {
-	return &Stream{ctx: ctx, client: c.client, timeout: c.timeout, sessionID: sessionID}
+// NewStream은 세션 하나의 ProcessVideo 흐름을 만든다. faceSwap이면 얼굴을 blur
+// 대신 프리셋 얼굴로 합성하도록 요청한다. 합성 모드는 AI 계약상 한 RPC 동안
+// 고정이라 스트림 수명 내내 매 프레임 같은 값을 싣는다.
+func (c *Client) NewStream(ctx context.Context, sessionID string, faceSwap bool) *Stream {
+	anonymization := aiv1.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_BLUR
+	if faceSwap {
+		anonymization = aiv1.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_FACE_SWAP
+	}
+	return &Stream{ctx: ctx, client: c.client, timeout: c.timeout, sessionID: sessionID, anonymization: anonymization}
 }
 
 // whitelistTimeout은 프레임 스트림 타임아웃보다 훨씬 길다. 첫 AddWhitelist가 얼굴
@@ -103,6 +110,8 @@ type Stream struct {
 	client    aiv1.AiProcessorClient
 	timeout   time.Duration
 	sessionID string
+	// anonymization은 얼굴 처리 방식이다. 0(blur)이면 종전 요청과 같다.
+	anonymization aiv1.FaceAnonymizationMode
 
 	mu           sync.Mutex
 	stream       aiv1.AiProcessor_ProcessVideoClient
@@ -130,6 +139,8 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 		Width:      uint32(width),
 		Height:     uint32(height),
 		PixFmt:     pixFmt,
+		// 합성 모드는 이후 프레임에서 생략하면 INVALID_ARGUMENT라 매 프레임 싣는다.
+		AnonymizationMode: s.anonymization,
 	}
 	// 고루틴은 ctx가 끝나면 기다리지 않으므로 reset 뒤에 실행될 수 있다.
 	// s.stream을 실행 시점에 읽으면 nil이라 서버 전체가 죽는다(#316) — 지금

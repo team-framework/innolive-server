@@ -18,11 +18,22 @@ const (
 // 얼굴로 다룬다.
 const numberPlateClassName = "number_plate"
 
+// AI 얼굴 합성 계약의 얼굴별 처리 결과다(faces[].anonymization.status).
+// 합성 모드가 아니면 비어 있다.
+const (
+	anonymizationStatusSwapped      = "swapped"
+	anonymizationStatusBlurFallback = "blur_fallback"
+)
+
 // mosaicCounts는 AI 응답 한 프레임의 객체 목록을 블러 기준으로 센 결과다.
 type mosaicCounts struct {
 	faces            int
 	plates           int
 	whitelistedFaces int
+	// swappedFaces와 blurFallbackFaces는 합성 모드에서 합성에 성공한 얼굴과
+	// 실패해 blur로 대체된 얼굴이다. faces의 부분집합이다.
+	swappedFaces      int
+	blurFallbackFaces int
 }
 
 // classifyMosaic은 AI의 블러 규칙(service/mosaic.py `_protected_mask`)과 같은
@@ -38,6 +49,12 @@ func classifyMosaic(objects []*aiv1.FaceMetadata) mosaicCounts {
 			counts.whitelistedFaces++
 		default:
 			counts.faces++
+		}
+		switch object.GetAnonymization().GetStatus() {
+		case anonymizationStatusSwapped:
+			counts.swappedFaces++
+		case anonymizationStatusBlurFallback:
+			counts.blurFallbackFaces++
 		}
 	}
 	return counts
@@ -67,6 +84,8 @@ type MosaicTally struct {
 	faces            atomic.Uint64
 	plates           atomic.Uint64
 	whitelistedFaces atomic.Uint64
+	swappedFaces     atomic.Uint64
+	blurFallback     atomic.Uint64
 }
 
 // MosaicSummary는 MosaicTally의 한 시점 값이다. 객체 수는 프레임마다 다시 센
@@ -79,6 +98,9 @@ type MosaicSummary struct {
 	FaceObjects            uint64
 	PlateObjects           uint64
 	WhitelistedFaceObjects uint64
+	// 합성 모드에서 합성에 성공한 얼굴과 blur로 대체된 얼굴 수다.
+	SwappedFaceObjects      uint64
+	BlurFallbackFaceObjects uint64
 }
 
 func NewMosaicTally() *MosaicTally {
@@ -99,16 +121,20 @@ func (t *MosaicTally) record(counts mosaicCounts) {
 	t.faces.Add(uint64(counts.faces))
 	t.plates.Add(uint64(counts.plates))
 	t.whitelistedFaces.Add(uint64(counts.whitelistedFaces))
+	t.swappedFaces.Add(uint64(counts.swappedFaces))
+	t.blurFallback.Add(uint64(counts.blurFallbackFaces))
 }
 
 func (t *MosaicTally) Summary() MosaicSummary {
 	return MosaicSummary{
-		FaceOnlyFrames:         t.faceOnly.Load(),
-		PlateOnlyFrames:        t.plateOnly.Load(),
-		BothFrames:             t.both.Load(),
-		NoneFrames:             t.none.Load(),
-		FaceObjects:            t.faces.Load(),
-		PlateObjects:           t.plates.Load(),
-		WhitelistedFaceObjects: t.whitelistedFaces.Load(),
+		FaceOnlyFrames:          t.faceOnly.Load(),
+		PlateOnlyFrames:         t.plateOnly.Load(),
+		BothFrames:              t.both.Load(),
+		NoneFrames:              t.none.Load(),
+		FaceObjects:             t.faces.Load(),
+		PlateObjects:            t.plates.Load(),
+		WhitelistedFaceObjects:  t.whitelistedFaces.Load(),
+		SwappedFaceObjects:      t.swappedFaces.Load(),
+		BlurFallbackFaceObjects: t.blurFallback.Load(),
 	}
 }

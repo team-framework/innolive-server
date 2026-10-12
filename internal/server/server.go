@@ -499,8 +499,9 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	// 카테고리·썸네일 반영 실패는 방송을 막지 않고 경고로만 알린다.
 	writeJSON(w, http.StatusOK, struct {
 		session.Response
-		Warnings []streaming.Warning `json:"warnings,omitempty"`
-	}{Response: liveSession.Response(), Warnings: warnings})
+		Warnings  []streaming.Warning `json:"warnings,omitempty"`
+		IngestURL string              `json:"ingest_url,omitempty"`
+	}{Response: liveSession.Response(), Warnings: warnings, IngestURL: directIngestURL(liveSession, providerName, false)})
 }
 
 // channelAlreadyLive는 채널이 이미 다른 도구로 라이브 중이면 409를 돌려준다(#361).
@@ -629,10 +630,11 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		return nil, s.prepareError(err, liveSession.ID, providerName)
 	}
-	if egressAttachesAtGoLive(providerName) {
+	if egressAttachesAtGoLive(providerName) || liveSession.AIProcessing == session.AIProcessingOnDevice {
 		// 치지직은 RTMP 연결이 곧 공개 방송이다(D1). 준비 단계에서 egress를
 		// 붙이면 "방송 준비"가 곧 라이브가 되므로 ingest URL만 들고 있다가
-		// 라이브 전환에서 붙인다.
+		// 라이브 전환에서 붙인다. 온디바이스 세션은 앱이 직접 송출하므로(#438)
+		// egress를 붙이지 않고 ingest URL을 앱에 넘긴다.
 		preparedRecord.IngestURL = prepared.IngestURL
 	} else if _, err := s.sessions.StartStream(liveSession.ID, prepared.IngestURL, streamOptionsFor(providerName)); err != nil {
 		// egress를 못 붙이면 방금 만든 방송은 쓸 데가 없으므로 되돌린다.
@@ -687,11 +689,43 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 		s.refreshBroadcastRemaining(r.Context(), liveSession, time.Now(), len(targets))
 	}
 	response := liveSession.Response()
+	var ingest []directIngest
+	for _, name := range providers {
+		if url := directIngestURL(liveSession, auth.StreamingProvider(name), true); url != "" {
+			ingest = append(ingest, directIngest{Provider: name, IngestURL: url})
+		}
+	}
 	writeJSON(w, http.StatusOK, struct {
 		session.StreamState
 		Targets []session.TargetState `json:"targets,omitempty"`
 		Failed  []goLiveFailure       `json:"failed_targets,omitempty"`
-	}{StreamState: response.Stream, Targets: response.Targets, Failed: failures})
+		Ingest  []directIngest        `json:"direct_ingest,omitempty"`
+	}{StreamState: response.Stream, Targets: response.Targets, Failed: failures, Ingest: ingest})
+}
+
+// directIngest는 온디바이스 세션의 앱이 직접 송출할 대상 주소다(#438).
+type directIngest struct {
+	Provider  string `json:"provider"`
+	IngestURL string `json:"ingest_url"`
+}
+
+// directIngestURL은 온디바이스 세션의 앱이 직접 송출할 ingest URL이다(#438).
+// 스트림 키가 들어 있으므로 세션 소유자 응답에만 싣고 로그에 남기지 않는다.
+// 유튜브는 준비 응답(라이브 전환 전에 송출이 도착해야 한다), 치지직은 연결이
+// 곧 공개 방송이므로(D1) 라이브 전환 응답에서만 넘긴다.
+func directIngestURL(liveSession *session.Session, provider auth.StreamingProvider, atGoLive bool) string {
+	if liveSession.AIProcessing != session.AIProcessingOnDevice || egressAttachesAtGoLive(provider) != atGoLive {
+		return ""
+	}
+	broadcast, phase := liveSession.PlatformBroadcast(string(provider))
+	want := session.BroadcastPhasePrepared
+	if atGoLive {
+		want = session.BroadcastPhaseLive
+	}
+	if phase != want {
+		return ""
+	}
+	return broadcast.IngestURL
 }
 
 // goLiveFailure는 동시 발사에서 한 대상만 실패했을 때 응답에 싣는 사유다.
@@ -743,7 +777,7 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 			return &apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."}
 		}
 	}
-	if egressAttachesAtGoLive(providerName) {
+	if egressAttachesAtGoLive(providerName) && liveSession.AIProcessing != session.AIProcessingOnDevice {
 		// 치지직의 라이브 전환은 곧 egress 부착이다(D1). 붙이지 못하면
 		// 플랫폼에 되돌릴 것은 없고 준비 상태로만 돌아간다.
 		if _, err := s.sessions.StartStream(liveSession.ID, broadcast.IngestURL, streamOptionsFor(providerName)); err != nil {
@@ -1229,6 +1263,11 @@ func (s *Server) handlePauseStream(w http.ResponseWriter, r *http.Request, liveS
 		writeError(w, *invalid)
 		return
 	}
+	if liveSession.AIProcessing == session.AIProcessingOnDevice {
+		// 온디바이스 세션은 앱이 직접 송출하므로(#438) 일시 중지도 앱이 한다.
+		writeSessionError(w, session.ErrOnDeviceProcessing, liveSession.ID)
+		return
+	}
 	if _, err := s.sessions.PauseStream(liveSession.ID, string(providerName)); err != nil {
 		switch {
 		case errors.Is(err, session.ErrStreamNotActive):
@@ -1247,6 +1286,11 @@ func (s *Server) handleResumeStream(w http.ResponseWriter, r *http.Request, live
 	providerName, invalid := targetProviderFrom(r, liveSession)
 	if invalid != nil {
 		writeError(w, *invalid)
+		return
+	}
+	if liveSession.AIProcessing == session.AIProcessingOnDevice {
+		// 온디바이스 세션은 앱이 직접 송출하므로(#438) 일시 중지도 앱이 한다.
+		writeSessionError(w, session.ErrOnDeviceProcessing, liveSession.ID)
 		return
 	}
 	if _, err := s.sessions.ResumeStream(liveSession.ID, string(providerName)); err != nil {

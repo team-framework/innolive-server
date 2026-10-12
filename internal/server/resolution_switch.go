@@ -58,6 +58,12 @@ func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Req
 	}
 	liveTargets, _ := liveSession.BroadcastActivity()
 	if len(liveTargets) > 0 {
+		if liveSession.AIProcessing == session.AIProcessingOnDevice {
+			// 방송 중 전환은 서버 egress를 갈아 끼우는 동작이라 앱이 직접
+			// 송출하는 온디바이스 세션에는 쓸 수 없다(#438).
+			writeSessionError(w, session.ErrOnDeviceProcessing, liveSession.ID)
+			return
+		}
 		s.startBroadcastSwitch(w, liveSession, resolution, liveTargets, uuid.Nil)
 		return
 	}

@@ -1394,7 +1394,15 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 		// 여기서 놓아준다 — 그러지 않으면 라이브 전환이나 세션 삭제 외에는
 		// 준비 상태를 빠져나갈 길이 없다. 유튜브는 준비와 동시에 egress가
 		// 붙으므로 이 분기에 오지 않는다.
-		if t.phase == BroadcastPhasePrepared {
+		// 온디바이스 세션은 앱이 직접 송출해 egress가 없으므로(#438) 라이브
+		// 방송도 여기서 놓아준다. 전환 왕복 중이면 전환 결과를 받은 쪽이
+		// 방송을 종료시키도록 중지 요청만 남긴다.
+		if s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseGoingLive {
+			t.goLiveStopRequested = true
+			s.UpdatedAt = time.Now().UTC()
+			return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
+		}
+		if t.phase == BroadcastPhasePrepared || (s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseLive) {
 			broadcast, phase := takeBroadcastLocked(s, provider)
 			s.UpdatedAt = time.Now().UTC()
 			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)

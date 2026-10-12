@@ -350,6 +350,8 @@ type Manager struct {
 	// 시점에 주입한다. nil이면 정리를 하지 않는다. phase는 정리 방법을
 	// 가르는 값이다 — prepared는 삭제, live는 즉시 종료다.
 	broadcastCleanup func(userID uuid.UUID, broadcast PlatformBroadcast, phase BroadcastPhase)
+	// directBroadcastEnded는 직접 송출 세대가 닫힐 때의 훅이다(#437).
+	directBroadcastEnded func(userID uuid.UUID, usageID string, broadcast PlatformBroadcast)
 	// broadcastCleanupWithContext는 계정 탈퇴가 쓰는 동기 버전이다. 오류가 DB 삭제
 	// 표시를 커밋하기 전에 DELETE /auth/me까지 전달돼야 한다.
 	broadcastCleanupWithContext func(context.Context, uuid.UUID, PlatformBroadcast, BroadcastPhase) error
@@ -404,7 +406,7 @@ func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 	s.mu.Lock()
 	pending := make([]pendingBroadcast, 0, len(s.targets))
 	for provider, t := range s.targets {
-		m.endDirectUsageLocked(t, "session_closed")
+		m.endDirectUsageLocked(s, t, "session_closed")
 		broadcast, phase := takeBroadcastLocked(s, provider)
 		pending = append(pending, pendingBroadcast{broadcast: broadcast, phase: phase})
 	}
@@ -417,12 +419,23 @@ func (m *Manager) cleanupPlatformBroadcast(s *Session) {
 // endDirectUsageLocked는 앱이 직접 송출하던 대상(egress 없음)의 송출 세대를
 // 닫는다(#435). egress가 있는 대상은 runEgress가 닫으므로 건드리지 않는다.
 // Session.mu를 가진 호출자만 쓴다.
-func (m *Manager) endDirectUsageLocked(t *streamTarget, reason string) {
+func (m *Manager) endDirectUsageLocked(s *Session, t *streamTarget, reason string) {
 	if t.egress != nil || t.usageID == "" {
 		return
 	}
 	m.recordUsage(UsageEvent{Kind: UsageBroadcastEnded, BroadcastID: t.usageID, Reason: reason})
+	if m.directBroadcastEnded != nil && t.platformBroadcast != nil && t.platformBroadcast.BroadcastID != "" {
+		// 플랫폼 시각 대조(#437)는 플랫폼 왕복이라 잠금 밖에서 돈다.
+		go m.directBroadcastEnded(s.UserID, t.usageID, *t.platformBroadcast)
+	}
 	t.usageID = ""
+}
+
+// SetDirectBroadcastEnded는 직접 송출 세대가 닫힐 때 부를 훅을 등록한다(#437).
+// 서버가 플랫폼의 실제 방송 시각을 읽어 실사용 기록과 대조한다. 서버 조립 직후
+// 한 번만 호출한다.
+func (m *Manager) SetDirectBroadcastEnded(hook func(userID uuid.UUID, usageID string, broadcast PlatformBroadcast)) {
+	m.directBroadcastEnded = hook
 }
 
 // pendingBroadcast는 세션에서 떼어낸, 아직 플랫폼에서 치우지 않은 방송이다.
@@ -1429,7 +1442,7 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 				}
 				s.directStops[provider] = reason
 			}
-			m.endDirectUsageLocked(t, reason)
+			m.endDirectUsageLocked(s, t, reason)
 			broadcast, phase := takeBroadcastLocked(s, provider)
 			s.UpdatedAt = time.Now().UTC()
 			m.logger.Info("prepared broadcast released", "session_id", s.ID, "provider", broadcast.Provider)

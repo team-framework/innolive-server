@@ -61,6 +61,11 @@ type Broadcast struct {
 	Source        string  `gorm:"type:varchar(10);not null;default:live;check:chk_usage_broadcasts_source,source IN ('live','backfill')"`
 	// 백필에서 종료 로그가 없어 세션 종료 시각으로 채운 행이다.
 	EndedAtEstimated bool `gorm:"not null;default:false"`
+	// 직접 송출(#437)은 서버가 영상을 받지 않아 LiveAt·EndedAt이 앱의 호출 시점이다.
+	// 플랫폼이 기록한 실제 시각을 함께 남겨 대조한다. 대조하지 못했으면 NULL이다.
+	PlatformBroadcastID *string `gorm:"type:varchar(64)"`
+	PlatformStartedAt   *time.Time
+	PlatformEndedAt     *time.Time
 }
 
 func (Broadcast) TableName() string { return "usage_broadcasts" }

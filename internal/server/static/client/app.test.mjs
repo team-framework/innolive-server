@@ -183,8 +183,9 @@ function createElement() {
   };
 }
 
-async function loadApp({ fetchImpl } = {}) {
+async function loadApp({ fetchImpl, navigator } = {}) {
   const scheduledTimers = [];
+  const cleared = [];
   let fetchCalls = 0;
   const context = {
     Headers,
@@ -207,10 +208,13 @@ async function loadApp({ fetchImpl } = {}) {
     localStorage: createStorage(),
     location: { origin: "https://example.test", protocol: "https:" },
     MediaStream: FakeMediaStream,
+    navigator,
     WebSocket: { OPEN: 1 },
     window: {
       clearInterval() {},
-      clearTimeout() {},
+      clearTimeout(id) {
+        cleared.push(id);
+      },
       setInterval() {
         return 1;
       },
@@ -224,7 +228,7 @@ async function loadApp({ fetchImpl } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
     context,
     { filename: appPath },
   );
@@ -245,6 +249,7 @@ async function loadApp({ fetchImpl } = {}) {
   return {
     ...hooks,
     scheduledTimers,
+    clearedTimers: cleared,
     fetchCalls: () => fetchCalls,
   };
 }
@@ -1855,4 +1860,32 @@ test("개발중 비밀번호 변경은 코드 확인 후 새 토큰으로 테스
   assert.equal(state.dev.accessToken, "access-new");
   assert.equal(state.dev.refreshToken, "refresh-new");
   assert.equal(state.dev.resetToken, null);
+});
+
+test("카메라 권한 응답이 늦으면 10초 뒤 주소창 확인을 안내하고, 응답하면 안내를 거둔다", async () => {
+  let grant;
+  const { ensureLocalMedia, scheduledTimers, clearedTimers, els } = await loadApp({
+    navigator: {
+      mediaDevices: {
+        getUserMedia: () => new Promise((resolve) => (grant = resolve)),
+        enumerateDevices: async () => [],
+      },
+    },
+  });
+  els.sendAudio = { checked: false };
+  els.cameraSelect = createElement();
+  els.resolutionSelect = createElement();
+  els.localVideo = createElement();
+  const opening = ensureLocalMedia();
+  await Promise.resolve();
+  assert.equal(els.broadcastVideoInput.textContent, "카메라 권한 확인 중");
+  const hint = scheduledTimers.find((timer) => timer.delay === 10000);
+  assert.ok(hint, "permission hint timer must be scheduled");
+
+  hint.callback();
+  assert.match(els.broadcastVideoInput.textContent, /주소창의 카메라 권한 요청/);
+
+  grant(new FakeMediaStream());
+  await opening;
+  assert.ok(clearedTimers.includes(scheduledTimers.indexOf(hint) + 1), "hint timer must be cleared after the answer");
 });

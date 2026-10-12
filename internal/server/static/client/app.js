@@ -3428,6 +3428,10 @@ function canUseCurrentSessionForOffer() {
   );
 }
 
+// 카메라 권한 응답을 기다리는 동안 아무 표시가 없으면 멈춘 것처럼 보인다. Brave는
+// 권한 요청을 주소창 아이콘으로만 띄워 놓치기 쉬워(실측) 일정 시간 뒤 안내한다.
+const CAMERA_PERMISSION_HINT_MS = 10000;
+
 async function ensureLocalMedia() {
   if (location.protocol === "file:") {
     throw new Error(
@@ -3446,6 +3450,12 @@ async function ensureLocalMedia() {
     audio: els.sendAudio.checked,
   };
   let stream;
+  logEvent("ok", "Camera permission requested");
+  setBroadcastStatus(els.broadcastVideoInput, "카메라 권한 확인 중", "warn");
+  const permissionHint = window.setTimeout(() => {
+    setBroadcastStatus(els.broadcastVideoInput, "주소창의 카메라 권한 요청을 확인하세요", "warn");
+    logEvent("warn", "Camera permission still pending", "주소창의 카메라 아이콘이나 권한 말풍선에서 허용하세요.");
+  }, CAMERA_PERMISSION_HINT_MS);
   try {
     stream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (error) {
@@ -3458,6 +3468,8 @@ async function ensureLocalMedia() {
       );
     }
     throw error;
+  } finally {
+    window.clearTimeout(permissionHint);
   }
   state.localStream = stream;
   els.localVideo.srcObject = stream;

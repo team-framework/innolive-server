@@ -12,6 +12,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,10 +116,33 @@ func TestDecoderPinHoldsVP8RisePortrait(t *testing.T) {
 	assertLogged(t, output, "VP8 decoder output locked", "width=720", "height=1280", "pin_long_edge=1280")
 }
 
-// TestDecoderPinSurvivesMidStreamRotation은 방송 도중 기기를 돌린 경우를 본다.
-// 핀 치수는 첫 프레임 방향으로 정해지고, 이후 방향이 뒤집혀도 pad가 흡수해
-// 출력 규격이 유지돼야 한다 — 유지되지 않으면 하위 단계가 전부 깨진다.
-func TestDecoderPinSurvivesMidStreamRotation(t *testing.T) {
+// assertRepinned는 앞쪽 프레임이 first 치수, 방향 전환 뒤 프레임이 second 치수로
+// 이어지고 그 사이에 다른 치수가 없는지 본다. 메타데이터와 페이로드도 각각 맞아야 한다.
+func assertRepinned(t *testing.T, frames []frame, firstWidth, firstHeight, secondWidth, secondHeight uint16) {
+	t.Helper()
+	split := 0
+	for split < len(frames) && frames[split].width == firstWidth && frames[split].height == firstHeight {
+		split++
+	}
+	if split == 0 || split == len(frames) {
+		t.Fatalf("방향 전환 경계 없음: 앞 구간 %d프레임 / 전체 %d프레임", split, len(frames))
+	}
+	assertPinned(t, frames[:split], firstWidth, firstHeight)
+	assertPinned(t, frames[split:], secondWidth, secondHeight)
+}
+
+// assertLockedTwice는 방향 전환으로 디코더가 정확히 한 번 다시 떴는지 본다.
+func assertLockedTwice(t *testing.T, output, message string) {
+	t.Helper()
+	if got := strings.Count(output, message); got != 2 {
+		t.Fatalf("%q 로그 %d회, want 2:\n%s", message, got, output)
+	}
+}
+
+// TestDecoderPinRepinsOnMidStreamRotation은 방송 도중 기기를 돌린 경우를 본다(#449).
+// 방향이 뒤집히면 디코더를 새 방향 핀으로 다시 띄워, 가로 영상이 세로 틀 안에
+// 작게 레터박스되지 않아야 한다.
+func TestDecoderPinRepinsOnMidStreamRotation(t *testing.T) {
 	requireTool(t, "ffmpeg")
 
 	dir := t.TempDir()
@@ -131,8 +155,28 @@ func TestDecoderPinSurvivesMidStreamRotation(t *testing.T) {
 	transcoder := NewFFmpegTranscoder("ffmpeg", nil, metrics.New(), TranscoderOptions{
 		VideoCodec: VideoCodecH264, WireFormat: config.WireFormatJPEG, PinLongEdge: 1280,
 	})
-	_, frames := drainDecoderFrames(t, transcoder, units)
-	assertPinned(t, frames, 1280, 720)
+	output, frames := drainDecoderFrames(t, transcoder, units)
+	assertRepinned(t, frames, 1280, 720, 720, 1280)
+	assertLockedTwice(t, output, "H.264 decoder output locked")
+}
+
+// TestDecoderPinRepinsVP8PortraitToLandscape는 2026-10-12 프로덕션 사례를 재현한다.
+// 앱이 세로 프레임으로 시작한 뒤 가로로 바꿔도 출력이 가로 핀으로 바뀌어야 한다.
+func TestDecoderPinRepinsVP8PortraitToLandscape(t *testing.T) {
+	requireTool(t, "ffmpeg")
+
+	dir := t.TempDir()
+	frames := append(
+		vp8Frames(t, dir, "portrait.ivf", 360, 640),
+		vp8Frames(t, dir, "landscape.ivf", 1280, 720)...,
+	)
+
+	transcoder := NewFFmpegTranscoder("ffmpeg", nil, metrics.New(), TranscoderOptions{
+		VideoCodec: VideoCodecVP8, WireFormat: config.WireFormatJPEG, PinLongEdge: 1280,
+	})
+	output, decoded := drainDecoderFrames(t, transcoder, frames)
+	assertRepinned(t, decoded, 720, 1280, 1280, 720)
+	assertLockedTwice(t, output, "VP8 decoder output locked")
 }
 
 // TestDecoderPinOffKeepsFirstFrameDimensions는 기본값(OFF)에서 종전 동작이

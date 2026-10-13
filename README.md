@@ -408,6 +408,8 @@ Apple·YouTube·AI worker·파일 저장소 또는 데이터베이스 단계에�
 - **송출**: `innolive_egress_frames_dropped_total`, `innolive_egress_reconnect_total`, `innolive_audio_samples_dropped_total`
 - **WebRTC 복구**: `innolive_peer_recovery_started_total`, `innolive_peer_recovery_succeeded_total`, `innolive_peer_recovery_exhausted_total`
 
+`innolive_audio_samples_dropped_total`은 `reason` 라벨로 원인을 나눕니다. `detached`(송출 연결 전 미리보기)와 `muted`(일시정지)는 정상 드롭이고, `queue_full`·`pipe_error`만 송출 중 실제 유실입니다.
+
 `innolive_ai_target_ready`는 상시 감시 프로브가 워커마다 갱신하는 게이지입니다. 프로세스가 살아 있어도 추론이 죽은 워커는 여기서 `0`이 됩니다.
 
 ## 배포

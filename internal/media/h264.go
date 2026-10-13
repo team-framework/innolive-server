@@ -305,6 +305,7 @@ func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height u
 	}
 	arguments = append(arguments,
 		"-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.1",
+		"-b:v", "2M", "-maxrate", "2M", "-bufsize", "200k",
 		"-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-bf", "0",
 		"-x264-params", "repeat-headers=1:aud=1:annexb=1", "-f", "h264", "-flush_packets", "1", "pipe:1",
 	)

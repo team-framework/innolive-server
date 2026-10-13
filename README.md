@@ -243,6 +243,26 @@ WebRTC UDP 포트는 두 방식 중 하나로 동작하고, 로컬과 프로덕�
 - **포트 범위 방식**: `WEBRTC_UDP_MUX_PORT=0`일 때 `WEBRTC_UDP_PORT_MIN/MAX` 범위를 씁니다. `.env.example`과 `compose.yaml`이 이 방식입니다.
 - **단일 mux 방식**: `WEBRTC_UDP_MUX_PORT`가 `0`이 아니면 그 포트 하나로 모든 세션을 다중화하고, 포트 범위 설정은 코드가 무시합니다. 프로덕션이 이 방식이니 로컬 감각으로 프로덕션 포트를 추정하지 마세요.
 
+### WebRTC 반환 정책
+
+GET /webrtc/config의 선택적 `features.send_only_video=true`는 이 서버의 송신 전용 지원을 알린다.
+이 값이 없거나 명시적 true가 아니면 클라이언트는 기존 방향을 유지해야 한다.
+영상 offer의 기본 방향은 `sendrecv`다. `sendonly` 발행자에는 `recvonly` answer를
+생성해 불필요한 반환 트랙을 추가하지 않는다. 방향은 SDP 세션에서 상속되며 영상
+media section의 명시적 방향이 우선한다. 기존 `sendrecv` 클라이언트의 반환·코덱·
+RTCP 피드백은 유지한다. ICE restart에서도 같은 영상 방향을 유지한다.
+
+반환을 받지 않는 발행자도 영상 디코딩·보호 처리 및 방송 플랫폼 egress fanout은
+계속 수행하며 사용하지 않는 WebRTC 반환 인코더는 시작하지 않는다. 이 경우 세션 응답의 `media.video_sender_active`는 `false`이며,
+입력 트랙과 처리 프레임의 존재를 반환 sender 유무와 구분해야 한다. 이 기능은
+별도 `ai_processing: on_device` 직접 RTMP 세션과 다른 WebRTC 방향 선택이다.
+
+H.264 WebRTC 반환 인코더는 목표/상한 2Mbps, VBV 버퍼 200kbit로 제한해
+상한 없는 CRF 출력의 큰 키프레임 버스트를 줄인다. VP8의 기존 2Mbps 설정과
+플랫폼 RTMP egress의 `EGRESS_VIDEO_BITRATE` 정책은 유지한다. 반환 상한이
+네트워크 손실이나 전체 end-to-end 지연을 보장하는 것은 아니며, 운영 계측에서
+피드백 기반 품질 적응과 패킷 pacing을 별도로 검증해야 한다.
+
 ### WebRTC 네트워크 복구 계약
 
 `GET /webrtc/config`은 ICE 서버 목록과 함께 아래 `recovery` 값을 반환합니다.

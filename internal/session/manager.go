@@ -2013,6 +2013,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	pipelineDone := make(chan struct{})
 	s.pipelineDone = pipelineDone
 	pinLongEdge := s.pinLongEdge
+	disableReturnVideo := s.Sender == nil
 	s.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
 
@@ -2026,11 +2027,12 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		aiStream = client.NewStream(trackCtx, s.AIClientID, s.FaceAnonymization == FaceAnonymizationFaceSwap)
 	}
 	transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
-		Gate:           m.spawnGate,
-		EncoderThreads: m.cfg.FFmpegEncoderThreads,
-		WireFormat:     m.cfg.AIWireFormat,
-		VideoCodec:     codec,
-		PinLongEdge:    uint16(pinLongEdge),
+		Gate:               m.spawnGate,
+		DisableReturnVideo: disableReturnVideo,
+		EncoderThreads:     m.cfg.FFmpegEncoderThreads,
+		WireFormat:         m.cfg.AIWireFormat,
+		VideoCodec:         codec,
+		PinLongEdge:        uint16(pinLongEdge),
 	})
 	processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 	if err != nil {

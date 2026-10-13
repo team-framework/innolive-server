@@ -363,6 +363,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		request.AIProcessing = request.Metadata["ai_processing"]
 	}
 	userID, _ := auth.UserIDFromContext(r.Context())
+	// 얼굴 합성은 개발 중인 기능이라 관리자(ADMIN_USER_IDS)에게만 연다.
+	if strings.TrimSpace(request.FaceAnonymization) == session.FaceAnonymizationFaceSwap {
+		if _, ok := s.adminUser(r); !ok {
+			writeError(w, apiError{
+				Status:  http.StatusForbidden,
+				Code:    "face_swap_not_allowed",
+				Message: "Face swap is only available to administrators.",
+			})
+			return
+		}
+	}
 	// FHD를 허용하지 않는 플랜은 세션을 만들기 전에 거절한다(#273) — 해상도는
 	// 여기서만 고르므로 prepare까지 가서 알리면 늦다.
 	if strings.TrimSpace(request.BroadcastResolution) == session.ResolutionFHD && s.plans != nil && userID != uuid.Nil {

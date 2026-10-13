@@ -1191,3 +1191,46 @@ func TestSelectedCandidatePairBeforeNegotiation(t *testing.T) {
 		t.Fatalf("selectedCandidatePair() = %v before negotiation, want nil", pair)
 	}
 }
+
+// 온디바이스 세션은 시그널링이 없어 answer가 생기지 않는다(#451). 직접 송출이
+// 라이브인 동안에는 미협상·방치 회수 모두 받지 않는다.
+func TestReapSkipsOnDeviceSessionWhileDirectLive(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	original := onDeviceIdleTimeout
+	onDeviceIdleTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { onDeviceIdleTimeout = original })
+
+	manager := newReapTestManager(t, timeout)
+	s, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, AIProcessingOnDevice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.targets[DefaultProvider] = &streamTarget{phase: BroadcastPhaseLive}
+	s.mu.Unlock()
+
+	time.Sleep(4 * onDeviceIdleTimeout)
+	if _, err := manager.Get(s.ID); err != nil {
+		t.Fatalf("direct live on-device session was reaped: %v", err)
+	}
+}
+
+// 직접 송출 대상 없이 방치된 온디바이스 세션은 마지막 활동 후
+// onDeviceIdleTimeout이 지나면 회수된다(#451).
+func TestReapIdleOnDeviceSessionAfterTimeout(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	original := onDeviceIdleTimeout
+	onDeviceIdleTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { onDeviceIdleTimeout = original })
+
+	manager := newReapTestManager(t, timeout)
+	createdAt := time.Now()
+	s, _, err := manager.CreateForUserWithAIProcessing(uuid.New(), DefaultProvider, AIProcessingOnDevice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if elapsed := waitUntilReaped(t, manager, s.ID, createdAt, 2*time.Second); elapsed < onDeviceIdleTimeout {
+		t.Fatalf("on-device session reaped after %s, want at least %s", elapsed, onDeviceIdleTimeout)
+	}
+}

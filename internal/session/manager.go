@@ -316,8 +316,10 @@ type Manager struct {
 	// egressSlots는 동시 송출 자리 예산이다. 상한이 필요한 이유는 GPU가 아니라
 	// 회선이며, nil이면 제한도 카드 배정도 없다(종전 동작).
 	egressSlots *media.EgressSlotBudget
-	api         *webrtc.API
-	ice         []webrtc.ICEServer
+	// onDeviceIdleTimeout은 생성 시 고정한 onDeviceIdleTimeout 값이다(#451).
+	onDeviceIdleTimeout time.Duration
+	api                 *webrtc.API
+	ice                 []webrtc.ICEServer
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -512,6 +514,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		ai:                          aiPool,
 		spawnGate:                   spawnGate,
 		egressSlots:                 media.NewEgressSlotBudget(cfg.MaxEgressSlots, cfg.EgressNVENCGPUs),
+		onDeviceIdleTimeout:         onDeviceIdleTimeout,
 		api:                         webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		ice:                         iceServers,
 		sessions:                    make(map[string]*Session),
@@ -835,6 +838,10 @@ func (m *Manager) reapUnnegotiated(id string) {
 	if err != nil {
 		return
 	}
+	if s.AIProcessing == AIProcessingOnDevice {
+		m.reapIdleOnDevice(s)
+		return
+	}
 	s.mu.RLock()
 	// answer를 끝까지 만들어낸 세션만 협상을 시작한 것으로 본다(#178). offer 수신
 	// 시각은 SDP를 적용하기 전에 기록하므로, 그 값으로 판정하면 SetRemoteDescription이
@@ -860,6 +867,37 @@ func (m *Manager) reapUnnegotiated(id string) {
 	}
 	m.logger.Info("reaping unnegotiated session", "session_id", id, "timeout", m.cfg.NegotiationTimeout)
 	_ = m.Delete(id, "negotiation_timeout")
+}
+
+// onDeviceIdleTimeout은 직접 송출 대상이 없는 온디바이스 세션을 방치로 보고
+// 회수하기까지의 시간이다(#451).
+var onDeviceIdleTimeout = 10 * time.Minute
+
+// reapIdleOnDevice는 온디바이스 세션의 회수 판정이다(#451). 앱이 플랫폼으로 직접
+// 송출해 시그널링을 하지 않으므로 answer가 생기지 않고, 서버 GPU도 쓰지 않는다.
+// 직접 송출이 라이브이거나 전환 중이면 활동으로 보고, 그 밖에는 마지막 활동 후
+// onDeviceIdleTimeout이 지나면 MAX_SESSIONS 슬롯을 돌려준다.
+func (m *Manager) reapIdleOnDevice(s *Session) {
+	now := time.Now()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	for _, t := range s.targets {
+		if t.egress == nil && (t.phase == BroadcastPhaseGoingLive || t.phase == BroadcastPhaseLive) {
+			s.lastActivityAt = now
+			break
+		}
+	}
+	idleFor := now.Sub(s.lastActivityAt)
+	s.mu.Unlock()
+	if remaining := m.onDeviceIdleTimeout - idleFor; remaining > 0 {
+		time.AfterFunc(remaining, func() { m.reapUnnegotiated(s.ID) })
+		return
+	}
+	m.logger.Info("reaping idle on-device session", "session_id", s.ID, "timeout", m.onDeviceIdleTimeout)
+	_ = m.Delete(s.ID, "on_device_idle_timeout")
 }
 
 func (m *Manager) Get(id string) (*Session, error) {

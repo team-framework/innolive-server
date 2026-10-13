@@ -73,6 +73,7 @@ type Registry struct {
 	rtpFramesAssembled  map[string]uint64
 	mosaicFrames        map[string]uint64
 	mosaicObjects       map[string]uint64
+	faceAnonymization   map[string]uint64
 	processing          map[string]*histogram
 	aiDuration          map[string]*histogram
 	stageDuration       map[string]*histogram
@@ -101,6 +102,7 @@ func New() *Registry {
 		rtpFramesAssembled:  make(map[string]uint64),
 		mosaicFrames:        make(map[string]uint64),
 		mosaicObjects:       make(map[string]uint64),
+		faceAnonymization:   make(map[string]uint64),
 		processing:          make(map[string]*histogram),
 		aiDuration:          make(map[string]*histogram),
 		stageDuration:       make(map[string]*histogram),
@@ -268,6 +270,18 @@ func (r *Registry) ObserveMosaic(kind string, faces, plates, whitelistedFaces in
 	r.mosaicObjects["whitelisted_face"] += uint64(whitelistedFaces)
 }
 
+// ObserveFaceAnonymization은 얼굴 합성 모드에서 프레임 하나의 합성 성공 얼굴과
+// blur로 대체된 얼굴 수를 더한다. 합성 모드가 아니면 둘 다 0이다.
+func (r *Registry) ObserveFaceAnonymization(swapped, blurFallback int) {
+	if swapped == 0 && blurFallback == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.faceAnonymization["swapped"] += uint64(swapped)
+	r.faceAnonymization["blur_fallback"] += uint64(blurFallback)
+}
+
 func (r *Registry) ObserveProcessing(mode string, duration time.Duration) {
 	r.observe(r.processing, mode, duration)
 }
@@ -375,6 +389,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCounters(w, "innolive_rtp_packets_discarded_total", "Number of RTP packets discarded while assembling complete video frames.", r.rtpPacketsDiscarded)
 	writeLabeledCountersWithKey(w, "innolive_mosaic_frames_total", "Number of AI-processed frames by what was blurred (face_only, plate_only, both, none).", "kind", r.mosaicFrames)
 	writeLabeledCountersWithKey(w, "innolive_mosaic_objects_total", "Number of objects in AI-processed frames, counted per frame (blurred face, number_plate, or whitelisted_face left unblurred).", "object", r.mosaicObjects)
+	writeLabeledCountersWithKey(w, "innolive_face_anonymization_total", "Number of faces in face-swap mode, counted per frame, by result (swapped, blur_fallback).", "status", r.faceAnonymization)
 	writeLabeledCounters(w, "innolive_rtp_frames_assembled_total", "Number of complete VP8 frames assembled from RTP packets.", r.rtpFramesAssembled)
 	writeHistograms(w, "innolive_frame_processing_duration_seconds", "Time spent processing one complete video frame.", "mode", r.processing)
 	writeHistograms(w, "innolive_ai_duration_seconds", "Round-trip time spent in the external AI service.", "mode", r.aiDuration)

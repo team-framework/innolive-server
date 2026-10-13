@@ -61,7 +61,7 @@ func TestClientUsesStreamingAndWhitelistContracts(t *testing.T) {
 	client := &Client{address: "bufnet", conn: connection, client: aiv1.NewAiProcessorClient(connection), timeout: time.Second}
 	defer client.Close()
 
-	stream := client.NewStream(ctx, "")
+	stream := client.NewStream(ctx, "", false)
 	defer stream.Close()
 	response, err := stream.Process([]byte("frame"), 123, 0, 0, "")
 	if err != nil {
@@ -106,7 +106,7 @@ func TestStreamProcessReportsContextCanceledWhenSessionCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	stream := client.NewStream(ctx, "")
+	stream := client.NewStream(ctx, "", false)
 	defer stream.Close()
 	_, err := stream.Process([]byte("frame"), 1, 0, 0, "")
 	if !errors.Is(err, context.Canceled) {
@@ -124,7 +124,7 @@ func (unavailableAIServer) ProcessVideo(grpc.BidiStreamingServer[aiv1.VideoChunk
 
 func TestStreamProcessKeepsAIFailureWhenSessionAlive(t *testing.T) {
 	client := newStreamTestClient(t, unavailableAIServer{})
-	stream := client.NewStream(context.Background(), "")
+	stream := client.NewStream(context.Background(), "", false)
 	defer stream.Close()
 	_, err := stream.Process([]byte("frame"), 1, 0, 0, "")
 	if err == nil {
@@ -132,5 +132,48 @@ func TestStreamProcessKeepsAIFailureWhenSessionAlive(t *testing.T) {
 	}
 	if errors.Is(err, context.Canceled) {
 		t.Fatalf("Process() error = %v, AI failure must not look like cancellation", err)
+	}
+}
+
+// recordingAIServer는 받은 요청의 합성 모드를 기록하고 프레임을 그대로 돌려준다.
+type recordingAIServer struct {
+	aiv1.UnimplementedAiProcessorServer
+	modes chan aiv1.FaceAnonymizationMode
+}
+
+func (s recordingAIServer) ProcessVideo(stream grpc.BidiStreamingServer[aiv1.VideoChunk, aiv1.ProcessedVideoChunk]) error {
+	for {
+		request, err := stream.Recv()
+		if err != nil {
+			return nil
+		}
+		s.modes <- request.GetAnonymizationMode()
+		if err := stream.Send(&aiv1.ProcessedVideoChunk{Data: request.Data, StatusMessage: "success"}); err != nil {
+			return err
+		}
+	}
+}
+
+// 합성 모드는 생략하면 AI가 INVALID_ARGUMENT로 거부하므로 매 프레임 실려야 한다.
+func TestStreamSendsAnonymizationModeOnEveryFrame(t *testing.T) {
+	for _, tc := range []struct {
+		faceSwap bool
+		want     aiv1.FaceAnonymizationMode
+	}{
+		{faceSwap: false, want: aiv1.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_BLUR},
+		{faceSwap: true, want: aiv1.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_FACE_SWAP},
+	} {
+		server := recordingAIServer{modes: make(chan aiv1.FaceAnonymizationMode, 3)}
+		client := newStreamTestClient(t, server)
+		stream := client.NewStream(context.Background(), "s", tc.faceSwap)
+		for i := 0; i < 3; i++ {
+			if _, err := stream.Process([]byte("frame"), int64(i), 0, 0, ""); err != nil {
+				t.Fatalf("faceSwap=%v Process() error = %v", tc.faceSwap, err)
+			}
+			if got := <-server.modes; got != tc.want {
+				t.Fatalf("faceSwap=%v frame %d mode = %v, want %v", tc.faceSwap, i, got, tc.want)
+			}
+		}
+		stream.Close()
 	}
 }

@@ -33,23 +33,47 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 		break
 	}
 
+	// 입력 방향(세로·가로)이 바뀌면 그 IDR부터 디코더를 새 치수로 다시
+	// 띄운다(#449). 같은 방향 안의 해상도 변화(램프업)는 핀이 흡수한다.
+	for {
+		next, err := t.decodeH264Segment(ctx, &bootstrap, first, width, height, input, output)
+		if err != nil || next == nil {
+			return err
+		}
+		first, width, height = next.item, next.width, next.height
+	}
+}
+
+// h264Repin은 방향이 바뀐 IDR 액세스 유닛과 그 SPS 치수다.
+type h264Repin struct {
+	item          frame
+	width, height uint16
+}
+
+// decodeH264Segment는 IDR first부터 디코더 하나를 돌린다. 입력 방향이 바뀐
+// IDR을 만나면 이미 넣은 프레임을 모두 읽어낸 뒤 그 IDR을 돌려준다. 입력이
+// 끝나면 nil을 돌려준다.
+func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h264Bootstrap, first frame, width, height uint16, input <-chan frame, output chan<- frame) (*h264Repin, error) {
 	outputWidth, outputHeight, filter, err := t.decoderOutput(width, height)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	process, err := t.startH264Decoder(ctx, filter)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer process.close()
-	// 디코더 ffmpeg는 출력 스트림 규격을 첫 프레임에 고정하고, 이후 입력
-	// 해상도가 올라가도 그 값으로 되돌린다. 핀이 꺼져 있으면 이 한 줄이
-	// 세션 화질의 상한을 기록하고, 켜져 있으면 입력과 무관하게 유지되는
-	// 규격을 기록한다(#122).
+	// 디코더 ffmpeg는 출력 스트림 규격을 구간의 첫 프레임에 고정하고, 이후 입력
+	// 해상도가 올라가도 그 값으로 되돌린다. 핀이 꺼져 있으면 이 한 줄이 화질의
+	// 상한을 기록하고, 켜져 있으면 입력과 무관하게 유지되는 규격을 기록한다(#122).
+	// 방향이 바뀌면 다시 찍힌다(#449).
 	t.logger.Info("H.264 decoder output locked",
 		"width", outputWidth, "height", outputHeight,
 		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
 
+	// repin은 방향이 바뀐 IDR이다. 쓰기 고루틴이 metadata를 닫기 전에만 쓰고,
+	// 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	var repin *h264Repin
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
 	go func() {
@@ -84,7 +108,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 					writeError <- nil
 					return
 				}
-				data, _, inputWidth, inputHeight := bootstrap.prepare(item.data)
+				data, idr, inputWidth, inputHeight := bootstrap.prepare(item.data)
 				if len(data) == 0 {
 					continue
 				}
@@ -101,6 +125,13 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 					observedWidth, observedHeight = inputWidth, inputHeight
 				}
 				item.data = data
+				// 방향 전환은 새 SPS를 실은 IDR에서만 반영한다. 디코더를 그 IDR부터
+				// 다시 띄워야 첫 픽처를 디코드할 수 있다.
+				if idr && inputWidth != 0 && inputHeight != 0 && orientationChanged(width, height, inputWidth, inputHeight) {
+					repin = &h264Repin{item: item, width: inputWidth, height: inputHeight}
+					writeError <- nil
+					return
+				}
 				if err := write(item); err != nil {
 					writeError <- err
 					return
@@ -117,18 +148,18 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 			item.data, err = readJPEG(process.stdout)
 		}
 		if err != nil {
-			return fmt.Errorf("read decoded frame from FFmpeg H.264 decoder: %w", err)
+			return nil, fmt.Errorf("read decoded frame from FFmpeg H.264 decoder: %w", err)
 		}
 		select {
 		case output <- item:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("write H.264 stream to FFmpeg decoder: %w", err)
+		return nil, fmt.Errorf("write H.264 stream to FFmpeg decoder: %w", err)
 	}
-	return nil
+	return repin, nil
 }
 
 func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
@@ -142,32 +173,54 @@ func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan fr
 		}
 		first = item
 	}
+	// 처리 프레임 크기가 바뀌면(입력 방향 전환 #449) 인코더를 새 크기로 다시 띄운다.
+	for {
+		next, err := t.encodeH264Segment(ctx, first, input, output)
+		if err != nil || next == nil {
+			return err
+		}
+		first = *next
+	}
+}
+
+// encodeH264Segment는 first 크기로 인코더 하나를 돌린다. 크기가 다른 프레임을
+// 만나면 이미 넣은 프레임을 모두 읽어낸 뒤 그 프레임을 돌려준다. 입력이
+// 끝나면 nil을 돌려준다.
+func (t *FFmpegTranscoder) encodeH264Segment(ctx context.Context, first frame, input <-chan frame, output chan<- frame) (*frame, error) {
 	process, err := t.startH264Encoder(ctx, first.width, first.height)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer process.close()
+
+	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
+	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	var resized *frame
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
-		write := func(item frame) error {
+		write := func(item frame) (bool, error) {
+			if resolutionChanged(item, first.width, first.height) {
+				resized = &item
+				return true, nil
+			}
 			if err := t.validateEncoderInput(item.data, rawFrameSize(first.width, first.height)); err != nil {
-				return err
+				return false, err
 			}
 			if _, err := process.stdin.Write(item.data); err != nil {
-				return err
+				return false, err
 			}
 			select {
 			case metadata <- item:
-				return nil
+				return false, nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			}
 		}
-		if err := write(first); err != nil {
+		if _, err := write(first); err != nil {
 			writeError <- err
 			return
 		}
@@ -181,7 +234,8 @@ func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan fr
 					writeError <- nil
 					return
 				}
-				if err := write(item); err != nil {
+				done, err := write(item)
+				if err != nil || done {
 					writeError <- err
 					return
 				}
@@ -193,18 +247,18 @@ func (t *FFmpegTranscoder) encodeH264Stream(ctx context.Context, input <-chan fr
 	for item := range metadata {
 		item.data, err = reader.Read()
 		if err != nil {
-			return fmt.Errorf("read H.264 access unit from FFmpeg encoder: %w", err)
+			return nil, fmt.Errorf("read H.264 access unit from FFmpeg encoder: %w", err)
 		}
 		select {
 		case output <- item:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("write frame stream to FFmpeg H.264 encoder: %w", err)
+		return nil, fmt.Errorf("write frame stream to FFmpeg H.264 encoder: %w", err)
 	}
-	return nil
+	return resized, nil
 }
 
 // startH264Decoder는 VP8 경로의 startDecoder와 동일한 저지연 인자를 쓴다.

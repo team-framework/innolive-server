@@ -45,7 +45,6 @@ type Registry struct {
 	egressDupFrames     atomic.Int64
 	egressDropFrames    atomic.Int64
 	audioSamplesOut     atomic.Uint64
-	audioSamplesDrop    atomic.Uint64
 	nvencLeakSuspected  atomic.Uint64
 	nvencProbeFailures  atomic.Uint64
 	processTree         processTreeTracker
@@ -74,6 +73,7 @@ type Registry struct {
 	mosaicFrames        map[string]uint64
 	mosaicObjects       map[string]uint64
 	faceAnonymization   map[string]uint64
+	audioSamplesDrop    map[string]uint64
 	processing          map[string]*histogram
 	aiDuration          map[string]*histogram
 	stageDuration       map[string]*histogram
@@ -97,6 +97,7 @@ func New() *Registry {
 		rtpSequenceGaps:     make(map[string]uint64),
 		rtpPacketsRecovered: make(map[string]uint64),
 		rtpIngressDropped:   make(map[string]uint64),
+		audioSamplesDrop:    make(map[string]uint64),
 		rtpOutOfOrder:       make(map[string]uint64),
 		rtpPacketsDiscarded: make(map[string]uint64),
 		rtpFramesAssembled:  make(map[string]uint64),
@@ -178,7 +179,13 @@ func (r *Registry) IncNVENCLeakSuspected() { r.nvencLeakSuspected.Add(1) }
 func (r *Registry) IncNVENCProbeFailure() { r.nvencProbeFailures.Add(1) }
 
 func (r *Registry) IncAudioSampleWritten() { r.audioSamplesOut.Add(1) }
-func (r *Registry) IncAudioSampleDropped() { r.audioSamplesDrop.Add(1) }
+
+// IncAudioSampleDropped는 audio pipe 앞에서 버린 Opus 샘플을 원인별로 센다.
+// 미연결·일시정지는 정상 동작이고 큐 초과·파이프 오류만 실제 유실이므로
+// 원인을 나눠야 유실률을 판단할 수 있다.
+func (r *Registry) IncAudioSampleDropped(reason string) {
+	r.increment(r.audioSamplesDrop, reason)
+}
 
 func (r *Registry) IncAIFallbackLatched(mode string) {
 	r.increment(r.aiFallbackLatched, mode)
@@ -365,10 +372,10 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeCounter(w, "innolive_audio_samples_written_total", "Number of Opus samples written to the RTMP egress audio pipe.", r.audioSamplesOut.Load())
 	writeCounter(w, "innolive_nvenc_leak_suspected_total", "Number of probes where measured NVENC sessions exceeded the internal egress slot accounting.", r.nvencLeakSuspected.Load())
 	writeCounter(w, "innolive_nvenc_probe_failures_total", "Number of failed nvidia-smi probes by the NVENC leak monitor.", r.nvencProbeFailures.Load())
-	writeCounter(w, "innolive_audio_samples_dropped_total", "Number of Opus samples dropped before the audio pipe (full queue, detached, non-monotonic, or pipe error).", r.audioSamplesDrop.Load())
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	writeLabeledCountersWithKey(w, "innolive_audio_samples_dropped_total", "Number of Opus samples dropped before the audio pipe, by reason (detached, muted, queue_full, non_monotonic, pipe_error).", "reason", r.audioSamplesDrop)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_latched_total", "Number of sessions that latched the fail-closed blackout after an AI failure.", "mode", r.aiFallbackLatched)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_recovered_total", "Number of times a latched session recovered when the AI boundary succeeded again.", "mode", r.aiFallbackRecovered)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)

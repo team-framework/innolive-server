@@ -35,6 +35,16 @@ const (
 
 var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
 
+// 오디오 드롭 원인 라벨. detached·muted는 송출 전 미리보기와 일시정지에서 생기는
+// 정상 드롭이고, queue_full·pipe_error만 송출 중 실제 유실이다.
+const (
+	audioDropDetached     = "detached"
+	audioDropMuted        = "muted"
+	audioDropQueueFull    = "queue_full"
+	audioDropNonMonotonic = "non_monotonic"
+	audioDropPipeError    = "pipe_error"
+)
+
 // AudioPipe는 송출자의 Opus 마이크 입력을 WebRTC ingest에서 RTMP egress FFmpeg로
 // Ogg/Opus 바이트 스트림으로 전달한다. RTP 읽기 루프는 패킷을 블로킹 없는 버퍼
 // 채널에 넣고, 단일 writer 고루틴이 samplebuilder로 재정렬한 뒤 oggwriter로
@@ -120,13 +130,13 @@ func (p *AudioPipe) WritePacket(packet *rtp.Packet) {
 	}
 	select {
 	case <-p.input:
-		p.metrics.IncAudioSampleDropped()
+		p.metrics.IncAudioSampleDropped(audioDropQueueFull)
 	default:
 	}
 	select {
 	case p.input <- packet:
 	default:
-		p.metrics.IncAudioSampleDropped()
+		p.metrics.IncAudioSampleDropped(audioDropQueueFull)
 	}
 }
 
@@ -183,13 +193,13 @@ func (p *AudioPipe) writeSample(timestamp uint32, payload []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.sinks) == 0 {
-		p.metrics.IncAudioSampleDropped()
+		p.metrics.IncAudioSampleDropped(audioDropDetached)
 		return
 	}
 	for writeEnd, sink := range p.sinks {
 		if sink.muted {
 			// 무음은 ticker가 채운다. 마이크 샘플까지 쓰면 두 계보가 섞인다.
-			p.metrics.IncAudioSampleDropped()
+			p.metrics.IncAudioSampleDropped(audioDropMuted)
 			continue
 		}
 		p.writeSinkLocked(writeEnd, sink, timestamp, payload)
@@ -222,7 +232,7 @@ func (p *AudioPipe) writeSilenceSamples() {
 
 func (p *AudioPipe) writeSinkLocked(writeEnd *os.File, sink *audioSink, timestamp uint32, payload []byte) {
 	if sink.havePrev && int32(timestamp-sink.prevTimestamp) <= 0 {
-		p.metrics.IncAudioSampleDropped()
+		p.metrics.IncAudioSampleDropped(audioDropNonMonotonic)
 		return
 	}
 	err := sink.ogg.WriteRTP(&rtp.Packet{
@@ -230,7 +240,7 @@ func (p *AudioPipe) writeSinkLocked(writeEnd *os.File, sink *audioSink, timestam
 		Payload: payload,
 	})
 	if err != nil {
-		p.metrics.IncAudioSampleDropped()
+		p.metrics.IncAudioSampleDropped(audioDropPipeError)
 		if !sink.errLogged {
 			p.logger.Warn("audio pipe write failed; dropping until egress reattaches", "error", err)
 			sink.errLogged = true

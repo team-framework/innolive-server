@@ -42,6 +42,12 @@ const (
 	audioDroppedMetric = "innolive_audio_samples_dropped_total"
 )
 
+// droppedValue는 원인 라벨이 붙은 오디오 드롭 카운터 하나의 값을 돌려준다.
+func droppedValue(t *testing.T, reg *metrics.Registry, reason string) float64 {
+	t.Helper()
+	return counterValue(t, reg, audioDroppedMetric+`{reason="`+reason+`"}`)
+}
+
 // TestAudioPipeWritePacketDropsOldestWhenFull: RTP 수신 큐는 막히지 않는다. 가득
 // 차면 가장 오래된 패킷을 버려 자리를 만들어, 느린 egress가 WebRTC 읽기 루프를
 // 멈추지 않게 한다.
@@ -52,11 +58,11 @@ func TestAudioPipeWritePacketDropsOldestWhenFull(t *testing.T) {
 	for i := 0; i < audioIngressQueueSize; i++ {
 		p.WritePacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: uint16(i)}})
 	}
-	if got := counterValue(t, reg, audioDroppedMetric); got != 0 {
+	if got := droppedValue(t, reg, audioDropQueueFull); got != 0 {
 		t.Fatalf("filling to capacity should not drop, got %v", got)
 	}
 	p.WritePacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: 9999}}) // 넘침
-	if got := counterValue(t, reg, audioDroppedMetric); got != 1 {
+	if got := droppedValue(t, reg, audioDropQueueFull); got != 1 {
 		t.Fatalf("overflow should drop exactly one, got %v", got)
 	}
 	if len(p.input) != audioIngressQueueSize {
@@ -88,7 +94,7 @@ func TestAudioPipeMonotonicGuardDropsBackwardTimestamps(t *testing.T) {
 	if got := counterValue(t, reg, audioWrittenMetric); got != 3 {
 		t.Fatalf("written = %v, want 3", got)
 	}
-	if got := counterValue(t, reg, audioDroppedMetric); got != 2 {
+	if got := droppedValue(t, reg, audioDropNonMonotonic); got != 2 {
 		t.Fatalf("dropped = %v, want 2", got)
 	}
 }
@@ -120,7 +126,7 @@ func TestAudioPipeDetachIsWriteEndTargeted(t *testing.T) {
 	if got := counterValue(t, reg, audioWrittenMetric); got != 1 {
 		t.Fatalf("no write after Detach(f1); written=%v want 1", got)
 	}
-	if got := counterValue(t, reg, audioDroppedMetric); got != 1 {
+	if got := droppedValue(t, reg, audioDropDetached); got != 1 {
 		t.Fatalf("write while detached must drop; dropped=%v want 1", got)
 	}
 }
@@ -164,5 +170,33 @@ func TestAudioPipeAttachWritesOggOpusHeader(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("OpusHead")) {
 		t.Fatal("stream must contain an OpusHead identification header")
+	}
+}
+
+// TestAudioPipePipeErrorDropsWithReason: FFmpeg 파이프 쓰기가 실패하면 그 샘플은
+// 실제 유실(pipe_error)로 세고 해당 출력을 뗀다. 이후 샘플은 미연결(detached)로
+// 세어, 정상 드롭과 실제 유실이 섞이지 않는다.
+func TestAudioPipePipeErrorDropsWithReason(t *testing.T) {
+	reg := metrics.New()
+	p := NewAudioPipe(testLogger(), reg, 2)
+	f, err := os.Create(filepath.Join(t.TempDir(), "out.ogg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Attach(f, false); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	f.Close() // 죽은 FFmpeg의 파이프처럼 쓰기를 실패시킨다
+
+	p.writeSample(1000, []byte{0xf8, 0x01})
+	if got := droppedValue(t, reg, audioDropPipeError); got != 1 {
+		t.Fatalf("pipe_error = %v, want 1", got)
+	}
+	p.writeSample(2000, []byte{0xf8, 0x01})
+	if got := droppedValue(t, reg, audioDropDetached); got != 1 {
+		t.Fatalf("detached after pipe error = %v, want 1", got)
+	}
+	if got := droppedValue(t, reg, audioDropPipeError); got != 1 {
+		t.Fatalf("pipe_error must not grow once detached, got %v", got)
 	}
 }

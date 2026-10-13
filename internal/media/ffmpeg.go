@@ -140,21 +140,41 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 	if err != nil {
 		return err
 	}
+	// 입력 방향(세로·가로)이 바뀌면 그 키프레임부터 디코더를 새 치수로 다시
+	// 띄운다(#449). 같은 방향 안의 해상도 변화(램프업)는 핀이 흡수한다.
+	for {
+		next, err := t.decodeVP8Segment(ctx, first, width, height, input, output)
+		if err != nil || next == nil {
+			return err
+		}
+		first = *next
+		width, height, _ = vp8KeyframeDimensions(first.data)
+	}
+}
+
+// decodeVP8Segment는 키프레임 first부터 디코더 하나를 돌린다. 입력 방향이 바뀐
+// 키프레임을 만나면 이미 넣은 프레임을 모두 읽어낸 뒤 그 프레임을 돌려준다.
+// 입력이 끝나면 nil을 돌려준다.
+func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, width, height uint16, input <-chan frame, output chan<- frame) (*frame, error) {
 	outputWidth, outputHeight, filter, err := t.decoderOutput(width, height)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	process, err := t.startDecoder(ctx, width, height, filter)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer process.close()
-	// 디코더 ffmpeg는 출력 규격을 첫 프레임에 고정한다. 핀이 꺼져 있으면 이
-	// 한 줄이 세션 화질의 상한을 기록하고, 켜져 있으면 입력과 무관하게
-	// 유지되는 규격을 기록한다(#122).
+	// 디코더 ffmpeg는 출력 규격을 구간의 첫 프레임에 고정한다. 핀이 꺼져 있으면
+	// 이 한 줄이 화질의 상한을 기록하고, 켜져 있으면 입력과 무관하게 유지되는
+	// 규격을 기록한다(#122). 방향이 바뀌면 다시 찍힌다(#449).
 	t.logger.Info("VP8 decoder output locked",
 		"width", outputWidth, "height", outputHeight,
 		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
+
+	// repin은 방향이 바뀐 키프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
+	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	var repin *frame
 
 	metadata := make(chan frame, 64)
 	writeError := make(chan error, 1)
@@ -164,9 +184,10 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		index := uint64(0)
 		// observed*는 관측 전용이며 이 고루틴 안에서만 쓴다(레이스 없음).
 		observedWidth, observedHeight := width, height
-		write := func(item frame) error {
+		write := func(item frame) (bool, error) {
 			// 키프레임에서만 치수를 읽을 수 있다. 인터프레임은 ErrKeyframeRequired로
-			// 걸러진다. 메타데이터는 바꾸지 않고 관측만 남긴다(#122).
+			// 걸러진다. 같은 방향이면 관측만 남기고(#122), 방향이 바뀌면 이 구간을
+			// 끝내고 그 키프레임으로 새 디코더를 띄운다(#449).
 			if inputWidth, inputHeight, err := vp8KeyframeDimensions(item.data); err == nil &&
 				(inputWidth != observedWidth || inputHeight != observedHeight) {
 				t.logger.Info("VP8 input resolution changed",
@@ -174,10 +195,14 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 					"to_width", inputWidth, "to_height", inputHeight,
 					"decoder_locked_width", outputWidth, "decoder_locked_height", outputHeight)
 				observedWidth, observedHeight = inputWidth, inputHeight
+				if orientationChanged(width, height, inputWidth, inputHeight) {
+					repin = &item
+					return true, nil
+				}
 			}
 			item.width, item.height = outputWidth, outputHeight
 			if err := writeIVFFrame(process.stdin, item.data, index); err != nil {
-				return err
+				return false, err
 			}
 			index++
 			// 프레임이 이제 압축 큐와 디코더 stdin 역압을 지났다. 경계를 표시해 읽기 루프가
@@ -185,12 +210,12 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 			item.decodeInAt = time.Now()
 			select {
 			case metadata <- item:
-				return nil
+				return false, nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			}
 		}
-		if err := write(first); err != nil {
+		if _, err := write(first); err != nil {
 			writeError <- err
 			return
 		}
@@ -204,7 +229,8 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 					writeError <- nil
 					return
 				}
-				if err := write(item); err != nil {
+				done, err := write(item)
+				if err != nil || done {
 					writeError <- err
 					return
 				}
@@ -221,7 +247,7 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 			decoded, err = readJPEG(process.stdout)
 		}
 		if err != nil {
-			return fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
+			return nil, fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 		}
 		item.data = decoded
 		// 합쳐진 "decode" 단계를 나눈다. pre_decode_wait는 압축 큐와 stdin 역압,
@@ -232,13 +258,19 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		select {
 		case output <- item:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("write VP8 stream to FFmpeg decoder: %w", err)
+		return nil, fmt.Errorf("write VP8 stream to FFmpeg decoder: %w", err)
 	}
-	return nil
+	return repin, nil
+}
+
+// orientationChanged는 입력이 세로와 가로 사이를 넘나들었는지 판정한다. 정사각형은
+// 가로로 본다.
+func orientationChanged(fromWidth, fromHeight, toWidth, toHeight uint16) bool {
+	return (fromHeight > fromWidth) != (toHeight > toWidth)
 }
 
 func (t *FFmpegTranscoder) EncodeStream(ctx context.Context, input <-chan frame, output chan<- frame) error {
@@ -262,11 +294,29 @@ func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan fra
 		}
 		first = item
 	}
+	// 처리 프레임 크기가 바뀌면(입력 방향 전환 #449) 인코더를 새 크기로 다시 띄운다.
+	for {
+		next, err := t.encodeVP8Segment(ctx, first, input, output)
+		if err != nil || next == nil {
+			return err
+		}
+		first = *next
+	}
+}
+
+// encodeVP8Segment는 first 크기로 인코더 하나를 돌린다. 크기가 다른 프레임을
+// 만나면 이미 넣은 프레임을 모두 읽어낸 뒤 그 프레임을 돌려준다. 입력이
+// 끝나면 nil을 돌려준다.
+func (t *FFmpegTranscoder) encodeVP8Segment(ctx context.Context, first frame, input <-chan frame, output chan<- frame) (*frame, error) {
 	process, err := t.startEncoder(ctx, first.width, first.height)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer process.close()
+
+	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
+	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	var resized *frame
 
 	expectedRawSize := rawFrameSize(first.width, first.height)
 	metadata := make(chan frame, 64)
@@ -274,21 +324,25 @@ func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan fra
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
-		write := func(item frame) error {
+		write := func(item frame) (bool, error) {
+			if resolutionChanged(item, first.width, first.height) {
+				resized = &item
+				return true, nil
+			}
 			if err := t.validateEncoderInput(item.data, expectedRawSize); err != nil {
-				return err
+				return false, err
 			}
 			if _, err := process.stdin.Write(item.data); err != nil {
-				return err
+				return false, err
 			}
 			select {
 			case metadata <- item:
-				return nil
+				return false, nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			}
 		}
-		if err := write(first); err != nil {
+		if _, err := write(first); err != nil {
 			writeError <- err
 			return
 		}
@@ -302,7 +356,8 @@ func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan fra
 					writeError <- nil
 					return
 				}
-				if err := write(item); err != nil {
+				done, err := write(item)
+				if err != nil || done {
 					writeError <- err
 					return
 				}
@@ -315,28 +370,28 @@ func (t *FFmpegTranscoder) encodeVP8Stream(ctx context.Context, input <-chan fra
 		if !headerRead {
 			header := make([]byte, 32)
 			if _, err := io.ReadFull(process.stdout, header); err != nil {
-				return fmt.Errorf("read FFmpeg encoder IVF header: %w", err)
+				return nil, fmt.Errorf("read FFmpeg encoder IVF header: %w", err)
 			}
 			if string(header[:4]) != "DKIF" || string(header[8:12]) != "VP80" {
-				return errors.New("FFmpeg encoder returned an invalid VP8 IVF stream")
+				return nil, errors.New("FFmpeg encoder returned an invalid VP8 IVF stream")
 			}
 			headerRead = true
 		}
 		encoded, _, err := readIVFFrame(process.stdout)
 		if err != nil {
-			return fmt.Errorf("read VP8 frame from FFmpeg encoder: %w", err)
+			return nil, fmt.Errorf("read VP8 frame from FFmpeg encoder: %w", err)
 		}
 		item.data = encoded
 		select {
 		case output <- item:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("write frame stream to FFmpeg encoder: %w", err)
+		return nil, fmt.Errorf("write frame stream to FFmpeg encoder: %w", err)
 	}
-	return nil
+	return resized, nil
 }
 
 func (t *FFmpegTranscoder) validateEncoderInput(data []byte, expectedRawSize int) error {

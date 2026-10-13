@@ -73,6 +73,10 @@ type Processor struct {
 	lastProbeAt           time.Time
 	blackoutMu            sync.Mutex
 	blackoutData          []byte
+	// blackoutWidth·Height는 blackoutData를 만든 프레임 치수다. 입력 방향이 바뀌면
+	// 디코더 출력 치수가 달라지므로(#449) 그때 다시 만든다.
+	blackoutWidth  uint16
+	blackoutHeight uint16
 
 	// mosaicTally는 세션의 블러 분류 누계다(#412). 없으면 Prometheus 카운터만 센다.
 	mosaicTally atomic.Pointer[MosaicTally]
@@ -386,9 +390,10 @@ func (p *Processor) serveBlackout(reference []byte, width, height uint16, cause 
 func (p *Processor) blackoutFrame(reference []byte, width, height uint16) ([]byte, error) {
 	p.blackoutMu.Lock()
 	defer p.blackoutMu.Unlock()
-	if p.blackoutData != nil {
+	if p.blackoutData != nil && p.blackoutWidth == width && p.blackoutHeight == height {
 		return p.blackoutData, nil
 	}
+	p.blackoutWidth, p.blackoutHeight = width, height
 
 	if p.wireFormat == config.WireFormatRaw {
 		size := rawFrameSize(width, height)

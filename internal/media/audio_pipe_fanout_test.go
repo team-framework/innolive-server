@@ -70,7 +70,7 @@ func TestAudioPipeFanoutMutesTargetsIndependently(t *testing.T) {
 	if got := counterValue(t, registry, audioWrittenMetric); got != 1 {
 		t.Fatalf("mic sample written = %v, want 1 (live target only)", got)
 	}
-	if got := counterValue(t, registry, audioDroppedMetric); got != 1 {
+	if got := droppedValue(t, registry, audioDropMuted); got != 1 {
 		t.Fatalf("mic sample dropped = %v, want 1 (paused target only)", got)
 	}
 

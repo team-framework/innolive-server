@@ -377,7 +377,14 @@ func runTranscodedTrack(
 	}()
 	go func() {
 		defer streamWorkers.Done()
-		err := transcoder.EncodeStream(pipelineContext, processed, encoded)
+		var err error
+		if transcoder.options.DisableReturnVideo {
+			// processImages already fans protected frames out to active broadcasts.
+			// Consume its bounded channel without spawning an unused return encoder.
+			consumeProcessedFrames(pipelineContext, processed)
+		} else {
+			err = transcoder.EncodeStream(pipelineContext, processed, encoded)
+		}
 		close(encoded)
 		if err != nil && pipelineContext.Err() == nil {
 			registry.IncFrameFailure(string(mode))
@@ -693,5 +700,18 @@ func subtractRemainingQueue[T any](queue <-chan T, registry *metrics.Registry) {
 	remaining := int64(len(queue))
 	if remaining > 0 {
 		registry.AddQueue(-remaining)
+	}
+}
+
+func consumeProcessedFrames(ctx context.Context, frames <-chan frame) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-frames:
+			if !ok {
+				return
+			}
+		}
 	}
 }

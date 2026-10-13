@@ -131,6 +131,127 @@ func TestConnectedPeerNegotiatesRTCPFeedback(t *testing.T) {
 	}
 }
 
+func TestConnectedSendOnlyPeerKeepsFeedbackAcrossICERestart(t *testing.T) {
+	manager := newTestManager(t, 0)
+	liveSession, ownerToken, err := manager.Create(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	capability := webrtc.RTPCodecCapability{
+		MimeType:    webrtc.MimeTypeH264,
+		ClockRate:   90000,
+		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		RTCPFeedback: []webrtc.RTCPFeedback{
+			{Type: "goog-remb"},
+			{Type: "ccm", Parameter: "fir"},
+			{Type: "nack"},
+			{Type: "nack", Parameter: "pli"},
+			{Type: "transport-cc"},
+		},
+	}
+	track, err := webrtc.NewTrackLocalStaticSample(capability, "camera", "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transceiver, err := client.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = transceiver.SetCodecPreferences([]webrtc.RTPCodecParameters{{RTPCodecCapability: capability}}); err != nil {
+		t.Fatal(err)
+	}
+
+	connected := make(chan struct{})
+	var once sync.Once
+	client.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			once.Do(func() { close(connected) })
+		}
+	})
+
+	offer, err := client.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(client)
+	if err = client.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gathered
+
+	answer, err := manager.CreateAnswer(liveSession.ID, ownerToken, client.LocalDescription().SDP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := videoSectionDirections(answer.SDP); len(got) != 1 || got[0] != "a=recvonly" {
+		t.Fatalf("send-only answer direction=%v", got)
+	}
+	if err = client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer.SDP}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-connected:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("peer connection never connected (ice=%s, state=%s)", client.ICEConnectionState(), client.ConnectionState())
+	}
+
+	// 실제 연결 뒤에도 같은 PeerConnection에 ICE restart offer를 적용할 수
+	// 있어야 네트워크 전환 시 세션·송출 egress를 새로 만들지 않는다.
+	restartOffer, err := client.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		t.Fatalf("create ICE restart offer: %v", err)
+	}
+	restartGathered := webrtc.GatheringCompletePromise(client)
+	if err = client.SetLocalDescription(restartOffer); err != nil {
+		t.Fatalf("set local ICE restart offer: %v", err)
+	}
+	<-restartGathered
+	negotiationID := uuid.NewString()
+	restartAnswer, err := manager.CreateAnswerWithOptions(liveSession.ID, ownerToken, client.LocalDescription().SDP, NegotiationOptions{
+		NegotiationID: negotiationID,
+		ICERestart:    true,
+	})
+	if err != nil {
+		t.Fatalf("create ICE restart answer: %v", err)
+	}
+	if restartAnswer.NegotiationID != negotiationID {
+		t.Fatalf("restart answer negotiation ID = %q, want %q", restartAnswer.NegotiationID, negotiationID)
+	}
+	if got := videoSectionDirections(restartAnswer.SDP); len(got) != 1 || got[0] != "a=recvonly" {
+		t.Fatalf("restart answer direction=%v", got)
+	}
+	if err = client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: restartAnswer.SDP}); err != nil {
+		t.Fatalf("set remote ICE restart answer: %v", err)
+	}
+
+	want := []string{"ccm fir", "goog-remb", "nack", "nack pli", "transport-cc"}
+	for _, direction := range []struct {
+		name   string
+		codecs []webrtc.RTPCodecParameters
+	}{
+		{"sender", transceiver.Sender().GetParameters().Codecs},
+	} {
+		if len(direction.codecs) == 0 {
+			t.Errorf("%s negotiated no codec at all", direction.name)
+			continue
+		}
+		got := negotiatedFeedback(direction.codecs[0].RTCPFeedback)
+		for _, feedback := range want {
+			if !got[feedback] {
+				t.Errorf("%s codec %s did not negotiate %q feedback (got %v)",
+					direction.name, direction.codecs[0].MimeType, feedback, sortedKeys(got))
+			}
+		}
+	}
+}
+
 // negotiatedFeedback은 RTCPFeedback을 SDP에 나오는 모양("nack pli")으로 키를 잡는다.
 func negotiatedFeedback(feedback []webrtc.RTCPFeedback) map[string]bool {
 	present := make(map[string]bool, len(feedback))

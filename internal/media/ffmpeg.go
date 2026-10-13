@@ -48,6 +48,8 @@ type commandFactory func(ctx context.Context, name string, arguments ...string) 
 // TranscoderOptions는 모든 세션의 FFmpeg 쌍이 공유하는 프로세스별 자원
 // 정책을 담는다.
 type TranscoderOptions struct {
+	// DisableReturnVideo retains ingress/egress processing without a preview encoder.
+	DisableReturnVideo bool
 	// Gate는 동시에 시작하는 FFmpeg 프로세스 수를 제한한다. nil이면 무제한이다.
 	Gate *SpawnGate
 	// EncoderThreads는 libvpx 인코더 스레드를 제한한다. 0이면 FFmpeg가 자동으로 정한다.

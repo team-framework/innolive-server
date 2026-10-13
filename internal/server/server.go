@@ -326,6 +326,7 @@ func (s *Server) handleWebRTCConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"iceServers": items,
 		"recovery":   s.sessions.WebRTCRecoveryPolicy(),
+		"features":   map[string]bool{"send_only_video": true},
 	})
 }
 

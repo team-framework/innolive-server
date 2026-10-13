@@ -385,7 +385,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledGaugesWithKey(w, "innolive_nvenc_slots_accounted", "Egress slots the server accounts for on each GPU.", "gpu", r.nvencSlotsPerCard)
 	writeLabeledGaugesWithKey(w, "innolive_ai_target_ready", "Whether the AI worker target answered the most recent preflight probe (1) or not (0).", "target", r.aiTargetReady)
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
-	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of processed video frames returned to WebRTC.", r.framesProcessed)
+	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of successfully processed video frames.", r.framesProcessed)
 	writeLabeledCounters(w, "innolive_frame_dropped_total", "Number of stale decoded frames discarded by the processing queue.", r.framesDropped)
 	writeLabeledCounters(w, "innolive_frame_failures_total", "Number of frame processing failures.", r.frameFailures)
 	writeLabeledCounters(w, "innolive_rtp_packets_received_total", "Number of RTP video packets read by the server.", r.rtpPacketsReceived)

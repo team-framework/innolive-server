@@ -386,6 +386,9 @@ func TestWebRTCConfigPublishesRecoveryContract(t *testing.T) {
 		t.Fatalf("GET /webrtc/config status = %d", response.StatusCode)
 	}
 	var payload struct {
+		Features struct {
+			SendOnlyVideo bool `json:"send_only_video"`
+		} `json:"features"`
 		Recovery struct {
 			WindowMS    int64 `json:"window_ms"`
 			DebounceMS  int64 `json:"debounce_ms"`
@@ -394,6 +397,9 @@ func TestWebRTCConfigPublishesRecoveryContract(t *testing.T) {
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
+	}
+	if !payload.Features.SendOnlyVideo {
+		t.Fatal("GET /webrtc/config did not advertise tested send-only support")
 	}
 	if payload.Recovery.WindowMS != 50000 || payload.Recovery.DebounceMS != 2000 || payload.Recovery.MaxAttempts != 10 {
 		t.Fatalf("recovery = %+v, want 50000ms/2000ms/10", payload.Recovery)
@@ -530,6 +536,10 @@ func TestBypassWebRTCEndToEnd(t *testing.T) {
 // connectTestPublisher는 세션에 VP8 송출 피어를 붙이고 ICE 연결까지 마친다.
 // 반환하는 채널에는 서버가 되돌려 보내는 미리보기 프레임이 하나씩 들어온다.
 func connectTestPublisher(t *testing.T, baseURL, sessionID, ownerToken string) (*webrtc.TrackLocalStaticSample, <-chan []byte) {
+	return connectTestPublisherDirection(t, baseURL, sessionID, ownerToken, webrtc.RTPTransceiverDirectionSendrecv)
+}
+
+func connectTestPublisherDirection(t *testing.T, baseURL, sessionID, ownerToken string, direction webrtc.RTPTransceiverDirection) (*webrtc.TrackLocalStaticSample, <-chan []byte) {
 	t.Helper()
 
 	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/signaling"
@@ -604,7 +614,7 @@ func connectTestPublisher(t *testing.T, baseURL, sessionID, ownerToken string) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	sender, err := peerConnection.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv})
+	sender, err := peerConnection.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{Direction: direction})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -786,7 +796,11 @@ func testServerConfig() config.Config {
 
 func newTestApplicationWithConfig(t *testing.T, cfg config.Config, requireUser func(http.Handler) http.Handler, authenticateUsers ...func(context.Context, string) (uuid.UUID, error)) (*Server, *session.Manager) {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newTestApplicationWithLogger(t, cfg, requireUser, slog.New(slog.NewTextHandler(io.Discard, nil)), authenticateUsers...)
+}
+
+func newTestApplicationWithLogger(t *testing.T, cfg config.Config, requireUser func(http.Handler) http.Handler, logger *slog.Logger, authenticateUsers ...func(context.Context, string) (uuid.UUID, error)) (*Server, *session.Manager) {
+	t.Helper()
 	registry := metrics.New()
 	manager, err := session.NewManager(cfg, logger, registry, nil, nil)
 	if err != nil {

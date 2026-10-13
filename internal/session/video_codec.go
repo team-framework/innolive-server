@@ -26,6 +26,10 @@ func (s *Session) prepareOutputForOffer(offerSDP string) error {
 	if err != nil {
 		return err
 	}
+	receivesVideo, err := offeredVideoReceives(offerSDP)
+	if err != nil {
+		return err
+	}
 	for _, candidate := range candidates {
 		if err := transceiver.SetCodecPreferences([]webrtc.RTPCodecParameters{candidate.parameters}); err != nil {
 			continue
@@ -34,16 +38,23 @@ func (s *Session) prepareOutputForOffer(offerSDP string) error {
 		if err != nil {
 			return fmt.Errorf("create %s processed video track: %w", candidate.codec, err)
 		}
-		sender, err := s.PC.AddTrack(output)
-		if err != nil {
-			return fmt.Errorf("add %s processed video track: %w", candidate.codec, err)
+		var sender *webrtc.RTPSender
+		// AddTrack changes a recvonly transceiver to sendrecv. A sendonly publisher
+		// needs the processing output for egress, but must not negotiate a return track.
+		if receivesVideo {
+			sender, err = s.PC.AddTrack(output)
+			if err != nil {
+				return fmt.Errorf("add %s processed video track: %w", candidate.codec, err)
+			}
 		}
 		s.mu.Lock()
 		s.Output = output
 		s.Sender = sender
 		s.VideoCodec = candidate.codec
 		s.mu.Unlock()
-		go drainRTCP(sender)
+		if sender != nil {
+			go drainRTCP(sender)
+		}
 		return nil
 	}
 	return fmt.Errorf("remote offer has no supported H.264 or VP8 video codec")
@@ -124,4 +135,31 @@ func firstVideoTransceiver(pc *webrtc.PeerConnection) *webrtc.RTPTransceiver {
 		}
 	}
 	return nil
+}
+
+// Direction is inherited from the session unless the video section overrides it.
+// RFC 3264's default is sendrecv; sendonly/inactive offers do not receive video.
+func offeredVideoReceives(raw string) (bool, error) {
+	var description sdp.SessionDescription
+	if err := description.UnmarshalString(raw); err != nil {
+		return false, fmt.Errorf("parse remote offer direction: %w", err)
+	}
+	direction := func(attributes []sdp.Attribute, receives bool) bool {
+		for _, attribute := range attributes {
+			switch attribute.Key {
+			case "sendonly", "inactive":
+				receives = false
+			case "recvonly", "sendrecv":
+				receives = true
+			}
+		}
+		return receives
+	}
+	inherited := direction(description.Attributes, true)
+	for _, mediaDescription := range description.MediaDescriptions {
+		if strings.EqualFold(mediaDescription.MediaName.Media, "video") {
+			return direction(mediaDescription.Attributes, inherited), nil
+		}
+	}
+	return false, fmt.Errorf("remote offer has no video media section")
 }

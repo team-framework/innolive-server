@@ -197,7 +197,8 @@ func TestRealProcessorTimeoutStreakResetsOnSuccess(t *testing.T) {
 	}
 }
 
-func TestRealProcessorRawBlackoutFrame(t *testing.T) {
+// 크기가 맞지 않아 블러할 수 없는 raw 프레임은 원본 대신 검은 프레임으로 내보낸다.
+func TestRealProcessorRawBlackoutFrameWhenBlurImpossible(t *testing.T) {
 	ai := &fakeAIStream{process: func([]byte, int64) (*aiv1.ProcessedVideoChunk, error) {
 		return nil, errors.New("ai unavailable")
 	}}
@@ -207,7 +208,8 @@ func TestRealProcessorRawBlackoutFrame(t *testing.T) {
 	}
 
 	const width, height = 4, 4
-	black, err := processor.Process(context.Background(), make([]byte, rawFrameSize(width, height)), 1, width, height)
+	truncated := bytes.Repeat([]byte{0xEB}, rawFrameSize(width, height)-1)
+	black, err := processor.Process(context.Background(), truncated, 1, width, height)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +225,93 @@ func TestRealProcessorRawBlackoutFrame(t *testing.T) {
 		if black[i] != 0x80 {
 			t.Fatalf("chroma byte %d = %#x, want 0x80", i, black[i])
 		}
+	}
+}
+
+func TestRealProcessorRawFallbackBlursWholeFrame(t *testing.T) {
+	ai := &fakeAIStream{process: func([]byte, int64) (*aiv1.ProcessedVideoChunk, error) {
+		return nil, errors.New("ai unavailable")
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatRaw, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const width, height = 320, 180
+	original := checkerboardRawFrame(width, height, 2, 0)
+	for i := 0; i < 3; i++ { // 잠금 프레임과 재시도 사이 프레임
+		blurred, err := processor.Process(context.Background(), original, int64(i+1), width, height)
+		if err != nil {
+			t.Fatalf("frame %d: Process() error = %v, want blurred frame", i, err)
+		}
+		if len(blurred) != len(original) {
+			t.Fatalf("frame %d: blurred size = %d, want %d", i, len(blurred), len(original))
+		}
+		if bytes.Equal(blurred, original) {
+			t.Fatalf("frame %d: fallback emitted the original frame", i)
+		}
+		for x := 1; x < width; x++ {
+			if diff := int(blurred[x]) - int(blurred[x-1]); diff > 8 || diff < -8 {
+				t.Fatalf("frame %d: luma jumps %d between x=%d and x=%d; checkerboard detail survived", i, diff, x-1, x)
+			}
+		}
+	}
+	if !processor.FallbackActive() {
+		t.Fatal("non-timeout failure should latch the fallback")
+	}
+}
+
+// 격자 칸 평균이 같으면 세부가 달라도 출력이 같다 — 원본 세부를 되살릴 수 없다.
+func TestBlurRawFrameDependsOnlyOnCellAverages(t *testing.T) {
+	const width, height = 320, 180
+	first, ok := blurRawFrame(checkerboardRawFrame(width, height, 2, 0), width, height)
+	if !ok {
+		t.Fatal("blurRawFrame() rejected a well-formed frame")
+	}
+	second, ok := blurRawFrame(checkerboardRawFrame(width, height, 2, 1), width, height)
+	if !ok {
+		t.Fatal("blurRawFrame() rejected a well-formed frame")
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("frames with equal cell averages produced different blurred output")
+	}
+}
+
+func TestBlurRawFrameHandlesFramesSmallerThanGrid(t *testing.T) {
+	const width, height = 4, 4
+	blurred, ok := blurRawFrame(checkerboardRawFrame(width, height, 1, 0), width, height)
+	if !ok || len(blurred) != rawFrameSize(width, height) {
+		t.Fatalf("blurRawFrame() = %d bytes, ok=%v; want %d bytes", len(blurred), ok, rawFrameSize(width, height))
+	}
+}
+
+// checkerboardRawFrame은 cell 픽셀 크기 흑백 바둑판 yuv420p 프레임이다. phase를
+// 바꾸면 흑백이 뒤집히지만 블러 격자 칸 평균은 같다.
+func checkerboardRawFrame(width, height, cell, phase int) []byte {
+	frame := make([]byte, rawFrameSize(uint16(width), uint16(height)))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if (x/cell+y/cell+phase)%2 == 0 {
+				frame[y*width+x] = 0xEB
+			} else {
+				frame[y*width+x] = 0x10
+			}
+		}
+	}
+	for i := width * height; i < len(frame); i++ {
+		frame[i] = 0x80
+	}
+	return frame
+}
+
+func BenchmarkBlurRawFrame(b *testing.B) {
+	for _, size := range [][2]uint16{{1280, 720}, {1920, 1080}} {
+		frame := checkerboardRawFrame(int(size[0]), int(size[1]), 8, 0)
+		b.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				blurRawFrame(frame, size[0], size[1])
+			}
+		})
 	}
 }
 

@@ -374,9 +374,17 @@ func (p *Processor) recordMosaic(objects []*aiv1.FaceMetadata) {
 	}
 }
 
-// serveBlackout은 이 세션에 캐시한 검은 프레임을 돌려준다. 검은 프레임을 만들 수
-// 없으면 원래 AI 오류(있으면)를 넘겨 프레임을 원본으로 내보내지 않고 버린다.
+// serveBlackout은 AI를 거치지 않은 프레임 대신 내보낼 fail-closed 프레임을
+// 돌려준다. raw wire면 화면 전체를 흐린 프레임이고(#463), 블러를 만들 수 없으면
+// (JPEG wire·크기 불일치) 이 세션에 캐시한 검은 프레임이다. 둘 다 만들 수 없으면
+// 원래 AI 오류(있으면)를 넘겨 프레임을 원본으로 내보내지 않고 버린다.
 func (p *Processor) serveBlackout(reference []byte, width, height uint16, cause error) ([]byte, error) {
+	if p.wireFormat == config.WireFormatRaw {
+		if blurred, ok := blurRawFrame(reference, width, height); ok {
+			p.metrics.IncAIFallbackFrame(string(p.mode))
+			return blurred, nil
+		}
+	}
 	black, err := p.blackoutFrame(reference, width, height)
 	if err != nil {
 		if cause != nil {

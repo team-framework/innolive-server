@@ -378,7 +378,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCountersWithKey(w, "innolive_audio_samples_dropped_total", "Number of Opus samples dropped before the audio pipe, by reason (detached, muted, queue_full, non_monotonic, pipe_error).", "reason", r.audioSamplesDrop)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_latched_total", "Number of sessions that latched the fail-closed blackout after an AI failure.", "mode", r.aiFallbackLatched)
 	writeLabeledCountersWithKey(w, "innolive_ai_fallback_recovered_total", "Number of times a latched session recovered when the AI boundary succeeded again.", "mode", r.aiFallbackRecovered)
-	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of blackout frames emitted by latched sessions.", "mode", r.aiFallbackFrames)
+	writeLabeledCountersWithKey(w, "innolive_ai_fallback_frames_total", "Number of fail-closed frames (whole-frame blur or blackout) emitted by latched sessions.", "mode", r.aiFallbackFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_input_paused_frames_total", "Number of camera frames discarded before AI processing while a broadcast is paused.", "mode", r.aiInputPausedFrames)
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)
 	writeLabeledGaugesWithKey(w, "innolive_nvenc_sessions", "NVENC encoder sessions reported by nvidia-smi for each GPU.", "gpu", r.nvencSessions)

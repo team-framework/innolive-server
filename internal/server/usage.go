@@ -34,7 +34,7 @@ type usageBroadcastResponse struct {
 	StartedAt  time.Time `json:"started_at"`
 	Resolution string    `json:"resolution"`
 	Providers  []string  `json:"providers"`
-	// AIProcessing은 server 또는 on_device다. 온디바이스는 실제 시간으로 차감한다.
+	// AIProcessing은 server 또는 on_device다. 서버·온디바이스 시간을 따로 센다.
 	AIProcessing string `json:"ai_processing"`
 	// 방송한 시간(하나라도 송출 중인 시간)과 줄어든 방송 시간(유닛-시간)
 	BroadcastSeconds int64 `json:"broadcast_seconds"`
@@ -60,7 +60,7 @@ type usageResponse struct {
 	LimitSeconds     *int64 `json:"limit_seconds"`
 	UsedSeconds      int64  `json:"used_seconds"`
 	RemainingSeconds *int64 `json:"remaining_seconds"`
-	// device_*는 온디바이스 시간(실제 시간)이다(#469). null이면 무제한이다.
+	// device_*는 온디바이스 시간(유닛-시간)이다(#469). null이면 무제한이다.
 	DeviceLimitSeconds     *int64                   `json:"device_limit_seconds"`
 	DeviceUsedSeconds      int64                    `json:"device_used_seconds"`
 	DeviceRemainingSeconds *int64                   `json:"device_remaining_seconds"`

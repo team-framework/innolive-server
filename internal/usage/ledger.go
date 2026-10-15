@@ -19,7 +19,7 @@ import (
 // 차감 규칙: 시점마다 "라이브이고 멈추지 않은 송출 대상 수" k로 유닛을 정하고
 // (plan.Units: 720p k, FHD k+1) 시간을 곱해 더한다. 동시 송출에서 한쪽이 먼저
 // 끝나거나 멈추면 그 뒤로는 단독 배수다. 슬롯 회계(#272)와 같은 규칙이다.
-// 온디바이스 세션은 서버 유닛을 쓰지 않으므로 실제 방송 시간으로 차감한다(#469).
+// 온디바이스 세션도 같은 배수로 차감하고, 서버 시간과는 따로 센다(#469·#475).
 
 // LedgerLocation은 월 경계의 기준 시간대다(매월 1일 0시 KST).
 var LedgerLocation = time.FixedZone("KST", 9*60*60)
@@ -246,9 +246,6 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 			continue
 		}
 		onDevice := s.AIProcessing != nil && *s.AIProcessing == session.AIProcessingOnDevice
-		if onDevice {
-			charged = onAir
-		}
 		sort.Strings(providers)
 		charges = append(charges, SessionCharge{SessionID: s.ID, StartedAt: s.StartedAt, Resolution: resolution, Providers: providers, OnDevice: onDevice, OnAir: onAir, Charged: charged})
 	}

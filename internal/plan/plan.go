@@ -51,7 +51,7 @@ func (m Mode) Units() int {
 type Policy struct {
 	// MonthlyServer는 서버 처리 월 한도다. 송출 방식 배수로 차감하는 유닛-시간이다.
 	MonthlyServer time.Duration
-	// MonthlyDevice는 온디바이스 월 한도다. 실제 방송 시간으로 센다.
+	// MonthlyDevice는 온디바이스 월 한도다. 서버와 같이 유닛-시간으로 센다.
 	MonthlyDevice time.Duration
 	// MaxPerBroadcast는 처리 위치와 무관한 1회 최대(실제 방송 시간)다.
 	MaxPerBroadcast time.Duration

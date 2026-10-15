@@ -293,9 +293,3 @@ func TestMonthlyLimitErrorIsPerProcessing(t *testing.T) {
 		t.Fatalf("server gate = %+v, %v, want allowed", gate, err)
 	}
 }
-
-func TestChargeUnitsOnDeviceIsRealTime(t *testing.T) {
-	if chargeUnits(true, true, 2) != 1 || chargeUnits(false, true, 2) != 3 {
-		t.Fatal("on-device must charge 1x, server must use plan units")
-	}
-}

@@ -221,9 +221,8 @@ func TestPostgresLedgerHonorsRecordedResolutionChange(t *testing.T) {
 	}
 }
 
-// 온디바이스 세션은 서버 유닛을 쓰지 않으므로 FHD 동시여도 실제 방송 시간으로
-// 차감하고, 서버 세션과 구분해 돌려준다(#469).
-func TestPostgresLedgerChargesOnDeviceByOnAir(t *testing.T) {
+// 온디바이스 세션도 송출 방식 배수로 차감하고, 서버 세션과 구분해 돌려준다(#469·#475).
+func TestPostgresLedgerChargesOnDeviceByUnits(t *testing.T) {
 	db := newPostgresUsageTestDB(t)
 	owner := createTestUser(t, db)
 	base := time.Date(2026, 10, 10, 12, 0, 0, 0, LedgerLocation)
@@ -238,7 +237,7 @@ func TestPostgresLedgerChargesOnDeviceByOnAir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 온디바이스 FHD 동시 1시간 → 1시간
+	// 온디바이스 FHD 동시 1시간 → 3시간
 	device := Session{ID: uuid.New(), UserID: &owner, StartedAt: at(-5), EndedAt: ptr(at(65)), Resolution: &fhd, AIProcessing: &onDevice, Source: SourceLive}
 	mustCreate(&device)
 	for _, provider := range []string{"youtube", "chzzk"} {
@@ -257,8 +256,8 @@ func TestPostgresLedgerChargesOnDeviceByOnAir(t *testing.T) {
 	if len(charges) != 2 {
 		t.Fatalf("charges = %+v, want 2", charges)
 	}
-	if got := charges[0]; got.SessionID != device.ID || !got.OnDevice || got.OnAir != time.Hour || got.Charged != time.Hour {
-		t.Fatalf("device charge = %+v, want on device 1h charged 1h", got)
+	if got := charges[0]; got.SessionID != device.ID || !got.OnDevice || got.OnAir != time.Hour || got.Charged != 3*time.Hour {
+		t.Fatalf("device charge = %+v, want on device 1h charged 3h", got)
 	}
 	if got := charges[1]; got.SessionID != serverSession.ID || got.OnDevice || got.Charged != 30*time.Minute {
 		t.Fatalf("server charge = %+v, want server 30m", got)

@@ -149,7 +149,7 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 		}
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
 		decision := decideLimits(live.Plan, onDevice, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
-		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, chargeUnits(onDevice, live.Resolution() == session.ResolutionFHD, len(targets))))
+		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,
@@ -210,16 +210,7 @@ func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Se
 		s.logger.Error("broadcast remaining refresh failed", "session_id", live.ID, "error", err)
 		return
 	}
-	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, chargeUnits(onDevice, live.Resolution() == session.ResolutionFHD, targets)))
-}
-
-// chargeUnits는 남은 시간 계산에 쓰는 차감 배수다. 온디바이스는 서버 유닛을 쓰지
-// 않아 실제 시간으로 차감한다(#469).
-func chargeUnits(onDevice, fhd bool, targets int) int {
-	if onDevice {
-		return 1
-	}
-	return plan.Units(fhd, targets)
+	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
 }
 
 // broadcastUsage는 이 세션의 실제 방송 시간과 같은 처리 위치의 이번 달 누적 차감을

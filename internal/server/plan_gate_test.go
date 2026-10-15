@@ -25,10 +25,11 @@ func TestPlanGateError(t *testing.T) {
 		targets  int
 		code     string
 	}{
-		{plan.Spark, false, false, 1, ""},
-		{plan.Spark, false, true, 1, "plan_resolution_not_allowed"},
-		{plan.Spark, false, false, 2, "plan_simulcast_not_allowed"},
+		// Spark는 서버를 쓰지 않는다(#470).
+		{plan.Spark, false, false, 1, "plan_server_streaming_not_allowed"},
+		{plan.Spark, true, false, 1, ""},
 		{plan.Spark, true, true, 1, "plan_resolution_not_allowed"},
+		{plan.Spark, true, false, 2, "plan_simulcast_not_allowed"},
 		{plan.Beam, false, true, 1, ""},
 		{plan.Beam, false, false, 2, ""},
 		{plan.Beam, false, true, 2, "plan_simulcast_not_allowed"},
@@ -67,7 +68,7 @@ func TestPrepareGatesSecondTargetByPlan(t *testing.T) {
 		wantCode   string
 		wantCalls  int
 	}{
-		{plan.Spark, session.Resolution720p, "plan_simulcast_not_allowed", 0},
+		{plan.Spark, session.Resolution720p, "plan_simulcast_not_allowed", 0}, // 온디바이스
 		{plan.Beam, session.ResolutionFHD, "plan_simulcast_not_allowed", 0},
 		{plan.Beam, session.Resolution720p, "", 1},
 		{plan.Plasma, session.ResolutionFHD, "", 1},
@@ -79,7 +80,7 @@ func TestPrepareGatesSecondTargetByPlan(t *testing.T) {
 				auth.StreamingProviderChzzk:   chzzk,
 			})
 			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
-			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", test.resolution, nil)
+			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, processingFor(test.plan), test.resolution, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -187,7 +188,7 @@ func TestConcurrentPrepareCannotBypassSimulcastGate(t *testing.T) {
 			auth.StreamingProviderChzzk:   chzzk,
 		})
 		manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return plan.Spark, nil })
-		live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.Resolution720p, nil)
+		live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, session.AIProcessingOnDevice, session.Resolution720p, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +251,7 @@ func TestPrepareGatesSecondTargetAfterFirstIsPrepared(t *testing.T) {
 				auth.StreamingProviderChzzk:   chzzk,
 			})
 			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
-			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), string(auth.StreamingProviderChzzk), "", session.Resolution720p, nil)
+			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), string(auth.StreamingProviderChzzk), processingFor(test.plan), session.Resolution720p, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -283,4 +284,13 @@ func TestPrepareGatesSecondTargetAfterFirstIsPrepared(t *testing.T) {
 			}
 		})
 	}
+}
+
+// processingFor는 플랜 게이팅 테스트의 세션 처리 위치다. Spark는 서버를 쓰지
+// 않으므로(#470) 온디바이스로 세운다.
+func processingFor(value plan.Plan) string {
+	if value == plan.Spark {
+		return session.AIProcessingOnDevice
+	}
+	return session.AIProcessingServer
 }

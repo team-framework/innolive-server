@@ -81,11 +81,9 @@ func (p Policy) Modes(onDevice bool) []Mode {
 // 온디바이스 송출 방식은 상한이며 그보다 낮은 방식을 모두 포함한다.
 var policies = map[Plan]Policy{
 	Spark: {
-		// 서버 송출 차단(#470) 전까지 기존 서버 한도를 유지한다.
-		MonthlyServer:   5 * time.Hour,
+		// Spark는 서버를 쓰지 않는다(#470). 웹 게스트 체험은 플랜이 없어 영향받지 않는다.
 		MonthlyDevice:   5 * time.Hour,
 		MaxPerBroadcast: time.Hour,
-		ServerModes:     []Mode{Mode720pSingle},
 		DeviceModes:     []Mode{Mode720pSingle},
 		FaceSlots:       2,
 	},

@@ -143,9 +143,13 @@ func TestGetMyUsageAvailableByMode(t *testing.T) {
 			map[plan.Mode]int64{plan.Mode720pSingle: 5 * 3600, plan.ModeFHDSingle: 9000, plan.Mode720pMulti: 9000, plan.ModeFHDMulti: 6000},
 			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 12 * 3600},
 		// 다 쓰면 모두 0이다(음수가 아니다).
-		{plan.Spark, 6 * time.Hour,
+		{plan.Beam, 41 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 0, plan.ModeFHDSingle: 0, plan.Mode720pMulti: 0, plan.ModeFHDMulti: 0},
-			map[plan.Mode]bool{plan.Mode720pSingle: true}, 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true}, 12 * 3600},
+		// Spark는 서버 송출이 없다(#470) — 서버 방식은 모두 잠금·무한도(null)다.
+		{plan.Spark, 0,
+			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
+			map[plan.Mode]bool{}, 3600},
 		{plan.Glow, 10 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
 			map[plan.Mode]bool{}, 8 * 3600},

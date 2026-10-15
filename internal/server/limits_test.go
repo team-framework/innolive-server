@@ -44,7 +44,7 @@ func TestDecideLimits(t *testing.T) {
 		{"온디바이스는 온디바이스 한도로 판정", plan.Beam, true, h, 50 * h, false, 0, nil, ""},
 		{"유료는 월 100%여도 끊지 않음", plan.Plasma, false, h, 80 * h, false, 0, []string{noticeMonthlyUsage80, noticeMonthlyUsage100}, ""},
 		// Spark 월 5시간·1회 1시간
-		{"Spark 월 소진 → 종료", plan.Spark, false, 20 * time.Minute, 5 * h, false, 0,
+		{"Spark 월 소진 → 종료", plan.Spark, true, 20 * time.Minute, 5 * h, false, 0,
 			[]string{noticeMonthlyUsage80, noticeMonthlyUsage100, noticeMonthlyLimitReached}, noticeMonthlyLimitReached},
 		{"입력 없음 5분 → 종료", plan.Beam, false, h, h, true, idle, []string{noticeNoInputStopped}, noticeNoInputStopped},
 		{"입력 없음 5분 직전", plan.Beam, false, h, h, true, idle - time.Second, nil, ""},
@@ -54,7 +54,7 @@ func TestDecideLimits(t *testing.T) {
 		{"Glow 1회 최대 도달 → 종료", plan.Glow, true, 8 * h, h, false, 0,
 			[]string{noticeBroadcastLimit30m, noticeBroadcastLimit10m, noticeBroadcastLimitReached}, noticeBroadcastLimitReached},
 		// 여러 규칙이 겹치면 첫 사유(1회 최대)로 끝낸다
-		{"겹치면 1회 최대가 사유", plan.Spark, false, h, 5 * h, true, idle,
+		{"겹치면 1회 최대가 사유", plan.Spark, true, h, 5 * h, true, idle,
 			[]string{noticeBroadcastLimit30m, noticeBroadcastLimit10m, noticeBroadcastLimitReached, noticeMonthlyUsage80, noticeMonthlyUsage100, noticeMonthlyLimitReached, noticeNoInputStopped}, noticeBroadcastLimitReached},
 	}
 	for _, test := range cases {
@@ -69,26 +69,30 @@ func TestDecideLimits(t *testing.T) {
 	}
 }
 
-type monthlyUsageLedger struct{ used time.Duration }
+type monthlyUsageLedger struct {
+	used     time.Duration
+	onDevice bool
+}
 
 func (l monthlyUsageLedger) Month(context.Context, uuid.UUID, time.Time, time.Time, time.Time) ([]usage.SessionCharge, error) {
 	if l.used == 0 {
 		return nil, nil
 	}
-	return []usage.SessionCharge{{SessionID: uuid.New(), Charged: l.used, OnAir: l.used}}, nil
+	return []usage.SessionCharge{{SessionID: uuid.New(), OnDevice: l.onDevice, Charged: l.used, OnAir: l.used}}, nil
 }
 
 // 월 방송 시간을 다 쓰면 다음 방송 준비가 플랫폼 호출 전에 막힌다 — 유료도 같다.
 func TestPrepareBlockedWhenMonthlyLimitExhausted(t *testing.T) {
 	for _, test := range []struct {
-		plan      plan.Plan
-		used      time.Duration
-		wantCode  string
-		wantCalls int
+		plan       plan.Plan
+		processing string
+		used       time.Duration
+		wantCode   string
+		wantCalls  int
 	}{
-		{plan.Spark, 5 * time.Hour, "monthly_limit_exhausted", 0},
-		{plan.Beam, 120 * time.Hour, "monthly_limit_exhausted", 0},
-		{plan.Spark, 4 * time.Hour, "", 1},
+		{plan.Spark, session.AIProcessingOnDevice, 5 * time.Hour, "monthly_limit_exhausted", 0},
+		{plan.Beam, session.AIProcessingServer, 40 * time.Hour, "monthly_limit_exhausted", 0},
+		{plan.Spark, session.AIProcessingOnDevice, 4 * time.Hour, "", 1},
 	} {
 		t.Run(string(test.plan), func(t *testing.T) {
 			youtube := &stubStreamingProvider{prepareErr: auth.ErrStreamingNotConnected}
@@ -96,8 +100,8 @@ func TestPrepareBlockedWhenMonthlyLimitExhausted(t *testing.T) {
 				auth.StreamingProviderYouTube: youtube,
 			})
 			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
-			application.usageLedger = monthlyUsageLedger{used: test.used}
-			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.Resolution720p, nil)
+			application.usageLedger = monthlyUsageLedger{used: test.used, onDevice: test.processing == session.AIProcessingOnDevice}
+			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, test.processing, session.Resolution720p, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,7 +137,7 @@ func TestPrepareBlockedWhenSessionReachedBroadcastLimit(t *testing.T) {
 		auth.StreamingProviderYouTube: youtube,
 	})
 	manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return plan.Spark, nil })
-	live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.Resolution720p, nil)
+	live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, session.AIProcessingOnDevice, session.Resolution720p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +169,7 @@ func TestBroadcastRemaining(t *testing.T) {
 		{"1회 잔여가 제한", plan.Plasma, false, 0, 38 * h, 3, 12 * h},
 		// Beam 서버 잔여 5h, FHD(2배) → 2.5h. 1회 잔여 11h보다 작다.
 		{"월 잔여 ÷ 배수가 제한", plan.Beam, false, h, 35 * h, 2, 150 * time.Minute},
-		{"다 쓰면 0(음수 아님)", plan.Spark, false, 30 * time.Minute, 6 * h, 1, 0},
+		{"다 쓰면 0(음수 아님)", plan.Spark, true, 30 * time.Minute, 6 * h, 1, 0},
 		// Glow 온디바이스 잔여 2h, 1회 잔여 7h
 		{"Glow 온디바이스 월 잔여", plan.Glow, true, h, 58 * h, 1, 2 * h},
 		// Beam 온디바이스 잔여 70h → 1회 잔여 11h
@@ -200,12 +204,12 @@ func TestIdleBroadcastRemainingIsFilledAndKept(t *testing.T) {
 		ledger     UsageLedger
 		want       int64 // -1 = null
 	}{
-		// Spark 월 5h 중 4.5h 사용 → 월 잔여 30분이 1회 1h보다 작다.
-		{"720p는 1배", plan.Spark, session.Resolution720p, monthlyUsageLedger{used: 4*time.Hour + 30*time.Minute}, 1800},
+		// Beam 서버 월 40h 중 39.5h 사용 → 월 잔여 30분이 1회 12h보다 작다.
+		{"720p는 1배", plan.Beam, session.Resolution720p, monthlyUsageLedger{used: 39*time.Hour + 30*time.Minute}, 1800},
 		// Beam 서버 월 40h 중 30h 사용, FHD 2배 → 5h(1회 12h보다 작다).
 		{"FHD는 2배", plan.Beam, session.ResolutionFHD, monthlyUsageLedger{used: 30 * time.Hour}, 5 * 3600},
 		{"플랜 없으면 null", "", session.Resolution720p, monthlyUsageLedger{}, -1},
-		{"원장 실패는 null", plan.Spark, session.Resolution720p, failingUsageLedger{}, -1},
+		{"원장 실패는 null", plan.Beam, session.Resolution720p, failingUsageLedger{}, -1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, manager, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{

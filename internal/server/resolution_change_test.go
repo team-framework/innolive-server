@@ -115,7 +115,7 @@ func TestBroadcastResolutionChangeHonorsPlan(t *testing.T) {
 				auth.StreamingProviderYouTube: &stubStreamingProvider{},
 			})
 			manager.SetPlanResolver(func(context.Context, uuid.UUID) (plan.Plan, error) { return test.plan, nil })
-			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, "", session.Resolution720p, nil)
+			live, ownerToken, err := manager.CreateForUserWithResolution(uuid.New(), session.DefaultProvider, processingFor(test.plan), session.Resolution720p, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

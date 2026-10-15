@@ -164,6 +164,7 @@ type Response struct {
 		UnsupportedTrackPolicy string      `json:"unsupported_track_policy"`
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
 		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
+		ScreenBlurEnabled      bool        `json:"screen_blur_enabled"`
 	} `json:"media"`
 	Stream StreamState `json:"stream"`
 	// Targets는 대상별 송출 상태다(#233). 대상이 하나뿐인 세션에서는 Stream과
@@ -250,6 +251,7 @@ type Session struct {
 	// 보내지 않도록, egress의 순간 상태가 아니라 세션에 기록한다.
 	aiInputPaused        bool
 	anonymizationEnabled bool
+	screenBlurEnabled    bool
 	broadcast            *YouTubeBroadcastSettings
 	// chzzkBroadcast는 치지직 대상의 방송 설정이다(#229). 동시 송출 세션은
 	// broadcast와 이 필드를 함께 든다(#233) — 플랫폼이 셋 이상이 되면
@@ -1659,6 +1661,33 @@ func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, er
 	return s, nil
 }
 
+// SetScreenBlurEnabled는 송출을 끊지 않고 화면 전체 블러를 켜고 끈다(#465).
+// 켜져 있는 동안 두 출력 모두 AI 결과 대신 화면 전체 블러가 나간다.
+func (m *Manager) SetScreenBlurEnabled(id string, enabled bool) (*Session, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrNotFound
+	}
+	if s.AIProcessing == AIProcessingOnDevice {
+		return nil, ErrOnDeviceProcessing
+	}
+	s.screenBlurEnabled = enabled
+	if s.processor != nil {
+		s.processor.SetScreenBlurEnabled(enabled)
+		for _, egress := range activeEgressesLocked(s) {
+			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
+		}
+	}
+	s.UpdatedAt = time.Now().UTC()
+	m.logger.Info("screen blur changed", "session_id", s.ID, "enabled", enabled)
+	return s, nil
+}
+
 func pauseEgress(egress streamPauseController) error {
 	switch egress.Status().Phase {
 	case media.EgressPhaseStopped:
@@ -2048,6 +2077,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		processor.SuspendAIInput()
 	}
 	processor.SetAnonymizationEnabled(s.anonymizationEnabled)
+	processor.SetScreenBlurEnabled(s.screenBlurEnabled)
 	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor
 	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
@@ -2159,6 +2189,7 @@ func (s *Session) Response() Response {
 		response.Media.AIFallbackActive = s.processor.FallbackActive()
 	}
 	response.Media.AnonymizationEnabled = s.anonymizationEnabled
+	response.Media.ScreenBlurEnabled = s.screenBlurEnabled
 	if s.broadcast != nil {
 		broadcast := s.broadcast.response()
 		response.Broadcast = &broadcast

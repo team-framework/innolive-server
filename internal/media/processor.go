@@ -44,6 +44,9 @@ type Processor struct {
 	ai                   AIStream
 	aiInputPaused        bool
 	anonymizationEnabled bool
+	// screenBlurEnabled는 스트리머가 고른 화면 전체 블러다. 켜져 있으면 AI 대신
+	// 프레임 전체를 블러해 내보낸다(#465).
+	screenBlurEnabled bool
 	// privacyGeneration은 지금 익명화 설정의 세대다. 설정이 바뀔 때마다 새로
 	// 받는다. egress는 이 세대로 정지 화면에 다시 써도 되는 프레임을 가린다.
 	privacyGeneration atomic.Uint64
@@ -173,6 +176,30 @@ func (p *Processor) SetAnonymizationEnabled(enabled bool) {
 	p.aiMu.Unlock()
 }
 
+// SetScreenBlurEnabled는 화면 전체 블러를 켜고 끈다. 익명화 토글처럼 AI 스트림은
+// 열어 둔다.
+func (p *Processor) SetScreenBlurEnabled(enabled bool) {
+	if p.mode != config.PrivacyModeReal {
+		return
+	}
+	p.aiMu.Lock()
+	if p.screenBlurEnabled != enabled {
+		p.privacyGeneration.Store(privacyGenerations.Add(1))
+	}
+	p.screenBlurEnabled = enabled
+	p.aiMu.Unlock()
+}
+
+// ScreenBlurEnabled는 real 모드 프레임을 지금 화면 전체 블러로 내보내는지다.
+func (p *Processor) ScreenBlurEnabled() bool {
+	if p.mode != config.PrivacyModeReal {
+		return false
+	}
+	p.aiMu.RLock()
+	defer p.aiMu.RUnlock()
+	return p.screenBlurEnabled
+}
+
 // PrivacyGeneration은 지금 익명화 설정의 세대다. 설정이 바뀌면 커진다.
 // 쓰기는 aiMu 쓰기 잠금 안에서만 일어나고 처리 중에는 읽기 잠금을 쥐므로,
 // 처리 전후에 읽은 값이 같으면 그 프레임은 한 설정 아래에서 처리된 것이다.
@@ -211,6 +238,9 @@ func (p *Processor) Process(ctx context.Context, frame []byte, timestamp int64, 
 	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
 		return nil, errAIInputPaused
 	}
+	if p.mode == config.PrivacyModeReal && p.screenBlurEnabled {
+		return p.screenBlur(frame, width, height)
+	}
 	if p.mode == config.PrivacyModeReal && !p.anonymizationEnabled {
 		return frame, nil
 	}
@@ -225,6 +255,10 @@ func (p *Processor) ProcessIfAIInputEnabled(ctx context.Context, frame []byte, t
 	defer p.aiMu.RUnlock()
 	if p.mode == config.PrivacyModeReal && p.aiInputPaused {
 		return nil, false, nil
+	}
+	if p.mode == config.PrivacyModeReal && p.screenBlurEnabled {
+		output, err := p.screenBlur(frame, width, height)
+		return output, true, err
 	}
 	if p.mode == config.PrivacyModeReal && !p.anonymizationEnabled {
 		return frame, true, nil
@@ -394,6 +428,17 @@ func (p *Processor) serveBlackout(reference []byte, width, height uint16, cause 
 	}
 	p.metrics.IncAIFallbackFrame(string(p.mode))
 	return black, nil
+}
+
+// screenBlur는 화면 전체 블러 프레임을 돌려준다. 블러는 raw 프레임에서만 할 수
+// 있으므로 jpeg 와이어나 크기가 맞지 않는 프레임에는 원본 대신 검은 프레임을 낸다.
+func (p *Processor) screenBlur(frame []byte, width, height uint16) ([]byte, error) {
+	if p.wireFormat == config.WireFormatRaw {
+		if blurred, ok := blurRawFrame(frame, width, height); ok {
+			return blurred, nil
+		}
+	}
+	return p.blackoutFrame(frame, width, height)
 }
 
 func (p *Processor) blackoutFrame(reference []byte, width, height uint16) ([]byte, error) {

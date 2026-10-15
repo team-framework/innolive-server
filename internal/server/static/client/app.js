@@ -139,6 +139,8 @@ function bindElements() {
     "pauseBroadcastBtn",
     "changeResolutionBtn",
     "resumeBroadcastBtn",
+    "anonymizationToggleBtn",
+    "screenBlurToggleBtn",
     "stopBroadcastBtn",
     "healthBtn",
     "createSessionBtn",
@@ -387,6 +389,8 @@ function bindEvents() {
   els.startBtn.addEventListener("click", () => void startWebRtc());
   els.goLiveBtn.addEventListener("click", () => void goLiveBroadcast());
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
+  els.anonymizationToggleBtn.addEventListener("click", () => void togglePrivacy("anonymization"));
+  els.screenBlurToggleBtn.addEventListener("click", () => void togglePrivacy("screen-blur"));
   els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
   els.youtubeApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("youtube"));
   els.chzzkApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("chzzk"));
@@ -3099,6 +3103,30 @@ async function pauseBroadcast() {
   });
 }
 
+// PRIVACY_TOGGLES는 방송을 끊지 않고 켜고 끄는 서버 처리 토글이다. field는 세션
+// 응답 media의 현재 값이다(#465).
+const PRIVACY_TOGGLES = {
+  anonymization: { field: "anonymization_enabled", label: "비식별화" },
+  "screen-blur": { field: "screen_blur_enabled", label: "화면 블러" },
+};
+
+async function togglePrivacy(kind) {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("설정을 바꿀 세션이 없습니다.");
+  }
+  const { field, label } = PRIVACY_TOGGLES[kind];
+  const enabled = !state.session?.media?.[field];
+  await runBusy(async () => {
+    const session = await apiFetch(`/sessions/${sessionId}/${kind}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    });
+    setCurrentSession(session);
+    logEvent("ok", `${label} ${enabled ? "켜짐" : "꺼짐"}`, { session_id: sessionId, enabled });
+  });
+}
+
 // changeBroadcastMode는 방송 중에 송출 구성의 해상도·플랫폼으로 송출 방식을 바꾼다
 // (#300, 202). 해상도가 바뀌면 서버가 방송을 끝내고 새 구성으로 다시 연다. 진행은
 // 세션 응답의 resolution_switch로 폴링된다. 새로 더하는 플랫폼은 카드의 설정을
@@ -4829,6 +4857,13 @@ function updateButtons() {
     state.busy ||
     !state.session?.session_id ||
     streamStatus !== "paused";
+  // 온디바이스 세션은 서버가 409로 막는다 — 보내는 기기에서 제어한다.
+  const serverProcessing = Boolean(state.session?.session_id) && state.session?.ai_processing !== "on_device";
+  for (const [kind, button] of [["anonymization", els.anonymizationToggleBtn], ["screen-blur", els.screenBlurToggleBtn]]) {
+    const { field, label } = PRIVACY_TOGGLES[kind];
+    button.disabled = state.busy || !serverProcessing;
+    button.textContent = `${label} ${state.session?.media?.[field] ? "끄기" : "켜기"}`;
+  }
   // 송출 방식 변경은 라이브 중에만 연다. 방송 전 해상도·플랫폼은 "방송 준비"가
   // 송출 구성을 그대로 쓴다.
   els.changeResolutionBtn.disabled =

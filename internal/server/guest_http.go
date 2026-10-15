@@ -259,6 +259,25 @@ func (s *Server) handleGuestPatchAnonymization(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, live.Response())
 }
 
+func (s *Server) handleGuestPatchScreenBlur(w http.ResponseWriter, r *http.Request) {
+	live, _, ok := s.guestSessionRequest(w, r)
+	if !ok {
+		return
+	}
+	request := struct {
+		Enabled *bool `json:"enabled"`
+	}{}
+	if err := decodeOptionalJSON(http.MaxBytesReader(w, r.Body, maxJSONBody), &request); err != nil || request.Enabled == nil {
+		writeError(w, badRequest("Invalid screen blur request.", nil))
+		return
+	}
+	if _, err := s.sessions.SetScreenBlurEnabled(live.ID, *request.Enabled); err != nil {
+		writeSessionError(w, err, live.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, live.Response())
+}
+
 func (s *Server) guestSessionRequest(w http.ResponseWriter, r *http.Request) (*session.Session, *http.Request, bool) {
 	guest, ok := s.guestID(w, r, false)
 	if !ok {

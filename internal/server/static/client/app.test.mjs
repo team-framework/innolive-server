@@ -15,6 +15,8 @@ const buttonKeys = [
   "pauseBroadcastBtn",
   "changeResolutionBtn",
   "resumeBroadcastBtn",
+  "anonymizationToggleBtn",
+  "screenBlurToggleBtn",
   "stopBroadcastBtn",
   "healthBtn",
   "createSessionBtn",
@@ -229,7 +231,7 @@ async function loadApp({ fetchImpl, navigator } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, togglePrivacy, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
     context,
     { filename: appPath },
   );
@@ -1913,4 +1915,40 @@ test("세션 생성 요청에 고른 얼굴 가림 방식을 싣는다", async (
   const session = await createSession();
   assert.equal(bodies[0].face_anonymization, "face_swap");
   assert.equal(session.face_anonymization, "face_swap");
+});
+
+test("비식별화·화면 블러 토글은 현재 값을 뒤집어 보낸다", async () => {
+  const calls = [];
+  const { togglePrivacy, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ path: String(url), method: options.method, body });
+      const media = String(url).endsWith("/screen-blur")
+        ? { anonymization_enabled: true, screen_blur_enabled: body.enabled }
+        : { anonymization_enabled: body.enabled, screen_blur_enabled: false };
+      return jsonResponse({ session_id: "s-1", ai_processing: "server", media });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", ai_processing: "server", media: { anonymization_enabled: true, screen_blur_enabled: false } };
+
+  await togglePrivacy("screen-blur");
+  assert.match(calls[0].path, /\/sessions\/s-1\/screen-blur$/);
+  assert.equal(calls[0].method, "PATCH");
+  assert.deepEqual(calls[0].body, { enabled: true });
+  assert.equal(els.screenBlurToggleBtn.textContent, "화면 블러 끄기");
+
+  await togglePrivacy("anonymization");
+  assert.match(calls[1].path, /\/sessions\/s-1\/anonymization$/);
+  assert.deepEqual(calls[1].body, { enabled: false });
+  assert.equal(els.anonymizationToggleBtn.textContent, "비식별화 켜기");
+});
+
+test("온디바이스 세션에서는 비식별화·화면 블러 토글을 막는다", async () => {
+  const { updateButtons, state, els } = await loadApp();
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", ai_processing: "on_device", media: {} };
+  updateButtons();
+  assert.equal(els.anonymizationToggleBtn.disabled, true);
+  assert.equal(els.screenBlurToggleBtn.disabled, true);
 });

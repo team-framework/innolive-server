@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image/jpeg"
+	"sync/atomic"
 	"testing"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
@@ -434,5 +435,65 @@ func TestRealProcessorLatchesRealFailureAfterCancellation(t *testing.T) {
 	}
 	if !processor.FallbackActive() {
 		t.Fatal("real AI failure after a cancellation should still latch")
+	}
+}
+
+func TestRealProcessorScreenBlurReplacesAIOutputUntilDisabled(t *testing.T) {
+	var calls atomic.Int64
+	ai := &fakeAIStream{process: func(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+		calls.Add(1)
+		return &aiv1.ProcessedVideoChunk{Data: data, Timestamp: timestamp, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatRaw, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processor.ScreenBlurEnabled() {
+		t.Fatal("screen blur must default to off")
+	}
+
+	const width, height = 320, 180
+	original := checkerboardRawFrame(width, height, 2, 0)
+	want, _ := blurRawFrame(original, width, height)
+	before := processor.PrivacyGeneration()
+	processor.SetScreenBlurEnabled(true)
+	if processor.PrivacyGeneration() == before {
+		t.Fatal("enabling screen blur must advance the privacy generation")
+	}
+	output, processed, err := processor.ProcessIfAIInputEnabled(context.Background(), original, 1, width, height)
+	if err != nil || !processed || !bytes.Equal(output, want) {
+		t.Fatalf("screen blur output processed=%v err=%v blurred=%v", processed, err, bytes.Equal(output, want))
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("AI calls with screen blur = %d, want 0", calls.Load())
+	}
+	if processor.FallbackActive() {
+		t.Fatal("screen blur must not latch the AI fallback")
+	}
+
+	processor.SetScreenBlurEnabled(false)
+	output, _, err = processor.ProcessIfAIInputEnabled(context.Background(), original, 2, width, height)
+	if err != nil || !bytes.Equal(output, original) || calls.Load() != 1 {
+		t.Fatalf("after disabling: err=%v original=%v calls=%d, want AI output", err, bytes.Equal(output, original), calls.Load())
+	}
+}
+
+func TestRealProcessorScreenBlurNeverPassesOriginalOnJPEGWire(t *testing.T) {
+	ai := &fakeAIStream{process: func(data []byte, timestamp int64) (*aiv1.ProcessedVideoChunk, error) {
+		return &aiv1.ProcessedVideoChunk{Data: data, Timestamp: timestamp, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor.SetScreenBlurEnabled(true)
+	processor.SetAnonymizationEnabled(false)
+	original := []byte("jpeg-frame")
+	output, _, err := processor.ProcessIfAIInputEnabled(context.Background(), original, 1, 64, 36)
+	if err != nil {
+		t.Fatalf("screen blur on jpeg wire error = %v", err)
+	}
+	if bytes.Equal(output, original) {
+		t.Fatal("screen blur on jpeg wire emitted the original frame")
 	}
 }

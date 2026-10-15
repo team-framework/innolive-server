@@ -15,7 +15,7 @@ func TestPolicyMatchesBM(t *testing.T) {
 		deviceModes int
 		faces       int
 	}{
-		{Spark, 5 * time.Hour, 5 * time.Hour, time.Hour, 1, 1, 2},
+		{Spark, 0, 5 * time.Hour, time.Hour, 0, 1, 2},
 		{Glow, 0, 60 * time.Hour, 8 * time.Hour, 0, 2, 2},
 		{Beam, 40 * time.Hour, 120 * time.Hour, 12 * time.Hour, 3, 3, 5},
 		{Plasma, 80 * time.Hour, 300 * time.Hour, 12 * time.Hour, 4, 4, 10},
@@ -70,7 +70,7 @@ func TestModeForAndAllows(t *testing.T) {
 		onDevice bool
 		want     bool
 	}{
-		{Spark, Mode720pSingle, false, true}, {Spark, ModeFHDSingle, false, false}, {Spark, Mode720pSingle, true, true}, {Spark, ModeFHDSingle, true, false},
+		{Spark, Mode720pSingle, false, false}, {Spark, ModeFHDSingle, false, false}, {Spark, Mode720pSingle, true, true}, {Spark, ModeFHDSingle, true, false},
 		{Glow, Mode720pSingle, false, false}, {Glow, ModeFHDSingle, true, true}, {Glow, Mode720pSingle, true, true}, {Glow, Mode720pMulti, true, false},
 		{Beam, ModeFHDSingle, false, true}, {Beam, Mode720pMulti, true, true}, {Beam, ModeFHDMulti, false, false}, {Beam, ModeFHDMulti, true, false},
 		{Plasma, ModeFHDMulti, false, true}, {Plasma, ModeFHDMulti, true, true}, {"", Mode720pSingle, true, false},

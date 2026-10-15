@@ -261,3 +261,37 @@ func TestRefreshBroadcastRemainingUsesLiveTargetCount(t *testing.T) {
 		t.Fatalf("after go-live got %v, want %d", got, int64((10 * time.Hour / 3).Seconds()))
 	}
 }
+
+type splitUsageLedger struct{ server, device time.Duration }
+
+func (l splitUsageLedger) Month(context.Context, uuid.UUID, time.Time, time.Time, time.Time) ([]usage.SessionCharge, error) {
+	return []usage.SessionCharge{
+		{SessionID: uuid.New(), Charged: l.server, OnAir: l.server},
+		{SessionID: uuid.New(), OnDevice: true, Charged: l.device, OnAir: l.device},
+	}, nil
+}
+
+// 서버 시간을 다 써도 온디바이스 방송은 막지 않고, 그 반대도 같다(#469).
+func TestMonthlyLimitErrorIsPerProcessing(t *testing.T) {
+	application := &Server{usageLedger: splitUsageLedger{server: 40 * time.Hour, device: 10 * time.Hour}}
+	userID := uuid.New()
+	if gate, err := application.monthlyLimitError(context.Background(), plan.Beam, false, userID); err != nil || gate == nil || gate.Code != "monthly_limit_exhausted" {
+		t.Fatalf("server gate = %+v, %v, want monthly_limit_exhausted", gate, err)
+	}
+	if gate, err := application.monthlyLimitError(context.Background(), plan.Beam, true, userID); err != nil || gate != nil {
+		t.Fatalf("device gate = %+v, %v, want allowed", gate, err)
+	}
+	application.usageLedger = splitUsageLedger{server: time.Hour, device: 120 * time.Hour}
+	if gate, err := application.monthlyLimitError(context.Background(), plan.Beam, true, userID); err != nil || gate == nil {
+		t.Fatalf("device gate = %+v, %v, want exhausted", gate, err)
+	}
+	if gate, err := application.monthlyLimitError(context.Background(), plan.Beam, false, userID); err != nil || gate != nil {
+		t.Fatalf("server gate = %+v, %v, want allowed", gate, err)
+	}
+}
+
+func TestChargeUnitsOnDeviceIsRealTime(t *testing.T) {
+	if chargeUnits(true, true, 2) != 1 || chargeUnits(false, true, 2) != 3 {
+		t.Fatal("on-device must charge 1x, server must use plan units")
+	}
+}

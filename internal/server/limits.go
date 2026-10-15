@@ -14,7 +14,7 @@ import (
 
 // 방송 한도 집행(#275). 규칙(노션 BM):
 //   - 1회 최대(실제 방송 시간, 일시정지 제외): 30분·10분 전 알림, 도달 시 종료
-//   - 월 방송 시간 80%·100% 알림. 소진 시 Spark는 종료, 유료는 진행 중 방송을
+//   - 월 방송 시간 80%·100% 알림. 서버·온디바이스 시간은 따로 센다(#469). 소진 시 Spark는 종료, 유료는 진행 중 방송을
 //     끊지 않고 다음 방송 준비를 막는다(초과 과금 동의는 #277)
 //   - 영상 입력이 일정 시간 없으면 종료
 const limitCheckInterval = 15 * time.Second
@@ -140,16 +140,16 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
-		onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, live.CreatedAt, now)
+		onDevice := live.AIProcessing == session.AIProcessingOnDevice
+		onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, onDevice, live.CreatedAt, now)
 		cancel()
 		if err != nil {
 			s.logger.Error("limit check failed", "session_id", live.ID, "error", err)
 			continue
 		}
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
-		onDevice := live.AIProcessing == session.AIProcessingOnDevice
 		decision := decideLimits(live.Plan, onDevice, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
-		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
+		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, chargeUnits(onDevice, live.Resolution() == session.ResolutionFHD, len(targets))))
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,
@@ -204,18 +204,27 @@ func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Se
 		return
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
-	onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, live.CreatedAt, now)
+	onAir, used, err := s.broadcastUsage(checkCtx, live.UserID, live.ID, onDevice, live.CreatedAt, now)
 	cancel()
 	if err != nil {
 		s.logger.Error("broadcast remaining refresh failed", "session_id", live.ID, "error", err)
 		return
 	}
-	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
+	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, chargeUnits(onDevice, live.Resolution() == session.ResolutionFHD, targets)))
 }
 
-// broadcastUsage는 이 세션의 실제 방송 시간과 이번 달 누적 차감을 원장에서 읽는다.
-// 이번 방송 시간은 월 경계로 자르지 않도록 세션 시작부터 센다.
-func (s *Server) broadcastUsage(ctx context.Context, userID uuid.UUID, sessionID string, sessionStart, now time.Time) (onAir, used time.Duration, err error) {
+// chargeUnits는 남은 시간 계산에 쓰는 차감 배수다. 온디바이스는 서버 유닛을 쓰지
+// 않아 실제 시간으로 차감한다(#469).
+func chargeUnits(onDevice, fhd bool, targets int) int {
+	if onDevice {
+		return 1
+	}
+	return plan.Units(fhd, targets)
+}
+
+// broadcastUsage는 이 세션의 실제 방송 시간과 같은 처리 위치의 이번 달 누적 차감을
+// 원장에서 읽는다. 이번 방송 시간은 월 경계로 자르지 않도록 세션 시작부터 센다.
+func (s *Server) broadcastUsage(ctx context.Context, userID uuid.UUID, sessionID string, onDevice bool, sessionStart, now time.Time) (onAir, used time.Duration, err error) {
 	since, err := s.usageLedger.Month(ctx, userID, sessionStart, now.Add(time.Second), now)
 	if err != nil {
 		return 0, 0, err
@@ -225,11 +234,13 @@ func (s *Server) broadcastUsage(ctx context.Context, userID uuid.UUID, sessionID
 			onAir = charge.OnAir
 		}
 	}
-	used, err = s.monthlyUsed(ctx, userID, now)
+	used, err = s.monthlyUsed(ctx, userID, onDevice, now)
 	return onAir, used, err
 }
 
-func (s *Server) monthlyUsed(ctx context.Context, userID uuid.UUID, now time.Time) (time.Duration, error) {
+// monthlyUsed는 처리 위치 하나의 이번 달 누적 차감이다 — 서버와 온디바이스 시간은
+// 따로 센다(#469).
+func (s *Server) monthlyUsed(ctx context.Context, userID uuid.UUID, onDevice bool, now time.Time) (time.Duration, error) {
 	from, to := usage.MonthRange(now)
 	charges, err := s.usageLedger.Month(ctx, userID, from, to, now)
 	if err != nil {
@@ -237,7 +248,9 @@ func (s *Server) monthlyUsed(ctx context.Context, userID uuid.UUID, now time.Tim
 	}
 	var used time.Duration
 	for _, charge := range charges {
-		used += charge.Charged
+		if charge.OnDevice == onDevice {
+			used += charge.Charged
+		}
 	}
 	return used, nil
 }
@@ -277,7 +290,7 @@ func (s *Server) monthlyLimitError(ctx context.Context, owner plan.Plan, onDevic
 	if limit <= 0 {
 		return nil, nil
 	}
-	used, err := s.monthlyUsed(ctx, userID, time.Now())
+	used, err := s.monthlyUsed(ctx, userID, onDevice, time.Now())
 	if err != nil {
 		return nil, err
 	}

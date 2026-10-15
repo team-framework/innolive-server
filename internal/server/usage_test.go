@@ -119,8 +119,10 @@ func TestGetMyUsageRejectsBadMonthAndHandlesUnlimited(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if got.LimitSeconds != nil || got.RemainingSeconds != nil {
-		t.Fatalf("glow usage = %+v, want unlimited (null limit)", got)
+	// Glow는 서버 한도가 없고(null) 온디바이스 60시간만 있다.
+	if got.LimitSeconds != nil || got.RemainingSeconds != nil ||
+		got.DeviceLimitSeconds == nil || *got.DeviceLimitSeconds != 60*3600 {
+		t.Fatalf("glow usage = %+v, want null server limit and 60h device limit", got)
 	}
 }
 
@@ -179,5 +181,30 @@ func TestGetMyUsageAvailableByMode(t *testing.T) {
 				t.Fatalf("max_per_broadcast_seconds = %v, want %d", got.MaxPerBroadcastSeconds, test.perOnce)
 			}
 		})
+	}
+}
+
+// 서버 시간과 온디바이스 시간은 따로 쌓이고 따로 남는다(#469).
+func TestGetMyUsageSplitsServerAndDevice(t *testing.T) {
+	ledger := &fakeUsageLedger{charges: map[uuid.UUID][]usage.SessionCharge{}}
+	baseURL, header, userID := newUsageTestServer(t, nil, ledger)
+	ledger.charges[userID] = []usage.SessionCharge{
+		{SessionID: uuid.New(), Resolution: "fhd", Providers: []string{"youtube"}, OnAir: time.Hour, Charged: 2 * time.Hour},
+		{SessionID: uuid.New(), Resolution: "fhd", Providers: []string{"chzzk", "youtube"}, OnDevice: true, OnAir: 3 * time.Hour, Charged: 3 * time.Hour},
+	}
+
+	response := mustRequest(t, http.MethodGet, baseURL+"/users/me/usage", nil, header)
+	var got usageResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	// Beam 서버 40h − 2h = 38h, 온디바이스 120h − 3h = 117h
+	if got.UsedSeconds != 2*3600 || got.RemainingSeconds == nil || *got.RemainingSeconds != 38*3600 ||
+		got.DeviceUsedSeconds != 3*3600 || got.DeviceRemainingSeconds == nil || *got.DeviceRemainingSeconds != 117*3600 {
+		t.Fatalf("usage = %+v", got)
+	}
+	if len(got.Broadcasts) != 2 || got.Broadcasts[0].AIProcessing != "server" || got.Broadcasts[1].AIProcessing != "on_device" {
+		t.Fatalf("broadcasts = %+v", got.Broadcasts)
 	}
 }

@@ -76,7 +76,7 @@ func (s *Server) handlePutBroadcastResolution(w http.ResponseWriter, r *http.Req
 		writeError(w, broadcastBusyError(liveSession.ID))
 		return
 	}
-	if gate := planGateError(liveSession.Plan, resolution == session.ResolutionFHD, 1); gate != nil {
+	if gate := planGateError(liveSession.Plan, liveSession.AIProcessing == session.AIProcessingOnDevice, resolution == session.ResolutionFHD, 1); gate != nil {
 		writeError(w, *gate)
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) startBroadcastSwitch(w http.ResponseWriter, liveSession *sessio
 		writeJSON(w, http.StatusOK, liveSession.Response())
 		return
 	}
-	if gate := planGateError(liveSession.Plan, resolution == session.ResolutionFHD, len(targets)); gate != nil {
+	if gate := planGateError(liveSession.Plan, liveSession.AIProcessing == session.AIProcessingOnDevice, resolution == session.ResolutionFHD, len(targets)); gate != nil {
 		writeError(w, *gate)
 		return
 	}

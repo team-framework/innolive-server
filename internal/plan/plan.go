@@ -46,36 +46,68 @@ func (m Mode) Units() int {
 	}
 }
 
-// Policy는 플랜 하나의 정책 값이다. 시간 값 0은 무제한이다.
+// Policy는 플랜 하나의 정책 값이다. 시간 값 0은 무제한이다. 처리 위치(서버·
+// 온디바이스)별로 월 시간과 송출 방식을 따로 둔다(#468).
 type Policy struct {
-	MonthlyBroadcast time.Duration
-	MaxPerBroadcast  time.Duration
-	// AllowedModes가 비어 있으면 서버 송출이 없는 플랜이다(Glow, 온디바이스).
-	AllowedModes []Mode
-	FaceSlots    int
+	// MonthlyServer는 서버 처리 월 한도다. 송출 방식 배수로 차감하는 유닛-시간이다.
+	MonthlyServer time.Duration
+	// MonthlyDevice는 온디바이스 월 한도다. 실제 방송 시간으로 센다.
+	MonthlyDevice time.Duration
+	// MaxPerBroadcast는 처리 위치와 무관한 1회 최대(실제 방송 시간)다.
+	MaxPerBroadcast time.Duration
+	// ServerModes가 비어 있으면 서버 송출이 없는 플랜이다(Glow).
+	ServerModes []Mode
+	DeviceModes []Mode
+	FaceSlots   int
 }
 
+// Monthly는 처리 위치의 월 한도다.
+func (p Policy) Monthly(onDevice bool) time.Duration {
+	if onDevice {
+		return p.MonthlyDevice
+	}
+	return p.MonthlyServer
+}
+
+// Modes는 처리 위치에서 허용하는 송출 방식이다.
+func (p Policy) Modes(onDevice bool) []Mode {
+	if onDevice {
+		return p.DeviceModes
+	}
+	return p.ServerModes
+}
+
+// 정본은 노션 신규 BM(2026-10-13)과 2026-10-15 확정(Glow 온디바이스 FHD 한 곳).
+// 온디바이스 송출 방식은 상한이며 그보다 낮은 방식을 모두 포함한다.
 var policies = map[Plan]Policy{
 	Spark: {
-		MonthlyBroadcast: 5 * time.Hour,
-		MaxPerBroadcast:  2 * time.Hour,
-		AllowedModes:     []Mode{Mode720pSingle},
-		FaceSlots:        2,
+		// Spark는 서버를 쓰지 않는다(#470). 웹 게스트 체험은 플랜이 없어 영향받지 않는다.
+		MonthlyDevice:   5 * time.Hour,
+		MaxPerBroadcast: time.Hour,
+		DeviceModes:     []Mode{Mode720pSingle},
+		FaceSlots:       2,
 	},
 	Glow: {
-		FaceSlots: 2,
+		MonthlyDevice:   60 * time.Hour,
+		MaxPerBroadcast: 8 * time.Hour,
+		DeviceModes:     []Mode{Mode720pSingle, ModeFHDSingle},
+		FaceSlots:       2,
 	},
 	Beam: {
-		MonthlyBroadcast: 120 * time.Hour,
-		MaxPerBroadcast:  8 * time.Hour,
-		AllowedModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti},
-		FaceSlots:        5,
+		MonthlyServer:   40 * time.Hour,
+		MonthlyDevice:   120 * time.Hour,
+		MaxPerBroadcast: 12 * time.Hour,
+		ServerModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti},
+		DeviceModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti},
+		FaceSlots:       5,
 	},
 	Plasma: {
-		MonthlyBroadcast: 240 * time.Hour,
-		MaxPerBroadcast:  12 * time.Hour,
-		AllowedModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti, ModeFHDMulti},
-		FaceSlots:        10,
+		MonthlyServer:   80 * time.Hour,
+		MonthlyDevice:   300 * time.Hour,
+		MaxPerBroadcast: 12 * time.Hour,
+		ServerModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti, ModeFHDMulti},
+		DeviceModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti, ModeFHDMulti},
+		FaceSlots:       10,
 	},
 }
 
@@ -107,9 +139,9 @@ func Units(fhd bool, targets int) int {
 	return targets
 }
 
-// Allows는 플랜이 그 송출 방식을 허용하는지다.
-func (p Plan) Allows(mode Mode) bool {
-	for _, allowed := range policies[p].AllowedModes {
+// Allows는 플랜이 그 처리 위치에서 송출 방식을 허용하는지다.
+func (p Plan) Allows(mode Mode, onDevice bool) bool {
+	for _, allowed := range policies[p].Modes(onDevice) {
 		if allowed == mode {
 			return true
 		}
@@ -129,6 +161,7 @@ func (p Plan) Policy() (Policy, bool) {
 	if !ok {
 		return Policy{}, false
 	}
-	policy.AllowedModes = append([]Mode(nil), policy.AllowedModes...)
+	policy.ServerModes = append([]Mode(nil), policy.ServerModes...)
+	policy.DeviceModes = append([]Mode(nil), policy.DeviceModes...)
 	return policy, true
 }

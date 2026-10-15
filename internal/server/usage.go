@@ -8,6 +8,7 @@ import (
 
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/plan"
+	"inno-live-server/internal/session"
 	"inno-live-server/internal/usage"
 
 	"github.com/google/uuid"
@@ -33,6 +34,8 @@ type usageBroadcastResponse struct {
 	StartedAt  time.Time `json:"started_at"`
 	Resolution string    `json:"resolution"`
 	Providers  []string  `json:"providers"`
+	// AIProcessing은 server 또는 on_device다. 온디바이스는 실제 시간으로 차감한다.
+	AIProcessing string `json:"ai_processing"`
 	// 방송한 시간(하나라도 송출 중인 시간)과 줄어든 방송 시간(유닛-시간)
 	BroadcastSeconds int64 `json:"broadcast_seconds"`
 	ChargedSeconds   int64 `json:"charged_seconds"`
@@ -52,12 +55,17 @@ type modeAvailability struct {
 type usageResponse struct {
 	Month string `json:"month"`
 	Plan  string `json:"plan"`
-	// 한도·남은 시간이 null이면 무제한이다(Glow).
-	LimitSeconds     *int64                   `json:"limit_seconds"`
-	UsedSeconds      int64                    `json:"used_seconds"`
-	RemainingSeconds *int64                   `json:"remaining_seconds"`
-	Broadcasts       []usageBroadcastResponse `json:"broadcasts"`
-	// AvailableByMode는 송출 방식별 실제 방송 가능 시간이다(#276). 월 잔여만 반영한다.
+	// limit·used·remaining은 서버 처리 시간(유닛-시간)이다. 한도·남은 시간이 null이면
+	// 서버 송출이 없는 플랜(Glow)이다.
+	LimitSeconds     *int64 `json:"limit_seconds"`
+	UsedSeconds      int64  `json:"used_seconds"`
+	RemainingSeconds *int64 `json:"remaining_seconds"`
+	// device_*는 온디바이스 시간(실제 시간)이다(#469). null이면 무제한이다.
+	DeviceLimitSeconds     *int64                   `json:"device_limit_seconds"`
+	DeviceUsedSeconds      int64                    `json:"device_used_seconds"`
+	DeviceRemainingSeconds *int64                   `json:"device_remaining_seconds"`
+	Broadcasts             []usageBroadcastResponse `json:"broadcasts"`
+	// AvailableByMode는 서버 송출 방식별 실제 방송 가능 시간이다(#276). 월 잔여만 반영한다.
 	AvailableByMode []modeAvailability `json:"available_by_mode"`
 	// MaxPerBroadcastSeconds는 1회 최대 방송 시간이다. 월 잔여가 많아도 한 번에 이보다
 	// 길게 방송할 수 없다. null이면 무제한이다.
@@ -69,7 +77,7 @@ type usageResponse struct {
 func availableByMode(owner plan.Plan, remaining *int64) []modeAvailability {
 	modes := make([]modeAvailability, 0, len(plan.Modes))
 	for _, mode := range plan.Modes {
-		entry := modeAvailability{Mode: mode, Multiplier: mode.Units(), Allowed: owner.Allows(mode)}
+		entry := modeAvailability{Mode: mode, Multiplier: mode.Units(), Allowed: owner.Allows(mode, false)}
 		if remaining != nil {
 			seconds := *remaining / int64(entry.Multiplier)
 			entry.Seconds = &seconds
@@ -77,6 +85,16 @@ func availableByMode(owner plan.Plan, remaining *int64) []modeAvailability {
 		modes = append(modes, entry)
 	}
 	return modes
+}
+
+// limitAndRemaining은 월 한도와 남은 시간(초)이다. 한도가 0이면 둘 다 nil이다.
+func limitAndRemaining(limit time.Duration, used int64) (*int64, *int64) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	seconds := int64(limit.Seconds())
+	remaining := max(seconds-used, 0)
+	return &seconds, &remaining
 }
 
 // handleGetMyUsage는 인증된 사용자 자신의 월 사용 내역만 돌려준다. 대상 사용자를
@@ -120,22 +138,25 @@ func (s *Server) handleGetMyUsage(w http.ResponseWriter, r *http.Request) {
 
 	response := usageResponse{Month: from.Format("2006-01"), Plan: string(owner), Broadcasts: []usageBroadcastResponse{}}
 	for _, charge := range charges {
-		response.UsedSeconds += int64(charge.Charged.Seconds())
+		processing := session.AIProcessingServer
+		if charge.OnDevice {
+			processing = session.AIProcessingOnDevice
+			response.DeviceUsedSeconds += int64(charge.Charged.Seconds())
+		} else {
+			response.UsedSeconds += int64(charge.Charged.Seconds())
+		}
 		response.Broadcasts = append(response.Broadcasts, usageBroadcastResponse{
 			SessionID:        charge.SessionID,
 			StartedAt:        charge.StartedAt,
 			Resolution:       charge.Resolution,
 			Providers:        charge.Providers,
+			AIProcessing:     processing,
 			BroadcastSeconds: int64(charge.OnAir.Seconds()),
 			ChargedSeconds:   int64(charge.Charged.Seconds()),
 		})
 	}
-	if policy.MonthlyBroadcast > 0 {
-		limit := int64(policy.MonthlyBroadcast.Seconds())
-		remaining := max(limit-response.UsedSeconds, 0)
-		response.LimitSeconds = &limit
-		response.RemainingSeconds = &remaining
-	}
+	response.LimitSeconds, response.RemainingSeconds = limitAndRemaining(policy.MonthlyServer, response.UsedSeconds)
+	response.DeviceLimitSeconds, response.DeviceRemainingSeconds = limitAndRemaining(policy.MonthlyDevice, response.DeviceUsedSeconds)
 	if policy.MaxPerBroadcast > 0 {
 		perBroadcast := int64(policy.MaxPerBroadcast.Seconds())
 		response.MaxPerBroadcastSeconds = &perBroadcast

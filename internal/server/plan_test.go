@@ -93,7 +93,8 @@ func TestAdminSetsPlanAndSessionCarriesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK || got.Plan != plan.Plasma || got.MonthlyBroadcastSeconds != 240*3600 || len(got.AllowedModes) != 4 {
+	if response.StatusCode != http.StatusOK || got.Plan != plan.Plasma || got.MonthlyBroadcastSeconds != 80*3600 ||
+		got.MonthlyDeviceSeconds != 300*3600 || len(got.AllowedModes) != 4 || len(got.DeviceModes) != 4 {
 		t.Fatalf("GET /users/me/plan = %d %+v", response.StatusCode, got)
 	}
 

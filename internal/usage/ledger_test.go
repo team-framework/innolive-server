@@ -220,3 +220,47 @@ func TestPostgresLedgerHonorsRecordedResolutionChange(t *testing.T) {
 		t.Fatalf("charges = %+v, want on air 50m charged 70m", charges)
 	}
 }
+
+// 온디바이스 세션은 서버 유닛을 쓰지 않으므로 FHD 동시여도 실제 방송 시간으로
+// 차감하고, 서버 세션과 구분해 돌려준다(#469).
+func TestPostgresLedgerChargesOnDeviceByOnAir(t *testing.T) {
+	db := newPostgresUsageTestDB(t)
+	owner := createTestUser(t, db)
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, LedgerLocation)
+	at := func(minutes int) time.Time { return base.Add(time.Duration(minutes) * time.Minute).UTC() }
+	ptr := func(value time.Time) *time.Time { return &value }
+	fhd, hd := "fhd", "720p"
+	onDevice, server := session.AIProcessingOnDevice, session.AIProcessingServer
+	reason := "user_requested"
+	mustCreate := func(value any) {
+		t.Helper()
+		if err := db.Create(value).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 온디바이스 FHD 동시 1시간 → 1시간
+	device := Session{ID: uuid.New(), UserID: &owner, StartedAt: at(-5), EndedAt: ptr(at(65)), Resolution: &fhd, AIProcessing: &onDevice, Source: SourceLive}
+	mustCreate(&device)
+	for _, provider := range []string{"youtube", "chzzk"} {
+		mustCreate(&Broadcast{ID: uuid.New(), SessionID: device.ID, Provider: provider, StartedAt: at(0), LiveAt: ptr(at(0)), EndedAt: ptr(at(60)), EndReason: &reason, Source: SourceLive})
+	}
+	// 서버 720p 한 곳 30분 → 30분
+	serverSession := Session{ID: uuid.New(), UserID: &owner, StartedAt: at(100), EndedAt: ptr(at(140)), Resolution: &hd, AIProcessing: &server, Source: SourceLive}
+	mustCreate(&serverSession)
+	mustCreate(&Broadcast{ID: uuid.New(), SessionID: serverSession.ID, Provider: "youtube", StartedAt: at(100), LiveAt: ptr(at(100)), EndedAt: ptr(at(130)), EndReason: &reason, Source: SourceLive})
+
+	from, to := MonthRange(base)
+	charges, err := NewLedger(db).Month(context.Background(), owner, from, to, at(600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(charges) != 2 {
+		t.Fatalf("charges = %+v, want 2", charges)
+	}
+	if got := charges[0]; got.SessionID != device.ID || !got.OnDevice || got.OnAir != time.Hour || got.Charged != time.Hour {
+		t.Fatalf("device charge = %+v, want on device 1h charged 1h", got)
+	}
+	if got := charges[1]; got.SessionID != serverSession.ID || got.OnDevice || got.Charged != 30*time.Minute {
+		t.Fatalf("server charge = %+v, want server 30m", got)
+	}
+}

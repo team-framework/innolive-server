@@ -386,7 +386,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, internalError())
 			return
 		}
-		if gate := planGateError(owner, true, 1); gate != nil {
+		if gate := planGateError(owner, strings.TrimSpace(request.AIProcessing) == session.AIProcessingOnDevice, true, 1); gate != nil {
 			s.logger.Info("session creation rejected by plan", "user_id", userID, "code", gate.Code, "details", gate.Details)
 			writeError(w, *gate)
 			return
@@ -602,7 +602,7 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	// 판정하면 둘 다 "다른 대상 0"으로 통과한다). 플랫폼 호출 전이라 거절돼도
 	// 채널에 빈 방송이 남지 않는다. 대상 수는 선점한 이 대상을 포함하고, 선점과
 	// 같은 잠금에서 센 값이라 동시 요청 중 먼저 선점한 쪽만 통과한다(#308).
-	if gate := planGateError(liveSession.Plan, liveSession.Resolution() == session.ResolutionFHD, busyTargets); gate != nil {
+	if gate := planGateError(liveSession.Plan, liveSession.AIProcessing == session.AIProcessingOnDevice, liveSession.Resolution() == session.ResolutionFHD, busyTargets); gate != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
 		s.logger.Info("stream prepare rejected by plan", "session_id", liveSession.ID, "provider", providerName, "code", gate.Code, "details", gate.Details)
 		return nil, gate
@@ -611,7 +611,7 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	// 진행 중 방송은 끊지 않지만 대상 추가는 새 송출이라 여기서 함께 막힌다.
 	exhausted, err := s.broadcastLimitError(ctx, liveSession.Plan, liveSession.UserID, liveSession.ID, liveSession.CreatedAt)
 	if err == nil && exhausted == nil {
-		exhausted, err = s.monthlyLimitError(ctx, liveSession.Plan, liveSession.UserID)
+		exhausted, err = s.monthlyLimitError(ctx, liveSession.Plan, liveSession.AIProcessing == session.AIProcessingOnDevice, liveSession.UserID)
 	}
 	if err != nil || exhausted != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))

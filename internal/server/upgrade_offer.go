@@ -56,7 +56,7 @@ func upgradeCandidateFor(live *session.Session, targets []string, addable []stri
 	for _, mode := range plan.Modes {
 		toFHD := mode == plan.ModeFHDSingle || mode == plan.ModeFHDMulti
 		toMulti := mode == plan.Mode720pMulti || mode == plan.ModeFHDMulti
-		if !live.Plan.Allows(mode) || (fhd && !toFHD) || (len(targets) > 1 && !toMulti) {
+		if !live.Plan.Allows(mode, false) || (fhd && !toFHD) || (len(targets) > 1 && !toMulti) {
 			continue
 		}
 		to := slices.Clone(targets)
@@ -72,7 +72,7 @@ func upgradeCandidateFor(live *session.Session, targets []string, addable []stri
 		if unitsTo <= unitsFrom {
 			continue
 		}
-		remaining := broadcastRemaining(live.Plan, onAir, used, unitsTo)
+		remaining := broadcastRemaining(live.Plan, false, onAir, used, unitsTo)
 		if remaining != nil && *remaining < upgradeMinRemaining {
 			continue
 		}

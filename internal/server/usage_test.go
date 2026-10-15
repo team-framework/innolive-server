@@ -62,10 +62,10 @@ func TestGetMyUsage(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	// Beam 120시간 − (3 + 2)시간 = 115시간
+	// Beam 서버 40시간 − (3 + 2)시간 = 35시간
 	if got.Month != "2026-09" || got.Plan != "beam" || got.UsedSeconds != 5*3600 ||
-		got.LimitSeconds == nil || *got.LimitSeconds != 120*3600 ||
-		got.RemainingSeconds == nil || *got.RemainingSeconds != 115*3600 || len(got.Broadcasts) != 2 {
+		got.LimitSeconds == nil || *got.LimitSeconds != 40*3600 ||
+		got.RemainingSeconds == nil || *got.RemainingSeconds != 35*3600 || len(got.Broadcasts) != 2 {
 		t.Fatalf("usage = %+v", got)
 	}
 	first := got.Broadcasts[0]
@@ -119,8 +119,10 @@ func TestGetMyUsageRejectsBadMonthAndHandlesUnlimited(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if got.LimitSeconds != nil || got.RemainingSeconds != nil {
-		t.Fatalf("glow usage = %+v, want unlimited (null limit)", got)
+	// Glow는 서버 한도가 없고(null) 온디바이스 60시간만 있다.
+	if got.LimitSeconds != nil || got.RemainingSeconds != nil ||
+		got.DeviceLimitSeconds == nil || *got.DeviceLimitSeconds != 60*3600 {
+		t.Fatalf("glow usage = %+v, want null server limit and 60h device limit", got)
 	}
 }
 
@@ -134,19 +136,23 @@ func TestGetMyUsageAvailableByMode(t *testing.T) {
 		perOnce int64 // -1 = null
 	}{
 		// BM 예시: 남은 방송 시간 42시간 → 720p 42 · FHD 21 · 720p 동시 21 · FHD 동시 14
-		{plan.Plasma, (240 - 42) * time.Hour,
+		{plan.Plasma, (80 - 42) * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 42 * 3600, plan.ModeFHDSingle: 21 * 3600, plan.Mode720pMulti: 21 * 3600, plan.ModeFHDMulti: 14 * 3600},
 			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: true}, 12 * 3600},
-		{plan.Beam, 115 * time.Hour,
+		{plan.Beam, 35 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 5 * 3600, plan.ModeFHDSingle: 9000, plan.Mode720pMulti: 9000, plan.ModeFHDMulti: 6000},
-			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 8 * 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 12 * 3600},
 		// 다 쓰면 모두 0이다(음수가 아니다).
-		{plan.Spark, 6 * time.Hour,
+		{plan.Beam, 41 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 0, plan.ModeFHDSingle: 0, plan.Mode720pMulti: 0, plan.ModeFHDMulti: 0},
-			map[plan.Mode]bool{plan.Mode720pSingle: true}, 2 * 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true}, 12 * 3600},
+		// Spark는 서버 송출이 없다(#470) — 서버 방식은 모두 잠금·무한도(null)다.
+		{plan.Spark, 0,
+			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
+			map[plan.Mode]bool{}, 3600},
 		{plan.Glow, 10 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
-			map[plan.Mode]bool{}, -1},
+			map[plan.Mode]bool{}, 8 * 3600},
 	}
 	for _, test := range cases {
 		t.Run(string(test.plan), func(t *testing.T) {
@@ -179,5 +185,30 @@ func TestGetMyUsageAvailableByMode(t *testing.T) {
 				t.Fatalf("max_per_broadcast_seconds = %v, want %d", got.MaxPerBroadcastSeconds, test.perOnce)
 			}
 		})
+	}
+}
+
+// 서버 시간과 온디바이스 시간은 따로 쌓이고 따로 남는다(#469).
+func TestGetMyUsageSplitsServerAndDevice(t *testing.T) {
+	ledger := &fakeUsageLedger{charges: map[uuid.UUID][]usage.SessionCharge{}}
+	baseURL, header, userID := newUsageTestServer(t, nil, ledger)
+	ledger.charges[userID] = []usage.SessionCharge{
+		{SessionID: uuid.New(), Resolution: "fhd", Providers: []string{"youtube"}, OnAir: time.Hour, Charged: 2 * time.Hour},
+		{SessionID: uuid.New(), Resolution: "fhd", Providers: []string{"chzzk", "youtube"}, OnDevice: true, OnAir: 3 * time.Hour, Charged: 3 * time.Hour},
+	}
+
+	response := mustRequest(t, http.MethodGet, baseURL+"/users/me/usage", nil, header)
+	var got usageResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	// Beam 서버 40h − 2h = 38h, 온디바이스 120h − 3h = 117h
+	if got.UsedSeconds != 2*3600 || got.RemainingSeconds == nil || *got.RemainingSeconds != 38*3600 ||
+		got.DeviceUsedSeconds != 3*3600 || got.DeviceRemainingSeconds == nil || *got.DeviceRemainingSeconds != 117*3600 {
+		t.Fatalf("usage = %+v", got)
+	}
+	if len(got.Broadcasts) != 2 || got.Broadcasts[0].AIProcessing != "server" || got.Broadcasts[1].AIProcessing != "on_device" {
+		t.Fatalf("broadcasts = %+v", got.Broadcasts)
 	}
 }

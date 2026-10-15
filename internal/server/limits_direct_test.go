@@ -80,7 +80,7 @@ func stopTargets(t *testing.T, payload map[string]any) []string {
 // 앱에 끊을 대상을 알린다 — 라이브 대상이 없어도 그 응답은 거절하지 않는다.
 func TestDirectBroadcastStoppedAtBroadcastLimit(t *testing.T) {
 	fixture := newDirectLimitFixture(t)
-	fixture.ledger.onAir = 8 * time.Hour // Beam 1회 최대
+	fixture.ledger.onAir = 12 * time.Hour // Beam 1회 최대
 
 	fixture.app.enforceLimits(context.Background(), time.Now())
 

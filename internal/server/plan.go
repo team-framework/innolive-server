@@ -46,10 +46,13 @@ func (s *Server) SetPlanStore(store PlanStore) {
 
 type planResponse struct {
 	Plan plan.Plan `json:"plan"`
-	// 시간 값은 초 단위이며 0은 무제한이다.
+	// 시간 값은 초 단위이며 0은 무제한이다. monthly_broadcast_seconds·allowed_modes는
+	// 서버 처리 값이고, 온디바이스 값은 device 필드로 따로 내보낸다(#468).
 	MonthlyBroadcastSeconds int64       `json:"monthly_broadcast_seconds"`
+	MonthlyDeviceSeconds    int64       `json:"monthly_device_seconds"`
 	MaxPerBroadcastSeconds  int64       `json:"max_per_broadcast_seconds"`
 	AllowedModes            []plan.Mode `json:"allowed_modes"`
+	DeviceModes             []plan.Mode `json:"device_modes"`
 	FaceSlots               int         `json:"face_slots"`
 }
 
@@ -58,15 +61,19 @@ func newPlanResponse(value plan.Plan) (planResponse, bool) {
 	if !ok {
 		return planResponse{}, false
 	}
-	modes := policy.AllowedModes
-	if modes == nil {
-		modes = []plan.Mode{}
+	nonNil := func(modes []plan.Mode) []plan.Mode {
+		if modes == nil {
+			return []plan.Mode{}
+		}
+		return modes
 	}
 	return planResponse{
 		Plan:                    value,
-		MonthlyBroadcastSeconds: int64(policy.MonthlyBroadcast.Seconds()),
+		MonthlyBroadcastSeconds: int64(policy.MonthlyServer.Seconds()),
+		MonthlyDeviceSeconds:    int64(policy.MonthlyDevice.Seconds()),
 		MaxPerBroadcastSeconds:  int64(policy.MaxPerBroadcast.Seconds()),
-		AllowedModes:            modes,
+		AllowedModes:            nonNil(policy.ServerModes),
+		DeviceModes:             nonNil(policy.DeviceModes),
 		FaceSlots:               policy.FaceSlots,
 	}, true
 }

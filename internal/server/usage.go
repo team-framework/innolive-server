@@ -69,7 +69,7 @@ type usageResponse struct {
 func availableByMode(owner plan.Plan, remaining *int64) []modeAvailability {
 	modes := make([]modeAvailability, 0, len(plan.Modes))
 	for _, mode := range plan.Modes {
-		entry := modeAvailability{Mode: mode, Multiplier: mode.Units(), Allowed: owner.Allows(mode)}
+		entry := modeAvailability{Mode: mode, Multiplier: mode.Units(), Allowed: owner.Allows(mode, false)}
 		if remaining != nil {
 			seconds := *remaining / int64(entry.Multiplier)
 			entry.Seconds = &seconds
@@ -130,8 +130,9 @@ func (s *Server) handleGetMyUsage(w http.ResponseWriter, r *http.Request) {
 			ChargedSeconds:   int64(charge.Charged.Seconds()),
 		})
 	}
-	if policy.MonthlyBroadcast > 0 {
-		limit := int64(policy.MonthlyBroadcast.Seconds())
+	// 처리 위치별 분리(#469) 전까지 서버 한도 기준이다.
+	if policy.MonthlyServer > 0 {
+		limit := int64(policy.MonthlyServer.Seconds())
 		remaining := max(limit-response.UsedSeconds, 0)
 		response.LimitSeconds = &limit
 		response.RemainingSeconds = &remaining

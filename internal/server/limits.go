@@ -38,7 +38,7 @@ type limitDecision struct {
 // decideLimits는 한도 판정이다. onAir는 이번 방송의 실제 방송 시간, used는 이번 달
 // 누적 차감이다. checkIdle은 멈추지 않은 라이브 대상이 있고 처리 프레임이 한 번이라도
 // 있었는지다 — 모두 멈추면 AI 입력도 멈추므로 입력 없음으로 보면 안 된다.
-func decideLimits(owner plan.Plan, onAir, used time.Duration, checkIdle bool, idleFor, idleTimeout time.Duration) limitDecision {
+func decideLimits(owner plan.Plan, onDevice bool, onAir, used time.Duration, checkIdle bool, idleFor, idleTimeout time.Duration) limitDecision {
 	var decision limitDecision
 	stop := func(reason string) {
 		if decision.stopReason == "" {
@@ -59,7 +59,7 @@ func decideLimits(owner plan.Plan, onAir, used time.Duration, checkIdle bool, id
 			stop(noticeBroadcastLimitReached)
 		}
 	}
-	if limit := policy.MonthlyBroadcast; limit > 0 {
+	if limit := policy.Monthly(onDevice); limit > 0 {
 		if used*5 >= limit*4 {
 			decision.notices = append(decision.notices, noticeMonthlyUsage80)
 		}
@@ -81,7 +81,7 @@ func decideLimits(owner plan.Plan, onAir, used time.Duration, checkIdle bool, id
 
 // broadcastRemaining은 현재 송출 방식(units배)으로 더 방송할 수 있는 시간이다(#276).
 // 월 잔여 ÷ 배수와 1회 잔여 중 작은 값이며, 한도가 없으면 nil이다.
-func broadcastRemaining(owner plan.Plan, onAir, used time.Duration, units int) *time.Duration {
+func broadcastRemaining(owner plan.Plan, onDevice bool, onAir, used time.Duration, units int) *time.Duration {
 	policy, _ := owner.Policy()
 	var remaining *time.Duration
 	consider := func(value time.Duration) {
@@ -90,8 +90,8 @@ func broadcastRemaining(owner plan.Plan, onAir, used time.Duration, units int) *
 			remaining = &value
 		}
 	}
-	if policy.MonthlyBroadcast > 0 && units > 0 {
-		consider((policy.MonthlyBroadcast - used) / time.Duration(units))
+	if monthly := policy.Monthly(onDevice); monthly > 0 && units > 0 {
+		consider((monthly - used) / time.Duration(units))
 	}
 	if policy.MaxPerBroadcast > 0 {
 		consider(policy.MaxPerBroadcast - onAir)
@@ -147,8 +147,9 @@ func (s *Server) enforceLimits(ctx context.Context, now time.Time) {
 			continue
 		}
 		checkIdle := unpaused > 0 && !idleSince.IsZero()
-		decision := decideLimits(live.Plan, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
-		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
+		onDevice := live.AIProcessing == session.AIProcessingOnDevice
+		decision := decideLimits(live.Plan, onDevice, onAir, used, checkIdle, now.Sub(idleSince), s.cfg.BroadcastIdleTimeout)
+		live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, len(targets))))
 		for _, code := range decision.notices {
 			if live.AddNotice(code, now) {
 				s.logger.Info("broadcast limit notice", "session_id", live.ID, "plan", live.Plan, "code", code,
@@ -198,7 +199,8 @@ func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Se
 	if s.usageLedger == nil || live.Plan == "" || live.UserID == uuid.Nil {
 		return
 	}
-	if policy, _ := live.Plan.Policy(); policy.MonthlyBroadcast <= 0 && policy.MaxPerBroadcast <= 0 {
+	onDevice := live.AIProcessing == session.AIProcessingOnDevice
+	if policy, _ := live.Plan.Policy(); policy.Monthly(onDevice) <= 0 && policy.MaxPerBroadcast <= 0 {
 		return
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, limitCheckInterval)
@@ -208,7 +210,7 @@ func (s *Server) refreshBroadcastRemaining(ctx context.Context, live *session.Se
 		s.logger.Error("broadcast remaining refresh failed", "session_id", live.ID, "error", err)
 		return
 	}
-	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
+	live.SetBroadcastRemaining(broadcastRemaining(live.Plan, onDevice, onAir, used, plan.Units(live.Resolution() == session.ResolutionFHD, targets)))
 }
 
 // broadcastUsage는 이 세션의 실제 방송 시간과 이번 달 누적 차감을 원장에서 읽는다.
@@ -266,21 +268,22 @@ func (s *Server) broadcastLimitError(ctx context.Context, owner plan.Plan, userI
 
 // monthlyLimitError는 월 방송 시간을 다 쓴 사용자의 다음 방송 준비를 막는다(#275).
 // 유료 플랜의 초과 과금 동의는 결제(#277)에서 이 판정에 붙는다.
-func (s *Server) monthlyLimitError(ctx context.Context, owner plan.Plan, userID uuid.UUID) (*apiError, error) {
+func (s *Server) monthlyLimitError(ctx context.Context, owner plan.Plan, onDevice bool, userID uuid.UUID) (*apiError, error) {
 	if s.usageLedger == nil || owner == "" || userID == uuid.Nil {
 		return nil, nil
 	}
 	policy, _ := owner.Policy()
-	if policy.MonthlyBroadcast <= 0 {
+	limit := policy.Monthly(onDevice)
+	if limit <= 0 {
 		return nil, nil
 	}
 	used, err := s.monthlyUsed(ctx, userID, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	if used < policy.MonthlyBroadcast {
+	if used < limit {
 		return nil, nil
 	}
 	return &apiError{Status: http.StatusForbidden, Code: "monthly_limit_exhausted", Message: "This month's broadcast time is used up.",
-		Details: map[string]any{"plan": owner, "used_seconds": int64(used.Seconds()), "limit_seconds": int64(policy.MonthlyBroadcast.Seconds())}}, nil
+		Details: map[string]any{"plan": owner, "used_seconds": int64(used.Seconds()), "limit_seconds": int64(limit.Seconds())}}, nil
 }

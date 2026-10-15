@@ -125,7 +125,7 @@ func TestSelectUpgradeOption(t *testing.T) {
 // 선택지 표(#333): 지금보다 유닛이 많고 해상도·대상 수가 줄지 않는 허용 방식 전부.
 // 동시 송출은 추가할 계정이 연결돼 있을 때만.
 func TestUpgradeCandidateFor(t *testing.T) {
-	beamMonthly := func() time.Duration { policy, _ := plan.Beam.Policy(); return policy.MonthlyBroadcast }()
+	beamMonthly := func() time.Duration { policy, _ := plan.Beam.Policy(); return policy.MonthlyServer }()
 	chzzk := []string{"chzzk"}
 	for _, test := range []struct {
 		name       string

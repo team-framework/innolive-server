@@ -62,10 +62,10 @@ func TestGetMyUsage(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	// Beam 120시간 − (3 + 2)시간 = 115시간
+	// Beam 서버 40시간 − (3 + 2)시간 = 35시간
 	if got.Month != "2026-09" || got.Plan != "beam" || got.UsedSeconds != 5*3600 ||
-		got.LimitSeconds == nil || *got.LimitSeconds != 120*3600 ||
-		got.RemainingSeconds == nil || *got.RemainingSeconds != 115*3600 || len(got.Broadcasts) != 2 {
+		got.LimitSeconds == nil || *got.LimitSeconds != 40*3600 ||
+		got.RemainingSeconds == nil || *got.RemainingSeconds != 35*3600 || len(got.Broadcasts) != 2 {
 		t.Fatalf("usage = %+v", got)
 	}
 	first := got.Broadcasts[0]
@@ -134,19 +134,19 @@ func TestGetMyUsageAvailableByMode(t *testing.T) {
 		perOnce int64 // -1 = null
 	}{
 		// BM 예시: 남은 방송 시간 42시간 → 720p 42 · FHD 21 · 720p 동시 21 · FHD 동시 14
-		{plan.Plasma, (240 - 42) * time.Hour,
+		{plan.Plasma, (80 - 42) * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 42 * 3600, plan.ModeFHDSingle: 21 * 3600, plan.Mode720pMulti: 21 * 3600, plan.ModeFHDMulti: 14 * 3600},
 			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: true}, 12 * 3600},
-		{plan.Beam, 115 * time.Hour,
+		{plan.Beam, 35 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 5 * 3600, plan.ModeFHDSingle: 9000, plan.Mode720pMulti: 9000, plan.ModeFHDMulti: 6000},
-			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 8 * 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true, plan.ModeFHDSingle: true, plan.Mode720pMulti: true, plan.ModeFHDMulti: false}, 12 * 3600},
 		// 다 쓰면 모두 0이다(음수가 아니다).
 		{plan.Spark, 6 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: 0, plan.ModeFHDSingle: 0, plan.Mode720pMulti: 0, plan.ModeFHDMulti: 0},
-			map[plan.Mode]bool{plan.Mode720pSingle: true}, 2 * 3600},
+			map[plan.Mode]bool{plan.Mode720pSingle: true}, 3600},
 		{plan.Glow, 10 * time.Hour,
 			map[plan.Mode]int64{plan.Mode720pSingle: -1, plan.ModeFHDSingle: -1, plan.Mode720pMulti: -1, plan.ModeFHDMulti: -1},
-			map[plan.Mode]bool{}, -1},
+			map[plan.Mode]bool{}, 8 * 3600},
 	}
 	for _, test := range cases {
 		t.Run(string(test.plan), func(t *testing.T) {

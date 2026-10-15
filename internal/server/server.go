@@ -131,6 +131,7 @@ func New(
 	mux.Handle("DELETE /sessions/{session_id}/upgrade-offer", requireUser(s.requireSessionOwner(s.handleDeleteUpgradeOffer)))
 	mux.Handle("POST /sessions/{session_id}/upgrade-offer/select", requireUser(s.requireSessionOwner(s.handleSelectUpgradeOption)))
 	mux.Handle("PATCH /sessions/{session_id}/anonymization", requireUser(s.requireSessionOwner(s.handlePatchAnonymization)))
+	mux.Handle("PATCH /sessions/{session_id}/screen-blur", requireUser(s.requireSessionOwner(s.handlePatchScreenBlur)))
 	mux.Handle("GET /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleGetReferenceFace))))
 	mux.Handle("POST /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handlePostReferenceFace))))
 	mux.Handle("DELETE /reference-face", requireUser(s.withUserOperation(http.HandlerFunc(s.handleDeleteReferenceFace))))
@@ -172,6 +173,7 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 	s.mux.HandleFunc("GET /guest/sessions/{session_id}", s.handleGuestGetSession)
 	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}", s.handleGuestDeleteSession)
 	s.mux.HandleFunc("PATCH /guest/sessions/{session_id}/anonymization", s.handleGuestPatchAnonymization)
+	s.mux.HandleFunc("PATCH /guest/sessions/{session_id}/screen-blur", s.handleGuestPatchScreenBlur)
 	s.mux.HandleFunc("GET /guest/sessions/{session_id}/reference-face", s.handleGuestGetReferenceFace)
 	s.mux.HandleFunc("POST /guest/sessions/{session_id}/reference-face", s.handleGuestPostReferenceFace)
 	s.mux.HandleFunc("DELETE /guest/sessions/{session_id}/reference-face", s.handleGuestDeleteReferenceFace)
@@ -1355,6 +1357,26 @@ func (s *Server) handlePatchAnonymization(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if _, err := s.sessions.SetAnonymizationEnabled(liveSession.ID, *request.Enabled); err != nil {
+		writeSessionError(w, err, liveSession.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveSession.Response())
+}
+
+// handlePatchScreenBlur는 송출을 끊지 않고 화면 전체 블러를 켜고 끈다(#465).
+func (s *Server) handlePatchScreenBlur(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
+	request := struct {
+		Enabled *bool `json:"enabled"`
+	}{}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := decodeOptionalJSON(r.Body, &request); err != nil || request.Enabled == nil {
+		if err == nil {
+			err = errors.New("enabled is required")
+		}
+		writeError(w, badRequest("Invalid screen blur request.", map[string]any{"error": err.Error()}))
+		return
+	}
+	if _, err := s.sessions.SetScreenBlurEnabled(liveSession.ID, *request.Enabled); err != nil {
 		writeSessionError(w, err, liveSession.ID)
 		return
 	}

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
@@ -14,13 +14,34 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Pool은 AI 워커 대상마다 클라이언트를 하나씩 두고 세션을 라운드로빈으로
-// 배정한다. MPS(또는 소프트웨어 자원 상한)로 워커 프로세스마다 GPU 몫이 정해져
-// 있으므로, 세션을 워커에 나눠야 그 격리가 스트림별 격리가 된다.
+// Pool은 AI 워커 대상마다 클라이언트를 하나씩 두고 세션을 활성 스트림이 가장
+// 적은 대상에 배정한다. MPS(또는 소프트웨어 자원 상한)로 워커 프로세스마다 GPU
+// 몫이 정해져 있으므로, 세션을 워커에 나눠야 그 격리가 스트림별 격리가 된다.
 type Pool struct {
 	clients []*Client
-	next    atomic.Uint64
 	logger  *slog.Logger
+
+	mu sync.Mutex
+	// active는 대상별로 지금 열려 있는 영상 파이프라인 수다.
+	active []int
+	// next는 활성 수가 같은 대상 사이에서 시작 위치를 돌려 고르게 퍼뜨린다.
+	next int
+	// observer는 대상별 활성 수가 바뀔 때마다 불린다(메트릭 게이지).
+	observer func(target string, active int)
+}
+
+// SetStreamObserver는 대상별 활성 스트림 수가 바뀔 때마다 부를 함수를 붙인다.
+// 지금 값을 한 번씩 먼저 알려 게이지가 0부터 보이게 한다.
+func (p *Pool) SetStreamObserver(observer func(target string, active int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.observer = observer
+	if observer == nil {
+		return
+	}
+	for index, client := range p.clients {
+		observer(client.Address(), p.active[index])
+	}
 }
 
 // SetLogger는 로거를 붙인다. 화이트리스트 롤백처럼 최선 노력 경로가 재시도를 다
@@ -79,13 +100,45 @@ func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
 		}
 		clients = append(clients, client)
 	}
-	return &Pool{clients: clients}, nil
+	return &Pool{clients: clients, active: make([]int, len(clients))}, nil
 }
 
-// Next는 다음 세션에 쓸 클라이언트를 대상들을 돌아가며 돌려준다.
-func (p *Pool) Next() *Client {
-	index := (p.next.Add(1) - 1) % uint64(len(p.clients))
-	return p.clients[index]
+// Acquire는 활성 스트림이 가장 적은 대상을 골라 스트림 하나를 배정하고, 그
+// 배정을 되돌리는 release를 함께 돌려준다. 호출자는 파이프라인이 끝날 때 release를
+// 한 번 불러야 한다(여러 번 불러도 한 번만 반영된다).
+//
+// 워커 한 프로세스는 프레임을 차례로 처리하므로 같은 워커에 몰린 스트림 수가 곧
+// 프레임 지연이다(#477). 종전 라운드로빈은 끝난 세션·파이프라인 재시작에도
+// 카운터가 넘어가, 동시 2세션이 한 워커에 몰리고 다른 워커가 놀 수 있었다.
+func (p *Pool) Acquire() (*Client, func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	best := p.next % len(p.clients)
+	for offset := 1; offset < len(p.clients); offset++ {
+		index := (p.next + offset) % len(p.clients)
+		if p.active[index] < p.active[best] {
+			best = index
+		}
+	}
+	p.next = (best + 1) % len(p.clients)
+	p.adjust(best, 1)
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.adjust(best, -1)
+		})
+	}
+	return p.clients[best], release
+}
+
+// adjust는 p.mu를 쥔 채 불린다.
+func (p *Pool) adjust(index, delta int) {
+	p.active[index] += delta
+	if p.observer != nil {
+		p.observer(p.clients[index].Address(), p.active[index])
+	}
 }
 
 func (p *Pool) Clients() []*Client {
@@ -118,8 +171,8 @@ type WhitelistResult struct {
 // 요청 컨텍스트는 이미 취소된 경우가 많아, 롤백은 분리해 돌리고 자기 기한을 둔다.
 const partialAddRollbackTimeout = 5 * time.Second
 
-// AddWhitelist는 클라이언트의 기준 얼굴을 모든 AI 워커에 등록한다(세션이 대상에
-// 라운드로빈으로 퍼지므로 화이트리스트가 전부에 있어야 한다).
+// AddWhitelist는 클라이언트의 기준 얼굴을 모든 AI 워커에 등록한다(세션이 어느
+// 대상에 배정될지 미리 알 수 없으므로 화이트리스트가 전부에 있어야 한다).
 //
 // 오류가 나면 얼굴은 어디에도 등록되지 않은 상태다. 받아들인 워커는 여기서
 // 되돌린다. 호출자는 이를 할 수 없다 — 엔트리 id는 워커마다 발급되고 부분 성공의

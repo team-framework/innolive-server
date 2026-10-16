@@ -288,8 +288,24 @@ func (t *FFmpegTranscoder) startH264Decoder(ctx context.Context, filter string) 
 	return process, nil
 }
 
+// h264ReturnLevelFor는 반환 해상도를 담는 가장 낮은 baseline level이다.
+// 720×1280(3600 MB)은 3.1, 1080×1920(8160 MB, 30fps 244800 MB/s)은 4.0이 필요하다.
+// level이 프레임 크기보다 작으면 하드웨어 디코더가 스트림을 거부하거나 버퍼를
+// 잘못 잡을 수 있다.
+func h264ReturnLevelFor(width, height uint16) string {
+	if int(width)*int(height) > 1280*720 {
+		return "4.0"
+	}
+	return "3.1"
+}
+
 // startH264Encoder도 VP8 경로의 startEncoder와 인자를 맞춘다(#130).
 // 스레드는 VP8과 마찬가지로 자원 거버너(EncoderThreads)를 따른다.
+//
+// maxrate는 목표 bitrate와 같게 두어 상한 없는 출력의 키프레임 버스트를 막고(#461),
+// VBV 버퍼는 1초 분량으로 둔다. 0.1초(200k) 버퍼는 키프레임을 P 프레임 크기로
+// 눌러 1초마다 화질이 꺼졌다. 실측(#478)에서 1초 버퍼의 FHD 최저 프레임 PSNR은
+// 약 2dB 올랐고 키프레임은 22KB에서 37KB로만 커졌다.
 func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height uint16) (*ffmpegProcess, error) {
 	arguments := []string{
 		"-hide_banner", "-loglevel", "error",
@@ -303,9 +319,10 @@ func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height u
 	if t.options.EncoderThreads > 0 {
 		arguments = append(arguments, "-threads", strconv.Itoa(t.options.EncoderThreads))
 	}
+	bitrate := returnVideoBitrateFor(width, height)
 	arguments = append(arguments,
-		"-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.1",
-		"-b:v", "2M", "-maxrate", "2M", "-bufsize", "200k",
+		"-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", h264ReturnLevelFor(width, height),
+		"-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate,
 		"-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-bf", "0",
 		"-x264-params", "repeat-headers=1:aud=1:annexb=1", "-f", "h264", "-flush_packets", "1", "pipe:1",
 	)

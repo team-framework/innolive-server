@@ -437,6 +437,25 @@ func (t *FFmpegTranscoder) startDecoder(ctx context.Context, width, height uint1
 	return process, nil
 }
 
+const (
+	returnVideoBitrate    = "2M"
+	returnVideoBitrateFHD = "4M"
+)
+
+// returnVideoBitrateFor는 WebRTC 반환 인코더(VP8·H.264 공통)의 목표 bitrate다.
+// 720p 이하는 종전 2M을 유지하고, FHD 세션(디코더 장변 1920)은 같은 화소당
+// 비트를 맞추도록 4M을 쓴다. 실측(#478)에서 4M은 FHD PSNR을 약 1~2.3dB 올렸고
+// 세션당 CPU는 측정 오차 안에 머물렀다.
+func returnVideoBitrateFor(width, height uint16) string {
+	if int(width)*int(height) > 1280*720 {
+		return returnVideoBitrateFHD
+	}
+	return returnVideoBitrate
+}
+
+// startEncoder의 cpu-used는 8을 유지한다. VP8 realtime 모드의 양수 cpu-used는
+// 고정 속도가 아니라 프레임 간격 대비 CPU 예산((16-n)/16)이라, 5~6으로 낮춰도
+// 실측(#478, 30fps 페이싱·스레드 1)에서 화질 차이가 없이 CPU만 최대 30% 늘었다.
 func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint16) (*ffmpegProcess, error) {
 	arguments := []string{
 		"-hide_banner", "-loglevel", "error",
@@ -456,7 +475,7 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 	}
 	arguments = append(arguments,
 		"-an", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
-		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", "2M",
+		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", returnVideoBitrateFor(width, height),
 		"-pix_fmt", "yuv420p", "-flush_packets", "1", "-f", "ivf", "-blocksize", "1024", "pipe:1",
 	)
 	process, err := t.startFFmpeg(ctx, "encoder", nil, nil, arguments...)

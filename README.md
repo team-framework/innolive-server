@@ -257,9 +257,14 @@ RTCP 피드백은 유지한다. ICE restart에서도 같은 영상 방향을 유
 입력 트랙과 처리 프레임의 존재를 반환 sender 유무와 구분해야 한다. 이 기능은
 별도 `ai_processing: on_device` 직접 RTMP 세션과 다른 WebRTC 방향 선택이다.
 
-H.264 WebRTC 반환 인코더는 목표/상한 2Mbps, VBV 버퍼 200kbit로 제한해
-상한 없는 CRF 출력의 큰 키프레임 버스트를 줄인다. VP8의 기존 2Mbps 설정과
-플랫폼 RTMP egress의 `EGRESS_VIDEO_BITRATE` 정책은 유지한다. 반환 상한이
+WebRTC 반환 인코더의 목표 bitrate는 처리 프레임 해상도를 따른다. 720p 이하는
+2Mbps, FHD 세션(1080×1920)은 4Mbps이며 VP8과 H.264가 같다. H.264는 상한을 목표와
+같게 두고 VBV 버퍼를 1초 분량(2Mbit/4Mbit)으로 제한해 상한 없는 CRF 출력의 큰
+키프레임 버스트를 막는다. 한 프레임은 버퍼 크기(720p 250KB, FHD 500KB)를 넘지
+않고, 실측 키프레임은 720p 약 29KB, FHD 약 37KB다. 0.1초 버퍼는 키프레임 화질을
+크게 떨어뜨려 쓰지 않는다. H.264 level은 720p 3.1, FHD 4.0이다. VP8은
+`-cpu-used 8`을 유지한다. 플랫폼 RTMP egress의 `EGRESS_VIDEO_BITRATE` 정책은
+유지한다. 반환 상한이
 네트워크 손실이나 전체 end-to-end 지연을 보장하는 것은 아니며, 운영 계측에서
 피드백 기반 품질 적응과 패킷 pacing을 별도로 검증해야 한다.
 

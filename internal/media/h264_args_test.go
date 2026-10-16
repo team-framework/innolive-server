@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -117,5 +118,51 @@ func TestH264EncoderUsesLowLatencyArgs(t *testing.T) {
 			continue
 		}
 		assertArgPair(t, captured, "-threads", map[int]string{1: "1", 4: "4"}[threads])
+	}
+}
+
+// TestReturnEncodersScaleWithResolution은 반환 인코더의 bitrate·VBV·level이
+// 처리 프레임 해상도를 따르는지 고정한다(#478). 720p는 종전 2M을 유지하고 FHD
+// 세션은 4M을 쓴다. H.264 VBV는 1초 분량이고, level은 1080×1920을 담아야 한다.
+func TestReturnEncodersScaleWithResolution(t *testing.T) {
+	cases := []struct {
+		width, height uint16
+		bitrate       string
+		level         string
+	}{
+		{720, 1280, "2M", "3.1"},
+		{1280, 720, "2M", "3.1"},
+		{1080, 1920, "4M", "4.0"},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%dx%d", tc.width, tc.height), func(t *testing.T) {
+			h264 := captureFFmpegArgs(t,
+				TranscoderOptions{VideoCodec: VideoCodecH264, WireFormat: config.WireFormatRaw, EncoderThreads: 1},
+				func(transcoder *FFmpegTranscoder) error {
+					process, err := transcoder.startH264Encoder(context.Background(), tc.width, tc.height)
+					if err == nil {
+						process.close()
+					}
+					return err
+				})
+			assertArgPair(t, h264, "-level:v", tc.level)
+			assertArgPair(t, h264, "-b:v", tc.bitrate)
+			assertArgPair(t, h264, "-maxrate", tc.bitrate)
+			assertArgPair(t, h264, "-bufsize", tc.bitrate)
+
+			vp8 := captureFFmpegArgs(t,
+				TranscoderOptions{VideoCodec: VideoCodecVP8, WireFormat: config.WireFormatRaw, EncoderThreads: 1},
+				func(transcoder *FFmpegTranscoder) error {
+					process, err := transcoder.startEncoder(context.Background(), tc.width, tc.height)
+					if err == nil {
+						process.close()
+					}
+					return err
+				})
+			assertArgPair(t, vp8, "-c:v", "libvpx")
+			assertArgPair(t, vp8, "-b:v", tc.bitrate)
+			// realtime 모드의 cpu-used는 CPU 예산이라 낮추면 세션당 CPU만 는다.
+			assertArgPair(t, vp8, "-cpu-used", "8")
+		})
 	}
 }

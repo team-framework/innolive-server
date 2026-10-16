@@ -503,6 +503,9 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 	if cfg.PrivacyMode == config.PrivacyModeReal && aiPool == nil {
 		return nil, errors.New("real privacy mode requires an AI client pool")
 	}
+	if aiPool != nil && registry != nil {
+		aiPool.SetStreamObserver(registry.SetAITargetActiveStreams)
+	}
 	var settingEngine webrtc.SettingEngine
 	if cfg.UDPMuxPort > 0 {
 		// 모든 ICE UDP 트래픽을 단일 포트에 multiplex한다. 기본값처럼 미디어를
@@ -2047,8 +2050,12 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	s.mu.Unlock()
 
 	var aiStream media.AIStream
+	// releaseAI는 이 파이프라인의 AI 워커 배정을 돌려준다. 파이프라인이 끝나거나
+	// 시작에 실패하면 반드시 불린다 — 그래야 다음 세션이 덜 붐비는 워커로 간다.
+	releaseAI := func() {}
 	if s.privacyMode == config.PrivacyModeReal {
-		client := m.ai.Next()
+		client, release := m.ai.Acquire()
+		releaseAI = release
 		m.metrics.IncAITargetSession(client.Address())
 		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
 		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
@@ -2066,6 +2073,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	processor, err := media.NewProcessor(s.privacyMode, m.cfg.PrivacyFixedDelay, aiStream, m.metrics, m.logger.With("session_id", s.ID), m.cfg.AIWireFormat, m.cfg.AIFailurePolicy, m.cfg.AITimeoutLatchThreshold)
 	if err != nil {
 		m.logger.Error("create video processor failed", "session_id", s.ID, "error", err)
+		releaseAI()
 		close(pipelineDone)
 		return
 	}
@@ -2099,6 +2107,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	}
 	go func() {
 		defer close(pipelineDone)
+		defer releaseAI()
 		m.mu.Lock()
 		m.pipelines[s.ID] = struct{}{}
 		m.mu.Unlock()

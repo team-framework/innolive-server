@@ -70,6 +70,28 @@ func TestProcessTreeKeepsCompletedChildCPU(t *testing.T) {
 	}
 }
 
+// TestAITargetActiveStreamsGauge: 워커별 활성 파이프라인 수가 오르내린 그대로
+// 보여야 편중을 운영 메트릭에서 바로 읽을 수 있다(#477).
+func TestAITargetActiveStreamsGauge(t *testing.T) {
+	r := New()
+	r.SetAITargetActiveStreams("127.0.0.1:50051", 2)
+	r.SetAITargetActiveStreams("127.0.0.1:50052", 1)
+	r.SetAITargetActiveStreams("127.0.0.1:50051", 1)
+
+	var output bytes.Buffer
+	r.WritePrometheus(&output)
+	text := output.String()
+	for _, expected := range []string{
+		"# TYPE innolive_ai_target_active_streams gauge",
+		`innolive_ai_target_active_streams{target="127.0.0.1:50051"} 1`,
+		`innolive_ai_target_active_streams{target="127.0.0.1:50052"} 1`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("metrics output missing %q", expected)
+		}
+	}
+}
+
 // TestAITargetReadyGauge: 게이지는 target별로 갈라져야 하고, not-ready로 떨어진
 // 뒤 다시 ready가 되면 0에 머무르지 않고 올라와야 한다(#162).
 func TestAITargetReadyGauge(t *testing.T) {

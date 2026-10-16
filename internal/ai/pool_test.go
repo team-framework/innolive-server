@@ -20,22 +20,95 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-func TestPoolNextCyclesRoundRobin(t *testing.T) {
+func newTestPool(t *testing.T, targets ...string) *Pool {
+	t.Helper()
 	// grpc.NewClient는 지연 연결이라 닿지 않는 대상도 여기서는 괜찮다.
-	pool, err := NewPool([]string{"a:1", "b:1", "c:1"}, time.Second)
+	pool, err := NewPool(targets, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(func() { _ = pool.Close() })
+	return pool
+}
+
+func TestPoolAcquireSpreadsEqualLoadInTurn(t *testing.T) {
+	pool := newTestPool(t, "a:1", "b:1", "c:1")
 
 	want := []string{"a:1", "b:1", "c:1", "a:1", "b:1", "c:1"}
 	for index, expected := range want {
-		if got := pool.Next().Address(); got != expected {
-			t.Fatalf("Next() #%d = %q, want %q", index, got, expected)
+		if got, _ := pool.Acquire(); got.Address() != expected {
+			t.Fatalf("Acquire() #%d = %q, want %q", index, got.Address(), expected)
 		}
 	}
 	if clients := pool.Clients(); len(clients) != 3 {
 		t.Fatalf("Clients() length = %d, want 3", len(clients))
+	}
+}
+
+// 짧게 끝난 파이프라인이 순번만 넘기면 라운드로빈은 다음 세션을 이미 붐비는
+// 워커에 보낸다(#477). 활성 수로 고르면 비어 있는 워커로 간다.
+func TestPoolAcquirePrefersTheLeastActiveTarget(t *testing.T) {
+	pool := newTestPool(t, "a:1", "b:1")
+
+	first, _ := pool.Acquire()
+	_, releaseShort := pool.Acquire()
+	releaseShort()
+	second, _ := pool.Acquire()
+
+	if first.Address() != "a:1" || second.Address() != "b:1" {
+		t.Fatalf("Acquire() = %q then %q, want a:1 then b:1", first.Address(), second.Address())
+	}
+}
+
+func TestPoolReleaseIsIdempotentAndReported(t *testing.T) {
+	pool := newTestPool(t, "a:1", "b:1")
+	var mu sync.Mutex
+	observed := map[string]int{}
+	pool.SetStreamObserver(func(target string, active int) {
+		mu.Lock()
+		observed[target] = active
+		mu.Unlock()
+	})
+	if observed["a:1"] != 0 || observed["b:1"] != 0 || len(observed) != 2 {
+		t.Fatalf("initial observation = %v, want both targets at 0", observed)
+	}
+
+	_, releaseA := pool.Acquire()
+	_, releaseB := pool.Acquire()
+	_, releaseA2 := pool.Acquire()
+	if observed["a:1"] != 2 || observed["b:1"] != 1 {
+		t.Fatalf("after three acquires = %v, want a:1=2 b:1=1", observed)
+	}
+	releaseA()
+	releaseA()
+	releaseB()
+	if observed["a:1"] != 1 || observed["b:1"] != 0 {
+		t.Fatalf("after releases = %v, want a:1=1 b:1=0", observed)
+	}
+	releaseA2()
+	if observed["a:1"] != 0 {
+		t.Fatalf("a:1 = %d after every release, want 0", observed["a:1"])
+	}
+}
+
+func TestPoolAcquireIsSafeUnderConcurrency(t *testing.T) {
+	pool := newTestPool(t, "a:1", "b:1")
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, release := pool.Acquire()
+			release()
+		}()
+	}
+	wait.Wait()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	for index, active := range pool.active {
+		if active != 0 {
+			t.Fatalf("active[%d] = %d after every release, want 0", index, active)
+		}
 	}
 }
 

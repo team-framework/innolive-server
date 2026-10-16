@@ -13,7 +13,7 @@
 ## 주요 기능
 
 - **WebRTC 인제스트/전달**: [pion/webrtc](https://github.com/pion/webrtc) 기반. STUN/TURN, ICE 재연결 유예, 네트워크 전환 시 ICE restart 복구를 지원합니다.
-- **AI 프라이버시 파이프라인**: 프레임을 AI 서버로 보내 얼굴을 블러 처리합니다. `bypass`, `fixed_delay`, `real` 세 모드가 있고, 워커 여러 대에 라운드로빈으로 분배합니다.
+- **AI 프라이버시 파이프라인**: 프레임을 AI 서버로 보내 얼굴을 블러 처리합니다. `bypass`, `fixed_delay`, `real` 세 모드가 있고, 워커 여러 대 중 활성 스트림이 가장 적은 워커에 분배합니다.
 - **fail-closed 실패 처리**: AI 처리가 지연되거나 실패하면 미처리 원본 대신 검은 화면을 내보냅니다.
 - **AI 워커 상시 감시**: 주기마다 실제 프레임을 왕복시키는 프로브를 돌려, 프로세스는 살아 있는데 추론만 죽은 워커를 잡아냅니다.
 - **플랫폼 송출**: 사용자가 연결한 YouTube 계정으로 방송을 만들고 FFmpeg로 RTMP 송출합니다. 방송 준비와 라이브 전환을 나눠서, 시청자에게 보이기 전에 화면을 확인할 수 있습니다.
@@ -428,7 +428,7 @@ Apple·YouTube·AI worker·파일 저장소 또는 데이터베이스 단계에�
 `GET /metrics`가 `innolive_` 접두사의 Prometheus 메트릭을 노출합니다. 파이프라인을 진단할 때 먼저 보는 메트릭입니다.
 
 - **세션**: `innolive_active_sessions`, `innolive_sessions_rejected_total`, `innolive_connection_failures_total`
-- **AI 처리**: `innolive_ai_duration_seconds`, `innolive_ai_fallback_frames_total`, `innolive_ai_fallback_latched_total`, `innolive_ai_target_ready`
+- **AI 처리**: `innolive_ai_duration_seconds`, `innolive_ai_fallback_frames_total`, `innolive_ai_fallback_latched_total`, `innolive_ai_target_ready`, `innolive_ai_target_active_streams`
 - **프레임 흐름**: `innolive_frame_received_total`, `innolive_frame_processed_total`, `innolive_frame_dropped_total`, `innolive_processing_queue_size`
 - **송출**: `innolive_egress_frames_dropped_total`, `innolive_egress_reconnect_total`, `innolive_audio_samples_dropped_total`
 - **WebRTC 복구**: `innolive_peer_recovery_started_total`, `innolive_peer_recovery_succeeded_total`, `innolive_peer_recovery_exhausted_total`
@@ -436,6 +436,8 @@ Apple·YouTube·AI worker·파일 저장소 또는 데이터베이스 단계에�
 `innolive_audio_samples_dropped_total`은 `reason` 라벨로 원인을 나눕니다. `detached`(송출 연결 전 미리보기)와 `muted`(일시정지)는 정상 드롭이고, `queue_full`·`pipe_error`만 송출 중 실제 유실입니다.
 
 `innolive_ai_target_ready`는 상시 감시 프로브가 워커마다 갱신하는 게이지입니다. 프로세스가 살아 있어도 추론이 죽은 워커는 여기서 `0`이 됩니다.
+
+`innolive_ai_target_active_streams`는 워커마다 지금 배정된 영상 파이프라인 수입니다. 워커 하나가 프레임을 차례로 처리하므로 이 값이 한 워커에 몰리면 그 워커의 세션 지연이 늘어납니다.
 
 ## 배포
 

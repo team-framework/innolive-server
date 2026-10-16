@@ -57,6 +57,7 @@ type Registry struct {
 	aiTargetSessions    map[string]uint64
 	egressUnitsByPlan   map[string]int64
 	aiTargetReady       map[string]int64
+	aiTargetActive      map[string]int64
 	nvencSessions       map[string]int64
 	nvencSlotsPerCard   map[string]int64
 	framesReceived      map[string]uint64
@@ -87,6 +88,7 @@ func New() *Registry {
 		aiInputPausedFrames: make(map[string]uint64),
 		aiTargetSessions:    make(map[string]uint64),
 		aiTargetReady:       make(map[string]int64),
+		aiTargetActive:      make(map[string]int64),
 		nvencSessions:       make(map[string]int64),
 		nvencSlotsPerCard:   make(map[string]int64),
 		framesReceived:      make(map[string]uint64),
@@ -207,6 +209,14 @@ func (r *Registry) IncAIInputPausedFrame(mode string) {
 
 func (r *Registry) IncAITargetSession(target string) {
 	r.increment(r.aiTargetSessions, target)
+}
+
+// SetAITargetActiveStreams는 한 AI worker에 지금 배정된 영상 파이프라인 수다.
+// 워커 하나가 프레임을 차례로 처리하므로 이 값의 편중이 곧 지연 편중이다(#477).
+func (r *Registry) SetAITargetActiveStreams(target string, active int) {
+	r.mu.Lock()
+	r.aiTargetActive[target] = int64(active)
+	r.mu.Unlock()
 }
 
 // SetAITargetReady는 한 AI worker가 마지막 preflight 프로브에서 실제로 추론을
@@ -383,6 +393,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCountersWithKey(w, "innolive_ai_target_sessions_total", "Number of sessions assigned to each AI worker target.", "target", r.aiTargetSessions)
 	writeLabeledGaugesWithKey(w, "innolive_nvenc_sessions", "NVENC encoder sessions reported by nvidia-smi for each GPU.", "gpu", r.nvencSessions)
 	writeLabeledGaugesWithKey(w, "innolive_nvenc_slots_accounted", "Egress slots the server accounts for on each GPU.", "gpu", r.nvencSlotsPerCard)
+	writeLabeledGaugesWithKey(w, "innolive_ai_target_active_streams", "Video pipelines currently assigned to each AI worker target.", "target", r.aiTargetActive)
 	writeLabeledGaugesWithKey(w, "innolive_ai_target_ready", "Whether the AI worker target answered the most recent preflight probe (1) or not (0).", "target", r.aiTargetReady)
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
 	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of successfully processed video frames.", r.framesProcessed)

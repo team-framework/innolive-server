@@ -310,7 +310,7 @@ func h264ReturnLevelFor(width, height uint16) string {
 // preset은 superfast다. ultrafast는 디블로킹 필터와 AQ를 꺼서, 움직임 구간에
 // 비트가 모자라면 16×16 블록 경계가 그대로 드러나 모자이크처럼 깨졌다(#487).
 // 실측에서 움직임 구간 blockdetect가 3.95에서 1.21(원본 1.13)로 내려갔고
-// 1스트림 CPU는 약 13% 늘었다. baseline profile이라 CABAC·8x8 변환은 여전히 꺼져
+// 1스트림 CPU는 약 11% 늘었다. baseline profile이라 CABAC·8x8 변환은 여전히 꺼져
 // 협상한 Constrained Baseline 규격은 그대로다.
 func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height uint16) (*ffmpegProcess, error) {
 	arguments := []string{

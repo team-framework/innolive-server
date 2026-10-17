@@ -32,10 +32,10 @@ func TestDecideLimits(t *testing.T) {
 		stop     string
 	}{
 		{"한도 여유", plan.Beam, false, h, 10 * h, true, time.Second, nil, ""},
-		// Beam 1회 최대 12시간
-		{"1회 최대 30분 전", plan.Beam, false, 11*h + 30*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m}, ""},
-		{"1회 최대 10분 전", plan.Beam, false, 11*h + 50*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m, noticeBroadcastLimit10m}, ""},
-		{"1회 최대 도달 → 종료", plan.Beam, false, 12 * h, 10 * h, false, 0,
+		// Beam 1회 최대 8시간
+		{"1회 최대 30분 전", plan.Beam, false, 7*h + 30*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m}, ""},
+		{"1회 최대 10분 전", plan.Beam, false, 7*h + 50*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m, noticeBroadcastLimit10m}, ""},
+		{"1회 최대 도달 → 종료", plan.Beam, false, 8 * h, 10 * h, false, 0,
 			[]string{noticeBroadcastLimit30m, noticeBroadcastLimit10m, noticeBroadcastLimitReached}, noticeBroadcastLimitReached},
 		// Beam 서버 월 40시간: 80% = 32시간
 		{"월 80% 직전", plan.Beam, false, h, 32*h - time.Second, false, 0, nil, ""},
@@ -167,13 +167,13 @@ func TestBroadcastRemaining(t *testing.T) {
 		// Plasma 서버 월 80h 중 38h 사용 → 잔여 42h. FHD 동시(3배)면 14h, 1회 잔여(12h−1h=11h)가 더 작다.
 		{"1회 잔여가 더 작음", plan.Plasma, false, h, 38 * h, 3, 11 * h},
 		{"1회 잔여가 제한", plan.Plasma, false, 0, 38 * h, 3, 12 * h},
-		// Beam 서버 잔여 5h, FHD(2배) → 2.5h. 1회 잔여 11h보다 작다.
+		// Beam 서버 잔여 5h, FHD(2배) → 2.5h. 1회 잔여 7h보다 작다.
 		{"월 잔여 ÷ 배수가 제한", plan.Beam, false, h, 35 * h, 2, 150 * time.Minute},
 		{"다 쓰면 0(음수 아님)", plan.Spark, true, 30 * time.Minute, 6 * h, 1, 0},
 		// Glow 온디바이스 잔여 2h, 1회 잔여 7h
 		{"Glow 온디바이스 월 잔여", plan.Glow, true, h, 58 * h, 1, 2 * h},
-		// Beam 온디바이스 잔여 70h → 1회 잔여 11h
-		{"온디바이스는 온디바이스 한도", plan.Beam, true, h, 50 * h, 1, 11 * h},
+		// Beam 온디바이스 잔여 70h → 1회 잔여 7h
+		{"온디바이스는 온디바이스 한도", plan.Beam, true, h, 50 * h, 1, 7 * h},
 	}
 	for _, test := range cases {
 		got := broadcastRemaining(test.plan, test.onDevice, test.onAir, test.used, test.units)
@@ -204,9 +204,9 @@ func TestIdleBroadcastRemainingIsFilledAndKept(t *testing.T) {
 		ledger     UsageLedger
 		want       int64 // -1 = null
 	}{
-		// Beam 서버 월 40h 중 39.5h 사용 → 월 잔여 30분이 1회 12h보다 작다.
+		// Beam 서버 월 40h 중 39.5h 사용 → 월 잔여 30분이 1회 8h보다 작다.
 		{"720p는 1배", plan.Beam, session.Resolution720p, monthlyUsageLedger{used: 39*time.Hour + 30*time.Minute}, 1800},
-		// Beam 서버 월 40h 중 30h 사용, FHD 2배 → 5h(1회 12h보다 작다).
+		// Beam 서버 월 40h 중 30h 사용, FHD 2배 → 5h(1회 8h보다 작다).
 		{"FHD는 2배", plan.Beam, session.ResolutionFHD, monthlyUsageLedger{used: 30 * time.Hour}, 5 * 3600},
 		{"플랜 없으면 null", "", session.Resolution720p, monthlyUsageLedger{}, -1},
 		{"원장 실패는 null", plan.Beam, session.Resolution720p, failingUsageLedger{}, -1},

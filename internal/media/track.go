@@ -489,7 +489,11 @@ func processImages(
 	onProcessedFrame func(),
 ) {
 	defer close(processed)
-	var failureLog failureLogger
+	output := processedOutput{logger: logger, processor: processor, processed: processed, egress: egress, registry: registry, mode: mode, onProcessedFrame: onProcessedFrame}
+	if inflight := processor.pipelinedAIInflight(); inflight > 1 {
+		processImagesPipelined(ctx, processor, decoded, &output, inflight)
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -501,34 +505,106 @@ func processImages(
 			registry.AddQueue(-1)
 			registry.IncFrameReceived(string(mode))
 			generation := processor.PrivacyGeneration()
-			output, processedByAI, err := processor.ProcessIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
-			if !processedByAI {
-				registry.IncAIInputPausedFrame(string(mode))
-				continue
-			}
-			if err != nil {
-				recordFrameFailure(ctx, logger, registry, mode, &failureLog, err)
-				continue
-			}
-			registry.IncFrameProcessed(string(mode))
-			item.data = output
-			item.stageAt = time.Now()
-			item.privacyGeneration = 0
-			if processor.PrivacyGeneration() == generation {
-				item.privacyGeneration = generation
-			}
-			for _, sink := range egress.Sinks() {
-				sink.Enqueue(item)
-			}
-			if onProcessedFrame != nil {
-				onProcessedFrame()
-			}
-			select {
-			case processed <- item:
-			case <-ctx.Done():
+			data, processedByAI, err := processor.ProcessIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
+			if !output.emit(ctx, item, generation, data, processedByAI, err) {
 				return
 			}
 		}
+	}
+}
+
+// processImagesPipelined는 AI 응답을 기다리는 동안 다음 프레임을 inflight장까지 미리
+// 보낸다. 보내는 고루틴과 받는 고루틴을 나누고, 결과는 보낸 순서대로 내보낸다.
+func processImagesPipelined(ctx context.Context, processor *Processor, decoded <-chan frame, output *processedOutput, inflight int) {
+	type sentFrame struct {
+		item       frame
+		generation uint64
+		task       aiTask
+	}
+	sent := make(chan sentFrame, inflight)
+	slots := make(chan struct{}, inflight)
+	go func() {
+		defer close(sent)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case slots <- struct{}{}:
+			}
+			var item frame
+			select {
+			case <-ctx.Done():
+				return
+			case next, ok := <-decoded:
+				if !ok {
+					return
+				}
+				item = next
+			}
+			output.registry.AddQueue(-1)
+			output.registry.IncFrameReceived(string(output.mode))
+			generation := processor.PrivacyGeneration()
+			task := processor.beginAIInput(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
+			// slots가 보낸 프레임 수를 inflight로 묶으므로 sent는 막히지 않는다.
+			sent <- sentFrame{item: item, generation: generation, task: task}
+		}
+	}()
+	// 보내는 고루틴이 끝날 때까지 받아, 받지 않은 응답이 스트림에 남지 않게 한다.
+	stopped := false
+	for next := range sent {
+		if stopped || ctx.Err() != nil {
+			stopped = true
+			processor.discardAIInput(next.task)
+			continue
+		}
+		data, processedByAI, err := processor.finishAIInput(next.task)
+		<-slots
+		if !output.emit(ctx, next.item, next.generation, data, processedByAI, err) {
+			stopped = true
+		}
+	}
+}
+
+// processedOutput은 처리 결과 프레임을 방송 송출과 반환 영상으로 내보낸다.
+type processedOutput struct {
+	logger           *slog.Logger
+	processor        *Processor
+	processed        chan<- frame
+	egress           *EgressFanout
+	registry         *metrics.Registry
+	mode             config.PrivacyMode
+	onProcessedFrame func()
+	failureLog       failureLogger
+}
+
+// emit은 프레임 하나의 처리 결과를 내보낸다. ctx가 끝나 더 내보낼 수 없으면 false다.
+func (o *processedOutput) emit(ctx context.Context, item frame, generation uint64, data []byte, processedByAI bool, err error) bool {
+	if !processedByAI {
+		o.registry.IncAIInputPausedFrame(string(o.mode))
+		return true
+	}
+	if err != nil {
+		recordFrameFailure(ctx, o.logger, o.registry, o.mode, &o.failureLog, err)
+		return true
+	}
+	o.registry.IncFrameProcessed(string(o.mode))
+	item.data = data
+	item.stageAt = time.Now()
+	item.privacyGeneration = 0
+	if o.processor.PrivacyGeneration() == generation {
+		item.privacyGeneration = generation
+	}
+	for _, sink := range o.egress.Sinks() {
+		sink.Enqueue(item)
+	}
+	if o.onProcessedFrame != nil {
+		o.onProcessedFrame()
+	}
+	select {
+	case o.processed <- item:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

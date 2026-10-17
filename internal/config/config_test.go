@@ -415,3 +415,20 @@ func TestExperienceQualityKey(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateAISessionMaxInflight(t *testing.T) {
+	for _, valid := range []int{0, 1, 2, 4} {
+		cfg := validConfig()
+		cfg.AISessionMaxInflight = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() with AISessionMaxInflight=%d error = %v", valid, err)
+		}
+	}
+	for _, invalid := range []int{-1, 5} {
+		cfg := validConfig()
+		cfg.AISessionMaxInflight = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected AISessionMaxInflight=%d to be rejected", invalid)
+		}
+	}
+}

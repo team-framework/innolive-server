@@ -14,6 +14,7 @@ import (
 	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
+	"inno-live-server/internal/ai"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 
@@ -25,6 +26,18 @@ type AIStream interface {
 	Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error)
 	Close()
 }
+
+// PipelinedAIStream은 응답을 기다리지 않고 다음 프레임을 보낼 수 있는 AI 스트림이다.
+// Send한 순서대로 Recv한다.
+type PipelinedAIStream interface {
+	AIStream
+	Send(data []byte, timestamp int64, width, height uint16, pixFmt string) (ai.Pending, error)
+	Recv(pending ai.Pending) (*aiv1.ProcessedVideoChunk, error)
+	Discard(pending ai.Pending)
+}
+
+// MaxAIInflight는 세션 하나가 AI 응답을 기다리며 동시에 보내 둘 수 있는 프레임 수의 상한이다.
+const MaxAIInflight = 4
 
 var errAIInputPaused = errors.New("AI input is paused")
 
@@ -71,11 +84,20 @@ type Processor struct {
 	fallback atomic.Bool
 	// recoveryProbeInterval은 잠긴 세션이 AI를 다시 시도하는 빈도의 한계다. 잠긴
 	// 세션이 많아도 이미 과부하인 워커에 프레임마다 몰리지 않게 한다. lastProbeAt은
-	// 세션당 하나인 처리 고루틴에서만 건드린다.
+	// 마지막 시도 시각(UnixNano)이다. 여러 프레임을 보내 둘 때는 보내는 고루틴과 받는
+	// 고루틴이 함께 쓴다.
 	recoveryProbeInterval time.Duration
-	lastProbeAt           time.Time
-	blackoutMu            sync.Mutex
-	blackoutData          []byte
+	lastProbeAt           atomic.Int64
+
+	// aiInflight는 세션 하나가 AI 응답을 기다리며 보내 둘 프레임 수다. 1이면 한 장씩
+	// 보내고 받는다.
+	aiInflight int
+	// aiEpoch는 SuspendAIInput마다 커진다. 보내 둔 프레임의 응답이 입력 중단으로 닫힌
+	// 스트림에서 실패하면 AI 실패가 아니라 중단 구간 프레임으로 버린다.
+	aiEpoch atomic.Uint64
+
+	blackoutMu   sync.Mutex
+	blackoutData []byte
 	// blackoutWidth·Height는 blackoutData를 만든 프레임 치수다. 입력 방향이 바뀌면
 	// 디코더 출력 치수가 달라지므로(#449) 그때 다시 만든다.
 	blackoutWidth  uint16
@@ -121,6 +143,7 @@ func NewProcessor(
 		timeoutLatchThreshold: timeoutLatchThreshold,
 		recoveryProbeInterval: defaultRecoveryProbeInterval,
 		anonymizationEnabled:  mode == config.PrivacyModeReal,
+		aiInflight:            1,
 	}
 	processor.privacyGeneration.Store(privacyGenerations.Add(1))
 	return processor, nil
@@ -144,6 +167,7 @@ func (p *Processor) SuspendAIInput() {
 	p.aiMu.Lock()
 	defer p.aiMu.Unlock()
 	p.aiInputPaused = true
+	p.aiEpoch.Add(1)
 	if p.ai != nil {
 		p.ai.Close()
 	}
@@ -285,60 +309,73 @@ func (p *Processor) process(ctx context.Context, frame []byte, timestamp int64, 
 			return nil, ctx.Err()
 		}
 	case config.PrivacyModeReal:
+		probe := false
 		if p.fallback.Load() {
 			// 잠김: AI를 recoveryProbeInterval마다 최대 한 번만 다시 시도해, 잠긴 세션이
 			// 모두 과부하 워커에 몰리지 않으면서 회복한 워커를 알아챈다. 시도 사이에는
 			// AI를 건드리지 않고 블랙아웃을 내보낸다.
-			if time.Since(p.lastProbeAt) < p.recoveryProbeInterval {
+			if !p.probeDue() {
 				return p.serveBlackout(frame, width, height, nil)
 			}
-			p.lastProbeAt = time.Now()
-			output, err := p.processImage(frame, timestamp, width, height)
-			if err != nil {
-				return p.serveBlackout(frame, width, height, err)
-			}
-			// AI 경계가 다시 동작한다. 잠금을 풀고 이 프레임부터 정상 처리한다.
-			p.fallback.Store(false)
-			p.consecutiveTimeouts.Store(0)
-			p.metrics.IncAIFallbackRecovered(string(p.mode))
-			p.logger.Info("AI processing recovered; clearing fail-closed blackout latch for this session")
-			return output, nil
+			p.lastProbeAt.Store(time.Now().UnixNano())
+			probe = true
 		}
 		output, err := p.processImage(frame, timestamp, width, height)
-		if err == nil {
-			p.consecutiveTimeouts.Store(0)
-			return output, nil
-		}
-		// 파이프라인을 내리며(해상도 전환·세션 종료) 서버가 스스로 끊은 요청이다.
-		// AI 실패가 아니므로 latch·카운터 없이 돌려준다(#297).
-		if errors.Is(err, context.Canceled) {
-			return nil, err
-		}
-		if p.failurePolicy == config.FailurePolicyFreeze {
-			return nil, err
-		}
-		// 연속 타임아웃이 일정 횟수까지는(예: AI 워커 스레드 풀이 잠깐 포화) 영구히
-		// 잠그지 않는다. 이 프레임만 블랙아웃을 내보내고 다음 프레임에 AI를 다시
-		// 시도한다. 타임아웃이 아닌 실패는 곧바로 잠금 경로로 간다.
-		if isTimeoutError(err) {
-			if int(p.consecutiveTimeouts.Add(1)) <= p.timeoutLatchThreshold {
-				return p.serveBlackout(frame, width, height, err)
-			}
-		} else {
-			p.consecutiveTimeouts.Store(0)
-		}
-		if p.fallback.CompareAndSwap(false, true) {
-			p.lastProbeAt = time.Now()
-			p.metrics.IncAIFallbackLatched(string(p.mode))
-			p.logger.Warn("AI processing failed; latching fail-closed blackout for this session",
-				"error", err,
-				"wire_format", p.wireFormat,
-				"hint", latchHint(err, p.wireFormat))
-		}
-		return p.serveBlackout(frame, width, height, err)
+		return p.settleAIResult(frame, width, height, output, err, probe)
 	default:
 		return nil, fmt.Errorf("unsupported privacy mode %q", p.mode)
 	}
+}
+
+func (p *Processor) probeDue() bool {
+	return time.Since(time.Unix(0, p.lastProbeAt.Load())) >= p.recoveryProbeInterval
+}
+
+// settleAIResult는 AI 경계 결과에 실패 정책을 적용한다. probe는 잠긴 세션의 회복
+// 시도 프레임인지다.
+func (p *Processor) settleAIResult(frame []byte, width, height uint16, output []byte, err error, probe bool) ([]byte, error) {
+	if probe {
+		if err != nil {
+			return p.serveBlackout(frame, width, height, err)
+		}
+		// AI 경계가 다시 동작한다. 잠금을 풀고 이 프레임부터 정상 처리한다.
+		p.fallback.Store(false)
+		p.consecutiveTimeouts.Store(0)
+		p.metrics.IncAIFallbackRecovered(string(p.mode))
+		p.logger.Info("AI processing recovered; clearing fail-closed blackout latch for this session")
+		return output, nil
+	}
+	if err == nil {
+		p.consecutiveTimeouts.Store(0)
+		return output, nil
+	}
+	// 파이프라인을 내리며(해상도 전환·세션 종료) 서버가 스스로 끊은 요청이다.
+	// AI 실패가 아니므로 latch·카운터 없이 돌려준다(#297).
+	if errors.Is(err, context.Canceled) {
+		return nil, err
+	}
+	if p.failurePolicy == config.FailurePolicyFreeze {
+		return nil, err
+	}
+	// 연속 타임아웃이 일정 횟수까지는(예: AI 워커 스레드 풀이 잠깐 포화) 영구히
+	// 잠그지 않는다. 이 프레임만 블랙아웃을 내보내고 다음 프레임에 AI를 다시
+	// 시도한다. 타임아웃이 아닌 실패는 곧바로 잠금 경로로 간다.
+	if isTimeoutError(err) {
+		if int(p.consecutiveTimeouts.Add(1)) <= p.timeoutLatchThreshold {
+			return p.serveBlackout(frame, width, height, err)
+		}
+	} else {
+		p.consecutiveTimeouts.Store(0)
+	}
+	if p.fallback.CompareAndSwap(false, true) {
+		p.lastProbeAt.Store(time.Now().UnixNano())
+		p.metrics.IncAIFallbackLatched(string(p.mode))
+		p.logger.Warn("AI processing failed; latching fail-closed blackout for this session",
+			"error", err,
+			"wire_format", p.wireFormat,
+			"hint", latchHint(err, p.wireFormat))
+	}
+	return p.serveBlackout(frame, width, height, err)
 }
 
 func (p *Processor) ProcessImage(frame []byte, timestamp int64, width, height uint16) ([]byte, error) {
@@ -368,6 +405,11 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 
 	aiStartedAt := time.Now()
 	response, err := p.ai.Process(frame, timestamp, width, height, p.aiPixFmt())
+	return p.acceptAIResponse(response, err, timestamp, aiStartedAt)
+}
+
+// acceptAIResponse는 AI 응답을 검증하고 내보낼 프레임을 돌려준다.
+func (p *Processor) acceptAIResponse(response *aiv1.ProcessedVideoChunk, err error, timestamp int64, aiStartedAt time.Time) ([]byte, error) {
 	p.metrics.ObserveAI(string(p.mode), time.Since(aiStartedAt))
 	p.metrics.ObserveStage("grpc", time.Since(aiStartedAt))
 	if err != nil {

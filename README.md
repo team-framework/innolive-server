@@ -146,6 +146,7 @@ make proto        # protobuf 코드 생성
 | `AI_GRPC_TIMEOUT` | `5s` | 프레임 한 장을 처리하는 요청의 제한 시간 |
 | `AI_FAILURE_POLICY` | `blackout_latch` | AI 실패 시 정책. `blackout_latch`는 검은 화면, `freeze`는 마지막 처리 프레임 유지 |
 | `AI_TIMEOUT_LATCH_THRESHOLD` | `3` | 연속 타임아웃이 이 횟수를 넘으면 블랙아웃 래치를 겁니다 |
+| `AI_SESSION_MAX_INFLIGHT` | `1` | 세션 하나가 AI 응답을 기다리며 미리 보내 둘 프레임 수(1~4). 1은 한 장씩 보내고 받습니다 |
 | `AI_PREFLIGHT_REQUIRED` | `false` | 기동 preflight가 실패하면 부팅을 중단할지 여부 |
 | `AI_PREFLIGHT_TIMEOUT` | `30s` | preflight 프로브 제한 시간 |
 | `AI_PREFLIGHT_INTERVAL` | `5m` | 상시 감시 프로브 주기. `0`은 비활성이며 `AI_PREFLIGHT_TIMEOUT`보다 길어야 합니다 |

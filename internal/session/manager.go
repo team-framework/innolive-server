@@ -2077,6 +2077,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		close(pipelineDone)
 		return
 	}
+	processor.SetAIInflight(m.cfg.AISessionMaxInflight)
 	s.mu.Lock()
 	// 새 Processor를 세션에 공개하기 전에 현재 제어 상태를 먼저 적용한다.
 	// 그렇지 않으면 토글 요청이 이 새 Processor를 갱신한 직후, 여기서 읽은

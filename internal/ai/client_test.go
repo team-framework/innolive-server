@@ -177,3 +177,61 @@ func TestStreamSendsAnonymizationModeOnEveryFrame(t *testing.T) {
 		stream.Close()
 	}
 }
+
+// 응답을 기다리지 않고 여러 프레임을 보내도 응답은 보낸 순서대로 받는다.
+func TestStreamSendRecvKeepsOrder(t *testing.T) {
+	client := newStreamTestClient(t, echoAIServer{})
+	stream := client.NewStream(context.Background(), "", false)
+	defer stream.Close()
+
+	var pending []Pending
+	for timestamp := int64(1); timestamp <= 3; timestamp++ {
+		sent, err := stream.Send([]byte{byte(timestamp)}, timestamp, 0, 0, "")
+		if err != nil {
+			t.Fatalf("Send(%d) error = %v", timestamp, err)
+		}
+		pending = append(pending, sent)
+	}
+	for i, sent := range pending {
+		response, err := stream.Recv(sent)
+		if err != nil {
+			t.Fatalf("Recv(%d) error = %v", i+1, err)
+		}
+		if response.GetTimestamp() != int64(i+1) {
+			t.Fatalf("Recv(%d) timestamp = %d", i+1, response.GetTimestamp())
+		}
+	}
+}
+
+// 보낸 뒤 스트림이 닫히면 남은 응답을 새 스트림에서 읽지 않고 ErrStreamReset을
+// 돌려준다. 다음 Send는 새 스트림을 연다.
+func TestStreamRecvAfterDiscardReturnsReset(t *testing.T) {
+	client := newStreamTestClient(t, echoAIServer{})
+	stream := client.NewStream(context.Background(), "", false)
+	defer stream.Close()
+
+	first, err := stream.Send([]byte("a"), 1, 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := stream.Send([]byte("b"), 2, 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Discard(first)
+	if _, err := stream.Recv(second); !errors.Is(err, ErrStreamReset) {
+		t.Fatalf("Recv() after Discard error = %v, want ErrStreamReset", err)
+	}
+
+	next, err := stream.Send([]byte("c"), 3, 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := stream.Recv(next)
+	if err != nil {
+		t.Fatalf("Recv() on new stream error = %v", err)
+	}
+	if response.GetTimestamp() != 3 {
+		t.Fatalf("new stream returned timestamp %d, want 3", response.GetTimestamp())
+	}
+}

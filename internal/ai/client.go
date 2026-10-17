@@ -116,6 +116,20 @@ type Stream struct {
 	mu           sync.Mutex
 	stream       aiv1.AiProcessor_ProcessVideoClient
 	streamCancel context.CancelFunc
+	// generation은 reset마다 커진다. Send로 보낸 프레임은 보낸 스트림의 세대를
+	// 기억해, 그 사이 스트림이 바뀌었으면 Recv가 새 스트림에서 엉뚱한 응답을 읽지 않는다.
+	generation uint64
+}
+
+// ErrStreamReset은 프레임을 보낸 뒤 그 스트림이 오류·Close로 닫혀 응답을 받을 수
+// 없다는 뜻이다. 원인 오류는 먼저 Recv한 프레임이 이미 돌려줬다.
+var ErrStreamReset = errors.New("AI stream was reset before the response arrived")
+
+// Pending은 Send로 보내고 아직 Recv하지 않은 프레임이다.
+type Pending struct {
+	stream     aiv1.AiProcessor_ProcessVideoClient
+	generation uint64
+	deadline   time.Time
 }
 
 // Process는 한 프레임을 AI로 보내고 응답을 받는다. pixFmt가 비어 있지 않으면
@@ -131,17 +145,7 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 
 	callCtx, cancel := context.WithTimeout(s.ctx, s.timeout)
 	defer cancel()
-	request := &aiv1.VideoChunk{
-		Data:       data,
-		Timestamp:  timestamp,
-		SessionId:  s.sessionID,
-		OutputMode: aiv1.VideoOutputMode_VIDEO_OUTPUT_MODE_MOSAIC_JPEG,
-		Width:      uint32(width),
-		Height:     uint32(height),
-		PixFmt:     pixFmt,
-		// 합성 모드는 이후 프레임에서 생략하면 INVALID_ARGUMENT라 매 프레임 싣는다.
-		AnonymizationMode: s.anonymization,
-	}
+	request := s.request(data, timestamp, width, height, pixFmt)
 	// 고루틴은 ctx가 끝나면 기다리지 않으므로 reset 뒤에 실행될 수 있다.
 	// s.stream을 실행 시점에 읽으면 nil이라 서버 전체가 죽는다(#316) — 지금
 	// 스트림을 고정해 넘긴다.
@@ -161,6 +165,88 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 		return nil, s.wrapStreamError("receive AI video frame", err)
 	}
 	return response, nil
+}
+
+// Send는 한 프레임을 보내고 응답을 기다리지 않는다. 응답은 보낸 순서대로
+// Recv로 받는다. AI 워커는 한 스트림의 프레임을 순서대로 처리하므로, 응답을 기다리는
+// 동안 다음 프레임을 미리 보내 두면 전송과 응답 처리 사이에 워커가 쉬지 않는다.
+// Send는 한 고루틴에서만, Recv는 다른 한 고루틴에서만 부른다. Process와 섞지 않는다.
+func (s *Stream) Send(data []byte, timestamp int64, width, height uint16, pixFmt string) (Pending, error) {
+	s.mu.Lock()
+	if err := s.ensureStream(); err != nil {
+		s.mu.Unlock()
+		return Pending{}, err
+	}
+	pending := Pending{stream: s.stream, generation: s.generation, deadline: time.Now().Add(s.timeout)}
+	s.mu.Unlock()
+
+	callCtx, cancel := context.WithDeadline(s.ctx, pending.deadline)
+	defer cancel()
+	request := s.request(data, timestamp, width, height, pixFmt)
+	if err := runWithContext(callCtx, func() error { return pending.stream.Send(request) }); err != nil {
+		s.resetGeneration(pending.generation)
+		return Pending{}, s.wrapStreamError("send AI video frame", err)
+	}
+	return pending, nil
+}
+
+// Recv는 Send로 보낸 프레임의 응답을 받는다. 제한 시간은 보낸 시각부터 센다.
+// 보낸 뒤 스트림이 닫혔으면 ErrStreamReset이다.
+func (s *Stream) Recv(pending Pending) (*aiv1.ProcessedVideoChunk, error) {
+	if !s.currentGeneration(pending.generation) {
+		return nil, ErrStreamReset
+	}
+	callCtx, cancel := context.WithDeadline(s.ctx, pending.deadline)
+	defer cancel()
+	var response *aiv1.ProcessedVideoChunk
+	if err := runWithContext(callCtx, func() error {
+		var err error
+		response, err = pending.stream.Recv()
+		return err
+	}); err != nil {
+		if !s.resetGeneration(pending.generation) {
+			return nil, ErrStreamReset
+		}
+		return nil, s.wrapStreamError("receive AI video frame", err)
+	}
+	return response, nil
+}
+
+// Discard는 받지 않을 응답이 남은 스트림을 닫는다. 다음 Send가 새 스트림을 열어
+// 남은 응답이 다음 프레임의 응답으로 읽히지 않게 한다.
+func (s *Stream) Discard(pending Pending) {
+	s.resetGeneration(pending.generation)
+}
+
+func (s *Stream) request(data []byte, timestamp int64, width, height uint16, pixFmt string) *aiv1.VideoChunk {
+	return &aiv1.VideoChunk{
+		Data:       data,
+		Timestamp:  timestamp,
+		SessionId:  s.sessionID,
+		OutputMode: aiv1.VideoOutputMode_VIDEO_OUTPUT_MODE_MOSAIC_JPEG,
+		Width:      uint32(width),
+		Height:     uint32(height),
+		PixFmt:     pixFmt,
+		// 합성 모드는 이후 프레임에서 생략하면 INVALID_ARGUMENT라 매 프레임 싣는다.
+		AnonymizationMode: s.anonymization,
+	}
+}
+
+func (s *Stream) currentGeneration(generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stream != nil && s.generation == generation
+}
+
+// resetGeneration은 스트림이 아직 generation 세대일 때만 닫고 true를 돌려준다.
+func (s *Stream) resetGeneration(generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stream == nil || s.generation != generation {
+		return false
+	}
+	s.reset()
+	return true
 }
 
 func (s *Stream) Close() {
@@ -200,6 +286,9 @@ func (s *Stream) reset() {
 	}
 	if s.streamCancel != nil {
 		s.streamCancel()
+	}
+	if s.stream != nil {
+		s.generation++
 	}
 	s.stream = nil
 	s.streamCancel = nil

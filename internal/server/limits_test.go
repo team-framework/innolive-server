@@ -32,10 +32,10 @@ func TestDecideLimits(t *testing.T) {
 		stop     string
 	}{
 		{"한도 여유", plan.Beam, false, h, 10 * h, true, time.Second, nil, ""},
-		// Beam 1회 최대 12시간
-		{"1회 최대 30분 전", plan.Beam, false, 11*h + 30*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m}, ""},
-		{"1회 최대 10분 전", plan.Beam, false, 11*h + 50*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m, noticeBroadcastLimit10m}, ""},
-		{"1회 최대 도달 → 종료", plan.Beam, false, 12 * h, 10 * h, false, 0,
+		// Beam 1회 최대 8시간
+		{"1회 최대 30분 전", plan.Beam, false, 7*h + 30*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m}, ""},
+		{"1회 최대 10분 전", plan.Beam, false, 7*h + 50*time.Minute, 10 * h, false, 0, []string{noticeBroadcastLimit30m, noticeBroadcastLimit10m}, ""},
+		{"1회 최대 도달 → 종료", plan.Beam, false, 8 * h, 10 * h, false, 0,
 			[]string{noticeBroadcastLimit30m, noticeBroadcastLimit10m, noticeBroadcastLimitReached}, noticeBroadcastLimitReached},
 		// Beam 서버 월 40시간: 80% = 32시간
 		{"월 80% 직전", plan.Beam, false, h, 32*h - time.Second, false, 0, nil, ""},

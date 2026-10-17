@@ -344,6 +344,7 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `POST` | `/guest-sessions` | admission 토큰 소비 및 게스트 세션 생성 (owner token·ICE 설정 반환) |
 | `GET`/`DELETE` | `/guest/sessions/{id}` | 게스트 세션 조회/삭제 (쿠키와 owner token 필요) |
 | `PATCH` | `/guest/sessions/{id}/anonymization` | 게스트 비식별화 설정 변경 (쿠키와 owner token 필요) |
+| `PUT` | `/guest/sessions/{id}/mosaic-config` | 게스트 블러 강도·영역 설정 변경 (쿠키와 owner token 필요) |
 | `GET`/`POST`/`DELETE` | `/guest/sessions/{id}/reference-face` | 게스트 세션별 기준 얼굴 관리 (쿠키와 owner token 필요) |
 
 ### 세션 · 송출
@@ -359,6 +360,22 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `POST` | `/sessions/{id}/stream/pause`\|`/resume` | RTMP 송출 일시 중지/재개 |
 | `POST` | `/sessions/{id}/stream/stop` | 송출 종료. 플랫폼 방송도 단계에 맞춰 정리(뷰어 WebRTC·세션은 유지) |
 | `PATCH` | `/sessions/{id}/anonymization` | `{ "enabled": true\|false }`로 비식별화 AI 처리만 켜거나 끔(WebRTC·RTMP 송출 유지) |
+| `PUT` | `/sessions/{id}/mosaic-config` | 얼굴·번호판 블러 강도·영역 변경(송출 유지, 다음 프레임부터 적용). [블러 강도·영역](#블러-강도영역) 참고 |
+
+### 블러 강도·영역
+
+`PUT /sessions/{id}/mosaic-config` 본문은 세션 설정 전체입니다. 빠지거나 `null`인 필드는 AI 기본값이고 `0`과 구분합니다. `{}`는 전부 기본값으로 되돌립니다. 응답의 `media.mosaic_config`가 현재 값입니다.
+
+| 필드 | 범위 | 비우면 | 의미 |
+|------|------|--------|------|
+| `blur_radius` | 0 초과 64 이하 실수 | 24 | 가우시안 블러 반경(px) |
+| `pixel_size` | 정수 1..8 | 2 | 모자이크 블록 크기(px). 1이면 블러만 |
+| `mask_margin` | 정수 0..64 | 8 | 검출 윤곽선 바깥으로 넓히는 폭(송출 영상 px). 0이면 윤곽선 안쪽만 |
+
+- 범위 밖 값, 정수 필드의 음수·소수, 문자열, 모르는 필드는 400 `bad_request`(`details.field`)로 거절하고 세션 설정을 바꾸지 않습니다. AI 오류 응답 하나가 세션을 fail-closed로 잠그기 때문에 AI에는 유효한 값만 보냅니다.
+- AI는 설정을 기억하지 않으므로 서버가 매 프레임 `VideoChunk.mosaic_config`로 싣습니다. 아무것도 지정하지 않은 세션은 field 7 없이 보내 이전과 같은 요청입니다.
+- `mask_margin`은 `EGRESS_VIDEO_SIZE`가 있으면 그 크기 기준이며 AI 입력 프레임 픽셀로 바꿔 보냅니다(상한 64). 없으면 송출 영상과 AI 입력이 같아 그대로 보냅니다. `blur_radius`·`pixel_size`는 바꾸지 않습니다.
+- 온디바이스 세션은 409 `on_device_processing`입니다.
 
 ### 참조 얼굴
 

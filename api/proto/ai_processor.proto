@@ -35,8 +35,8 @@ message VideoChunk {
   string session_id = 5;
   // Response payload requested for this stream. Unspecified returns a server-processed JPEG.
   VideoOutputMode output_mode = 6;
-  // 7 is reserved to stay aligned with the AI proto, where it is mosaic_config.
-  reserved 7;
+  // Per-frame mosaic strength and area. Unset uses server defaults. May change mid-stream.
+  MosaicConfig mosaic_config = 7;
   // Frame width in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
   uint32 width = 8;
   // Frame height in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
@@ -72,6 +72,16 @@ message FaceAnonymization {
   // swapped, metadata_only, or blur_fallback.
   string status = 4;
   string fallback_reason = 5;
+}
+
+message MosaicConfig {
+  // Gaussian blur radius in pixels; larger means a stronger blur. Valid range: (0, 64].
+  optional double blur_radius = 1;
+  // Mosaic block size in pixels; 1 disables pixelation. Valid range: 1..8.
+  optional uint32 pixel_size = 2;
+  // Outer mask margin in input-frame pixels, 0..64. Unset preserves the legacy 8px edge.
+  // Zero protects the entire polygon. Larger values extend full blur with an outer fade <=8px.
+  optional uint32 mask_margin = 3;
 }
 
 enum VideoOutputMode {

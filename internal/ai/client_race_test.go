@@ -35,7 +35,7 @@ func TestProcessAfterCancelDoesNotUseResetStream(t *testing.T) {
 	cancel()
 	for i := 0; i < 5000; i++ {
 		stream := &Stream{ctx: ctx, client: idleProcessorClient{}, timeout: time.Second}
-		if _, err := stream.Process([]byte("frame"), 0, 0, 0, ""); err == nil {
+		if _, err := stream.Process([]byte("frame"), 0, 0, 0, "", nil); err == nil {
 			// 고루틴이 먼저 끝나면 성공할 수도 있다. 오류 여부는 이 테스트의 관심사가 아니다.
 			continue
 		}

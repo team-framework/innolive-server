@@ -121,6 +121,7 @@ h2 {
 
 .toolbar,
 .actions,
+.mosaic-config,
 .broadcast-settings,
 .reference-face-panel,
 .video-panel,
@@ -188,6 +189,22 @@ h2 {
 .actions {
   margin-top: 12px;
   padding: 12px;
+}
+
+/* 블러 강도·영역(#483). 빈 칸은 AI 기본값이다. */
+.mosaic-config {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.mosaic-config-detail {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .runtime-notice {
@@ -761,6 +778,10 @@ dd {
 }
 
 @media (max-width: 760px) {
+  .mosaic-config {
+    grid-template-columns: 1fr;
+  }
+
   .app-shell {
     width: min(100% - 20px, 1480px);
     padding-top: 14px;

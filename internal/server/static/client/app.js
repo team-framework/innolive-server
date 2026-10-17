@@ -141,6 +141,11 @@ function bindElements() {
     "resumeBroadcastBtn",
     "anonymizationToggleBtn",
     "screenBlurToggleBtn",
+    "mosaicBlurRadius",
+    "mosaicPixelSize",
+    "mosaicMaskMargin",
+    "applyMosaicConfigBtn",
+    "mosaicConfigDetail",
     "stopBroadcastBtn",
     "healthBtn",
     "createSessionBtn",
@@ -391,6 +396,7 @@ function bindEvents() {
   els.pauseBroadcastBtn.addEventListener("click", () => void pauseBroadcast());
   els.anonymizationToggleBtn.addEventListener("click", () => void togglePrivacy("anonymization"));
   els.screenBlurToggleBtn.addEventListener("click", () => void togglePrivacy("screen-blur"));
+  els.applyMosaicConfigBtn.addEventListener("click", () => void applyMosaicConfig());
   els.changeResolutionBtn.addEventListener("click", () => void changeBroadcastMode());
   els.youtubeApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("youtube"));
   els.chzzkApplyLiveBtn.addEventListener("click", () => void applyLiveSettings("chzzk"));
@@ -3127,6 +3133,50 @@ async function togglePrivacy(kind) {
   });
 }
 
+// MOSAIC_CONFIG_FIELDS는 블러 설정 입력과 서버 필드다(#483). 빈 칸은 보내지 않아
+// AI 기본값이 되고, 0은 그대로 보낸다. 범위는 서버가 검증해 400으로 돌려준다.
+const MOSAIC_CONFIG_FIELDS = [
+  { input: "mosaicBlurRadius", field: "blur_radius", label: "반경", fallback: "24" },
+  { input: "mosaicPixelSize", field: "pixel_size", label: "크기", fallback: "2" },
+  { input: "mosaicMaskMargin", field: "mask_margin", label: "확장", fallback: "8", unit: "px" },
+];
+
+function mosaicConfigBody() {
+  const body = {};
+  for (const { input, field } of MOSAIC_CONFIG_FIELDS) {
+    const value = String(els[input].value ?? "").trim();
+    if (value !== "") {
+      body[field] = Number(value);
+    }
+  }
+  return body;
+}
+
+function describeMosaicConfig(config) {
+  return MOSAIC_CONFIG_FIELDS.map(({ field, label, fallback, unit = "" }) => {
+    const value = config?.[field];
+    return value === null || value === undefined ? `${label} 기본(${fallback}${unit})` : `${label} ${value}${unit}`;
+  }).join(" · ");
+}
+
+// applyMosaicConfig는 입력값으로 세션 블러 설정 전체를 바꾼다. 송출은 끊기지 않고
+// 다음 프레임부터 적용된다.
+async function applyMosaicConfig() {
+  const sessionId = state.session?.session_id;
+  if (!sessionId) {
+    throw new Error("블러 설정을 바꿀 세션이 없습니다.");
+  }
+  const body = mosaicConfigBody();
+  await runBusy(async () => {
+    const session = await apiFetch(`/sessions/${sessionId}/mosaic-config`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    setCurrentSession(session);
+    logEvent("ok", "블러 설정 적용", { session_id: sessionId, mosaic_config: session.media?.mosaic_config });
+  });
+}
+
 // changeBroadcastMode는 방송 중에 송출 구성의 해상도·플랫폼으로 송출 방식을 바꾼다
 // (#300, 202). 해상도가 바뀌면 서버가 방송을 끝내고 새 구성으로 다시 연다. 진행은
 // 세션 응답의 resolution_switch로 폴링된다. 새로 더하는 플랫폼은 카드의 설정을
@@ -4864,6 +4914,12 @@ function updateButtons() {
     button.disabled = state.busy || !serverProcessing;
     button.textContent = `${label} ${state.session?.media?.[field] ? "끄기" : "켜기"}`;
   }
+  els.applyMosaicConfigBtn.disabled = state.busy || !serverProcessing;
+  els.mosaicConfigDetail.textContent = !state.session?.session_id
+    ? "세션을 만든 뒤 적용할 수 있습니다."
+    : !serverProcessing
+      ? "온디바이스 세션은 보내는 기기에서 블러를 처리합니다."
+      : `현재: ${describeMosaicConfig(state.session?.media?.mosaic_config)}`;
   // 송출 방식 변경은 라이브 중에만 연다. 방송 전 해상도·플랫폼은 "방송 준비"가
   // 송출 구성을 그대로 쓴다.
   els.changeResolutionBtn.disabled =

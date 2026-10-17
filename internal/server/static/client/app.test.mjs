@@ -17,6 +17,11 @@ const buttonKeys = [
   "resumeBroadcastBtn",
   "anonymizationToggleBtn",
   "screenBlurToggleBtn",
+  "mosaicBlurRadius",
+  "mosaicPixelSize",
+  "mosaicMaskMargin",
+  "applyMosaicConfigBtn",
+  "mosaicConfigDetail",
   "stopBroadcastBtn",
   "healthBtn",
   "createSessionBtn",
@@ -231,7 +236,7 @@ async function loadApp({ fetchImpl, navigator } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, togglePrivacy, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, togglePrivacy, applyMosaicConfig, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
     context,
     { filename: appPath },
   );
@@ -1951,4 +1956,31 @@ test("온디바이스 세션에서는 비식별화·화면 블러 토글을 막�
   updateButtons();
   assert.equal(els.anonymizationToggleBtn.disabled, true);
   assert.equal(els.screenBlurToggleBtn.disabled, true);
+  assert.equal(els.applyMosaicConfigBtn.disabled, true);
+});
+
+test("블러 설정은 빈 칸을 빼고 0은 그대로 보낸다", async () => {
+  const calls = [];
+  const { applyMosaicConfig, state, els } = await loadApp({
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ path: String(url), method: options.method, body });
+      return jsonResponse({
+        session_id: "s-1",
+        ai_processing: "server",
+        media: { mosaic_config: { blur_radius: null, pixel_size: body.pixel_size ?? null, mask_margin: body.mask_margin ?? null } },
+      });
+    },
+  });
+  state.accessToken = "access-token";
+  state.session = { session_id: "s-1", ai_processing: "server", media: {} };
+  els.mosaicBlurRadius.value = "";
+  els.mosaicPixelSize.value = " 4 ";
+  els.mosaicMaskMargin.value = "0";
+
+  await applyMosaicConfig();
+  assert.match(calls[0].path, /\/sessions\/s-1\/mosaic-config$/);
+  assert.equal(calls[0].method, "PUT");
+  assert.deepEqual(calls[0].body, { pixel_size: 4, mask_margin: 0 });
+  assert.equal(els.mosaicConfigDetail.textContent, "현재: 반경 기본(24) · 크기 4 · 확장 0px");
 });

@@ -124,6 +124,23 @@
         <button id="deleteSessionBtn" class="button button-danger" type="button" disabled>Delete Session</button>
       </section>
 
+      <section class="mosaic-config" aria-label="블러 설정">
+        <label class="field">
+          <span>블러 반경 (0 초과~64, 비우면 24)</span>
+          <input id="mosaicBlurRadius" type="number" min="0" max="64" step="any" inputmode="decimal" placeholder="24" />
+        </label>
+        <label class="field">
+          <span>모자이크 크기 (1~8, 비우면 2)</span>
+          <input id="mosaicPixelSize" type="number" min="1" max="8" step="1" inputmode="numeric" placeholder="2" />
+        </label>
+        <label class="field">
+          <span>영역 확장 px (0~64, 비우면 8)</span>
+          <input id="mosaicMaskMargin" type="number" min="0" max="64" step="1" inputmode="numeric" placeholder="8" />
+        </label>
+        <button id="applyMosaicConfigBtn" class="button" type="button" disabled>블러 설정 적용</button>
+        <span id="mosaicConfigDetail" class="mosaic-config-detail">세션을 만든 뒤 적용할 수 있습니다.</span>
+      </section>
+
       <section class="broadcast-status" aria-labelledby="broadcastStatusTitle" aria-live="polite">
         <div class="broadcast-status-copy">
           <p class="eyebrow">Broadcasting</p>

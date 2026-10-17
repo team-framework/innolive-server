@@ -166,3 +166,32 @@ func TestReturnEncodersScaleWithResolution(t *testing.T) {
 		})
 	}
 }
+
+// TestH264ReturnEncoderKeepsDeblocking은 반환 H.264 인코더가 디블로킹 필터를
+// 켜는 preset을 쓰는지 고정한다(#487). ultrafast는 디블로킹과 AQ를 꺼서 FHD
+// 세션이 움직일 때 16×16 블록이 모자이크처럼 드러났다. x264-params로 디블로킹을
+// 다시 끄는 것도 막는다.
+func TestH264ReturnEncoderKeepsDeblocking(t *testing.T) {
+	for _, size := range [][2]uint16{{720, 1280}, {1080, 1920}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			arguments := captureFFmpegArgs(t,
+				TranscoderOptions{VideoCodec: VideoCodecH264, WireFormat: config.WireFormatRaw, EncoderThreads: 1},
+				func(transcoder *FFmpegTranscoder) error {
+					process, err := transcoder.startH264Encoder(context.Background(), size[0], size[1])
+					if err == nil {
+						process.close()
+					}
+					return err
+				})
+			assertArgPair(t, arguments, "-preset", "superfast")
+			assertArgPair(t, arguments, "-profile:v", "baseline")
+			assertArgPair(t, arguments, "-x264-params", "repeat-headers=1:aud=1:annexb=1")
+			joined := strings.Join(arguments, " ")
+			for _, disabled := range []string{"no-deblock", "deblock=0", "aq-mode=0"} {
+				if strings.Contains(joined, disabled) {
+					t.Errorf("반환 인코더가 %s 를 쓴다:\n  %s", disabled, joined)
+				}
+			}
+		})
+	}
+}

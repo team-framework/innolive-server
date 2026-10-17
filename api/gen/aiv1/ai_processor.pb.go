@@ -137,6 +137,8 @@ type VideoChunk struct {
 	SessionId string `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// Response payload requested for this stream. Unspecified returns a server-processed JPEG.
 	OutputMode VideoOutputMode `protobuf:"varint,6,opt,name=output_mode,json=outputMode,proto3,enum=VideoOutputMode" json:"output_mode,omitempty"`
+	// Per-frame mosaic strength and area. Unset uses server defaults. May change mid-stream.
+	MosaicConfig *MosaicConfig `protobuf:"bytes,7,opt,name=mosaic_config,json=mosaicConfig,proto3" json:"mosaic_config,omitempty"`
 	// Frame width in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
 	Width uint32 `protobuf:"varint,8,opt,name=width,proto3" json:"width,omitempty"`
 	// Frame height in pixels. Required when data carries raw pixels (pix_fmt set); ignored for JPEG.
@@ -221,6 +223,13 @@ func (x *VideoChunk) GetOutputMode() VideoOutputMode {
 		return x.OutputMode
 	}
 	return VideoOutputMode_VIDEO_OUTPUT_MODE_UNSPECIFIED
+}
+
+func (x *VideoChunk) GetMosaicConfig() *MosaicConfig {
+	if x != nil {
+		return x.MosaicConfig
+	}
+	return nil
 }
 
 func (x *VideoChunk) GetWidth() uint32 {
@@ -406,6 +415,70 @@ func (x *FaceAnonymization) GetFallbackReason() string {
 	return ""
 }
 
+type MosaicConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Gaussian blur radius in pixels; larger means a stronger blur. Valid range: (0, 64].
+	BlurRadius *float64 `protobuf:"fixed64,1,opt,name=blur_radius,json=blurRadius,proto3,oneof" json:"blur_radius,omitempty"`
+	// Mosaic block size in pixels; 1 disables pixelation. Valid range: 1..8.
+	PixelSize *uint32 `protobuf:"varint,2,opt,name=pixel_size,json=pixelSize,proto3,oneof" json:"pixel_size,omitempty"`
+	// Outer mask margin in input-frame pixels, 0..64. Unset preserves the legacy 8px edge.
+	// Zero protects the entire polygon. Larger values extend full blur with an outer fade <=8px.
+	MaskMargin    *uint32 `protobuf:"varint,3,opt,name=mask_margin,json=maskMargin,proto3,oneof" json:"mask_margin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MosaicConfig) Reset() {
+	*x = MosaicConfig{}
+	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MosaicConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MosaicConfig) ProtoMessage() {}
+
+func (x *MosaicConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MosaicConfig.ProtoReflect.Descriptor instead.
+func (*MosaicConfig) Descriptor() ([]byte, []int) {
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *MosaicConfig) GetBlurRadius() float64 {
+	if x != nil && x.BlurRadius != nil {
+		return *x.BlurRadius
+	}
+	return 0
+}
+
+func (x *MosaicConfig) GetPixelSize() uint32 {
+	if x != nil && x.PixelSize != nil {
+		return *x.PixelSize
+	}
+	return 0
+}
+
+func (x *MosaicConfig) GetMaskMargin() uint32 {
+	if x != nil && x.MaskMargin != nil {
+		return *x.MaskMargin
+	}
+	return 0
+}
+
 type ProcessedVideoChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-composited JPEG. Empty only for metadata-only mode or failed frames.
@@ -431,7 +504,7 @@ type ProcessedVideoChunk struct {
 
 func (x *ProcessedVideoChunk) Reset() {
 	*x = ProcessedVideoChunk{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -443,7 +516,7 @@ func (x *ProcessedVideoChunk) String() string {
 func (*ProcessedVideoChunk) ProtoMessage() {}
 
 func (x *ProcessedVideoChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[3]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -456,7 +529,7 @@ func (x *ProcessedVideoChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessedVideoChunk.ProtoReflect.Descriptor instead.
 func (*ProcessedVideoChunk) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ProcessedVideoChunk) GetData() []byte {
@@ -569,7 +642,7 @@ type ProcessingTiming struct {
 
 func (x *ProcessingTiming) Reset() {
 	*x = ProcessingTiming{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -581,7 +654,7 @@ func (x *ProcessingTiming) String() string {
 func (*ProcessingTiming) ProtoMessage() {}
 
 func (x *ProcessingTiming) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[4]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -594,7 +667,7 @@ func (x *ProcessingTiming) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessingTiming.ProtoReflect.Descriptor instead.
 func (*ProcessingTiming) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ProcessingTiming) GetQueueMs() float64 {
@@ -670,7 +743,7 @@ type Point struct {
 
 func (x *Point) Reset() {
 	*x = Point{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -682,7 +755,7 @@ func (x *Point) String() string {
 func (*Point) ProtoMessage() {}
 
 func (x *Point) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[5]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -695,7 +768,7 @@ func (x *Point) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Point.ProtoReflect.Descriptor instead.
 func (*Point) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Point) GetX() float32 {
@@ -724,7 +797,7 @@ type BoundingBox struct {
 
 func (x *BoundingBox) Reset() {
 	*x = BoundingBox{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +809,7 @@ func (x *BoundingBox) String() string {
 func (*BoundingBox) ProtoMessage() {}
 
 func (x *BoundingBox) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[6]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +822,7 @@ func (x *BoundingBox) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoundingBox.ProtoReflect.Descriptor instead.
 func (*BoundingBox) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *BoundingBox) GetX1() float32 {
@@ -799,7 +872,7 @@ type FaceMetadata struct {
 
 func (x *FaceMetadata) Reset() {
 	*x = FaceMetadata{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -811,7 +884,7 @@ func (x *FaceMetadata) String() string {
 func (*FaceMetadata) ProtoMessage() {}
 
 func (x *FaceMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[7]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -824,7 +897,7 @@ func (x *FaceMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FaceMetadata.ProtoReflect.Descriptor instead.
 func (*FaceMetadata) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *FaceMetadata) GetBbox() *BoundingBox {
@@ -923,7 +996,7 @@ type FrameStats struct {
 
 func (x *FrameStats) Reset() {
 	*x = FrameStats{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -935,7 +1008,7 @@ func (x *FrameStats) String() string {
 func (*FrameStats) ProtoMessage() {}
 
 func (x *FrameStats) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[8]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -948,7 +1021,7 @@ func (x *FrameStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FrameStats.ProtoReflect.Descriptor instead.
 func (*FrameStats) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *FrameStats) GetDetections() uint32 {
@@ -1040,7 +1113,7 @@ type FaceData struct {
 
 func (x *FaceData) Reset() {
 	*x = FaceData{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1052,7 +1125,7 @@ func (x *FaceData) String() string {
 func (*FaceData) ProtoMessage() {}
 
 func (x *FaceData) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[9]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1065,7 +1138,7 @@ func (x *FaceData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FaceData.ProtoReflect.Descriptor instead.
 func (*FaceData) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{9}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *FaceData) GetData() []byte {
@@ -1096,7 +1169,7 @@ type WhitelistResponse struct {
 
 func (x *WhitelistResponse) Reset() {
 	*x = WhitelistResponse{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1108,7 +1181,7 @@ func (x *WhitelistResponse) String() string {
 func (*WhitelistResponse) ProtoMessage() {}
 
 func (x *WhitelistResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[10]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1121,7 +1194,7 @@ func (x *WhitelistResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WhitelistResponse.ProtoReflect.Descriptor instead.
 func (*WhitelistResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{10}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *WhitelistResponse) GetStatusMessage() string {
@@ -1168,7 +1241,7 @@ type GetWhitelistStatusRequest struct {
 
 func (x *GetWhitelistStatusRequest) Reset() {
 	*x = GetWhitelistStatusRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1180,7 +1253,7 @@ func (x *GetWhitelistStatusRequest) String() string {
 func (*GetWhitelistStatusRequest) ProtoMessage() {}
 
 func (x *GetWhitelistStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[11]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1193,7 +1266,7 @@ func (x *GetWhitelistStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWhitelistStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetWhitelistStatusRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{11}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetWhitelistStatusRequest) GetSessionId() string {
@@ -1215,7 +1288,7 @@ type GetWhitelistStatusResponse struct {
 
 func (x *GetWhitelistStatusResponse) Reset() {
 	*x = GetWhitelistStatusResponse{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1227,7 +1300,7 @@ func (x *GetWhitelistStatusResponse) String() string {
 func (*GetWhitelistStatusResponse) ProtoMessage() {}
 
 func (x *GetWhitelistStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[12]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +1313,7 @@ func (x *GetWhitelistStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWhitelistStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetWhitelistStatusResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{12}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetWhitelistStatusResponse) GetSessionId() string {
@@ -1281,7 +1354,7 @@ type DeleteWhitelistRequest struct {
 
 func (x *DeleteWhitelistRequest) Reset() {
 	*x = DeleteWhitelistRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1293,7 +1366,7 @@ func (x *DeleteWhitelistRequest) String() string {
 func (*DeleteWhitelistRequest) ProtoMessage() {}
 
 func (x *DeleteWhitelistRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[13]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1306,7 +1379,7 @@ func (x *DeleteWhitelistRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteWhitelistRequest.ProtoReflect.Descriptor instead.
 func (*DeleteWhitelistRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{13}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DeleteWhitelistRequest) GetSessionId() string {
@@ -1331,7 +1404,7 @@ type CreateSessionRequest struct {
 
 func (x *CreateSessionRequest) Reset() {
 	*x = CreateSessionRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1343,7 +1416,7 @@ func (x *CreateSessionRequest) String() string {
 func (*CreateSessionRequest) ProtoMessage() {}
 
 func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[14]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1356,7 +1429,7 @@ func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionRequest.ProtoReflect.Descriptor instead.
 func (*CreateSessionRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{14}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{15}
 }
 
 type ListSessionsRequest struct {
@@ -1367,7 +1440,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1379,7 +1452,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[15]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1392,7 +1465,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{15}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{16}
 }
 
 type DeleteSessionRequest struct {
@@ -1404,7 +1477,7 @@ type DeleteSessionRequest struct {
 
 func (x *DeleteSessionRequest) Reset() {
 	*x = DeleteSessionRequest{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1416,7 +1489,7 @@ func (x *DeleteSessionRequest) String() string {
 func (*DeleteSessionRequest) ProtoMessage() {}
 
 func (x *DeleteSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[16]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1429,7 +1502,7 @@ func (x *DeleteSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSessionRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSessionRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{16}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DeleteSessionRequest) GetSessionId() string {
@@ -1452,7 +1525,7 @@ type SessionInfo struct {
 
 func (x *SessionInfo) Reset() {
 	*x = SessionInfo{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[17]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1537,7 @@ func (x *SessionInfo) String() string {
 func (*SessionInfo) ProtoMessage() {}
 
 func (x *SessionInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[17]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1550,7 @@ func (x *SessionInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionInfo.ProtoReflect.Descriptor instead.
 func (*SessionInfo) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{17}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SessionInfo) GetSessionId() string {
@@ -1524,7 +1597,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_api_proto_ai_processor_proto_msgTypes[18]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +1609,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_ai_processor_proto_msgTypes[18]
+	mi := &file_api_proto_ai_processor_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +1622,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{18}
+	return file_api_proto_ai_processor_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*SessionInfo {
@@ -1563,7 +1636,7 @@ var File_api_proto_ai_processor_proto protoreflect.FileDescriptor
 
 const file_api_proto_ai_processor_proto_rawDesc = "" +
 	"\n" +
-	"\x1capi/proto/ai_processor.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xe2\x02\n" +
+	"\x1capi/proto/ai_processor.proto\x1a\x1bgoogle/protobuf/empty.proto\"\x90\x03\n" +
 	"\n" +
 	"VideoChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1c\n" +
@@ -1574,12 +1647,13 @@ const file_api_proto_ai_processor_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x05 \x01(\tR\tsessionId\x121\n" +
 	"\voutput_mode\x18\x06 \x01(\x0e2\x10.VideoOutputModeR\n" +
-	"outputMode\x12\x14\n" +
+	"outputMode\x122\n" +
+	"\rmosaic_config\x18\a \x01(\v2\r.MosaicConfigR\fmosaicConfig\x12\x14\n" +
 	"\x05width\x18\b \x01(\rR\x05width\x12\x16\n" +
 	"\x06height\x18\t \x01(\rR\x06height\x12\x17\n" +
 	"\apix_fmt\x18\n" +
 	" \x01(\tR\x06pixFmt\x12E\n" +
-	"\x12anonymization_mode\x18\v \x01(\x0e2\x16.FaceAnonymizationModeR\x11anonymizationModeJ\x04\b\a\x10\b\"\xe6\x01\n" +
+	"\x12anonymization_mode\x18\v \x01(\x0e2\x16.FaceAnonymizationModeR\x11anonymizationMode\"\xe6\x01\n" +
 	"\x0eFaceAttributes\x12\x16\n" +
 	"\x06gender\x18\x01 \x01(\tR\x06gender\x12\x10\n" +
 	"\x03age\x18\x02 \x01(\tR\x03age\x12\x18\n" +
@@ -1599,7 +1673,17 @@ const file_api_proto_ai_processor_proto_rawDesc = "" +
 	"\n" +
 	"preset_key\x18\x03 \x01(\tR\tpresetKey\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12'\n" +
-	"\x0ffallback_reason\x18\x05 \x01(\tR\x0efallbackReason\"\xb8\x03\n" +
+	"\x0ffallback_reason\x18\x05 \x01(\tR\x0efallbackReason\"\xad\x01\n" +
+	"\fMosaicConfig\x12$\n" +
+	"\vblur_radius\x18\x01 \x01(\x01H\x00R\n" +
+	"blurRadius\x88\x01\x01\x12\"\n" +
+	"\n" +
+	"pixel_size\x18\x02 \x01(\rH\x01R\tpixelSize\x88\x01\x01\x12$\n" +
+	"\vmask_margin\x18\x03 \x01(\rH\x02R\n" +
+	"maskMargin\x88\x01\x01B\x0e\n" +
+	"\f_blur_radiusB\r\n" +
+	"\v_pixel_sizeB\x0e\n" +
+	"\f_mask_margin\"\xb8\x03\n" +
 	"\x13ProcessedVideoChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12%\n" +
@@ -1742,63 +1826,65 @@ func file_api_proto_ai_processor_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_ai_processor_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_proto_ai_processor_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_api_proto_ai_processor_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_api_proto_ai_processor_proto_goTypes = []any{
 	(FaceAnonymizationMode)(0),         // 0: FaceAnonymizationMode
 	(VideoOutputMode)(0),               // 1: VideoOutputMode
 	(*VideoChunk)(nil),                 // 2: VideoChunk
 	(*FaceAttributes)(nil),             // 3: FaceAttributes
 	(*FaceAnonymization)(nil),          // 4: FaceAnonymization
-	(*ProcessedVideoChunk)(nil),        // 5: ProcessedVideoChunk
-	(*ProcessingTiming)(nil),           // 6: ProcessingTiming
-	(*Point)(nil),                      // 7: Point
-	(*BoundingBox)(nil),                // 8: BoundingBox
-	(*FaceMetadata)(nil),               // 9: FaceMetadata
-	(*FrameStats)(nil),                 // 10: FrameStats
-	(*FaceData)(nil),                   // 11: FaceData
-	(*WhitelistResponse)(nil),          // 12: WhitelistResponse
-	(*GetWhitelistStatusRequest)(nil),  // 13: GetWhitelistStatusRequest
-	(*GetWhitelistStatusResponse)(nil), // 14: GetWhitelistStatusResponse
-	(*DeleteWhitelistRequest)(nil),     // 15: DeleteWhitelistRequest
-	(*CreateSessionRequest)(nil),       // 16: CreateSessionRequest
-	(*ListSessionsRequest)(nil),        // 17: ListSessionsRequest
-	(*DeleteSessionRequest)(nil),       // 18: DeleteSessionRequest
-	(*SessionInfo)(nil),                // 19: SessionInfo
-	(*ListSessionsResponse)(nil),       // 20: ListSessionsResponse
-	nil,                                // 21: FaceAttributes.ConfidenceEntry
-	(*emptypb.Empty)(nil),              // 22: google.protobuf.Empty
+	(*MosaicConfig)(nil),               // 5: MosaicConfig
+	(*ProcessedVideoChunk)(nil),        // 6: ProcessedVideoChunk
+	(*ProcessingTiming)(nil),           // 7: ProcessingTiming
+	(*Point)(nil),                      // 8: Point
+	(*BoundingBox)(nil),                // 9: BoundingBox
+	(*FaceMetadata)(nil),               // 10: FaceMetadata
+	(*FrameStats)(nil),                 // 11: FrameStats
+	(*FaceData)(nil),                   // 12: FaceData
+	(*WhitelistResponse)(nil),          // 13: WhitelistResponse
+	(*GetWhitelistStatusRequest)(nil),  // 14: GetWhitelistStatusRequest
+	(*GetWhitelistStatusResponse)(nil), // 15: GetWhitelistStatusResponse
+	(*DeleteWhitelistRequest)(nil),     // 16: DeleteWhitelistRequest
+	(*CreateSessionRequest)(nil),       // 17: CreateSessionRequest
+	(*ListSessionsRequest)(nil),        // 18: ListSessionsRequest
+	(*DeleteSessionRequest)(nil),       // 19: DeleteSessionRequest
+	(*SessionInfo)(nil),                // 20: SessionInfo
+	(*ListSessionsResponse)(nil),       // 21: ListSessionsResponse
+	nil,                                // 22: FaceAttributes.ConfidenceEntry
+	(*emptypb.Empty)(nil),              // 23: google.protobuf.Empty
 }
 var file_api_proto_ai_processor_proto_depIdxs = []int32{
 	1,  // 0: VideoChunk.output_mode:type_name -> VideoOutputMode
-	0,  // 1: VideoChunk.anonymization_mode:type_name -> FaceAnonymizationMode
-	21, // 2: FaceAttributes.confidence:type_name -> FaceAttributes.ConfidenceEntry
-	3,  // 3: FaceAnonymization.attributes:type_name -> FaceAttributes
-	9,  // 4: ProcessedVideoChunk.faces:type_name -> FaceMetadata
-	6,  // 5: ProcessedVideoChunk.timing:type_name -> ProcessingTiming
-	10, // 6: ProcessedVideoChunk.stats:type_name -> FrameStats
-	8,  // 7: FaceMetadata.bbox:type_name -> BoundingBox
-	7,  // 8: FaceMetadata.polygon:type_name -> Point
-	4,  // 9: FaceMetadata.anonymization:type_name -> FaceAnonymization
-	19, // 10: ListSessionsResponse.sessions:type_name -> SessionInfo
-	2,  // 11: AiProcessor.ProcessVideo:input_type -> VideoChunk
-	11, // 12: AiProcessor.AddWhitelist:input_type -> FaceData
-	15, // 13: AiProcessor.DeleteWhitelist:input_type -> DeleteWhitelistRequest
-	13, // 14: AiProcessor.GetWhitelistStatus:input_type -> GetWhitelistStatusRequest
-	16, // 15: AiProcessor.CreateSession:input_type -> CreateSessionRequest
-	17, // 16: AiProcessor.ListSessions:input_type -> ListSessionsRequest
-	18, // 17: AiProcessor.DeleteSession:input_type -> DeleteSessionRequest
-	5,  // 18: AiProcessor.ProcessVideo:output_type -> ProcessedVideoChunk
-	12, // 19: AiProcessor.AddWhitelist:output_type -> WhitelistResponse
-	12, // 20: AiProcessor.DeleteWhitelist:output_type -> WhitelistResponse
-	14, // 21: AiProcessor.GetWhitelistStatus:output_type -> GetWhitelistStatusResponse
-	19, // 22: AiProcessor.CreateSession:output_type -> SessionInfo
-	20, // 23: AiProcessor.ListSessions:output_type -> ListSessionsResponse
-	22, // 24: AiProcessor.DeleteSession:output_type -> google.protobuf.Empty
-	18, // [18:25] is the sub-list for method output_type
-	11, // [11:18] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	5,  // 1: VideoChunk.mosaic_config:type_name -> MosaicConfig
+	0,  // 2: VideoChunk.anonymization_mode:type_name -> FaceAnonymizationMode
+	22, // 3: FaceAttributes.confidence:type_name -> FaceAttributes.ConfidenceEntry
+	3,  // 4: FaceAnonymization.attributes:type_name -> FaceAttributes
+	10, // 5: ProcessedVideoChunk.faces:type_name -> FaceMetadata
+	7,  // 6: ProcessedVideoChunk.timing:type_name -> ProcessingTiming
+	11, // 7: ProcessedVideoChunk.stats:type_name -> FrameStats
+	9,  // 8: FaceMetadata.bbox:type_name -> BoundingBox
+	8,  // 9: FaceMetadata.polygon:type_name -> Point
+	4,  // 10: FaceMetadata.anonymization:type_name -> FaceAnonymization
+	20, // 11: ListSessionsResponse.sessions:type_name -> SessionInfo
+	2,  // 12: AiProcessor.ProcessVideo:input_type -> VideoChunk
+	12, // 13: AiProcessor.AddWhitelist:input_type -> FaceData
+	16, // 14: AiProcessor.DeleteWhitelist:input_type -> DeleteWhitelistRequest
+	14, // 15: AiProcessor.GetWhitelistStatus:input_type -> GetWhitelistStatusRequest
+	17, // 16: AiProcessor.CreateSession:input_type -> CreateSessionRequest
+	18, // 17: AiProcessor.ListSessions:input_type -> ListSessionsRequest
+	19, // 18: AiProcessor.DeleteSession:input_type -> DeleteSessionRequest
+	6,  // 19: AiProcessor.ProcessVideo:output_type -> ProcessedVideoChunk
+	13, // 20: AiProcessor.AddWhitelist:output_type -> WhitelistResponse
+	13, // 21: AiProcessor.DeleteWhitelist:output_type -> WhitelistResponse
+	15, // 22: AiProcessor.GetWhitelistStatus:output_type -> GetWhitelistStatusResponse
+	20, // 23: AiProcessor.CreateSession:output_type -> SessionInfo
+	21, // 24: AiProcessor.ListSessions:output_type -> ListSessionsResponse
+	23, // 25: AiProcessor.DeleteSession:output_type -> google.protobuf.Empty
+	19, // [19:26] is the sub-list for method output_type
+	12, // [12:19] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_ai_processor_proto_init() }
@@ -1806,14 +1892,15 @@ func file_api_proto_ai_processor_proto_init() {
 	if File_api_proto_ai_processor_proto != nil {
 		return
 	}
-	file_api_proto_ai_processor_proto_msgTypes[7].OneofWrappers = []any{}
+	file_api_proto_ai_processor_proto_msgTypes[3].OneofWrappers = []any{}
+	file_api_proto_ai_processor_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_ai_processor_proto_rawDesc), len(file_api_proto_ai_processor_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

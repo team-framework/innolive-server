@@ -121,7 +121,8 @@ type Stream struct {
 // Process는 한 프레임을 AI로 보내고 응답을 받는다. pixFmt가 비어 있지 않으면
 // data는 raw 픽셀(예: "yuv420p")이며, AI가 해석할 수 있도록 width/height를 함께
 // 싣는다. pixFmt가 비면 data는 자기서술적 JPEG이라 width/height는 무시된다.
-func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
+// mosaic은 이 프레임의 블러 설정이며 nil이면 AI 기본값이다.
+func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string, mosaic *aiv1.MosaicConfig) (*aiv1.ProcessedVideoChunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -141,6 +142,8 @@ func (s *Stream) Process(data []byte, timestamp int64, width, height uint16, pix
 		PixFmt:     pixFmt,
 		// 합성 모드는 이후 프레임에서 생략하면 INVALID_ARGUMENT라 매 프레임 싣는다.
 		AnonymizationMode: s.anonymization,
+		// 블러 설정은 생략하면 그 프레임이 기본값으로 돌아가므로 매 프레임 싣는다.
+		MosaicConfig: mosaic,
 	}
 	// 고루틴은 ctx가 끝나면 기다리지 않으므로 reset 뒤에 실행될 수 있다.
 	// s.stream을 실행 시점에 읽으면 nil이라 서버 전체가 죽는다(#316) — 지금

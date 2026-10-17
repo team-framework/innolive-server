@@ -63,7 +63,7 @@ func TestClientUsesStreamingAndWhitelistContracts(t *testing.T) {
 
 	stream := client.NewStream(ctx, "", false)
 	defer stream.Close()
-	response, err := stream.Process([]byte("frame"), 123, 0, 0, "")
+	response, err := stream.Process([]byte("frame"), 123, 0, 0, "", nil)
 	if err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestStreamProcessReportsContextCanceledWhenSessionCanceled(t *testing.T) {
 
 	stream := client.NewStream(ctx, "", false)
 	defer stream.Close()
-	_, err := stream.Process([]byte("frame"), 1, 0, 0, "")
+	_, err := stream.Process([]byte("frame"), 1, 0, 0, "", nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Process() error = %v, want context.Canceled", err)
 	}
@@ -126,7 +126,7 @@ func TestStreamProcessKeepsAIFailureWhenSessionAlive(t *testing.T) {
 	client := newStreamTestClient(t, unavailableAIServer{})
 	stream := client.NewStream(context.Background(), "", false)
 	defer stream.Close()
-	_, err := stream.Process([]byte("frame"), 1, 0, 0, "")
+	_, err := stream.Process([]byte("frame"), 1, 0, 0, "", nil)
 	if err == nil {
 		t.Fatal("Process() error = nil, want AI failure")
 	}
@@ -167,7 +167,7 @@ func TestStreamSendsAnonymizationModeOnEveryFrame(t *testing.T) {
 		client := newStreamTestClient(t, server)
 		stream := client.NewStream(context.Background(), "s", tc.faceSwap)
 		for i := 0; i < 3; i++ {
-			if _, err := stream.Process([]byte("frame"), int64(i), 0, 0, ""); err != nil {
+			if _, err := stream.Process([]byte("frame"), int64(i), 0, 0, "", nil); err != nil {
 				t.Fatalf("faceSwap=%v Process() error = %v", tc.faceSwap, err)
 			}
 			if got := <-server.modes; got != tc.want {

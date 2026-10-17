@@ -2,6 +2,7 @@
 
 // 반환 인코더 해상도별 설정(#478)의 실 ffmpeg 검증. 720p·FHD 처리 프레임을
 // VP8·H.264 반환 인코더에 넣고 출력 해상도·H.264 level·bitrate를 확인한다.
+// H.264는 preset을 바꿔도(#487) 협상한 Constrained Baseline 규격인지 함께 본다.
 //
 //	go test -tags egress_harness -run TestReturnEncoderResolutionProfile ./internal/media -v
 package media
@@ -70,7 +71,7 @@ func TestReturnEncoderResolutionProfile(t *testing.T) {
 
 				count, total, largestKey := 0, 0, 0
 				var width, height uint16
-				var levelIDC byte
+				var levelIDC, profileIDC, constraints byte
 				for item := range output {
 					count++
 					total += len(item.data)
@@ -83,7 +84,7 @@ func TestReturnEncoderResolutionProfile(t *testing.T) {
 					}
 					for _, nalu := range splitAnnexBNALUs(item.data) {
 						if len(nalu) > 3 && nalu[0]&0x1f == 7 {
-							levelIDC = nalu[3]
+							profileIDC, constraints, levelIDC = nalu[1], nalu[2], nalu[3]
 							if w, h, err := h264SPSDimensions(nalu); err == nil {
 								width, height = w, h
 							}
@@ -99,6 +100,10 @@ func TestReturnEncoderResolutionProfile(t *testing.T) {
 				}
 				if codec == VideoCodecH264 && levelIDC != tc.levelIDC {
 					t.Fatalf("H.264 level_idc=%d, want %d", levelIDC, tc.levelIDC)
+				}
+				// Constrained Baseline: profile_idc 66, constraint_set1_flag 1(profile-level-id 42e0xx).
+				if codec == VideoCodecH264 && (profileIDC != 66 || constraints&0x40 == 0) {
+					t.Fatalf("H.264 profile_idc=%d constraints=%#x, want Constrained Baseline", profileIDC, constraints)
 				}
 				bitsPerSecond := total * 8 / seconds
 				if bitsPerSecond < tc.bitsPerSecond*6/10 || bitsPerSecond > tc.bitsPerSecond*13/10 {

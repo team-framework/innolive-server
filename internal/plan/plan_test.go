@@ -17,7 +17,7 @@ func TestPolicyMatchesBM(t *testing.T) {
 	}{
 		{Spark, 0, 5 * time.Hour, time.Hour, 0, 1, 2},
 		{Glow, 0, 60 * time.Hour, 8 * time.Hour, 0, 2, 2},
-		{Beam, 40 * time.Hour, 120 * time.Hour, 12 * time.Hour, 3, 3, 5},
+		{Beam, 40 * time.Hour, 120 * time.Hour, 8 * time.Hour, 3, 3, 5},
 		{Plasma, 80 * time.Hour, 300 * time.Hour, 12 * time.Hour, 4, 4, 10},
 	}
 	for _, test := range tests {

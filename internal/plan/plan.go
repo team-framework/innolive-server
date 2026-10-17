@@ -96,7 +96,7 @@ var policies = map[Plan]Policy{
 	Beam: {
 		MonthlyServer:   40 * time.Hour,
 		MonthlyDevice:   120 * time.Hour,
-		MaxPerBroadcast: 12 * time.Hour,
+		MaxPerBroadcast: 8 * time.Hour,
 		ServerModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti},
 		DeviceModes:     []Mode{Mode720pSingle, ModeFHDSingle, Mode720pMulti},
 		FaceSlots:       5,

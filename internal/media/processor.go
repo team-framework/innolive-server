@@ -22,7 +22,8 @@ import (
 )
 
 type AIStream interface {
-	Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error)
+	// mosaic은 이 프레임에만 적용할 블러 설정이다. nil이면 AI 기본값이다.
+	Process(data []byte, timestamp int64, width, height uint16, pixFmt string, mosaic *aiv1.MosaicConfig) (*aiv1.ProcessedVideoChunk, error)
 	Close()
 }
 
@@ -47,6 +48,12 @@ type Processor struct {
 	// screenBlurEnabled는 스트리머가 고른 화면 전체 블러다. 켜져 있으면 AI 대신
 	// 프레임 전체를 블러해 내보낸다(#465).
 	screenBlurEnabled bool
+	// mosaicConfig는 스트리머가 고른 블러 강도·영역이다(#483). AI가 기억하지
+	// 않으므로 매 프레임 싣는다. egressWidth·Height는 mask_margin의 기준인 송출
+	// 영상 크기(EGRESS_VIDEO_SIZE)이며, 0이면 AI 입력 프레임과 같다.
+	mosaicConfig MosaicConfig
+	egressWidth  uint16
+	egressHeight uint16
 	// privacyGeneration은 지금 익명화 설정의 세대다. 설정이 바뀔 때마다 새로
 	// 받는다. egress는 이 세대로 정지 화면에 다시 써도 되는 프레임을 가린다.
 	privacyGeneration atomic.Uint64
@@ -187,6 +194,29 @@ func (p *Processor) SetScreenBlurEnabled(enabled bool) {
 		p.privacyGeneration.Store(privacyGenerations.Add(1))
 	}
 	p.screenBlurEnabled = enabled
+	p.aiMu.Unlock()
+}
+
+// SetMosaicConfig는 다음 프레임부터 AI에 보낼 블러 설정을 바꾼다. 호출자가 범위를
+// 검증해야 한다 — 범위 밖 값은 AI 오류로 세션을 블랙아웃으로 잠근다.
+func (p *Processor) SetMosaicConfig(cfg MosaicConfig) {
+	if p.mode != config.PrivacyModeReal {
+		return
+	}
+	p.aiMu.Lock()
+	if !p.mosaicConfig.Equal(cfg) {
+		p.privacyGeneration.Store(privacyGenerations.Add(1))
+	}
+	p.mosaicConfig = cfg.Clone()
+	p.aiMu.Unlock()
+}
+
+// SetEgressVideoSize는 mask_margin의 기준인 송출 영상 크기("1280x720")를 정한다.
+// 비었거나 형식이 틀리면 AI 입력 프레임 크기를 그대로 기준으로 쓴다.
+func (p *Processor) SetEgressVideoSize(value string) {
+	width, height, _ := parseVideoSize(value)
+	p.aiMu.Lock()
+	p.egressWidth, p.egressHeight = width, height
 	p.aiMu.Unlock()
 }
 
@@ -367,7 +397,8 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 	}
 
 	aiStartedAt := time.Now()
-	response, err := p.ai.Process(frame, timestamp, width, height, p.aiPixFmt())
+	mosaic := p.mosaicConfig.aiRequest(width, height, p.egressWidth, p.egressHeight)
+	response, err := p.ai.Process(frame, timestamp, width, height, p.aiPixFmt(), mosaic)
 	p.metrics.ObserveAI(string(p.mode), time.Since(aiStartedAt))
 	p.metrics.ObserveStage("grpc", time.Since(aiStartedAt))
 	if err != nil {

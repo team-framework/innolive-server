@@ -165,6 +165,8 @@ type Response struct {
 		AIFallbackActive       bool        `json:"ai_fallback_active"`
 		AnonymizationEnabled   bool        `json:"anonymization_enabled"`
 		ScreenBlurEnabled      bool        `json:"screen_blur_enabled"`
+		// MosaicConfig는 블러 강도·영역 설정이다(#483). null 필드는 AI 기본값이다.
+		MosaicConfig media.MosaicConfig `json:"mosaic_config"`
 	} `json:"media"`
 	Stream StreamState `json:"stream"`
 	// Targets는 대상별 송출 상태다(#233). 대상이 하나뿐인 세션에서는 Stream과
@@ -252,7 +254,10 @@ type Session struct {
 	aiInputPaused        bool
 	anonymizationEnabled bool
 	screenBlurEnabled    bool
-	broadcast            *YouTubeBroadcastSettings
+	// mosaicConfig는 세션의 블러 강도·영역이다(#483). 파이프라인이 다시 만들어져도
+	// 새 Processor에 그대로 넘긴다.
+	mosaicConfig media.MosaicConfig
+	broadcast    *YouTubeBroadcastSettings
 	// chzzkBroadcast는 치지직 대상의 방송 설정이다(#229). 동시 송출 세션은
 	// broadcast와 이 필드를 함께 든다(#233) — 플랫폼이 셋 이상이 되면
 	// 그때 추상화한다.
@@ -1691,6 +1696,37 @@ func (m *Manager) SetScreenBlurEnabled(id string, enabled bool) (*Session, error
 	return s, nil
 }
 
+// SetMosaicConfig는 송출을 끊지 않고 다음 프레임부터 블러 강도·영역을 바꾼다(#483).
+// 설정 전체를 바꾸며 비운 필드는 AI 기본값으로 돌아간다. 범위 밖 값은 AI에 닿기
+// 전에 거절한다 — AI 오류 응답 하나가 세션을 블랙아웃으로 잠근다.
+func (m *Manager) SetMosaicConfig(id string, cfg media.MosaicConfig) (*Session, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	s, err := m.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrNotFound
+	}
+	if s.AIProcessing == AIProcessingOnDevice {
+		return nil, ErrOnDeviceProcessing
+	}
+	s.mosaicConfig = cfg.Clone()
+	if s.processor != nil {
+		s.processor.SetMosaicConfig(cfg)
+		for _, egress := range activeEgressesLocked(s) {
+			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
+		}
+	}
+	s.UpdatedAt = time.Now().UTC()
+	m.logger.Info("mosaic config changed", "session_id", s.ID, "mosaic_config", cfg)
+	return s, nil
+}
+
 func pauseEgress(egress streamPauseController) error {
 	switch egress.Status().Phase {
 	case media.EgressPhaseStopped:
@@ -2086,6 +2122,8 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	}
 	processor.SetAnonymizationEnabled(s.anonymizationEnabled)
 	processor.SetScreenBlurEnabled(s.screenBlurEnabled)
+	processor.SetEgressVideoSize(m.cfg.EgressVideoSize)
+	processor.SetMosaicConfig(s.mosaicConfig)
 	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor
 	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
@@ -2199,6 +2237,7 @@ func (s *Session) Response() Response {
 	}
 	response.Media.AnonymizationEnabled = s.anonymizationEnabled
 	response.Media.ScreenBlurEnabled = s.screenBlurEnabled
+	response.Media.MosaicConfig = s.mosaicConfig.Clone()
 	if s.broadcast != nil {
 		broadcast := s.broadcast.response()
 		response.Broadcast = &broadcast

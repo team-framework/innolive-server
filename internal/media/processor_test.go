@@ -18,10 +18,11 @@ type fakeAIStream struct {
 	lastWidth  uint16
 	lastHeight uint16
 	lastPixFmt string
+	lastMosaic *aiv1.MosaicConfig
 }
 
-func (f *fakeAIStream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string) (*aiv1.ProcessedVideoChunk, error) {
-	f.lastWidth, f.lastHeight, f.lastPixFmt = width, height, pixFmt
+func (f *fakeAIStream) Process(data []byte, timestamp int64, width, height uint16, pixFmt string, mosaic *aiv1.MosaicConfig) (*aiv1.ProcessedVideoChunk, error) {
+	f.lastWidth, f.lastHeight, f.lastPixFmt, f.lastMosaic = width, height, pixFmt, mosaic
 	return f.process(data, timestamp)
 }
 func (f *fakeAIStream) Close() {

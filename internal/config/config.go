@@ -75,9 +75,12 @@ type Config struct {
 	AIWireFormat      WireFormat
 	// AIFaceSwapEnabled는 세션이 얼굴 합성을 고를 수 있는지다. AI 서버에 합성
 	// 모델과 프리셋이 준비된 배포에서만 켠다. 꺼져 있으면 모든 세션이 blur다.
-	AIFaceSwapEnabled          bool
-	AIFailurePolicy            AIFailurePolicy
-	AITimeoutLatchThreshold    int
+	AIFaceSwapEnabled       bool
+	AIFailurePolicy         AIFailurePolicy
+	AITimeoutLatchThreshold int
+	// AIStreamMaxInflight는 세션당 AI에 응답을 기다리지 않고 보내 둘 프레임 수다(#495).
+	// 1이면 프레임마다 응답을 기다린다. AI 워커의 AI_STREAM_PIPELINE_DEPTH와 함께 올린다.
+	AIStreamMaxInflight        int
 	AIPreflightTimeout         time.Duration
 	AIPreflightRequired        bool
 	AIPreflightInterval        time.Duration
@@ -175,6 +178,7 @@ func Load() (Config, error) {
 		AIFaceSwapEnabled:          envBool("AI_FACE_SWAP_ENABLED", false),
 		AIFailurePolicy:            AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
 		AITimeoutLatchThreshold:    envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
+		AIStreamMaxInflight:        envInt("AI_STREAM_MAX_INFLIGHT", 1),
 		AIPreflightTimeout:         envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
 		AIPreflightRequired:        envBool("AI_PREFLIGHT_REQUIRED", false),
 		AIPreflightInterval:        envDuration("AI_PREFLIGHT_INTERVAL", 5*time.Minute),
@@ -364,6 +368,9 @@ func (c Config) Validate() error {
 	}
 	if c.AITimeoutLatchThreshold < 0 {
 		return errors.New("AI_TIMEOUT_LATCH_THRESHOLD must not be negative")
+	}
+	if c.AIStreamMaxInflight < 1 || c.AIStreamMaxInflight > 4 {
+		return errors.New("AI_STREAM_MAX_INFLIGHT must be between 1 and 4")
 	}
 	if v := c.EgressVideoBitrate; v != "" {
 		digits := strings.TrimRight(v, "kKmM")

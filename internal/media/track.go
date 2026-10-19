@@ -489,6 +489,10 @@ func processImages(
 	onProcessedFrame func(),
 ) {
 	defer close(processed)
+	if inflight := processor.AIMaxInflight(); inflight > 1 {
+		processImagesPipelined(ctx, logger, processor, decoded, processed, egress, registry, mode, onProcessedFrame, inflight)
+		return
+	}
 	var failureLog failureLogger
 	for {
 		select {
@@ -502,33 +506,124 @@ func processImages(
 			registry.IncFrameReceived(string(mode))
 			generation := processor.PrivacyGeneration()
 			output, processedByAI, err := processor.ProcessIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
-			if !processedByAI {
-				registry.IncAIInputPausedFrame(string(mode))
-				continue
-			}
-			if err != nil {
-				recordFrameFailure(ctx, logger, registry, mode, &failureLog, err)
-				continue
-			}
-			registry.IncFrameProcessed(string(mode))
-			item.data = output
-			item.stageAt = time.Now()
-			item.privacyGeneration = 0
-			if processor.PrivacyGeneration() == generation {
-				item.privacyGeneration = generation
-			}
-			for _, sink := range egress.Sinks() {
-				sink.Enqueue(item)
-			}
-			if onProcessedFrame != nil {
-				onProcessedFrame()
-			}
-			select {
-			case processed <- item:
-			case <-ctx.Done():
+			if !forwardProcessed(ctx, logger, processor, item, generation, output, processedByAI, err, processed, egress, registry, mode, onProcessedFrame, &failureLog) {
 				return
 			}
 		}
+	}
+}
+
+// begunFrame은 AI에 요청을 보낸 뒤 마무리를 기다리는 프레임이다(#495).
+type begunFrame struct {
+	item       frame
+	generation uint64
+	finish     func() ([]byte, bool, error)
+}
+
+// processImagesPipelined는 앞 프레임의 AI 응답을 기다리지 않고 다음 프레임 요청을 보낸다
+// (#495). 이 고루틴이 프레임을 받은 순서대로 요청을 보내고, 마무리 고루틴 하나가 같은
+// 순서로 응답을 받아 내보내므로 반환 인코더·송출에는 원래 순서로 간다. 요청을 보냈지만
+// 마무리하지 않은 프레임은 inflight개를 넘지 않는다.
+func processImagesPipelined(
+	ctx context.Context,
+	logger *slog.Logger,
+	processor *Processor,
+	decoded <-chan frame,
+	processed chan<- frame,
+	egress *EgressFanout,
+	registry *metrics.Registry,
+	mode config.PrivacyMode,
+	onProcessedFrame func(),
+	inflight int,
+) {
+	// slots는 요청을 보내기 전에 잡고 마무리한 뒤 놓는다. 요청을 보냈지만 마무리하지
+	// 않은 프레임이 inflight개를 넘지 않는다.
+	slots := make(chan struct{}, inflight)
+	begun := make(chan begunFrame, inflight)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		var failureLog failureLogger
+		forwarding := true
+		for frame := range begun {
+			// 보낸 요청은 끝까지 마무리해 AI 스트림에 기다리는 응답을 남기지 않는다.
+			output, processedByAI, err := frame.finish()
+			<-slots
+			if forwarding {
+				forwarding = forwardProcessed(ctx, logger, processor, frame.item, frame.generation, output, processedByAI, err, processed, egress, registry, mode, onProcessedFrame, &failureLog)
+			}
+		}
+	}()
+	defer func() {
+		close(begun)
+		<-finished
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item, ok := <-decoded:
+			if !ok {
+				return
+			}
+			registry.AddQueue(-1)
+			registry.IncFrameReceived(string(mode))
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			generation := processor.PrivacyGeneration()
+			finish := processor.BeginIfAIInputEnabled(ctx, item.data, time.Now().UnixNano(), item.width, item.height)
+			begun <- begunFrame{item: item, generation: generation, finish: finish}
+		}
+	}
+}
+
+// forwardProcessed는 처리를 마친 프레임 하나를 송출과 반환 인코더로 넘긴다. ctx가
+// 끝나 더 넘길 수 없으면 false다.
+func forwardProcessed(
+	ctx context.Context,
+	logger *slog.Logger,
+	processor *Processor,
+	item frame,
+	generation uint64,
+	output []byte,
+	processedByAI bool,
+	err error,
+	processed chan<- frame,
+	egress *EgressFanout,
+	registry *metrics.Registry,
+	mode config.PrivacyMode,
+	onProcessedFrame func(),
+	failureLog *failureLogger,
+) bool {
+	if !processedByAI {
+		registry.IncAIInputPausedFrame(string(mode))
+		return true
+	}
+	if err != nil {
+		recordFrameFailure(ctx, logger, registry, mode, failureLog, err)
+		return true
+	}
+	registry.IncFrameProcessed(string(mode))
+	item.data = output
+	item.stageAt = time.Now()
+	item.privacyGeneration = 0
+	if processor.PrivacyGeneration() == generation {
+		item.privacyGeneration = generation
+	}
+	for _, sink := range egress.Sinks() {
+		sink.Enqueue(item)
+	}
+	if onProcessedFrame != nil {
+		onProcessedFrame()
+	}
+	select {
+	case processed <- item:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

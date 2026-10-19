@@ -2123,6 +2123,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	processor.SetAnonymizationEnabled(s.anonymizationEnabled)
 	processor.SetScreenBlurEnabled(s.screenBlurEnabled)
 	processor.SetEgressVideoSize(m.cfg.EgressVideoSize)
+	processor.SetAIMaxInflight(m.cfg.AIStreamMaxInflight)
 	processor.SetMosaicConfig(s.mosaicConfig)
 	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor

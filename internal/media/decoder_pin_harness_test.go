@@ -38,7 +38,7 @@ func drainDecoderFrames(t *testing.T, transcoder *FFmpegTranscoder, units [][]by
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	go func() { _ = transcoder.DecodeStream(ctx, input, output); close(output) }()
+	go func() { _ = transcoder.DecodeStream(ctx, input, output, nil); close(output) }()
 
 	var collected []frame
 	for item := range output {

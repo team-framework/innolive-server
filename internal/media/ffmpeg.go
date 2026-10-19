@@ -115,30 +115,36 @@ func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Reg
 	}
 }
 
-func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame, output chan<- frame) error {
+// DecodeStream은 압축 프레임을 디코드한다. keyframes는 첫 키프레임을 기다리며
+// 버리는 프레임을 세고 송신자에게 키프레임을 요청한다. nil이면 조용히 버린다.
+func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame, output chan<- frame, keyframes *keyframeWait) error {
 	if t.options.VideoCodec == VideoCodecH264 {
-		return t.decodeH264Stream(ctx, input, output)
+		return t.decodeH264Stream(ctx, input, output, keyframes)
 	}
-	return t.decodeVP8Stream(ctx, input, output)
+	return t.decodeVP8Stream(ctx, input, output, keyframes)
 }
 
-func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
+func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame, keyframes *keyframeWait) error {
 	first, ok := <-input
 	if !ok {
 		return nil
 	}
 	width, height, err := vp8KeyframeDimensions(first.data)
 	for errors.Is(err, ErrKeyframeRequired) {
+		keyframes.discard()
 		select {
 		case <-ctx.Done():
+			keyframes.end(t.logger, VideoCodecVP8, false)
 			return ctx.Err()
 		case first, ok = <-input:
 			if !ok {
+				keyframes.end(t.logger, VideoCodecVP8, false)
 				return nil
 			}
 			width, height, err = vp8KeyframeDimensions(first.data)
 		}
 	}
+	keyframes.end(t.logger, VideoCodecVP8, err == nil)
 	if err != nil {
 		return err
 	}

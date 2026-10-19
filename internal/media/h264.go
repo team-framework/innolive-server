@@ -16,19 +16,22 @@ const h264AnnexBStartCode = "\x00\x00\x00\x01"
 // decodeH264Stream은 RTP에서 조립된 완전한 Annex-B H.264 액세스 유닛을 소비한다.
 // 파라미터만 들어 있는 액세스 유닛은 IDR 프레임이 올 때까지 들고 있어서,
 // FFmpeg가 항상 SPS/PPS 다음에 디코드 가능한 픽처로 시작하게 한다.
-func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame) error {
+func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame, keyframes *keyframeWait) error {
 	bootstrap := h264Bootstrap{}
 	var first frame
 	var width, height uint16
 	for {
 		item, ok := <-input
 		if !ok {
+			keyframes.end(t.logger, VideoCodecH264, false)
 			return nil
 		}
 		data, idr, w, h := bootstrap.prepare(item.data)
 		if len(data) == 0 || !idr || w == 0 || h == 0 {
+			keyframes.discard()
 			continue
 		}
+		keyframes.end(t.logger, VideoCodecH264, true)
 		first, first.data, width, height = item, data, w, h
 		break
 	}

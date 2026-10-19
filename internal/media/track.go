@@ -355,9 +355,12 @@ func runTranscodedTrack(
 	}()
 	var streamWorkers sync.WaitGroup
 	streamWorkers.Add(2)
+	// 디코더는 키프레임부터만 시작할 수 있다. 파이프라인이 GOP 중간에서 뜨면
+	// 기다리는 동안 버리는 프레임을 세고 송신자에게 키프레임을 요청한다(#493).
+	keyframes := newKeyframeWait(registry, mode, requestKeyframe)
 	go func() {
 		defer streamWorkers.Done()
-		err := transcoder.DecodeStream(pipelineContext, compressed, decoderOutput)
+		err := transcoder.DecodeStream(pipelineContext, compressed, decoderOutput, keyframes)
 		close(decoderOutput)
 		if err != nil && pipelineContext.Err() == nil {
 			registry.IncFrameFailure(string(mode))

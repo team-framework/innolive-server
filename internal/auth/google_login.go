@@ -319,15 +319,24 @@ func (s *GoogleLoginService) login(ctx context.Context, rawIDToken string, clien
 		}
 		return TokenPair{}, fmt.Errorf("verify Google ID token: %w", err)
 	}
-	user, err := s.accounts.ResolveGoogleIdentity(ctx, identity, legacy)
+	// 시연 모드(#490)에서는 v1도 처음 보는 신원으로 계정을 만들지 않는다.
+	lockdown := s.tokens.demoLockdown()
+	user, err := s.accounts.ResolveGoogleIdentity(ctx, identity, legacy && !lockdown.Enabled())
 	if err != nil {
 		if errors.Is(err, ErrAccountNotLinked) {
+			if lockdown.Enabled() {
+				return TokenPair{}, ErrDemoLockdown
+			}
 			return TokenPair{}, err
 		}
 		return TokenPair{}, fmt.Errorf("resolve Google account: %w", err)
 	}
 	if user.Status != UserStatusActive {
 		return TokenPair{}, ErrUserInactive
+	}
+	// 비밀번호 설정 안내보다 먼저 막아, 관리자가 아닌 계정이 계정 설정으로 넘어가지 않게 한다.
+	if err := lockdown.Admit(user.ID); err != nil {
+		return TokenPair{}, err
 	}
 	if !legacy && !user.HasEmailAccount {
 		return TokenPair{}, s.tokens.passwordSetupRequired(user.ID)

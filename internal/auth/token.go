@@ -192,6 +192,9 @@ type refreshRotation struct {
 	IdleExpiresAt time.Time
 	AbsoluteTTL   time.Duration
 	Client        ClientInfo
+	// Admit은 회전을 진행할 사용자인지 본다. 오류면 기존 token을 그대로 두고
+	// 그 오류를 돌려준다 — 시연 모드(#490)가 끝나면 같은 token으로 다시 쓸 수 있다.
+	Admit func(uuid.UUID) error
 }
 
 type refreshStore interface {
@@ -201,9 +204,10 @@ type refreshStore interface {
 }
 
 type TokenService struct {
-	store refreshStore
-	cfg   TokenConfig
-	now   func() time.Time
+	store    refreshStore
+	cfg      TokenConfig
+	now      func() time.Time
+	lockdown *DemoLockdown
 }
 
 func NewTokenService(db *gorm.DB, cfg TokenConfig) *TokenService {
@@ -214,7 +218,24 @@ func newTokenService(store refreshStore, cfg TokenConfig) *TokenService {
 	return &TokenService{store: store, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}
 }
 
+// SetDemoLockdown은 시연 모드(#490)를 켠다. 토큰 발급·회전·access token 인증이
+// 모두 이 서비스를 지나므로 여기 한 곳에 건다. 요청을 받기 전 조립 단계에서 부른다.
+func (s *TokenService) SetDemoLockdown(lockdown *DemoLockdown) {
+	s.lockdown = lockdown
+}
+
+// demoLockdown은 이 서비스에 걸린 시연 모드다. 꺼져 있으면 nil이다.
+func (s *TokenService) demoLockdown() *DemoLockdown {
+	if s == nil {
+		return nil
+	}
+	return s.lockdown
+}
+
 func (s *TokenService) IssuePair(ctx context.Context, userID uuid.UUID, client ClientInfo) (TokenPair, error) {
+	if err := s.lockdown.Admit(userID); err != nil {
+		return TokenPair{}, err
+	}
 	now := s.now().UTC()
 	sessionID := uuid.New()
 	familyID := uuid.New()
@@ -263,6 +284,7 @@ func (s *TokenService) Rotate(ctx context.Context, rawRefresh string, client Cli
 		IdleExpiresAt: now.Add(s.cfg.RefreshTTL),
 		AbsoluteTTL:   s.cfg.RefreshAbsoluteTTL,
 		Client:        client,
+		Admit:         s.lockdown.Admit,
 	})
 	if err != nil {
 		return TokenPair{}, err

@@ -97,15 +97,17 @@ func mountAuthHTTP(next http.Handler, service *TokenService, google *GoogleLogin
 		mux.Handle("/auth/v2/apple", h.middleware(http.HandlerFunc(h.handleAppleLoginV2)))
 	}
 	if h.email != nil {
-		mux.Handle("/auth/sign-up", h.middleware(http.HandlerFunc(h.handleEmailSignup)))
-		mux.Handle("/auth/verify-email", h.middleware(http.HandlerFunc(h.handleEmailSignupVerification)))
-		mux.Handle("/auth/native/sign-up", h.middleware(http.HandlerFunc(h.handleNativeEmailSignup)))
-		mux.Handle("/auth/v2/native/sign-up", h.middleware(http.HandlerFunc(h.handleNativeEmailSignupV2)))
-		mux.Handle("/auth/native/verify-email", h.middleware(http.HandlerFunc(h.handleNativeEmailSignupVerification)))
+		// 로그인을 뺀 이메일 경로는 계정을 만들거나 바꾼다. 시연 모드(#490)는 통째로 닫는다.
+		closed := func(handler http.HandlerFunc) http.Handler { return h.middleware(h.demoLockdownClosed(handler)) }
+		mux.Handle("/auth/sign-up", closed(h.handleEmailSignup))
+		mux.Handle("/auth/verify-email", closed(h.handleEmailSignupVerification))
+		mux.Handle("/auth/native/sign-up", closed(h.handleNativeEmailSignup))
+		mux.Handle("/auth/v2/native/sign-up", closed(h.handleNativeEmailSignupV2))
+		mux.Handle("/auth/native/verify-email", closed(h.handleNativeEmailSignupVerification))
 		mux.Handle("/auth/sign-in", h.middleware(http.HandlerFunc(h.handleEmailLogin)))
-		mux.Handle("/auth/native/account-setup", h.middleware(http.HandlerFunc(h.handleNativeAccountSetup)))
-		mux.Handle("/auth/password/reset", h.middleware(http.HandlerFunc(h.handlePasswordReset)))
-		mux.Handle("/auth/password/reset/verify", h.middleware(http.HandlerFunc(h.handlePasswordResetVerify)))
+		mux.Handle("/auth/native/account-setup", closed(h.handleNativeAccountSetup))
+		mux.Handle("/auth/password/reset", closed(h.handlePasswordReset))
+		mux.Handle("/auth/password/reset/verify", closed(h.handlePasswordResetVerify))
 	}
 	if h.withdrawal != nil {
 		mux.Handle("DELETE /auth/me", h.middleware(http.HandlerFunc(h.handleWithdrawal)))
@@ -147,6 +149,8 @@ func (h *tokenHTTPHandler) handleRefresh(w http.ResponseWriter, r *http.Request)
 	pair, err := h.service.Rotate(r.Context(), raw, requestClientInfo(r))
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrDemoLockdown):
+			h.writeDemoLockdown(w, r)
 		case errors.Is(err, ErrRefreshTokenReused):
 			h.logger.Warn("refresh token reuse detected", "request_id", tokenRequestID(r))
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid.")

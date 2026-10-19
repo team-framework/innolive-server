@@ -104,6 +104,12 @@ func (s *gormRefreshStore) Rotate(
 			}
 			return err
 		}
+		if next.Admit != nil {
+			if err := next.Admit(current.UserID); err != nil {
+				semanticErr = err
+				return nil
+			}
+		}
 
 		var first refreshSessionRow
 		if err := tx.Where("family_id = ?", current.FamilyID).

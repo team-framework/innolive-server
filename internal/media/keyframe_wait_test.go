@@ -1,8 +1,13 @@
 package media
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,6 +65,7 @@ func TestKeyframeWaitRequestsOnFirstDiscardThenThrottles(t *testing.T) {
 func TestKeyframeWaitWithoutRequesterStillCounts(t *testing.T) {
 	var missing *keyframeWait
 	missing.discard()
+	missing.end(testLogger(), VideoCodecVP8, true)
 
 	registry := metrics.New()
 	keyframes := newKeyframeWait(registry, config.PrivacyModeReal, nil)
@@ -79,6 +85,40 @@ func sinkDecoder(transcoder *FFmpegTranscoder) {
 	}
 }
 
+// capturedLog는 JSON 로그를 모아 두었다가 메시지로 골라 읽게 한다.
+type capturedLog struct {
+	mu     sync.Mutex
+	output bytes.Buffer
+}
+
+func (c *capturedLog) Write(data []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.output.Write(data)
+}
+
+func (c *capturedLog) logger() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(c, nil))
+}
+
+func (c *capturedLog) records(t *testing.T, message string) []map[string]any {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var records []map[string]any
+	scanner := bufio.NewScanner(bytes.NewReader(c.output.Bytes()))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatalf("parse log line %q: %v", scanner.Text(), err)
+		}
+		if record["msg"] == message {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
 // annexB는 NAL 유닛들을 4바이트 시작 코드로 잇는다.
 func annexB(nalus ...[]byte) []byte {
 	var data []byte
@@ -95,60 +135,67 @@ var (
 	testH264PPS = []byte{0x68, 0xce, 0x0f, 0xc8}
 )
 
+// keyframeWaitCodecs는 코덱별 인터프레임과 디코더를 띄울 수 있는 키프레임이다.
+var keyframeWaitCodecs = []struct {
+	name     string
+	codec    VideoCodec
+	inter    []byte
+	keyframe []byte
+}{
+	{
+		name:     "VP8",
+		codec:    VideoCodecVP8,
+		inter:    []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		keyframe: []byte{0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x00, 0x30, 0x00},
+	},
+	{
+		name:     "H.264",
+		codec:    VideoCodecH264,
+		inter:    annexB([]byte{0x41, 0x9a, 0x00, 0x10}),
+		keyframe: annexB(testH264SPS, testH264PPS, []byte{0x65, 0x88, 0x84, 0x00}),
+	},
+}
+
+// runDecodeStream은 input을 모두 넣고 닫은 뒤 가짜 디코더로 DecodeStream을 끝까지
+// 돌린다. 가짜 디코더는 출력이 없으므로 키프레임이 있으면 읽기 오류로 끝난다.
+// 여기서 보는 것은 디코더를 띄우기 전까지의 폐기·요청·로그뿐이다.
+func runDecodeStream(t *testing.T, transcoder *FFmpegTranscoder, keyframes *keyframeWait, frames ...[]byte) chan frame {
+	t.Helper()
+	sinkDecoder(transcoder)
+	input := make(chan frame, len(frames))
+	for index, data := range frames {
+		input <- frame{data: data, timestamp: uint32(index * 3000)}
+	}
+	close(input)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = transcoder.DecodeStream(ctx, input, make(chan frame, len(frames)), keyframes)
+	if ctx.Err() != nil {
+		t.Fatal("DecodeStream() did not finish")
+	}
+	return input
+}
+
 // TestDecodeStreamCountsAndRequestsKeyframeUntilFirstKeyframe는 #493의 수용
 // 기준이다. 파이프라인이 GOP 중간에서 뜨면(#283 재시작) 디코더는 첫 키프레임까지
 // 프레임을 버린다. 그 폐기는 카운터에 남고, 기다리는 동안 송신자에게 키프레임을
-// 요청해야 한다. 첫 키프레임 뒤의 인터프레임은 디코더로 가며 세지도 요청하지도
-// 않는다.
+// 요청하며, 대기가 끝나면 폐기 수·요청 수·대기 시간을 한 줄로 남긴다. 첫 키프레임
+// 뒤의 인터프레임은 디코더로 가며 세지도 요청하지도 않는다.
 func TestDecodeStreamCountsAndRequestsKeyframeUntilFirstKeyframe(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		codec    VideoCodec
-		inter    []byte
-		keyframe []byte
-	}{
-		{
-			name:     "VP8",
-			codec:    VideoCodecVP8,
-			inter:    []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			keyframe: []byte{0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x00, 0x30, 0x00},
-		},
-		{
-			name:     "H.264",
-			codec:    VideoCodecH264,
-			inter:    annexB([]byte{0x41, 0x9a, 0x00, 0x10}),
-			keyframe: annexB(testH264SPS, testH264PPS, []byte{0x65, 0x88, 0x84, 0x00}),
-		},
-	} {
+	for _, test := range keyframeWaitCodecs {
 		t.Run(test.name, func(t *testing.T) {
 			registry := metrics.New()
-			transcoder := NewFFmpegTranscoder("ffmpeg", testLogger(), registry, TranscoderOptions{VideoCodec: test.codec})
-			sinkDecoder(transcoder)
+			var logs capturedLog
+			transcoder := NewFFmpegTranscoder("ffmpeg", logs.logger(), registry, TranscoderOptions{VideoCodec: test.codec})
 			var requests int
 			keyframes := newKeyframeWait(registry, config.PrivacyModeReal, func() { requests++ })
 			// 프레임 하나에 200ms씩 기다린다고 본다. 폐기는 0·200·400·600ms에 일어나므로
-			// 요청은 0ms와 600ms 두 번이다.
+			// 요청은 0ms와 600ms 두 번이고, 키프레임은 800ms에 온다.
 			keyframes.now = steppedClock(200 * time.Millisecond)
 
-			const waiting, after = 4, 3
-			input := make(chan frame, waiting+1+after)
-			for index := 0; index < waiting; index++ {
-				input <- frame{data: test.inter, timestamp: uint32(index * 3000)}
-			}
-			input <- frame{data: test.keyframe, timestamp: uint32(waiting * 3000)}
-			for index := 0; index < after; index++ {
-				input <- frame{data: test.inter, timestamp: uint32((waiting + 1 + index) * 3000)}
-			}
-			close(input)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// 가짜 디코더는 출력이 없으므로 읽기 오류로 끝난다. 여기서 보는 것은
-			// 디코더를 띄우기 전까지의 폐기와 요청뿐이다.
-			_ = transcoder.DecodeStream(ctx, input, make(chan frame, waiting+1+after), keyframes)
-			if ctx.Err() != nil {
-				t.Fatal("DecodeStream() did not finish")
-			}
+			const waiting = 4
+			frames := [][]byte{test.inter, test.inter, test.inter, test.inter, test.keyframe, test.inter, test.inter, test.inter}
+			input := runDecodeStream(t, transcoder, keyframes, frames...)
 
 			if remaining := len(input); remaining != 0 {
 				t.Fatalf("%d frames after the keyframe were never read", remaining)
@@ -159,36 +206,71 @@ func TestDecodeStreamCountsAndRequestsKeyframeUntilFirstKeyframe(t *testing.T) {
 			if requests != 2 {
 				t.Fatalf("keyframe requests = %d, want 2 (first discard, then after 500ms)", requests)
 			}
+			records := logs.records(t, "decoder keyframe wait ended")
+			if len(records) != 1 {
+				t.Fatalf("keyframe wait logs = %d, want 1", len(records))
+			}
+			for key, want := range map[string]any{
+				"codec":             string(test.codec),
+				"keyframe_received": true,
+				"discarded_frames":  float64(waiting),
+				"keyframe_requests": float64(2),
+				"waited_ms":         float64(800),
+			} {
+				if got := records[0][key]; got != want {
+					t.Errorf("log %s = %v, want %v", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDecodeStreamLogsKeyframeWaitEndingWithoutKeyframe: 키프레임이 오기 전에 입력이
+// 끝나면(세션 종료·재시작) 그 대기도 keyframe_received=false로 남는다. 로그만으로
+// 끝내 키프레임을 받지 못한 대기를 가려낼 수 있어야 한다.
+func TestDecodeStreamLogsKeyframeWaitEndingWithoutKeyframe(t *testing.T) {
+	for _, test := range keyframeWaitCodecs {
+		t.Run(test.name, func(t *testing.T) {
+			registry := metrics.New()
+			var logs capturedLog
+			transcoder := NewFFmpegTranscoder("ffmpeg", logs.logger(), registry, TranscoderOptions{VideoCodec: test.codec})
+			keyframes := newKeyframeWait(registry, config.PrivacyModeReal, func() {})
+
+			runDecodeStream(t, transcoder, keyframes, test.inter, test.inter)
+
+			records := logs.records(t, "decoder keyframe wait ended")
+			if len(records) != 1 {
+				t.Fatalf("keyframe wait logs = %d, want 1", len(records))
+			}
+			if records[0]["keyframe_received"] != false || records[0]["discarded_frames"] != float64(2) {
+				t.Fatalf("keyframe wait log = %v, want keyframe_received=false discarded_frames=2", records[0])
+			}
 		})
 	}
 }
 
 // TestDecodeStreamStartingOnKeyframeRequestsNothing: 키프레임으로 시작하는 평소
-// 경로는 아무것도 버리지 않고 송신자에게 요청도 보내지 않는다.
+// 경로는 아무것도 버리지 않고 송신자에게 요청도, 대기 로그도 남기지 않는다.
 func TestDecodeStreamStartingOnKeyframeRequestsNothing(t *testing.T) {
-	registry := metrics.New()
-	transcoder := NewFFmpegTranscoder("ffmpeg", testLogger(), registry, TranscoderOptions{})
-	sinkDecoder(transcoder)
-	var requests int
-	keyframes := newKeyframeWait(registry, config.PrivacyModeReal, func() { requests++ })
+	for _, test := range keyframeWaitCodecs {
+		t.Run(test.name, func(t *testing.T) {
+			registry := metrics.New()
+			var logs capturedLog
+			transcoder := NewFFmpegTranscoder("ffmpeg", logs.logger(), registry, TranscoderOptions{VideoCodec: test.codec})
+			var requests int
+			keyframes := newKeyframeWait(registry, config.PrivacyModeReal, func() { requests++ })
 
-	input := make(chan frame, 3)
-	input <- frame{data: []byte{0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x00, 0x30, 0x00}}
-	input <- frame{data: []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}
-	input <- frame{data: []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}
-	close(input)
+			runDecodeStream(t, transcoder, keyframes, test.keyframe, test.inter, test.inter)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = transcoder.DecodeStream(ctx, input, make(chan frame, 3), keyframes)
-	if ctx.Err() != nil {
-		t.Fatal("DecodeStream() did not finish")
-	}
-
-	if got := counterValue(t, registry, keyframeWaitMetric); got != 0 {
-		t.Fatalf("keyframe wait discards = %v, want 0", got)
-	}
-	if requests != 0 {
-		t.Fatalf("keyframe requests = %d, want 0", requests)
+			if got := counterValue(t, registry, keyframeWaitMetric); got != 0 {
+				t.Fatalf("keyframe wait discards = %v, want 0", got)
+			}
+			if requests != 0 {
+				t.Fatalf("keyframe requests = %d, want 0", requests)
+			}
+			if records := logs.records(t, "decoder keyframe wait ended"); len(records) != 0 {
+				t.Fatalf("keyframe wait logs = %d, want 0", len(records))
+			}
+		})
 	}
 }

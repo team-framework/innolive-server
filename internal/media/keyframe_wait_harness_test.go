@@ -23,8 +23,8 @@ import (
 
 // TestDecodeStreamMidGOPCountsDiscardsAndDecodesFromKeyframe는 #283 재시작처럼
 // 파이프라인이 GOP 중간에서 뜬 경우를 실 디코더로 재현한다. 첫 키프레임 앞의
-// 인터프레임은 모두 폐기 카운터에 남고, 송신자에게 키프레임을 한 번 요청하며,
-// 키프레임부터는 모든 프레임이 디코드된다.
+// 인터프레임은 모두 폐기 카운터와 대기 종료 로그에 남고, 송신자에게 키프레임을
+// 한 번 요청하며, 키프레임부터는 모든 프레임이 디코드된다.
 func TestDecodeStreamMidGOPCountsDiscardsAndDecodesFromKeyframe(t *testing.T) {
 	requireTool(t, "ffmpeg")
 
@@ -69,7 +69,8 @@ func TestDecodeStreamMidGOPCountsDiscardsAndDecodesFromKeyframe(t *testing.T) {
 			}
 
 			registry := metrics.New()
-			transcoder := NewFFmpegTranscoder("ffmpeg", testLogger(), registry,
+			var logs capturedLog
+			transcoder := NewFFmpegTranscoder("ffmpeg", logs.logger(), registry,
 				TranscoderOptions{VideoCodec: test.codec, WireFormat: config.WireFormatJPEG})
 			var requests int
 			keyframes := newKeyframeWait(registry, config.PrivacyModeReal, func() { requests++ })
@@ -104,6 +105,11 @@ func TestDecodeStreamMidGOPCountsDiscardsAndDecodesFromKeyframe(t *testing.T) {
 			}
 			if want := len(frames) - waiting; decoded != want {
 				t.Fatalf("decoded frames = %d, want %d from the first keyframe on", decoded, want)
+			}
+			records := logs.records(t, "decoder keyframe wait ended")
+			if len(records) != 1 || records[0]["keyframe_received"] != true ||
+				records[0]["discarded_frames"] != float64(waiting) || records[0]["keyframe_requests"] != float64(1) {
+				t.Fatalf("keyframe wait logs = %v, want one with keyframe_received=true discarded_frames=%d keyframe_requests=1", records, waiting)
 			}
 			t.Logf("fed %d frames, discarded %d before the keyframe, decoded %d", len(frames), waiting, decoded)
 		})

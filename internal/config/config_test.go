@@ -311,16 +311,17 @@ func TestLoadDatabaseConfig(t *testing.T) {
 
 func validConfig() Config {
 	return Config{
-		HTTPAddr:           ":8000",
-		PrivacyMode:        PrivacyModeReal,
-		PrivacyFixedDelay:  20 * time.Millisecond,
-		AIAddress:          "localhost:50051",
-		FFmpegPath:         "ffmpeg",
-		AITimeout:          time.Second,
-		AIPreflightTimeout: time.Second,
-		UDPPortMin:         50000,
-		UDPPortMax:         60000,
-		FrameQueueSize:     2,
+		HTTPAddr:            ":8000",
+		PrivacyMode:         PrivacyModeReal,
+		PrivacyFixedDelay:   20 * time.Millisecond,
+		AIAddress:           "localhost:50051",
+		FFmpegPath:          "ffmpeg",
+		AITimeout:           time.Second,
+		AIPreflightTimeout:  time.Second,
+		UDPPortMin:          50000,
+		UDPPortMax:          60000,
+		FrameQueueSize:      2,
+		AIStreamMaxInflight: 1,
 
 		DatabaseURL:             "postgres://test:test@localhost:5432/test?sslmode=disable",
 		DatabaseMaxOpenConns:    10,
@@ -329,6 +330,23 @@ func validConfig() Config {
 		DatabaseConnMaxIdleTime: 5 * time.Minute,
 
 		DatabaseMigrationMode: DatabaseMigrationModeAuto,
+	}
+}
+
+func TestValidateAIStreamMaxInflight(t *testing.T) {
+	for _, value := range []int{1, 2, 4} {
+		cfg := validConfig()
+		cfg.AIStreamMaxInflight = value
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("AI_STREAM_MAX_INFLIGHT=%d rejected: %v", value, err)
+		}
+	}
+	for _, value := range []int{0, 5} {
+		cfg := validConfig()
+		cfg.AIStreamMaxInflight = value
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("AI_STREAM_MAX_INFLIGHT=%d must be rejected", value)
+		}
 	}
 }
 

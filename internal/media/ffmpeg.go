@@ -134,14 +134,17 @@ func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan fra
 		keyframes.discard()
 		select {
 		case <-ctx.Done():
+			keyframes.end(t.logger, VideoCodecVP8, false)
 			return ctx.Err()
 		case first, ok = <-input:
 			if !ok {
+				keyframes.end(t.logger, VideoCodecVP8, false)
 				return nil
 			}
 			width, height, err = vp8KeyframeDimensions(first.data)
 		}
 	}
+	keyframes.end(t.logger, VideoCodecVP8, err == nil)
 	if err != nil {
 		return err
 	}

@@ -23,6 +23,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 	for {
 		item, ok := <-input
 		if !ok {
+			keyframes.end(t.logger, VideoCodecH264, false)
 			return nil
 		}
 		data, idr, w, h := bootstrap.prepare(item.data)
@@ -30,6 +31,7 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 			keyframes.discard()
 			continue
 		}
+		keyframes.end(t.logger, VideoCodecH264, true)
 		first, first.data, width, height = item, data, w, h
 		break
 	}

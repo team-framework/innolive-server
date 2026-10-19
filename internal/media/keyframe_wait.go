@@ -1,6 +1,7 @@
 package media
 
 import (
+	"log/slog"
 	"time"
 
 	"inno-live-server/internal/config"
@@ -22,6 +23,10 @@ type keyframeWait struct {
 	minInterval   time.Duration
 	now           func() time.Time
 	lastRequestAt time.Time
+	// 아래는 대기 종료 로그용이다. 디코드 고루틴 하나만 쓴다.
+	discarded      int
+	requests       int
+	firstDiscardAt time.Time
 }
 
 func newKeyframeWait(registry *metrics.Registry, mode config.PrivacyMode, request func()) *keyframeWait {
@@ -44,13 +49,34 @@ func (w *keyframeWait) discard() {
 	if w.registry != nil {
 		w.registry.IncKeyframeWaitDiscarded(w.mode)
 	}
+	now := w.now()
+	if w.discarded == 0 {
+		w.firstDiscardAt = now
+	}
+	w.discarded++
 	if w.request == nil {
 		return
 	}
-	now := w.now()
 	if !w.lastRequestAt.IsZero() && now.Sub(w.lastRequestAt) < w.minInterval {
 		return
 	}
 	w.lastRequestAt = now
+	w.requests++
 	w.request()
+}
+
+// end는 대기가 끝나면 한 번 부른다. 버린 프레임이 있었으면 폐기 수·요청 수·대기
+// 시간을 남긴다. 긴 대기는 드물어서(재시작 3주 65회 중 1초 초과 3회) 카운터
+// 합계만으로는 재요청이 대기를 줄였는지 가를 수 없으므로 건마다 남긴다.
+// keyframeReceived가 false면 키프레임 없이 입력이 끝났거나 취소된 것이다.
+func (w *keyframeWait) end(logger *slog.Logger, codec VideoCodec, keyframeReceived bool) {
+	if w == nil || w.discarded == 0 {
+		return
+	}
+	logger.Info("decoder keyframe wait ended",
+		"codec", codec,
+		"keyframe_received", keyframeReceived,
+		"discarded_frames", w.discarded,
+		"keyframe_requests", w.requests,
+		"waited_ms", w.now().Sub(w.firstDiscardAt).Milliseconds())
 }

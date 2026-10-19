@@ -50,3 +50,37 @@ func TestFFmpegProcessCloseDrainsUnreadOutput(t *testing.T) {
 		t.Fatalf("process state = %v, want a clean exit instead of a kill", state)
 	}
 }
+
+// TestFFmpegProcessCloseLogsSIGKILL는 grace를 넘겨 kill된 FFmpeg가 역할과 함께
+// 경고 로그를 남기고, 스스로 끝난 FFmpeg는 남기지 않는지 본다.
+func TestFFmpegProcessCloseLogsSIGKILL(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		script string
+		want   int
+	}{
+		{name: "killed", script: "kill -9 $$", want: 1},
+		{name: "clean exit", script: "cat > /dev/null", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs capturedLog
+			transcoder := NewFFmpegTranscoder("ffmpeg", logs.logger(), metrics.New(), TranscoderOptions{})
+			transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sh", "-c", test.script)
+			}
+			process, err := transcoder.startFFmpeg(context.Background(), "decoder", nil, nil)
+			if err != nil {
+				t.Fatalf("startFFmpeg() error = %v", err)
+			}
+			process.close()
+
+			records := logs.records(t, "FFmpeg did not exit within the shutdown grace and was killed")
+			if len(records) != test.want {
+				t.Fatalf("kill logs = %v, want %d", records, test.want)
+			}
+			if test.want > 0 && records[0]["ffmpeg_role"] != "decoder" {
+				t.Fatalf("kill log role = %v, want decoder", records[0]["ffmpeg_role"])
+			}
+		})
+	}
+}

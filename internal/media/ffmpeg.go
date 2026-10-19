@@ -97,6 +97,7 @@ type ffmpegProcess struct {
 	wait    sync.Once
 	waitErr error
 	metrics *metrics.Registry
+	logger  *slog.Logger
 }
 
 func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions) *FFmpegTranscoder {
@@ -564,12 +565,28 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 		stdin:   stdin,
 		stdout:  bufio.NewReaderSize(stdout, 1<<20),
 		metrics: t.metrics,
+		logger:  logger,
 	}, nil
 }
 
 func (p *ffmpegProcess) close() {
 	p.wait.Do(func() {
 		_ = p.stdin.Close()
+		// 호출자는 출력을 다 읽지 않고 떠날 수 있다(파이프라인 취소). 남은 출력을
+		// 버려 FFmpeg가 마지막 write를 마치고 스스로 끝나게 한다. 디코드 프레임 한
+		// 장(raw 720p 1.38MB)은 파이프 버퍼(64KB)보다 커서, 아무도 읽지 않으면
+		// FFmpeg가 write에서 멈춘 채 SIGINT와 stdin EOF로도 끝나지 않고 grace를 다
+		// 쓴 뒤 kill된다(#497). Wait가 읽기 끝을 닫으므로 비우기는 close가 돌아오기
+		// 전에 끝난다.
+		if p.stdout != nil {
+			drained := make(chan struct{})
+			go func() {
+				defer close(drained)
+				_, _ = io.Copy(io.Discard, p.stdout)
+			}()
+			defer func() { <-drained }()
+		}
+		started := time.Now()
 		done := make(chan error, 1)
 		go func() { done <- p.cmd.Wait() }()
 		timer := time.NewTimer(ffmpegShutdownGrace)
@@ -582,6 +599,13 @@ func (p *ffmpegProcess) close() {
 			}
 			p.waitErr = <-done
 		}
+		// grace를 넘겨 kill된 종료를 남긴다. kill은 이 타이머나 컨텍스트 취소 뒤의
+		// WaitDelay 어느 쪽에서도 올 수 있다. #497의 2초는 로그 없이 재시작 간격으로만
+		// 드러났다.
+		if p.logger != nil && killedBySIGKILL(p.cmd.ProcessState) {
+			p.logger.Warn("FFmpeg did not exit within the shutdown grace and was killed",
+				"waited_ms", time.Since(started).Milliseconds())
+		}
 		if p.metrics != nil && p.cmd.Process != nil {
 			cpuSeconds := 0.0
 			if p.cmd.ProcessState != nil {
@@ -590,6 +614,14 @@ func (p *ffmpegProcess) close() {
 			p.metrics.CompleteChildProcess(p.cmd.Process.Pid, cpuSeconds)
 		}
 	})
+}
+
+func killedBySIGKILL(state *os.ProcessState) bool {
+	if state == nil {
+		return false
+	}
+	status, ok := state.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
 
 func vp8KeyframeDimensions(frame []byte) (uint16, uint16, error) {

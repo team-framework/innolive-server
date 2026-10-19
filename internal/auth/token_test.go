@@ -79,6 +79,11 @@ func (s *memoryRefreshStore) Rotate(_ context.Context, hash []byte, now time.Tim
 		s.revokeFamily(current.FamilyID, now, revokeReasonUserInactive)
 		return refreshSessionRecord{}, ErrUserInactive
 	}
+	if next.Admit != nil {
+		if err := next.Admit(current.UserID); err != nil {
+			return refreshSessionRecord{}, err
+		}
+	}
 
 	familyStartedAt := current.CreatedAt
 	for _, candidate := range s.records {

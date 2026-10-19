@@ -344,6 +344,19 @@ func TestValidateAdminUserIDs(t *testing.T) {
 	}
 }
 
+// 관리자 없이 시연 모드를 켜면 아무도 로그인하지 못하므로 기동을 거부한다(#490).
+func TestValidateDemoLockdownRequiresAdmins(t *testing.T) {
+	cfg := validConfig()
+	cfg.DemoLockdown = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("DEMO_LOCKDOWN without ADMIN_USER_IDS must be rejected")
+	}
+	cfg.AdminUserIDs = []string{"6f1c1a3e-2d3b-4a8e-9a37-0c2d6f5e8b11"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("DEMO_LOCKDOWN with an admin rejected: %v", err)
+	}
+}
+
 func TestEgressTierReserves(t *testing.T) {
 	cfg := validConfig()
 	cfg.MaxEgressSlots = 13

@@ -3,6 +3,8 @@ package media
 import (
 	"context"
 	"os/exec"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -48,6 +50,50 @@ func TestFFmpegProcessCloseDrainsUnreadOutput(t *testing.T) {
 	}
 	if state := process.cmd.ProcessState; state == nil || !state.Success() {
 		t.Fatalf("process state = %v, want a clean exit instead of a kill", state)
+	}
+}
+
+// TestFFmpegProcessCloseReturnsWhileGrandchildHoldsStdout는 close의 stdout 비우기가
+// 프로세스 회수 뒤에 끝나는지 본다. 손자 프로세스가 stdout 쓰기 끝을 쥐고 있으면
+// 자식이 끝나도 EOF가 오지 않으므로, Wait가 읽기 끝을 닫아 비우기를 풀어야 한다.
+// 그렇지 않으면 close가 손자가 끝날 때까지 멈춘다.
+func TestFFmpegProcessCloseReturnsWhileGrandchildHoldsStdout(t *testing.T) {
+	transcoder := NewFFmpegTranscoder("ffmpeg", testLogger(), metrics.New(), TranscoderOptions{})
+	transcoder.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30 & echo $! >&2; exit 0")
+	}
+	grandchild := make(chan int, 1)
+	process, err := transcoder.startFFmpeg(context.Background(), "decoder", func(line string) {
+		if pid, err := strconv.Atoi(line); err == nil {
+			grandchild <- pid
+		}
+	}, nil)
+	if err != nil {
+		t.Fatalf("startFFmpeg() error = %v", err)
+	}
+	select {
+	case pid := <-grandchild:
+		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake decoder did not start its grandchild")
+	}
+
+	returned := make(chan time.Duration, 1)
+	go func() {
+		started := time.Now()
+		process.close()
+		returned <- time.Since(started)
+	}()
+	select {
+	case elapsed := <-returned:
+		if elapsed >= ffmpegShutdownGrace/2 {
+			t.Fatalf("close() took %v, want well under the %v shutdown grace", elapsed, ffmpegShutdownGrace)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("close() did not return while a grandchild held stdout open")
+	}
+	if state := process.cmd.ProcessState; state == nil || !state.Success() {
+		t.Fatalf("process state = %v, want the child's clean exit", state)
 	}
 }
 

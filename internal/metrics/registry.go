@@ -63,6 +63,7 @@ type Registry struct {
 	framesReceived      map[string]uint64
 	framesProcessed     map[string]uint64
 	framesDropped       map[string]uint64
+	keyframeWaitDropped map[string]uint64
 	frameFailures       map[string]uint64
 	rtpPacketsReceived  map[string]uint64
 	rtpSequenceGaps     map[string]uint64
@@ -94,6 +95,7 @@ func New() *Registry {
 		framesReceived:      make(map[string]uint64),
 		framesProcessed:     make(map[string]uint64),
 		framesDropped:       make(map[string]uint64),
+		keyframeWaitDropped: make(map[string]uint64),
 		frameFailures:       make(map[string]uint64),
 		rtpPacketsReceived:  make(map[string]uint64),
 		rtpSequenceGaps:     make(map[string]uint64),
@@ -242,6 +244,12 @@ func (r *Registry) IncFrameProcessed(mode string) {
 
 func (r *Registry) IncFrameDropped(mode string) {
 	r.increment(r.framesDropped, mode)
+}
+
+// IncKeyframeWaitDiscarded는 디코더가 첫 키프레임을 기다리며 버린 조립 프레임
+// 하나를 센다(#493). 파이프라인이 GOP 중간에서 시작·재시작하면 생긴다.
+func (r *Registry) IncKeyframeWaitDiscarded(mode string) {
+	r.increment(r.keyframeWaitDropped, mode)
 }
 
 func (r *Registry) IncFrameFailure(mode string) {
@@ -398,6 +406,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	writeLabeledCounters(w, "innolive_frame_received_total", "Number of complete video frames received for processing.", r.framesReceived)
 	writeLabeledCounters(w, "innolive_frame_processed_total", "Number of successfully processed video frames.", r.framesProcessed)
 	writeLabeledCounters(w, "innolive_frame_dropped_total", "Number of stale decoded frames discarded by the processing queue.", r.framesDropped)
+	writeLabeledCounters(w, "innolive_frame_keyframe_wait_discarded_total", "Number of assembled video frames discarded while the decoder waited for its first keyframe.", r.keyframeWaitDropped)
 	writeLabeledCounters(w, "innolive_frame_failures_total", "Number of frame processing failures.", r.frameFailures)
 	writeLabeledCounters(w, "innolive_rtp_packets_received_total", "Number of RTP video packets read by the server.", r.rtpPacketsReceived)
 	writeLabeledCounters(w, "innolive_rtp_sequence_gaps_total", "Number of RTP sequence numbers initially observed as missing.", r.rtpSequenceGaps)

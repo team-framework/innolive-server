@@ -12,6 +12,7 @@ func TestWritePrometheusIncludesLoadTestSeries(t *testing.T) {
 	r.SetActiveSessions(2)
 	r.IncFrameReceived("real")
 	r.IncFrameProcessed("real")
+	r.IncKeyframeWaitDiscarded("real")
 	r.ObserveProcessing("real", 12*time.Millisecond)
 	r.ObserveAI("real", 8*time.Millisecond)
 	r.ObserveStage("grpc", 8*time.Millisecond)
@@ -36,6 +37,7 @@ func TestWritePrometheusIncludesLoadTestSeries(t *testing.T) {
 		"# TYPE innolive_process_tree_resident_memory_bytes gauge",
 		"innolive_active_sessions 2",
 		`innolive_frame_received_total{mode="real"} 1`,
+		`innolive_frame_keyframe_wait_discarded_total{mode="real"} 1`,
 		"innolive_frame_processing_duration_seconds_bucket",
 		"innolive_ai_duration_seconds_bucket",
 		`innolive_ai_stage_duration_seconds_bucket{stage="grpc"`,

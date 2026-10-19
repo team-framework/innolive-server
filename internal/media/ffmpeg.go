@@ -97,6 +97,7 @@ type ffmpegProcess struct {
 	wait    sync.Once
 	waitErr error
 	metrics *metrics.Registry
+	logger  *slog.Logger
 }
 
 func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions) *FFmpegTranscoder {
@@ -564,6 +565,7 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 		stdin:   stdin,
 		stdout:  bufio.NewReaderSize(stdout, 1<<20),
 		metrics: t.metrics,
+		logger:  logger,
 	}, nil
 }
 
@@ -584,6 +586,7 @@ func (p *ffmpegProcess) close() {
 			}()
 			defer func() { <-drained }()
 		}
+		started := time.Now()
 		done := make(chan error, 1)
 		go func() { done <- p.cmd.Wait() }()
 		timer := time.NewTimer(ffmpegShutdownGrace)
@@ -596,6 +599,13 @@ func (p *ffmpegProcess) close() {
 			}
 			p.waitErr = <-done
 		}
+		// grace를 넘겨 kill된 종료를 남긴다. kill은 이 타이머나 컨텍스트 취소 뒤의
+		// WaitDelay 어느 쪽에서도 올 수 있다. #497의 2초는 로그 없이 재시작 간격으로만
+		// 드러났다.
+		if p.logger != nil && killedBySIGKILL(p.cmd.ProcessState) {
+			p.logger.Warn("FFmpeg did not exit within the shutdown grace and was killed",
+				"waited_ms", time.Since(started).Milliseconds())
+		}
 		if p.metrics != nil && p.cmd.Process != nil {
 			cpuSeconds := 0.0
 			if p.cmd.ProcessState != nil {
@@ -604,6 +614,14 @@ func (p *ffmpegProcess) close() {
 			p.metrics.CompleteChildProcess(p.cmd.Process.Pid, cpuSeconds)
 		}
 	})
+}
+
+func killedBySIGKILL(state *os.ProcessState) bool {
+	if state == nil {
+		return false
+	}
+	status, ok := state.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
 
 func vp8KeyframeDimensions(frame []byte) (uint16, uint16, error) {

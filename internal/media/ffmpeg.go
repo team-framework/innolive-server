@@ -570,6 +570,20 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 func (p *ffmpegProcess) close() {
 	p.wait.Do(func() {
 		_ = p.stdin.Close()
+		// 호출자는 출력을 다 읽지 않고 떠날 수 있다(파이프라인 취소). 남은 출력을
+		// 버려 FFmpeg가 마지막 write를 마치고 스스로 끝나게 한다. 디코드 프레임 한
+		// 장(raw 720p 1.38MB)은 파이프 버퍼(64KB)보다 커서, 아무도 읽지 않으면
+		// FFmpeg가 write에서 멈춘 채 SIGINT와 stdin EOF로도 끝나지 않고 grace를 다
+		// 쓴 뒤 kill된다(#497). Wait가 읽기 끝을 닫으므로 비우기는 close가 돌아오기
+		// 전에 끝난다.
+		if p.stdout != nil {
+			drained := make(chan struct{})
+			go func() {
+				defer close(drained)
+				_, _ = io.Copy(io.Discard, p.stdout)
+			}()
+			defer func() { <-drained }()
+		}
 		done := make(chan error, 1)
 		go func() { done <- p.cmd.Wait() }()
 		timer := time.NewTimer(ffmpegShutdownGrace)

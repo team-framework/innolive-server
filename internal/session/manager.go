@@ -2135,7 +2135,8 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	trackID := track.ID()
 	// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
 	// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
-	// 이후 재인코딩 프레임마다 손상이 이어지기 때문이다.
+	// 이후 재인코딩 프레임마다 손상이 이어지기 때문이다. 파이프라인이 GOP
+	// 중간에서 떠 decoder가 첫 keyframe을 기다릴 때도 요청한다(#493).
 	requestKeyframe := func() {
 		if err := s.PC.WriteRTCP([]rtcp.Packet{
 			&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},

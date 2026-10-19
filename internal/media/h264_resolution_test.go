@@ -66,7 +66,7 @@ func TestH264DecodeTracksSPSResolutionChange(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	go func() { _ = transcoder.DecodeStream(ctx, input, output); close(output) }()
+	go func() { _ = transcoder.DecodeStream(ctx, input, output, nil); close(output) }()
 
 	sizes := map[string]int{}
 	for item := range output {

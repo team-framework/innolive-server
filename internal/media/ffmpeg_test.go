@@ -110,7 +110,7 @@ func TestFFmpegTranscoderHandlesVP8Interframes(t *testing.T) {
 	decodeError := make(chan error, 1)
 	encodeError := make(chan error, 1)
 	go func() {
-		decodeError <- transcoder.DecodeStream(ctx, input, decoderOutput)
+		decodeError <- transcoder.DecodeStream(ctx, input, decoderOutput, nil)
 		close(decoderOutput)
 	}()
 	go func() {
@@ -208,7 +208,7 @@ func TestFFmpegTranscoderHandlesH264AccessUnits(t *testing.T) {
 	decodeError := make(chan error, 1)
 	encodeError := make(chan error, 1)
 	go func() {
-		decodeError <- transcoder.DecodeStream(ctx, input, decoderOutput)
+		decodeError <- transcoder.DecodeStream(ctx, input, decoderOutput, nil)
 		close(decoderOutput)
 	}()
 	go func() {

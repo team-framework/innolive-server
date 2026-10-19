@@ -131,6 +131,10 @@ type Config struct {
 	// AdminUserIDs는 사용자 플랜을 지정할 수 있는 사용자 UUID 목록이다(#270).
 	// 비어 있으면 관리자 API는 누구에게도 열리지 않는다.
 	AdminUserIDs []string
+	// DemoLockdown은 시연 중 서버를 ADMIN_USER_IDS 계정에만 연다(#490). 켜면
+	// 가입을 막고, 관리자가 아닌 계정의 토큰 발급과 인증 요청을 거절한다.
+	// 게스트 체험은 막지 않는다 — 게스트 수는 GUEST_MAX_SESSIONS로 줄인다.
+	DemoLockdown bool
 	// EgressSparkUnits·EgressPlasmaUnits는 플랜별 전용 송출 유닛이다(#272).
 	// Beam은 나머지(MAX_EGRESS_SLOTS − 둘)다. 각 플랜은 자기 몫과 하위 플랜의
 	// 빈 몫을 쓰고, 상위 플랜의 빈 몫은 쓰지 않는다. 둘 다 0이면 규칙이 없다.
@@ -205,6 +209,7 @@ func Load() (Config, error) {
 		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
 		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		AdminUserIDs:               splitList(env("ADMIN_USER_IDS", "")),
+		DemoLockdown:               envBool("DEMO_LOCKDOWN", false),
 		EgressSparkUnits:           envInt("EGRESS_SPARK_UNITS", 0),
 		EgressPlasmaUnits:          envInt("EGRESS_PLASMA_UNITS", 0),
 		GuestMaxSessions:           envInt("GUEST_MAX_SESSIONS", 0),
@@ -316,6 +321,10 @@ func (c Config) Validate() error {
 		if _, err := uuid.Parse(id); err != nil {
 			return fmt.Errorf("ADMIN_USER_IDS must be comma-separated user UUIDs: %q", id)
 		}
+	}
+	// 관리자 없이 시연 모드를 켜면 아무도 로그인하지 못한다.
+	if c.DemoLockdown && len(c.AdminUserIDs) == 0 {
+		return errors.New("DEMO_LOCKDOWN requires ADMIN_USER_IDS")
 	}
 	switch c.AIFailurePolicy {
 	case "", FailurePolicyBlackoutLatch, FailurePolicyFreeze: // 비면 뒤에서 blackout_latch로 본다

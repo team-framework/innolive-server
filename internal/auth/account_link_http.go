@@ -13,6 +13,11 @@ import (
 //   - 연결 안 된 신원: 403 account_not_linked — InnoLive 계정을 먼저 만들고 연결해야 한다
 //   - 이메일 계정 없는 기존 가입자: 403 password_setup_required + setup_token
 func (h *tokenHTTPHandler) writeAccountLinkLoginError(w http.ResponseWriter, r *http.Request, err error, provider string) bool {
+	// 시연 모드(#490)의 거절도 구글·애플 로그인이 함께 쓰는 이 경로로 답한다.
+	if errors.Is(err, ErrDemoLockdown) {
+		h.writeDemoLockdown(w, r)
+		return true
+	}
 	if errors.Is(err, ErrAccountNotLinked) {
 		h.writeError(w, r, http.StatusForbidden, "account_not_linked", "Create an InnoLive account first, then link "+provider+" in settings.")
 		return true

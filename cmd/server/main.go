@@ -263,6 +263,17 @@ func main() {
 		os.Exit(2)
 	}
 	tokenService := auth.NewTokenService(databaseConnection.DB, tokenConfig)
+	if cfg.DemoLockdown {
+		admins := make([]uuid.UUID, 0, len(cfg.AdminUserIDs))
+		for _, raw := range cfg.AdminUserIDs {
+			// config.Validate가 이미 형식을 확인했다.
+			if id, err := uuid.Parse(raw); err == nil {
+				admins = append(admins, id)
+			}
+		}
+		tokenService.SetDemoLockdown(auth.NewDemoLockdown(admins))
+		logger.Warn("demo lockdown enabled: only ADMIN_USER_IDS can sign in or use authenticated APIs", "admins", len(admins))
+	}
 	googleOAuthConfig, err := auth.LoadGoogleOAuthConfigFromEnv()
 	if err != nil {
 		logger.Error("invalid Google OAuth configuration", "error", err)

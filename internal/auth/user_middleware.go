@@ -68,6 +68,10 @@ func RequireUser(service *TokenService, users UserStatusChecker) func(http.Handl
 				writeUserMiddlewareError(w, http.StatusUnauthorized, "Authentication is required.")
 				return
 			}
+			if errors.Is(err, ErrDemoLockdown) {
+				writeUserMiddlewareError(w, demoLockdownStatus, demoLockdownMessage)
+				return
+			}
 			if err != nil {
 				writeUserMiddlewareError(w, http.StatusInternalServerError, "Authentication is unavailable.")
 				return
@@ -102,6 +106,11 @@ func AuthenticateUser(ctx context.Context, service *TokenService, users UserStat
 	if status != UserStatusActive {
 		return uuid.Nil, ErrAuthenticationRequired
 	}
+	// 시연 모드(#490)는 이미 발급된 token도 막는다 — 로그인만 막으면 토큰을 가진
+	// 앱이 그대로 세션을 만든다.
+	if err := service.demoLockdown().Admit(userID); err != nil {
+		return uuid.Nil, err
+	}
 	return userID, nil
 }
 
@@ -123,8 +132,11 @@ func accessBearerToken(r *http.Request) (string, bool) {
 
 func writeUserMiddlewareError(w http.ResponseWriter, status int, message string) {
 	code := "internal_error"
-	if status == http.StatusUnauthorized {
+	switch status {
+	case http.StatusUnauthorized:
 		code = "unauthorized"
+	case demoLockdownStatus:
+		code = demoLockdownCode
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")

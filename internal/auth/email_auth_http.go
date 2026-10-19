@@ -174,6 +174,8 @@ func (h *tokenHTTPHandler) handleEmailLogin(w http.ResponseWriter, r *http.Reque
 	pair, err := h.email.Login(r.Context(), request.Email, request.Password, requestClientInfo(r))
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrDemoLockdown):
+			h.writeDemoLockdown(w, r)
 		case errors.Is(err, ErrEmailLoginThrottled):
 			h.writeError(w, r, http.StatusTooManyRequests, "too_many_requests", "Too many login attempts. Please try again later.")
 		case errors.Is(err, ErrEmailCredentialsInvalid), errors.Is(err, ErrUserInactive):

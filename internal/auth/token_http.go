@@ -147,6 +147,8 @@ func (h *tokenHTTPHandler) handleRefresh(w http.ResponseWriter, r *http.Request)
 	pair, err := h.service.Rotate(r.Context(), raw, requestClientInfo(r))
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrDemoLockdown):
+			h.writeDemoLockdown(w, r)
 		case errors.Is(err, ErrRefreshTokenReused):
 			h.logger.Warn("refresh token reuse detected", "request_id", tokenRequestID(r))
 			h.writeError(w, r, http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid.")

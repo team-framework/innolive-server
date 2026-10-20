@@ -721,6 +721,34 @@ async function uploadReferenceFace() {
   });
 }
 
+// reregisterReferenceFace는 고른 사진 한 장으로 얼굴 하나를 같은 face_id로 다시
+// 등록한다. AI 워커가 재시작해 잃은 얼굴(reregistration_required)을 되살린다.
+async function reregisterReferenceFace(faceId) {
+  const file = Array.from(els.referenceFaceInput.files)[0];
+  if (!file) {
+    logEvent("warn", "다시 등록할 사진을 먼저 고르세요.", { face_id: faceId });
+    return;
+  }
+
+  await runReferenceFaceBusy(async () => {
+    const form = new FormData();
+    form.append("client_id", getClientId());
+    form.append("face_id", faceId);
+    form.append("images", file, file.name);
+    const status = await apiFetch(referenceFaceApiPath(), {
+      method: "POST",
+      body: form,
+    });
+    state.referenceFace = status;
+    renderReferenceFaceStatus();
+    logEvent("ok", "Reference face re-registered", {
+      face_id: faceId,
+      file: { name: file.name, size: file.size },
+      status,
+    });
+  });
+}
+
 async function deleteReferenceFace() {
   await runReferenceFaceBusy(async () => {
     await apiFetch(referenceFaceApiPath(), { method: "DELETE" });
@@ -775,6 +803,12 @@ function renderReferenceFaceStatus() {
       ? new Date(status.registered_at).toLocaleString()
       : "시간 정보 없음";
   els.referenceFaceDetail.textContent = `${source} · ${countText} · ${registeredAt}`;
+  if (status.reregistration_required) {
+    // AI 워커가 재시작해 얼굴을 잃었다. 다시 등록할 때까지 본인도 블러될 수 있다.
+    setPill(els.referenceFaceState, "재등록 필요", "warn");
+    els.referenceFaceDetail.textContent +=
+      " · AI 서버가 얼굴을 잃었습니다. 사진을 고른 뒤 표시된 얼굴의 '다시 등록'을 누르세요.";
+  }
   renderReferenceFaceList(status.faces || []);
   updateButtons();
 }
@@ -793,7 +827,17 @@ function renderReferenceFaceList(faces) {
     const registeredAt = face.registered_at
       ? new Date(face.registered_at).toLocaleString()
       : "시간 정보 없음";
-    label.textContent = `${face.face_id.slice(0, 8)} · ${registeredAt}`;
+    const mark = face.reregistration_required ? " · 재등록 필요" : "";
+    label.textContent = `${face.face_id.slice(0, 8)} · ${registeredAt}${mark}`;
+
+    const reregisterButton = document.createElement("button");
+    reregisterButton.className = face.reregistration_required
+      ? "button button-primary button-small"
+      : "button button-small";
+    reregisterButton.type = "button";
+    reregisterButton.textContent = "다시 등록";
+    reregisterButton.disabled = state.referenceFaceBusy;
+    reregisterButton.addEventListener("click", () => void reregisterReferenceFace(face.face_id));
 
     const button = document.createElement("button");
     button.className = "button button-danger button-small";
@@ -802,7 +846,7 @@ function renderReferenceFaceList(faces) {
     button.disabled = state.referenceFaceBusy;
     button.addEventListener("click", () => void deleteReferenceFaceById(face.face_id));
 
-    row.append(label, button);
+    row.append(label, reregisterButton, button);
     els.referenceFaceList.append(row);
   }
 }

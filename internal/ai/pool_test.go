@@ -36,7 +36,7 @@ func TestPoolAcquireSpreadsEqualLoadInTurn(t *testing.T) {
 
 	want := []string{"a:1", "b:1", "c:1", "a:1", "b:1", "c:1"}
 	for index, expected := range want {
-		if got, _ := pool.Acquire(); got.Address() != expected {
+		if got, _ := pool.Acquire(false); got.Address() != expected {
 			t.Fatalf("Acquire() #%d = %q, want %q", index, got.Address(), expected)
 		}
 	}
@@ -50,10 +50,10 @@ func TestPoolAcquireSpreadsEqualLoadInTurn(t *testing.T) {
 func TestPoolAcquirePrefersTheLeastActiveTarget(t *testing.T) {
 	pool := newTestPool(t, "a:1", "b:1")
 
-	first, _ := pool.Acquire()
-	_, releaseShort := pool.Acquire()
+	first, _ := pool.Acquire(false)
+	_, releaseShort := pool.Acquire(false)
 	releaseShort()
-	second, _ := pool.Acquire()
+	second, _ := pool.Acquire(false)
 
 	if first.Address() != "a:1" || second.Address() != "b:1" {
 		t.Fatalf("Acquire() = %q then %q, want a:1 then b:1", first.Address(), second.Address())
@@ -73,9 +73,9 @@ func TestPoolReleaseIsIdempotentAndReported(t *testing.T) {
 		t.Fatalf("initial observation = %v, want both targets at 0", observed)
 	}
 
-	_, releaseA := pool.Acquire()
-	_, releaseB := pool.Acquire()
-	_, releaseA2 := pool.Acquire()
+	_, releaseA := pool.Acquire(false)
+	_, releaseB := pool.Acquire(false)
+	_, releaseA2 := pool.Acquire(false)
 	if observed["a:1"] != 2 || observed["b:1"] != 1 {
 		t.Fatalf("after three acquires = %v, want a:1=2 b:1=1", observed)
 	}
@@ -98,7 +98,7 @@ func TestPoolAcquireIsSafeUnderConcurrency(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, release := pool.Acquire()
+			_, release := pool.Acquire(false)
 			release()
 		}()
 	}

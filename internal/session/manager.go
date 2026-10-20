@@ -30,6 +30,7 @@ var (
 	ErrOnDeviceProcessing        = errors.New("anonymization is controlled on device")
 	ErrInvalidFaceAnonymization  = errors.New("invalid face anonymization")
 	ErrFaceSwapUnavailable       = errors.New("face swap is not enabled on this server")
+	ErrFaceSwapWorkerUnavailable = errors.New("no face swap AI worker is ready")
 	ErrNotFound                  = errors.New("session not found")
 	ErrCapacityExceeded          = errors.New("session capacity exceeded")
 	ErrUserSessionExists         = errors.New("user already has an active session")
@@ -675,6 +676,11 @@ func (m *Manager) CreateForUserWithFaceAnonymization(userID uuid.UUID, provider,
 		}
 		if !m.cfg.AIFaceSwapEnabled {
 			return nil, "", ErrFaceSwapUnavailable
+		}
+		// 합성 세션은 합성 워커에만 간다(#507). 그 워커가 모두 응답 불가면 세션이
+		// 처음부터 fail-closed 블러로 잠기므로, 만들기 전에 거절한다.
+		if m.ai != nil && !m.ai.HasReadyTarget(true) {
+			return nil, "", ErrFaceSwapWorkerUnavailable
 		}
 	default:
 		return nil, "", ErrInvalidFaceAnonymization
@@ -2100,7 +2106,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	releaseAI := func() {}
 	aiTarget := ""
 	if s.privacyMode == config.PrivacyModeReal {
-		client, release := m.ai.Acquire()
+		client, release := m.ai.Acquire(s.FaceAnonymization == FaceAnonymizationFaceSwap)
 		releaseAI = release
 		aiTarget = client.Address()
 		m.metrics.IncAITargetSession(aiTarget)

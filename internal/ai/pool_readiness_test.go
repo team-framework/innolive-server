@@ -13,14 +13,14 @@ func TestPoolAcquireSkipsUnreadyTargets(t *testing.T) {
 	pool.SetTargetReady("b:1", false)
 
 	for index := range 6 {
-		if client, _ := pool.Acquire(); client.Address() == "b:1" {
+		if client, _ := pool.Acquire(false); client.Address() == "b:1" {
 			t.Fatalf("Acquire() #%d chose unready b:1", index)
 		}
 	}
 
 	// 돌아온 워커는 활성 스트림이 가장 적으므로 바로 다음 배정을 받는다.
 	pool.SetTargetReady("b:1", true)
-	if client, _ := pool.Acquire(); client.Address() != "b:1" {
+	if client, _ := pool.Acquire(false); client.Address() != "b:1" {
 		t.Fatalf("Acquire() after recovery = %q, want b:1", client.Address())
 	}
 }
@@ -32,8 +32,8 @@ func TestPoolAcquireFallsBackWhenNoTargetIsReady(t *testing.T) {
 	pool.SetTargetReady("a:1", false)
 	pool.SetTargetReady("b:1", false)
 
-	first, _ := pool.Acquire()
-	second, _ := pool.Acquire()
+	first, _ := pool.Acquire(false)
+	second, _ := pool.Acquire(false)
 	if first.Address() == second.Address() {
 		t.Fatalf("Acquire() chose %q twice, want load spread across unready targets", first.Address())
 	}

@@ -37,6 +37,36 @@ type Pool struct {
 	// suspectHandler는 ProcessVideo가 워커 고장 신호를 받았을 때 불린다. 상시
 	// 점검이 그 대상을 주기를 기다리지 않고 다시 점검하도록 연결한다.
 	suspectHandler func(*Client)
+	// faceSwap은 얼굴 합성 세션만 받는 대상이다(#507). 비어 있으면 모든 대상이 두
+	// 모드를 받는다. 비어 있지 않으면 합성 세션은 여기 든 대상에만, 블러 세션은
+	// 나머지 대상에만 간다 — 합성 옵션 없이 띄운 워커는 합성 요청을 받으면 모델을
+	// CPU로 지연 로드해 그 워커의 블러 세션까지 멈춘다.
+	faceSwap map[string]bool
+}
+
+// SetFaceSwapTargets는 얼굴 합성 세션만 받을 대상을 정한다(#507). 세션을 배정하기
+// 전에 부른다. 비우면 모든 대상이 두 모드를 받는다. 모르는 대상이 있거나 블러
+// 세션을 받을 대상이 하나도 남지 않으면 거절한다.
+func (p *Pool) SetFaceSwapTargets(targets []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	reserved := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		if !p.hasTargetLocked(target) {
+			return fmt.Errorf("face swap target %q is not in the AI target list", target)
+		}
+		reserved[target] = true
+	}
+	if len(reserved) > 0 && len(reserved) == len(p.clients) {
+		return errors.New("face swap targets must leave at least one AI target for blur sessions")
+	}
+	p.faceSwap = reserved
+	return nil
+}
+
+// servesLocked는 대상이 이 모드의 세션을 받는지다. p.mu를 쥔 채 불린다.
+func (p *Pool) servesLocked(target string, faceSwap bool) bool {
+	return len(p.faceSwap) == 0 || p.faceSwap[target] == faceSwap
 }
 
 // SetStreamObserver는 대상별 활성 스트림 수가 바뀔 때마다 부를 함수를 붙인다.
@@ -127,14 +157,21 @@ func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
 // 상태 점검이 응답 불가로 판정한 대상은 고르지 않는다(#499). 런타임이 죽은 워커는
 // 첫 프레임부터 실패해 세션이 블러로 잠긴다. 준비된 대상이 하나도 없으면 전체에서
 // 고른다 — 세션은 어차피 fail-closed로 막히고, 워커가 돌아오면 그대로 이어 쓴다.
-func (p *Pool) Acquire() (*Client, func()) {
+//
+// 합성 전용 대상이 정해져 있으면 faceSwap 모드의 대상 안에서만 고른다(#507).
+// 준비된 대상이 없을 때도 다른 모드의 대상으로 넘기지 않는다.
+func (p *Pool) Acquire(faceSwap bool) (*Client, func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	skipUnready := p.hasReadyTargetLocked("")
+	skipUnready := p.hasReadyTargetLocked("", faceSwap)
 	best := -1
 	for offset := 0; offset < len(p.clients); offset++ {
 		index := (p.next + offset) % len(p.clients)
-		if skipUnready && p.unready[p.clients[index].Address()] {
+		address := p.clients[index].Address()
+		if !p.servesLocked(address, faceSwap) {
+			continue
+		}
+		if skipUnready && p.unready[address] {
 			continue
 		}
 		if best < 0 || p.active[index] < p.active[best] {
@@ -202,18 +239,29 @@ func (p *Pool) TargetReady(target string) bool {
 	return !p.unready[target]
 }
 
-// HasReadyTargetOtherThan은 target 말고 준비된 대상이 있는지다. 응답 불가 워커의
-// 세션을 옮겨도 갈 곳이 있는지 판단한다.
+// HasReadyTargetOtherThan은 target과 같은 모드를 받는 대상 중 target 말고 준비된
+// 대상이 있는지다. 응답 불가 워커의 세션을 옮겨도 갈 곳이 있는지 판단한다. 세션은
+// 자기 모드의 대상에만 배정되므로 target의 모드가 곧 세션의 모드다(#507).
 func (p *Pool) HasReadyTargetOtherThan(target string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.hasReadyTargetLocked(target)
+	return p.hasReadyTargetLocked(target, p.faceSwap[target])
 }
 
-// hasReadyTargetLocked는 except 말고 준비된 대상이 있는지다. p.mu를 쥔 채 불린다.
-func (p *Pool) hasReadyTargetLocked(except string) bool {
+// HasReadyTarget은 faceSwap 모드의 세션을 받을 준비된 대상이 있는지다. 합성 세션을
+// 만들기 전에 합성 워커가 살아 있는지 확인한다(#507).
+func (p *Pool) HasReadyTarget(faceSwap bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hasReadyTargetLocked("", faceSwap)
+}
+
+// hasReadyTargetLocked는 faceSwap 모드를 받는 대상 중 except 말고 준비된 대상이
+// 있는지다. p.mu를 쥔 채 불린다.
+func (p *Pool) hasReadyTargetLocked(except string, faceSwap bool) bool {
 	for _, client := range p.clients {
-		if address := client.Address(); address != except && !p.unready[address] {
+		address := client.Address()
+		if address != except && p.servesLocked(address, faceSwap) && !p.unready[address] {
 			return true
 		}
 	}

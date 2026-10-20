@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,5 +221,45 @@ func TestReadinessMonitorProbesSuspectImmediately(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if _, updates := spy.snapshot(); updates != 2 {
 		t.Fatalf("readiness updates = %d after repeated suspects, want 2 (cooldown)", updates)
+	}
+}
+
+// probeCountingServer는 받은 ProcessVideo(점검) 수를 센다.
+type probeCountingServer struct {
+	echoAIServer
+	probes atomic.Int32
+}
+
+func (s *probeCountingServer) ProcessVideo(stream grpc.BidiStreamingServer[aiv1.VideoChunk, aiv1.ProcessedVideoChunk]) error {
+	s.probes.Add(1)
+	return s.echoAIServer.ProcessVideo(stream)
+}
+
+// 막 세션 프레임을 처리한 워커에는 상시 점검을 보내지 않는다. 점검 프레임이 그
+// 워커의 추론 줄에 끼어 라이브 프레임을 늦추기 때문이다. 응답 불가로 판정된 워커는
+// 기존 스트림이 돌아도 언제나 점검한다.
+func TestReadinessMonitorSkipsWorkersServingFrames(t *testing.T) {
+	server := &probeCountingServer{}
+	client := preflightClient(t, server)
+	client.address = "busy:50051"
+	pool := &Pool{clients: []*Client{client}, active: make([]int, 1)}
+	monitor := testMonitor(pool, newReadySpy(), time.Hour)
+
+	client.lastFrameAt.Store(time.Now().UnixNano())
+	monitor.probe(context.Background())
+	if got := server.probes.Load(); got != 0 {
+		t.Fatalf("probes on a worker serving frames = %d, want 0", got)
+	}
+
+	pool.SetTargetReady("busy:50051", false)
+	monitor.probe(context.Background())
+	if got := server.probes.Load(); got != 1 {
+		t.Fatalf("probes on an unready worker = %d, want 1", got)
+	}
+
+	client.lastFrameAt.Store(time.Now().Add(-servingWindow - time.Second).UnixNano())
+	monitor.probe(context.Background())
+	if got := server.probes.Load(); got != 2 {
+		t.Fatalf("probes on an idle worker = %d, want 2", got)
 	}
 }

@@ -131,3 +131,38 @@ func TestPreflightDoesNotReportSuspect(t *testing.T) {
 		t.Fatalf("suspect reports = %d, want 0 for a probe", suspects.Load())
 	}
 }
+
+// 오류 없이 돌아온 세션 프레임만 "막 처리함"으로 센다. 상시 점검은 이것을 보고
+// 송출 중인 워커를 건너뛴다.
+func TestStreamRecordsServedFramesOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		server aiv1.AiProcessorServer
+		served bool
+	}{
+		"echo":          {echoAIServer{}, true},
+		"decode failed": {errorCodeServer{code: "DECODE_FAILED"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, _ := watchedTestClient(t, tc.server)
+			stream := client.NewStream(context.Background(), "session", false)
+			defer stream.Close()
+			if _, err := stream.Process([]byte("frame"), 1, 0, 0, "", nil); err != nil {
+				t.Fatalf("Process() error = %v", err)
+			}
+			if got := client.servedFrameWithin(time.Minute); got != tc.served {
+				t.Fatalf("servedFrameWithin() = %t, want %t", got, tc.served)
+			}
+		})
+	}
+}
+
+// 점검 프레임은 "막 처리함"으로 세지 않는다.
+func TestPreflightDoesNotRecordServedFrame(t *testing.T) {
+	client, _ := watchedTestClient(t, echoAIServer{})
+	if err := client.Preflight(context.Background(), "jpeg", 0); err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+	if client.servedFrameWithin(time.Minute) {
+		t.Fatal("a probe frame counted as a served session frame")
+	}
+}

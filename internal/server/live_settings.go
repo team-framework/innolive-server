@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -119,7 +120,7 @@ func (s *Server) handlePatchLiveBroadcast(w http.ResponseWriter, r *http.Request
 	broadcast, _ := liveSession.PlatformBroadcast(string(providerName))
 	prepared := streaming.PreparedBroadcast{Provider: providerName, BroadcastID: broadcast.BroadcastID, StreamID: broadcast.StreamID, AccountID: broadcast.AccountID}
 	if err := updater.UpdateLive(r.Context(), liveSession.UserID, prepared, update); err != nil {
-		writeError(w, s.liveUpdateError(err, liveSession.ID, providerName))
+		writeError(w, s.liveUpdateError(auth.WithStreamingAccount(r.Context(), broadcast.AccountID), err, liveSession.ID, providerName))
 		return
 	}
 
@@ -147,9 +148,9 @@ func liveSettingsError(err error, sessionID string, providerName auth.StreamingP
 
 // liveUpdateError는 플랫폼 반영 실패를 옮긴다. 계정·한도 문제는 방송 준비와 같은
 // 코드로, 나머지는 반영 실패(502)로 알린다.
-func (s *Server) liveUpdateError(err error, sessionID string, providerName auth.StreamingProvider) apiError {
+func (s *Server) liveUpdateError(ctx context.Context, err error, sessionID string, providerName auth.StreamingProvider) apiError {
 	if errors.Is(err, auth.ErrStreamingNotConnected) || errors.Is(err, auth.ErrStreamingReconnectRequired) || errors.Is(err, streaming.ErrPlatformRateLimited) {
-		return *s.prepareError(err, sessionID, providerName)
+		return *s.prepareError(ctx, err, sessionID, providerName)
 	}
 	s.logger.Error("live broadcast settings update failed", "session_id", sessionID, "provider", providerName, "error", err)
 	return apiError{Status: http.StatusBadGateway, Code: "streaming_update_failed", Message: "The streaming platform could not apply the settings.", Details: map[string]any{"provider": providerName}}

@@ -29,7 +29,7 @@ func (s *Server) handleGetYouTubeCategories(w http.ResponseWriter, r *http.Reque
 	categories, err := lister.Categories(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, auth.ErrStreamingNotConnected) || errors.Is(err, auth.ErrStreamingReconnectRequired) || errors.Is(err, streaming.ErrPlatformRateLimited) {
-			writeError(w, *s.prepareError(err, "", auth.StreamingProviderYouTube))
+			writeError(w, *s.prepareError(r.Context(), err, "", auth.StreamingProviderYouTube))
 			return
 		}
 		s.logger.Error("list YouTube categories failed", "user_id", userID, "error", err)

@@ -663,7 +663,7 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 	}
 	if err != nil {
 		s.sessions.ResetBroadcastPreparation(liveSession.ID, string(providerName))
-		return nil, s.prepareError(err, liveSession.ID, providerName)
+		return nil, s.prepareError(ctx, err, liveSession.ID, providerName)
 	}
 	if egressAttachesAtGoLive(providerName) || liveSession.AIProcessing == session.AIProcessingOnDevice {
 		// 치지직은 RTMP 연결이 곧 공개 방송이다(D1). 준비 단계에서 egress를
@@ -809,8 +809,10 @@ func (s *Server) goLiveTarget(ctx context.Context, liveSession *session.Session,
 			return &apiError{Status: http.StatusConflict, Code: "broadcast_not_ready", Message: "The broadcast is not ready to go live yet. Retry once the stream is being received.", Details: map[string]any{"session_id": liveSession.ID}}
 		case errors.Is(err, auth.ErrStreamingReconnectRequired):
 			return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
-		case errors.Is(err, streaming.ErrQuotaExceeded):
-			return s.prepareError(err, liveSession.ID, providerName)
+		case errors.Is(err, streaming.ErrQuotaExceeded), errors.Is(err, streaming.ErrPlatformRateLimited):
+			// 요청 한도는 준비와 같은 코드로 알린다. 일반 전환 실패로 내리면
+			// 클라이언트가 "잠시 뒤·다른 채널" 안내를 할 수 없다.
+			return s.prepareError(auth.WithStreamingAccount(ctx, broadcast.AccountID), err, liveSession.ID, providerName)
 		default:
 			s.logger.Error("go live failed", "session_id", liveSession.ID, "provider", providerName, "error", err)
 			return &apiError{Status: http.StatusBadGateway, Code: "streaming_golive_failed", Message: "The streaming platform could not switch the broadcast to live."}
@@ -1049,8 +1051,10 @@ func broadcastPhaseError(phase session.BroadcastPhase, sessionID string) *apiErr
 	}
 }
 
-// prepareError는 플랫폼 준비 실패를 응답 오류로 옮긴다.
-func (s *Server) prepareError(err error, sessionID string, providerName auth.StreamingProvider) *apiError {
+// prepareError는 플랫폼 준비 실패를 응답 오류로 옮긴다. 요청 한도는 채널(송출
+// 연결) 단위라, ctx에 연결 ID가 실려 있으면 응답과 로그에 그 ID를 함께 싣는다 —
+// 클라이언트는 막힌 채널을 안내하고, 운영은 어느 채널이 막혔는지 추적한다.
+func (s *Server) prepareError(ctx context.Context, err error, sessionID string, providerName auth.StreamingProvider) *apiError {
 	switch {
 	case errors.Is(err, auth.ErrStreamingAccountSelectionRequired):
 		return youtubeChannelRequiredError(providerName)
@@ -1062,7 +1066,14 @@ func (s *Server) prepareError(err error, sessionID string, providerName auth.Str
 		return &apiError{Status: http.StatusConflict, Code: "streaming_reconnect_required", Message: "The streaming account needs to be reconnected.", Details: map[string]any{"provider": providerName}}
 	case errors.Is(err, streaming.ErrPlatformRateLimited):
 		// 재시도로 곧바로 풀리지 않는다 — 일반 준비 실패(502)와 구분해 "잠시 뒤"를 안내한다.
-		return &apiError{Status: http.StatusTooManyRequests, Code: "streaming_rate_limited", Message: "The streaming platform is limiting requests from this account. Try again later.", Details: map[string]any{"provider": providerName}}
+		details := map[string]any{"provider": providerName}
+		attrs := []any{"session_id", sessionID, "provider", providerName}
+		if accountID, ok := auth.StreamingAccountFromContext(ctx); ok {
+			details["account_id"] = accountID.String()
+			attrs = append(attrs, "account_id", accountID.String())
+		}
+		s.logger.Warn("streaming platform rate limited", attrs...)
+		return &apiError{Status: http.StatusTooManyRequests, Code: "streaming_rate_limited", Message: "The streaming platform is limiting requests from this account. Try again later.", Details: details}
 	case errors.Is(err, streaming.ErrQuotaExceeded):
 		// 오늘은 재시도해도 풀리지 않는다 — 일반 준비 실패(502)와 구분해 알린다.
 		s.logger.Error("streaming API quota exhausted", "session_id", sessionID, "provider", providerName)

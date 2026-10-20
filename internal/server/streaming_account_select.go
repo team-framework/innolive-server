@@ -39,7 +39,7 @@ func (s *Server) streamingAccountContext(ctx context.Context, userID uuid.UUID, 
 	}
 	accountID, _, err := resolver.ResolveAccount(auth.WithStreamingAccount(ctx, requested), userID)
 	if err != nil {
-		return ctx, s.prepareError(err, "", providerName)
+		return ctx, s.prepareError(auth.WithStreamingAccount(ctx, requested), err, "", providerName)
 	}
 	return auth.WithStreamingAccount(ctx, accountID), nil
 }
@@ -56,7 +56,7 @@ func (s *Server) broadcastChannel(ctx context.Context, userID uuid.UUID, provide
 	}
 	_, channelID, err := resolver.ResolveAccount(ctx, userID)
 	if err != nil {
-		return "", s.prepareError(err, "", providerName)
+		return "", s.prepareError(ctx, err, "", providerName)
 	}
 	return string(providerName) + "/" + channelID, nil
 }

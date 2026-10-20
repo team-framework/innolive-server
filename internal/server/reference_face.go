@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -339,8 +340,25 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		writeError(w, badRequest("name must be at most 40 characters and apply to one image.", map[string]any{"field": "name"}))
 		return
 	}
+	// face_id가 있으면 그 얼굴 하나를 새 사진으로 다시 등록한다(#501). 워커가 재시작해
+	// 잃은 얼굴을 face_id와 이름을 유지한 채 되살린다. 서버는 얼굴 원본을 보관하지
+	// 않으므로 사용자가 사진을 다시 올려야 한다.
+	reregisterID := strings.TrimSpace(r.FormValue("face_id"))
+	var previous referenceFace
+	if reregisterID != "" {
+		if len(files) != 1 {
+			writeError(w, badRequest("face_id must apply to exactly one image.", map[string]any{"field": "face_id"}))
+			return
+		}
+		face, found := s.references.face(clientID, reregisterID)
+		if !found {
+			writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "기준 얼굴을 찾을 수 없습니다.", Details: map[string]any{"face_id": reregisterID}})
+			return
+		}
+		previous = face
+	}
 	// "image"(단일 필드)는 클라이언트의 얼굴 집합을 교체하고, "images[]"는 추가한다.
-	replace := len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
+	replace := reregisterID == "" && len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
 	if replace {
 		// 클라이언트의 기존 워커 화이트리스트를 먼저 비워 오래된 얼굴이 더는 제외되지
 		// 않게 한다(Python의 교체 동작과 같다). 여기서 실패하면 업로드를 중단해야
@@ -416,6 +434,23 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		}
 		registered = append(registered, referenceFace{Name: name, FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
+	if reregisterID != "" && len(previous.EntryIDs) > 0 {
+		// 새 엔트리가 자리 잡은 뒤에 이전 엔트리를 지운다. 새 사진이 거절돼도 아직
+		// 남은 이전 등록은 그대로 둔다. 일부 워커에만 남은 얼굴이면 이전 엔트리를 지워야
+		// 한다 — 기록이 새 id로 바뀐 뒤에는 얼굴을 지워도 그 워커가 계속 블러에서 뺀다.
+		// 워커가 이미 잃은 엔트리는 지운 것으로 친다. 엔트리 id가 없는 옛 기록은 워커가
+		// 재시작으로 이미 잃었다.
+		if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, previous.EntryIDs); err != nil {
+			s.logger.Error("delete previous whitelist entries during re-registration failed", "client_id", clientID, "face_id", reregisterID, "error", err)
+			s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+			// 삭제가 일부 워커에서만 됐을 수 있다. 다음 대조를 기다리지 않고 표시한다.
+			if _, err := s.references.applyMarks([]referenceMark{{clientID: clientID, face: previous, required: true}}); err != nil {
+				s.logger.Warn("save reference face re-registration mark failed", "client_id", clientID, "face_id", reregisterID, "error", err)
+			}
+			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist re-registration failed."})
+			return
+		}
+	}
 	if gate, sessionID, ok := guestReferenceGateFromContext(r.Context()); ok && gate.IsClosed(sessionID) {
 		// 이 요청이 얼굴을 등록하는 동안 세션이 종료됐다. 이미 terminal 정리가 수행한
 		// 결과를 다시 저장하지 않는다.
@@ -430,9 +465,27 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.references.mu.Lock()
-	if replace {
+	switch {
+	case reregisterID != "":
+		faces := s.references.faces[clientID]
+		index := slices.IndexFunc(faces, func(face referenceFace) bool { return face.FaceID == reregisterID })
+		if index < 0 {
+			// 다시 등록하는 동안 얼굴이 지워졌다. 방금 만든 엔트리를 남기면 지운 얼굴이
+			// 계속 블러에서 빠진다.
+			s.references.mu.Unlock()
+			s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+			writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "기준 얼굴을 찾을 수 없습니다.", Details: map[string]any{"face_id": reregisterID}})
+			return
+		}
+		faces[index].EntryIDs = registered[0].EntryIDs
+		faces[index].RegisteredAt = registered[0].RegisteredAt
+		faces[index].ReregistrationRequired = false
+		if name != "" {
+			faces[index].Name = name
+		}
+	case replace:
 		s.references.faces[clientID] = registered
-	} else {
+	default:
 		s.references.faces[clientID] = append(s.references.faces[clientID], registered...)
 	}
 	_ = s.references.save()

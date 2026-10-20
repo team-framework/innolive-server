@@ -193,7 +193,7 @@ func TestReadinessMonitorMarksPoolReadiness(t *testing.T) {
 			pool.TargetReady("healthy:50051"), pool.TargetReady("broken:50052"))
 	}
 	for range 4 {
-		if client, _ := pool.Acquire(); client.Address() == "broken:50052" {
+		if client, _ := pool.Acquire(false); client.Address() == "broken:50052" {
 			t.Fatal("Acquire() chose the target the probe found broken")
 		}
 	}

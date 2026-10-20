@@ -2100,7 +2100,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	releaseAI := func() {}
 	aiTarget := ""
 	if s.privacyMode == config.PrivacyModeReal {
-		client, release := m.ai.Acquire()
+		client, release := m.ai.Acquire(s.FaceAnonymization == FaceAnonymizationFaceSwap)
 		releaseAI = release
 		aiTarget = client.Address()
 		m.metrics.IncAITargetSession(aiTarget)

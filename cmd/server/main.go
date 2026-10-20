@@ -158,6 +158,18 @@ func main() {
 		aiPool.SetLogger(logger)
 		defer aiPool.Close()
 
+		// 합성이 꺼진 배포에서는 합성 워커도 블러 세션을 받는다. 두 모델을 모두
+		// 올린 워커라 블러를 처리할 수 있고, 놀리는 워커가 생기지 않는다(#507).
+		if cfg.AIFaceSwapEnabled {
+			if err := aiPool.SetFaceSwapTargets(cfg.AIFaceSwapTargets); err != nil {
+				logger.Error(
+					"configure face swap AI targets failed",
+					"error", err,
+				)
+				os.Exit(2)
+			}
+		}
+
 		err = aiPool.Preflight(
 			context.Background(),
 			string(cfg.AIWireFormat),
@@ -672,6 +684,7 @@ func main() {
 			"ai_targets", cfg.AITargets,
 			"wire_format", cfg.AIWireFormat,
 			"face_swap_enabled", cfg.AIFaceSwapEnabled,
+			"face_swap_targets", cfg.AIFaceSwapTargets,
 			"max_sessions", cfg.MaxSessions,
 			"ffmpeg_spawn_concurrency",
 			cfg.FFmpegSpawnConcurrency,

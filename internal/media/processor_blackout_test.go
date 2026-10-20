@@ -156,6 +156,56 @@ func TestRealProcessorNonTimeoutLatchesImmediatelyDespiteThreshold(t *testing.T)
 	}
 }
 
+// AI 워커가 자기 추론 제한을 넘긴 응답(INFERENCE_TIMEOUT)은 워커가 잠깐 막힌
+// 것일 수 있어, 전송 타임아웃처럼 한계까지는 잠그지 않는다(#499). 종전에는 한
+// 번에 잠겨 세션이 끝날 때까지 블러였다.
+func TestRealProcessorToleratesWorkerInferenceTimeout(t *testing.T) {
+	calls := 0
+	ai := &fakeAIStream{process: func(_ []byte, ts int64) (*aiv1.ProcessedVideoChunk, error) {
+		calls++
+		if calls == 1 {
+			return &aiv1.ProcessedVideoChunk{Timestamp: ts, ErrorCode: "INFERENCE_TIMEOUT", ErrorMessage: "frame inference exceeded the server timeout"}, nil
+		}
+		return &aiv1.ProcessedVideoChunk{Data: []byte("ok"), Timestamp: ts, StatusMessage: "success"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := processor.Process(context.Background(), []byte("frame"), 1, 64, 48)
+	if err != nil {
+		t.Fatalf("Process() after INFERENCE_TIMEOUT error = %v, want a blackout frame", err)
+	}
+	if !isJPEG(first) {
+		t.Fatal("frame after INFERENCE_TIMEOUT is not a blackout JPEG")
+	}
+	if processor.FallbackActive() {
+		t.Fatal("a single INFERENCE_TIMEOUT latched the session")
+	}
+	second, err := processor.Process(context.Background(), []byte("frame"), 2, 64, 48)
+	if err != nil || string(second) != "ok" {
+		t.Fatalf("Process() after recovery = %q, %v, want ok", second, err)
+	}
+}
+
+// 시간 초과가 아닌 오류 코드는 종전대로 곧바로 잠근다.
+func TestRealProcessorLatchesOtherErrorCodesImmediately(t *testing.T) {
+	ai := &fakeAIStream{process: func(_ []byte, ts int64) (*aiv1.ProcessedVideoChunk, error) {
+		return &aiv1.ProcessedVideoChunk{Timestamp: ts, ErrorCode: "DECODE_FAILED", ErrorMessage: "frame could not be decoded"}, nil
+	}}
+	processor, err := NewProcessor(config.PrivacyModeReal, 0, ai, metrics.New(), nil, config.WireFormatJPEG, config.FailurePolicyBlackoutLatch, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := processor.Process(context.Background(), []byte("frame"), 1, 64, 48); err != nil {
+		t.Fatal(err)
+	}
+	if !processor.FallbackActive() {
+		t.Fatal("DECODE_FAILED did not latch the session immediately")
+	}
+}
+
 func TestRealProcessorTimeoutStreakResetsOnSuccess(t *testing.T) {
 	calls := 0
 	failing := true

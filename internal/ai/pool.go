@@ -349,6 +349,47 @@ func (p *Pool) ClearWhitelist(ctx context.Context, sessionID string) error {
 	})
 }
 
+// whitelistStatusTimeout은 WhitelistEntryIDs의 호출 하나의 한계다. 상태 조회는
+// 모델을 거치지 않는 메타데이터 읽기라, 이보다 오래 걸리는 워커는 멈춘 것으로 본다.
+const whitelistStatusTimeout = 5 * time.Second
+
+// WhitelistEntryIDs는 워커마다 각 세션에 대해 지금 가진 화이트리스트 엔트리 id를
+// 읽는다. 결과는 워커 주소 → 세션 → 엔트리 id이고 모든 워커 주소를 담는다.
+//
+// 답을 받지 못한 세션은 그 워커의 맵에 없다. 호출자는 그것을 "모름"으로 다뤄야
+// 한다 — 엔트리가 없다고 보면 잠깐 끊긴 워커 하나가 모든 얼굴을 잃은 것처럼 보인다.
+// 워커가 모르는 세션(NotFound)은 엔트리가 없는 것으로 친다. 한 워커에서 오류가
+// 나면 그 워커의 남은 세션은 묻지 않는다 — 멈춘 워커가 세션 수만큼 타임아웃을
+// 쌓지 않게 한다.
+func (p *Pool) WhitelistEntryIDs(ctx context.Context, sessionIDs []string) map[string]map[string][]string {
+	type answer struct {
+		address string
+		entries map[string][]string
+	}
+	answers := make(chan answer, len(p.clients))
+	for _, client := range p.clients {
+		go func(c *Client) {
+			entries := make(map[string][]string, len(sessionIDs))
+			for _, sessionID := range sessionIDs {
+				callCtx, cancel := context.WithTimeout(ctx, whitelistStatusTimeout)
+				snapshot, err := c.GetWhitelistStatus(callCtx, sessionID)
+				cancel()
+				if ignoreNotFound(err) != nil {
+					break
+				}
+				entries[sessionID] = append([]string{}, snapshot.GetEntryIds()...)
+			}
+			answers <- answer{address: c.Address(), entries: entries}
+		}(client)
+	}
+	result := make(map[string]map[string][]string, len(p.clients))
+	for range p.clients {
+		worker := <-answers
+		result[worker.address] = worker.entries
+	}
+	return result
+}
+
 // ignoreNotFound는 워커가 없는 엔트리·세션에 대해 돌려준 오류를 버린다. 호출자는
 // 그것이 없어지길 원했고, 없다.
 func ignoreNotFound(err error) error {

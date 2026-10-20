@@ -44,3 +44,28 @@ func TestAIWorkerMovesPicksSessionsOnUnreadyWorkers(t *testing.T) {
 		t.Fatalf("moves with no ready worker = %d (retry %s), want none", len(moves), retryIn)
 	}
 }
+
+// 합성 전용 워커를 정한 배포에서는 블러 세션을 합성 워커로 옮기지 않는다(#507).
+// 옮기면 뒤에 오는 합성 세션이 그 워커를 나눠 쓴다.
+func TestAIWorkerMovesStayWithinFaceSwapSplit(t *testing.T) {
+	pool, err := ai.NewPool([]string{"a:1", "swap:1"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := pool.SetFaceSwapTargets([]string{"swap:1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	m := &Manager{ai: pool, sessions: map[string]*Session{
+		"blur": {ID: "blur", aiTarget: "a:1"},
+		"swap": {ID: "swap", aiTarget: "swap:1"},
+	}}
+	pool.SetTargetReady("a:1", false)
+	pool.SetTargetReady("swap:1", false)
+	pool.SetTargetReady("swap:1", true)
+	if moves, _ := m.aiWorkerMoves(now); len(moves) != 0 {
+		t.Fatalf("moves = %+v, want none: the only ready worker is the face swap worker", moves)
+	}
+}

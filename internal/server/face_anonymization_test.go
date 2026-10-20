@@ -3,11 +3,16 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"inno-live-server/internal/ai"
+	"inno-live-server/internal/metrics"
+	"inno-live-server/internal/origin"
 	"inno-live-server/internal/plan"
 	"inno-live-server/internal/session"
 
@@ -72,5 +77,52 @@ func TestSessionFaceAnonymizationContract(t *testing.T) {
 				t.Fatalf("face_anonymization=%q, want %q", created.FaceAnonymization, tc.mode)
 			}
 		})
+	}
+}
+
+// 합성 워커가 모두 응답 불가면 관리자도 합성 세션을 만들 수 없다(#507). 코드는 합성이
+// 꺼진 배포와 같은 face_swap_unavailable이라 앱은 한 가지로 처리한다.
+func TestSessionFaceSwapRejectedWhenNoFaceSwapWorkerIsReady(t *testing.T) {
+	requireUser, authenticateUser, adminHeader, _, adminID := testRequireUser(t)
+	cfg := testServerConfig()
+	cfg.AIFaceSwapEnabled = true
+	cfg.AdminUserIDs = []string{adminID.String()}
+	pool, err := ai.NewPool([]string{"a:1", "swap:1"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := pool.SetFaceSwapTargets([]string{"swap:1"}); err != nil {
+		t.Fatal(err)
+	}
+	pool.SetTargetReady("swap:1", false)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry := metrics.New()
+	manager, err := session.NewManager(cfg, logger, registry, pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.CloseAll)
+	origins, err := origin.NewConfig(false, []string{"https://client.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := New(cfg, logger, registry, manager, nil, origins, requireUser, nil, authenticateUser)
+	application.SetPlanStore(&memoryPlanStore{plans: map[uuid.UUID]plan.Plan{adminID: plan.Spark}})
+	httpServer := httptest.NewServer(application.Handler())
+	t.Cleanup(httpServer.Close)
+
+	res := mustRequest(t, http.MethodPost, httpServer.URL+"/sessions", strings.NewReader(`{"face_anonymization":"face_swap"}`), adminHeader)
+	defer res.Body.Close()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusServiceUnavailable || body.Error.Code != "face_swap_unavailable" {
+		t.Fatalf("status=%d code=%q, want 503 face_swap_unavailable", res.StatusCode, body.Error.Code)
 	}
 }

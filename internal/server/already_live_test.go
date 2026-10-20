@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -24,71 +25,34 @@ func (p activeCheckingProvider) ActiveBroadcasts(context.Context, uuid.UUID) ([]
 	return p.active, nil
 }
 
-// 채널이 이미 다른 도구로 라이브면 확인을 받고, 확인하면 준비한다(#361).
-func TestPrepareStreamAsksBeforeConcurrentYouTubeBroadcast(t *testing.T) {
-	stub := &stubStreamingProvider{}
-	server, _, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live", "innolive-own"}, quota: streaming.NewQuotaMeter()},
-	})
-	application.ownBroadcasts.add("innolive-own")
-	created, ownerToken := createTestSession(t, server.URL, nil)
-	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
-
-	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
-	if response.StatusCode != http.StatusConflict || streamErrorCode(payload) != "channel_already_live" {
-		t.Fatalf("prepare = %d %v, want 409 channel_already_live", response.StatusCode, payload)
-	}
-	// InnoLive가 만든 방송은 세지 않는다.
-	details, _ := payload["error"].(map[string]any)["details"].(map[string]any)
-	if details["active_broadcasts"] != float64(1) {
-		t.Fatalf("details = %v, want 1 foreign broadcast", details)
-	}
-	stub.mu.Lock()
-	calls := stub.prepareCalls
-	stub.mu.Unlock()
-	if calls != 0 {
-		t.Fatalf("prepare calls = %d, want none before confirmation", calls)
-	}
-
-	_, payload = prepareStream(t, server.URL, created.SessionID, ownerToken, `{"allow_concurrent":true}`)
-	if streamErrorCode(payload) == "channel_already_live" {
-		t.Fatalf("confirmed prepare still asks: %v", payload)
-	}
-	stub.mu.Lock()
-	calls = stub.prepareCalls
-	stub.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("prepare calls = %d, want 1 after confirmation", calls)
-	}
-}
-
-// 우리 방송만 active면 묻지 않는다 — 방금 끝낸 방송은 autoStop 전까지 active다.
-func TestPrepareStreamIgnoresOwnActiveBroadcast(t *testing.T) {
-	stub := &stubStreamingProvider{}
-	server, _, application := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"innolive-own"}, quota: streaming.NewQuotaMeter()},
-	})
-	application.ownBroadcasts.add("innolive-own")
-	created, ownerToken := createTestSession(t, server.URL, nil)
-	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
-	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) == "channel_already_live" {
-		t.Fatalf("own broadcast triggered the confirmation: %v", payload)
-	}
-}
-
-// 쿼터가 80%를 넘어도 채널 라이브 확인은 한다 — 사용자가 쓰는 기능이다(#361).
-func TestPrepareStreamKeepsLiveCheckWhenQuotaLow(t *testing.T) {
-	stub := &stubStreamingProvider{}
-	meter := streaming.NewQuotaMeter()
-	for i := 0; i < 160; i++ {
-		meter.Record(http.MethodPost)
-	}
-	server, _, _ := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
-		auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live"}, quota: meter},
-	})
-	created, ownerToken := createTestSession(t, server.URL, nil)
-	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
-	if _, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`); streamErrorCode(payload) != "channel_already_live" {
-		t.Fatalf("low quota must keep the live check: %v", payload)
+// 기존 라이브와 쿼터 상태에 관계없이 YouTube 방송 준비를 호출한다.
+func TestPrepareStreamAllowsConcurrentYouTubeBroadcast(t *testing.T) {
+	for _, body := range []string{`{}`, `{"allow_concurrent":false}`, `{"allow_concurrent":true}`} {
+		for _, lowQuota := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/lowQuota=%t", body, lowQuota), func(t *testing.T) {
+				stub := &stubStreamingProvider{}
+				meter := streaming.NewQuotaMeter()
+				if lowQuota {
+					for i := 0; i < 160; i++ {
+						meter.Record(http.MethodPost)
+					}
+				}
+				server, _, _ := newStreamTestApplicationWithServer(t, map[auth.StreamingProvider]streaming.Provider{
+					auth.StreamingProviderYouTube: activeCheckingProvider{stubStreamingProvider: stub, active: []string{"obs-live", "innolive-own"}, quota: meter},
+				})
+				created, ownerToken := createTestSession(t, server.URL, nil)
+				putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
+				_, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, body)
+				if streamErrorCode(payload) == "channel_already_live" {
+					t.Fatalf("prepare still asks for confirmation: %v", payload)
+				}
+				stub.mu.Lock()
+				calls := stub.prepareCalls
+				stub.mu.Unlock()
+				if calls != 1 {
+					t.Fatalf("prepare calls = %d, want 1 without confirmation; response=%v", calls, payload)
+				}
+			})
+		}
 	}
 }

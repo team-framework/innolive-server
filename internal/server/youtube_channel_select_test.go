@@ -110,9 +110,8 @@ func TestPrepareStreamUsesOnlyYouTubeChannelWithoutAccountID(t *testing.T) {
 	}
 }
 
-// 한 유튜브 채널은 동시에 한 InnoLive 계정만 송출한다(#406). 다른 계정이 같은 채널로
-// 준비·송출 중이면 플랫폼에 닿기 전에 409로 거절한다.
-func TestPrepareStreamRejectsChannelUsedByOtherAccount(t *testing.T) {
+// 다른 InnoLive 계정이 같은 YouTube 채널을 사용해도 플랫폼 준비를 호출한다.
+func TestPrepareStreamAllowsYouTubeChannelUsedByOtherAccount(t *testing.T) {
 	accountA, accountB := uuid.New(), uuid.New()
 	provider := &channelSelectingProvider{
 		stubStreamingProvider: stubStreamingProvider{prepared: streaming.PreparedBroadcast{
@@ -132,18 +131,11 @@ func TestPrepareStreamRejectsChannelUsedByOtherAccount(t *testing.T) {
 	created, ownerToken := createTestSession(t, server.URL, nil)
 	putBroadcast(t, server.URL, created.SessionID, ownerToken, `{"made_for_kids":false}`)
 
-	response, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
-	if response.StatusCode != http.StatusConflict || streamErrorCode(payload) != "channel_in_use_by_other_account" {
-		t.Fatalf("shared channel prepare = %d %v", response.StatusCode, payload)
+	_, payload := prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
+	if streamErrorCode(payload) == "channel_in_use_by_other_account" {
+		t.Fatalf("shared channel rejected: %v", payload)
 	}
-	if provider.prepareCalls != 0 {
-		t.Fatal("rejected prepare reached the platform")
-	}
-
-	// 다른 계정의 방송이 끝나면 준비할 수 있다.
-	manager.ResetBroadcastPreparation(holder.ID, "youtube")
-	prepareStream(t, server.URL, created.SessionID, ownerToken, `{}`)
 	if provider.prepareCalls != 1 {
-		t.Fatalf("prepare calls = %d, want 1 after the channel is free", provider.prepareCalls)
+		t.Fatalf("prepare calls = %d, want 1 while channel is in use", provider.prepareCalls)
 	}
 }

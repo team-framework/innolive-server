@@ -28,6 +28,15 @@ type Pool struct {
 	next int
 	// observer는 대상별 활성 수가 바뀔 때마다 불린다(메트릭 게이지).
 	observer func(target string, active int)
+	// unready는 상태 점검이 응답 불가로 판정한 대상이다. 준비된 대상이 하나라도
+	// 있으면 Acquire는 여기 든 대상을 고르지 않는다(#499). 비어 있으면 모두 준비된
+	// 것으로 본다 — 기동 preflight를 지난 상태가 출발점이다.
+	unready map[string]bool
+	// readinessObserver는 대상의 준비 상태가 바뀔 때만 불린다.
+	readinessObserver func(target string, ready bool)
+	// suspectHandler는 ProcessVideo가 워커 고장 신호를 받았을 때 불린다. 상시
+	// 점검이 그 대상을 주기를 기다리지 않고 다시 점검하도록 연결한다.
+	suspectHandler func(*Client)
 }
 
 // SetStreamObserver는 대상별 활성 스트림 수가 바뀔 때마다 부를 함수를 붙인다.
@@ -100,23 +109,35 @@ func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
 		}
 		clients = append(clients, client)
 	}
-	return &Pool{clients: clients, active: make([]int, len(clients))}, nil
+	pool := &Pool{clients: clients, active: make([]int, len(clients))}
+	for _, client := range clients {
+		client.onSuspect = pool.reportSuspect
+	}
+	return pool, nil
 }
 
-// Acquire는 활성 스트림이 가장 적은 대상을 골라 스트림 하나를 배정하고, 그
+// Acquire는 활성 스트림이 가장 적은 준비된 대상을 골라 스트림 하나를 배정하고, 그
 // 배정을 되돌리는 release를 함께 돌려준다. 호출자는 파이프라인이 끝날 때 release를
 // 한 번 불러야 한다(여러 번 불러도 한 번만 반영된다).
 //
 // 워커 한 프로세스는 프레임을 차례로 처리하므로 같은 워커에 몰린 스트림 수가 곧
 // 프레임 지연이다(#477). 종전 라운드로빈은 끝난 세션·파이프라인 재시작에도
 // 카운터가 넘어가, 동시 2세션이 한 워커에 몰리고 다른 워커가 놀 수 있었다.
+//
+// 상태 점검이 응답 불가로 판정한 대상은 고르지 않는다(#499). 런타임이 죽은 워커는
+// 첫 프레임부터 실패해 세션이 블러로 잠긴다. 준비된 대상이 하나도 없으면 전체에서
+// 고른다 — 세션은 어차피 fail-closed로 막히고, 워커가 돌아오면 그대로 이어 쓴다.
 func (p *Pool) Acquire() (*Client, func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	best := p.next % len(p.clients)
-	for offset := 1; offset < len(p.clients); offset++ {
+	skipUnready := p.hasReadyTargetLocked("")
+	best := -1
+	for offset := 0; offset < len(p.clients); offset++ {
 		index := (p.next + offset) % len(p.clients)
-		if p.active[index] < p.active[best] {
+		if skipUnready && p.unready[p.clients[index].Address()] {
+			continue
+		}
+		if best < 0 || p.active[index] < p.active[best] {
 			best = index
 		}
 	}
@@ -138,6 +159,91 @@ func (p *Pool) adjust(index, delta int) {
 	p.active[index] += delta
 	if p.observer != nil {
 		p.observer(p.clients[index].Address(), p.active[index])
+	}
+}
+
+// SetReadinessObserver는 대상의 준비 상태가 바뀔 때마다 부를 함수를 붙인다. 응답
+// 불가가 된 워커에 붙은 세션을 다른 워커로 옮기는 데 쓴다(#499). 호출은 p.mu 밖에서
+// 일어나므로 observer가 풀을 다시 불러도 된다.
+func (p *Pool) SetReadinessObserver(observer func(target string, ready bool)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.readinessObserver = observer
+}
+
+// SetTargetReady는 상태 점검 결과로 대상의 준비 상태를 기록하고, 상태가 바뀌었는지
+// 돌려준다. 바뀐 때만 readinessObserver를 부른다. 모르는 대상은 무시한다.
+func (p *Pool) SetTargetReady(target string, ready bool) bool {
+	p.mu.Lock()
+	if !p.hasTargetLocked(target) || p.unready[target] == !ready {
+		p.mu.Unlock()
+		return false
+	}
+	if ready {
+		delete(p.unready, target)
+	} else {
+		if p.unready == nil {
+			p.unready = make(map[string]bool)
+		}
+		p.unready[target] = true
+	}
+	observer := p.readinessObserver
+	p.mu.Unlock()
+	if observer != nil {
+		observer(target, ready)
+	}
+	return true
+}
+
+// TargetReady는 대상이 마지막 상태 점검에서 응답 불가로 판정되지 않았는지다.
+func (p *Pool) TargetReady(target string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.unready[target]
+}
+
+// HasReadyTargetOtherThan은 target 말고 준비된 대상이 있는지다. 응답 불가 워커의
+// 세션을 옮겨도 갈 곳이 있는지 판단한다.
+func (p *Pool) HasReadyTargetOtherThan(target string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hasReadyTargetLocked(target)
+}
+
+// hasReadyTargetLocked는 except 말고 준비된 대상이 있는지다. p.mu를 쥔 채 불린다.
+func (p *Pool) hasReadyTargetLocked(except string) bool {
+	for _, client := range p.clients {
+		if address := client.Address(); address != except && !p.unready[address] {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Pool) hasTargetLocked(target string) bool {
+	for _, client := range p.clients {
+		if client.Address() == target {
+			return true
+		}
+	}
+	return false
+}
+
+// SetSuspectHandler는 ProcessVideo가 워커 고장 신호를 받았을 때 부를 함수를 붙인다.
+// nil이면 신호를 버린다.
+func (p *Pool) SetSuspectHandler(handler func(*Client)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.suspectHandler = handler
+}
+
+// reportSuspect는 클라이언트가 워커 고장 신호를 받았다고 알린다.
+func (p *Pool) reportSuspect(client *Client) {
+	p.mu.Lock()
+	handler := p.suspectHandler
+	p.mu.Unlock()
+	if handler != nil {
+		handler(client)
 	}
 }
 

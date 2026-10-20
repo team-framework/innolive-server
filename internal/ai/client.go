@@ -23,27 +23,35 @@ type Client struct {
 	conn    *grpc.ClientConn
 	client  aiv1.AiProcessorClient
 	timeout time.Duration
+	// onSuspect는 ProcessVideo가 워커 고장 신호를 받았을 때 불린다(#499). NewPool이
+	// 클라이언트를 돌려주기 전에 한 번 정하고, nil이면 신호를 버린다.
+	onSuspect func(*Client)
 }
 
 func New(address string, timeout time.Duration) (*Client, error) {
+	return newClient(address, timeout)
+}
+
+// newClient는 New의 본체다. 테스트는 extra로 bufconn 다이얼러를 붙인다.
+func newClient(address string, timeout time.Duration, extra ...grpc.DialOption) (*Client, error) {
 	if address == "" {
 		return nil, errors.New("AI gRPC address is empty")
 	}
-	conn, err := grpc.NewClient(address,
+	client := &Client{address: address, timeout: timeout}
+	options := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		// 최악의 ProcessedVideoChunk(모자이크 JPEG + 얼굴별 메타데이터)는 gRPC 기본 수신
 		// 한도 4 MiB를 넘을 수 있다. AI 계약은 5 MiB 이상을 요구한다.
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxAIRecvMsgSize)),
-	)
+		grpc.WithStreamInterceptor(client.watchStream),
+	}, extra...)
+	conn, err := grpc.NewClient(address, options...)
 	if err != nil {
 		return nil, fmt.Errorf("create AI gRPC client: %w", err)
 	}
-	return &Client{
-		address: address,
-		conn:    conn,
-		client:  aiv1.NewAiProcessorClient(conn),
-		timeout: timeout,
-	}, nil
+	client.conn = conn
+	client.client = aiv1.NewAiProcessorClient(conn)
+	return client, nil
 }
 
 func (c *Client) Close() error { return c.conn.Close() }

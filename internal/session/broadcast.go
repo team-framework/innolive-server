@@ -225,17 +225,16 @@ func (m *Manager) BeginBroadcastPrepareCounted(id string, providers ...string) (
 	return m.BeginBroadcastPrepareOnChannel(id, "", providers...)
 }
 
-// BeginBroadcastPrepareOnChannel은 준비 구간을 선점하면서 송출할 플랫폼 채널도
-// 선점한다(#406). 같은 채널로 다른 사용자가 준비·송출 중이면 거절한다 — 한 채널은
-// 동시에 한 InnoLive 계정만 송출한다. 같은 사용자의 다른 세션은 막지 않는다(이미
-// 라이브 확인이 묻는다). channel이 비면 채널 선점 없이 종전과 같다.
+// BeginBroadcastPrepareOnChannel은 세션의 준비 구간을 선점한다.
+// YouTube는 여러 사용자가 같은 채널로 방송할 수 있다. 다른 플랫폼은
+// 채널이 지정되면 사용자 간 채널 점유를 확인한다.
 func (m *Manager) BeginBroadcastPrepareOnChannel(id, channel string, providers ...string) (*Session, int, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, 0, err
 	}
 	provider := s.targetProvider(providers)
-	if channel != "" {
+	if channel != "" && provider != "youtube" {
 		m.channelMu.Lock()
 		defer m.channelMu.Unlock()
 		if m.channelInUseByOtherUser(s.UserID, provider, channel) {

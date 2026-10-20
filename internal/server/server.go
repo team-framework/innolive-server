@@ -489,8 +489,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Provider string `json:"provider"`
-		// AllowConcurrent는 채널이 이미 다른 도구로 라이브 중이어도 방송을 하나 더
-		// 연다는 사용자 확인이다(#361).
+		// AllowConcurrent는 YouTube 외 플랫폼의 동시 방송 확인값이다.
+		// 기존 YouTube 클라이언트의 요청도 계속 허용한다.
 		AllowConcurrent bool `json:"allow_concurrent"`
 		// AccountID는 송출할 유튜브 채널의 연결 ID다(#390). 연결이 하나면 생략한다.
 		AccountID string `json:"account_id"`
@@ -519,7 +519,7 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 		writeError(w, *failure)
 		return
 	}
-	if !request.AllowConcurrent {
+	if providerName != auth.StreamingProviderYouTube && !request.AllowConcurrent {
 		if conflict := s.channelAlreadyLive(ctx, liveSession, providerName); conflict != nil {
 			writeError(w, *conflict)
 			return
@@ -541,10 +541,8 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	}{Response: liveSession.Response(), Warnings: warnings, IngestURL: directIngestURL(liveSession, providerName, false)})
 }
 
-// channelAlreadyLive는 채널이 이미 다른 도구로 라이브 중이면 409를 돌려준다(#361).
-// 유튜브는 한 채널의 동시 라이브를 허용하므로 막지 않고 사용자에게 확인받는다 —
-// 확인하면 allow_concurrent로 다시 부른다. 방송 중 전환·대상 추가는 이 확인을
-// 거치지 않는다(준비 요청만). 확인에 실패하면 방송을 막지 않는다.
+// channelAlreadyLive는 YouTube 외 플랫폼의 기존 라이브 방송을 확인한다.
+// 확인에 실패하면 방송을 막지 않는다.
 func (s *Server) channelAlreadyLive(ctx context.Context, liveSession *session.Session, providerName auth.StreamingProvider) *apiError {
 	checker, ok := s.streaming[providerName].(streaming.ActiveBroadcastChecker)
 	if !ok {

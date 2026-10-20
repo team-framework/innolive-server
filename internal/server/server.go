@@ -419,6 +419,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if errors.Is(err, session.ErrFaceSwapWorkerUnavailable) {
+		s.logger.Warn("face swap session rejected: no face swap AI worker is ready", "user_id", userID)
+		writeError(w, apiError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "face_swap_unavailable",
+			Message: "No face swap worker is ready. Try again later.",
+		})
+		return
+	}
 	if errors.Is(err, session.ErrCapacityExceeded) {
 		active, limit := s.sessions.Capacity()
 		s.logger.Info("session rejected at capacity", "active_sessions", active, "max_sessions", limit)

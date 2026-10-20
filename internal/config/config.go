@@ -81,6 +81,7 @@ type Config struct {
 	AIPreflightTimeout         time.Duration
 	AIPreflightRequired        bool
 	AIPreflightInterval        time.Duration
+	AIReadinessTimeout         time.Duration
 	AIMeImagePath              string
 	ReferenceStorePath         string
 	ReferenceDecodeConcurrency int
@@ -177,7 +178,8 @@ func Load() (Config, error) {
 		AITimeoutLatchThreshold:    envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
 		AIPreflightTimeout:         envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
 		AIPreflightRequired:        envBool("AI_PREFLIGHT_REQUIRED", false),
-		AIPreflightInterval:        envDuration("AI_PREFLIGHT_INTERVAL", 5*time.Minute),
+		AIPreflightInterval:        envDuration("AI_PREFLIGHT_INTERVAL", 30*time.Second),
+		AIReadinessTimeout:         envDuration("AI_READINESS_TIMEOUT", 10*time.Second),
 		AIMeImagePath:              strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
 		ReferenceStorePath:         strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
 		ReferenceDecodeConcurrency: envInt("REFERENCE_DECODE_CONCURRENCY", 4),
@@ -397,14 +399,19 @@ func (c Config) Validate() error {
 		return errors.New("AI_PREFLIGHT_TIMEOUT must be positive")
 	}
 	// 0은 상시 감시 비활성이다. 프로브 하나가 끝나기도 전에 다음 주기가 오면
-	// 워커에 프로브가 쌓이므로, 주기는 타임아웃보다 길어야 한다.
+	// 워커에 프로브가 쌓이므로, 주기는 타임아웃보다 길어야 한다. 상시 점검의
+	// 타임아웃(AI_READINESS_TIMEOUT)은 기동 preflight와 따로 둔다(#499) — 기동은 첫
+	// 추론 warmup을 흡수하느라 길지만, 상시 점검은 응답 불가 워커를 빨리 가려야 한다.
 	if c.AIPreflightInterval < 0 {
 		return errors.New("AI_PREFLIGHT_INTERVAL must not be negative")
 	}
-	if c.AIPreflightInterval > 0 && c.AIPreflightInterval <= c.AIPreflightTimeout {
+	if c.AIPreflightInterval > 0 && c.AIReadinessTimeout <= 0 {
+		return errors.New("AI_READINESS_TIMEOUT must be positive when AI_PREFLIGHT_INTERVAL is set")
+	}
+	if c.AIPreflightInterval > 0 && c.AIPreflightInterval <= c.AIReadinessTimeout {
 		return fmt.Errorf(
-			"AI_PREFLIGHT_INTERVAL must be longer than AI_PREFLIGHT_TIMEOUT (%s): %s",
-			c.AIPreflightTimeout, c.AIPreflightInterval,
+			"AI_PREFLIGHT_INTERVAL must be longer than AI_READINESS_TIMEOUT (%s): %s",
+			c.AIReadinessTimeout, c.AIPreflightInterval,
 		)
 	}
 	if c.NegotiationTimeout < 0 {

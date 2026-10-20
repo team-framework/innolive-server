@@ -8,6 +8,7 @@ import (
 	"inno-live-server/internal/media"
 
 	"github.com/pion/rtcp"
+	"github.com/pion/webrtc/v4"
 )
 
 // 송출 해상도는 세션 생성 시 정해진다(#271). 디코더가 트랙 도착 즉시 이
@@ -114,22 +115,29 @@ func (m *Manager) ChangeBroadcastResolution(id, value string) (*Session, error) 
 	if !restart {
 		return s, nil
 	}
-	// 이전 파이프라인이 트랙 읽기를 놓을 때까지 기다린다 — 두 파이프라인이 한
-	// 트랙을 나눠 읽으면 안 된다.
+	m.relaunchVideoPipeline(s, track, done)
+	return s, nil
+}
+
+// relaunchVideoPipeline은 멈춘 파이프라인이 트랙 읽기를 놓을 때까지 기다렸다가 같은
+// 트랙으로 다시 띄우고 송출자에게 키프레임을 청한다. 해상도 변경(#283)과 AI 워커
+// 이동(#499)이 쓴다. 호출자는 s.trackCancel을 부르고 nil로 비운 뒤 resolutionMu를
+// 쥔 채 부른다.
+func (m *Manager) relaunchVideoPipeline(s *Session, track *webrtc.TrackRemote, done <-chan struct{}) {
+	// 두 파이프라인이 한 트랙을 나눠 읽으면 안 된다.
 	<-done
 	s.mu.RLock()
-	// 기다리는 사이 세션이 닫혔거나 트랙이 교체됐으면 그쪽이 새 핀으로 이미 띄웠다.
+	// 기다리는 사이 세션이 닫혔거나 트랙이 교체됐으면 그쪽이 이미 새로 띄웠다.
 	current := !s.closed && s.videoTrack == track && s.trackCancel == nil
 	s.mu.RUnlock()
 	if !current {
-		return s, nil
+		return
 	}
 	m.startVideoPipeline(s.baseCtx, s, track, media.VideoCodec(track.Codec().MimeType))
 	// 새 디코더는 참조 프레임이 없으므로 송출자에게 키프레임을 청한다.
 	if err := s.PC.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())}}); err != nil {
 		m.logger.Warn("keyframe request failed", "session_id", s.ID, "error", err)
 	}
-	return s, nil
 }
 
 // hasActiveTargetLocked는 준비·송출 중이거나 egress가 아직 살아 있는 대상이

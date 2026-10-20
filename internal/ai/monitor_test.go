@@ -176,3 +176,49 @@ func TestReadinessMonitorProbesTargetsConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// 점검 결과는 풀의 준비 상태에도 들어가, 응답 불가 워커가 새 배정에서 빠진다(#499).
+func TestReadinessMonitorMarksPoolReadiness(t *testing.T) {
+	healthy := preflightClient(t, echoAIServer{})
+	healthy.address = "healthy:50051"
+	broken := preflightClient(t, badStatusServer{})
+	broken.address = "broken:50052"
+	pool := &Pool{clients: []*Client{healthy, broken}, active: make([]int, 2)}
+
+	testMonitor(pool, newReadySpy(), time.Hour).probe(context.Background())
+
+	if !pool.TargetReady("healthy:50051") || pool.TargetReady("broken:50052") {
+		t.Fatalf("pool readiness healthy=%t broken=%t, want true and false",
+			pool.TargetReady("healthy:50051"), pool.TargetReady("broken:50052"))
+	}
+	for range 4 {
+		if client, _ := pool.Acquire(); client.Address() == "broken:50052" {
+			t.Fatal("Acquire() chose the target the probe found broken")
+		}
+	}
+}
+
+// 고장 신호를 받은 워커는 주기(여기서는 1시간)를 기다리지 않고 곧바로 다시
+// 점검한다. 같은 워커의 신호가 몰려도 대기 시간 안에는 한 번만 점검한다.
+func TestReadinessMonitorProbesSuspectImmediately(t *testing.T) {
+	broken := preflightClient(t, badStatusServer{})
+	broken.address = "broken:50052"
+	pool := &Pool{clients: []*Client{broken}, active: make([]int, 1)}
+	spy := newReadySpy()
+	monitor := testMonitor(pool, spy, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go monitor.Run(ctx)
+	spy.waitForUpdates(t, 1)
+
+	pool.reportSuspect(broken)
+	spy.waitForUpdates(t, 2)
+
+	pool.reportSuspect(broken)
+	pool.reportSuspect(broken)
+	time.Sleep(200 * time.Millisecond)
+	if _, updates := spy.snapshot(); updates != 2 {
+		t.Fatalf("readiness updates = %d after repeated suspects, want 2 (cooldown)", updates)
+	}
+}

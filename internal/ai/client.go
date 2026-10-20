@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
@@ -26,6 +27,9 @@ type Client struct {
 	// onSuspect는 ProcessVideo가 워커 고장 신호를 받았을 때 불린다(#499). NewPool이
 	// 클라이언트를 돌려주기 전에 한 번 정하고, nil이면 신호를 버린다.
 	onSuspect func(*Client)
+	// lastFrameAt은 이 워커가 세션 프레임을 오류 없이 마지막으로 돌려준 시각(UnixNano)
+	// 이다. 상시 점검은 막 프레임을 처리한 워커를 건너뛴다.
+	lastFrameAt atomic.Int64
 }
 
 func New(address string, timeout time.Duration) (*Client, error) {

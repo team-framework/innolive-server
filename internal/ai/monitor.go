@@ -16,6 +16,11 @@ type ReadinessSink interface {
 // 워커에 붙은 세션들이 같은 고장을 동시에 알려도 점검은 한 번만 나간다.
 const suspectProbeCooldown = 5 * time.Second
 
+// servingWindow 안에 세션 프레임을 오류 없이 돌려준 워커는 상시 점검을 건너뛴다.
+// 송출 중인 워커는 초당 여러 프레임을 돌려주므로 넉넉하고, 이보다 길면 막 멈춘 워커의
+// 점검이 한 주기 더 밀린다.
+const servingWindow = 10 * time.Second
+
 // ReadinessMonitor는 interval마다 모든 AI worker에 preflight 프로브를 보내고
 // 결과를 sink와 풀의 준비 상태에 기록한다.
 //
@@ -94,9 +99,17 @@ func (m *ReadinessMonitor) Run(ctx context.Context) {
 // timeout×타깃수까지 늘어나 interval을 넘겨버리고(그래서 주기가 설정값보다
 // 길어진다), 죽은 워커를 기다리느라 멀쩡한 워커의 시계열까지 늦게 찍힌다 —
 // 워커가 죽었을 때 관측이 가장 늦어지는 셈이라 감시의 목적과 반대다.
+//
+// servingWindow 안에 세션 프레임을 오류 없이 돌려준 워커는 건너뛴다. 점검 프레임은 그 워커의
+// 추론 줄에 끼어 라이브 프레임을 늦추는데, 막 프레임을 처리한 워커는 이미 살아 있음이
+// 드러났다. 응답 불가로 판정된 워커는 기존 스트림이 돌아도 새 스트림을 거절할 수
+// 있으므로 언제나 점검한다. 고장 신호로 하는 점검(probeSuspect)도 건너뛰지 않는다.
 func (m *ReadinessMonitor) probe(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, client := range m.pool.Clients() {
+		if m.pool.TargetReady(client.Address()) && client.servedFrameWithin(servingWindow) {
+			continue
+		}
 		wg.Add(1)
 		go func(c *Client) {
 			defer wg.Done()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
 
@@ -74,10 +75,21 @@ func (s *watchedStream) RecvMsg(message any) error {
 		s.client.reportIfWorkerFailure(s.ctx, err)
 		return err
 	}
-	if chunk, ok := message.(*aiv1.ProcessedVideoChunk); ok && workerFailureCodes[chunk.GetErrorCode()] {
-		s.client.reportSuspect()
+	if chunk, ok := message.(*aiv1.ProcessedVideoChunk); ok {
+		switch code := chunk.GetErrorCode(); {
+		case workerFailureCodes[code]:
+			s.client.reportSuspect()
+		case code == "":
+			s.client.lastFrameAt.Store(time.Now().UnixNano())
+		}
 	}
 	return nil
+}
+
+// servedFrameWithin은 이 워커가 within 안에 세션 프레임을 오류 없이 돌려줬는지다.
+func (c *Client) servedFrameWithin(within time.Duration) bool {
+	last := c.lastFrameAt.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < within
 }
 
 // reportIfWorkerFailure는 워커가 연결을 받지 않거나(UNAVAILABLE) 스트림을 먼저

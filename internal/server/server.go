@@ -72,6 +72,9 @@ type Server struct {
 	mux                     *http.ServeMux
 	handler                 http.Handler
 	platformEnds            platformEndChecks
+	// referenceCheckRequests는 기준 얼굴 대조를 주기 밖에서 한 번 더 돌리라는 요청이다.
+	// 버퍼 1칸이라 밀린 요청은 하나로 합쳐진다.
+	referenceCheckRequests chan struct{}
 }
 
 func New(
@@ -96,6 +99,7 @@ func New(
 		ai:                      aiPool,
 		references:              newReferenceStore(cfg.ReferenceStorePath, cfg.AIMeImagePath != ""),
 		referenceDecode:         newDecodeGate(cfg.ReferenceDecodeConcurrency),
+		referenceCheckRequests:  make(chan struct{}, 1),
 		origins:                 origins,
 		streaming:               streamingProviders,
 		guestReference:          newGuestReferenceGate(),

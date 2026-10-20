@@ -128,6 +128,10 @@ type referenceFace struct {
 	// id를 따로 만들므로, 얼굴을 지우려면 각 워커에 그 워커의 id로 요청해야 한다.
 	EntryIDs     map[string]string `json:"entry_ids,omitempty"`
 	RegisteredAt time.Time         `json:"registered_at"`
+	// ReregistrationRequired는 워커 하나 이상이 이 얼굴을 잃었다는 대조 결과다(#501).
+	// 워커는 화이트리스트를 메모리에만 두고 서버는 얼굴 원본을 보관하지 않으므로,
+	// 되살리려면 사용자가 사진을 다시 올려야 한다. 다시 등록하면 지워진다.
+	ReregistrationRequired bool `json:"reregistration_required,omitempty"`
 }
 
 // referenceFaceView는 등록한 얼굴의 공개 형태다. 워커 엔트리 id는 내부 기록이라
@@ -136,6 +140,9 @@ type referenceFaceView struct {
 	Name         string    `json:"name,omitempty"`
 	FaceID       string    `json:"face_id"`
 	RegisteredAt time.Time `json:"registered_at"`
+	// ReregistrationRequired가 참이면 앱은 이 얼굴을 다시 등록하라고 안내한다. 그
+	// 전까지는 일부 또는 모든 세션에서 등록한 사람도 블러된다.
+	ReregistrationRequired bool `json:"reregistration_required"`
 }
 
 type referenceStatus struct {
@@ -145,6 +152,8 @@ type referenceStatus struct {
 	ClientID     string              `json:"client_id"`
 	Count        int                 `json:"count"`
 	Faces        []referenceFaceView `json:"faces"`
+	// ReregistrationRequired는 Faces 중 하나라도 재등록이 필요한지다.
+	ReregistrationRequired bool `json:"reregistration_required"`
 }
 
 type referenceStore struct {
@@ -537,10 +546,12 @@ func (s *referenceStore) status(clientID string) referenceStatus {
 	envConfigured := s.envConfigured
 	s.mu.RUnlock()
 	views := make([]referenceFaceView, 0, len(faces))
+	result := referenceStatus{ClientID: clientID, Count: len(faces)}
 	for _, face := range faces {
-		views = append(views, referenceFaceView{Name: face.Name, FaceID: face.FaceID, RegisteredAt: face.RegisteredAt})
+		views = append(views, referenceFaceView{Name: face.Name, FaceID: face.FaceID, RegisteredAt: face.RegisteredAt, ReregistrationRequired: face.ReregistrationRequired})
+		result.ReregistrationRequired = result.ReregistrationRequired || face.ReregistrationRequired
 	}
-	result := referenceStatus{ClientID: clientID, Count: len(faces), Faces: views}
+	result.Faces = views
 	if len(faces) > 0 {
 		source := "api"
 		registeredAt := faces[0].RegisteredAt

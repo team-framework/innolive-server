@@ -75,7 +75,11 @@ type Config struct {
 	AIWireFormat      WireFormat
 	// AIFaceSwapEnabled는 세션이 얼굴 합성을 고를 수 있는지다. AI 서버에 합성
 	// 모델과 프리셋이 준비된 배포에서만 켠다. 꺼져 있으면 모든 세션이 blur다.
-	AIFaceSwapEnabled          bool
+	AIFaceSwapEnabled bool
+	// AIFaceSwapTargets는 얼굴 합성 세션만 받는 AI 워커다(#507). AITargets의 일부이고,
+	// 합성이 켜져 있으면 합성 세션은 여기에만, 블러 세션은 나머지 워커에만 간다.
+	// 비우면 모든 워커가 두 모드를 받는다(모든 워커에 합성 모델을 올린 배포).
+	AIFaceSwapTargets          []string
 	AIFailurePolicy            AIFailurePolicy
 	AITimeoutLatchThreshold    int
 	AIPreflightTimeout         time.Duration
@@ -252,6 +256,7 @@ func Load() (Config, error) {
 	if len(cfg.AITargets) == 0 {
 		cfg.AITargets = []string{cfg.AIAddress}
 	}
+	cfg.AIFaceSwapTargets = splitList(env("AI_FACE_SWAP_TARGETS", ""))
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -432,6 +437,9 @@ func (c Config) Validate() error {
 				return errors.New("AI_GRPC_TARGETS must not contain empty addresses")
 			}
 		}
+		if err := c.validateFaceSwapTargets(); err != nil {
+			return err
+		}
 	}
 	if c.ExperienceQualityIngestKey != "" && len(c.ExperienceQualityIngestKey) < 32 {
 		return errors.New("EXPERIENCE_QUALITY_INGEST_KEY must contain at least 32 characters")
@@ -534,6 +542,29 @@ func splitURLs(value string) []string {
 		}
 	}
 	return urls
+}
+
+// validateFaceSwapTargets는 합성 전용 워커가 AI_GRPC_TARGETS 안에 있고, 블러 세션을
+// 받을 워커를 하나 이상 남기는지 확인한다(#507).
+func (c Config) validateFaceSwapTargets() error {
+	if len(c.AIFaceSwapTargets) == 0 {
+		return nil
+	}
+	targets := make(map[string]bool, len(c.AITargets))
+	for _, target := range c.AITargets {
+		targets[target] = true
+	}
+	reserved := make(map[string]bool, len(c.AIFaceSwapTargets))
+	for _, target := range c.AIFaceSwapTargets {
+		if !targets[target] {
+			return fmt.Errorf("AI_FACE_SWAP_TARGETS entry %q is not in AI_GRPC_TARGETS", target)
+		}
+		reserved[target] = true
+	}
+	if len(reserved) == len(targets) {
+		return errors.New("AI_FACE_SWAP_TARGETS must leave at least one AI_GRPC_TARGETS entry for blur sessions")
+	}
+	return nil
 }
 
 func splitList(value string) []string {

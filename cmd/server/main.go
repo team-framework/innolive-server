@@ -204,7 +204,7 @@ func main() {
 			registry,
 			logger,
 			string(cfg.AIWireFormat),
-			cfg.AIPreflightTimeout,
+			cfg.AIReadinessTimeout,
 			cfg.AIPreflightInterval,
 			cfg.DecoderPinLongEdge,
 		).Run(monitorContext)

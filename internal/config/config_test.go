@@ -212,23 +212,47 @@ func TestValidateDecoderPinLongEdge(t *testing.T) {
 }
 
 // TestValidateAIPreflightInterval: 0은 상시 감시 비활성이므로 통과해야 하고,
-// 주기가 타임아웃보다 짧거나 같으면 프로브가 워커에 쌓이므로 거부해야 한다(#162).
+// 주기가 상시 점검 타임아웃보다 짧거나 같으면 프로브가 워커에 쌓이므로 거부해야
+// 한다(#162). 기동 preflight 타임아웃은 주기와 무관하다(#499).
 func TestValidateAIPreflightInterval(t *testing.T) {
-	for _, valid := range []time.Duration{0, 31 * time.Second, 5 * time.Minute} {
+	for _, valid := range []time.Duration{0, 11 * time.Second, 30 * time.Second, 5 * time.Minute} {
 		cfg := validConfig()
-		cfg.AIPreflightTimeout = 30 * time.Second
+		cfg.AIPreflightTimeout = 60 * time.Second
+		cfg.AIReadinessTimeout = 10 * time.Second
 		cfg.AIPreflightInterval = valid
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate() with AIPreflightInterval=%s error = %v", valid, err)
 		}
 	}
-	for _, invalid := range []time.Duration{-time.Second, 10 * time.Second, 30 * time.Second} {
+	for _, invalid := range []time.Duration{-time.Second, 5 * time.Second, 10 * time.Second} {
 		cfg := validConfig()
-		cfg.AIPreflightTimeout = 30 * time.Second
+		cfg.AIPreflightTimeout = 60 * time.Second
+		cfg.AIReadinessTimeout = 10 * time.Second
 		cfg.AIPreflightInterval = invalid
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("expected AIPreflightInterval=%s to be rejected", invalid)
 		}
+	}
+	cfg := validConfig()
+	cfg.AIPreflightInterval = 30 * time.Second
+	cfg.AIReadinessTimeout = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected AIReadinessTimeout=0 to be rejected while the monitor is enabled")
+	}
+}
+
+// 응답 불가 워커를 5분이 아니라 30초 안에 가린다(#499). 운영 env에는 이 두 값이
+// 없어 기본값이 그대로 쓰인다.
+func TestLoadAIReadinessDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AI_PREFLIGHT_TIMEOUT", "60s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AIPreflightInterval != 30*time.Second || cfg.AIReadinessTimeout != 10*time.Second {
+		t.Fatalf("AIPreflightInterval=%s AIReadinessTimeout=%s, want 30s and 10s", cfg.AIPreflightInterval, cfg.AIReadinessTimeout)
 	}
 }
 

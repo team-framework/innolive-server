@@ -62,6 +62,8 @@ func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Du
 // Preflight는 이 worker를 상대로 합성 ProcessVideo 왕복을 한 번 수행한다.
 // deadline은 호출자가 ctx로 정한다.
 func (c *Client) Preflight(ctx context.Context, wireFormat string, pinLongEdge int) error {
+	// 프로브의 실패는 프로브가 직접 판정한다. 고장 신호로 다시 알리지 않는다.
+	ctx = withProbe(ctx)
 	dim := probeDimension(pinLongEdge)
 	const timestamp int64 = 1
 	request := &aiv1.VideoChunk{

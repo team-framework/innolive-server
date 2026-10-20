@@ -148,7 +148,8 @@ make proto        # protobuf 코드 생성
 | `AI_TIMEOUT_LATCH_THRESHOLD` | `3` | 연속 타임아웃이 이 횟수를 넘으면 블랙아웃 래치를 겁니다 |
 | `AI_PREFLIGHT_REQUIRED` | `false` | 기동 preflight가 실패하면 부팅을 중단할지 여부 |
 | `AI_PREFLIGHT_TIMEOUT` | `30s` | preflight 프로브 제한 시간 |
-| `AI_PREFLIGHT_INTERVAL` | `5m` | 상시 감시 프로브 주기. `0`은 비활성이며 `AI_PREFLIGHT_TIMEOUT`보다 길어야 합니다 |
+| `AI_PREFLIGHT_INTERVAL` | `30s` | 상시 감시 프로브 주기. `0`은 비활성이며 `AI_READINESS_TIMEOUT`보다 길어야 합니다. 응답 불가로 판정한 워커는 새 세션 배정에서 빠지고, 그 워커의 세션은 다른 워커로 옮깁니다 |
+| `AI_READINESS_TIMEOUT` | `10s` | 상시 감시 프로브 하나의 제한 시간 |
 | `AI_FRAME_WIRE_FORMAT` | `jpeg` | `jpeg` / `raw` |
 | `AI_FACE_SWAP_ENABLED` | `false` | 세션이 `face_anonymization: "face_swap"`을 고를 수 있는지 (AI 서버에 합성 모델·프리셋 필요) |
 | `AI_PRIVACY_FIXED_DELAY` | `20ms` | `fixed_delay` 모드에서 넣는 지연 |

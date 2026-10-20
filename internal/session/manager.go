@@ -301,6 +301,11 @@ type Session struct {
 	pipelineDone     chan struct{}
 	resolutionMu     sync.Mutex
 	resolutionSwitch *ResolutionSwitchState
+	// aiTarget은 지금 영상 파이프라인이 배정받은 AI 워커 주소다. 그 워커가 응답
+	// 불가가 되면 파이프라인을 다시 띄워 다른 워커로 옮긴다(#499). aiMovedAt은 마지막
+	// 이동 시각으로, 워커 상태가 오락가락해도 이동이 반복되지 않게 한다.
+	aiTarget  string
+	aiMovedAt time.Time
 	// upgradeOffer는 걸려 있는 화질 올리기 제안, upgradeOffered는 제안한 적이
 	// 있는지다(#278). 한 세션에 한 번만 제안한다.
 	upgradeOffer   *UpgradeOffer
@@ -552,6 +557,10 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 	// "제한 없음"이라, 설정해 둔 상한이 첫 방송 전까지 0으로 보이면
 	// 운영자는 설정이 안 먹은 것으로 읽는다.
 	registry.SetEgressSlots(manager.egressSlots.Used(), manager.egressSlots.Capacity())
+	if aiPool != nil {
+		// 응답 불가가 된 워커에 붙은 세션을 다른 워커로 옮긴다(#499).
+		aiPool.SetReadinessObserver(manager.handleAIReadinessChange)
+	}
 	return manager, nil
 }
 
@@ -2089,10 +2098,12 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	// releaseAI는 이 파이프라인의 AI 워커 배정을 돌려준다. 파이프라인이 끝나거나
 	// 시작에 실패하면 반드시 불린다 — 그래야 다음 세션이 덜 붐비는 워커로 간다.
 	releaseAI := func() {}
+	aiTarget := ""
 	if s.privacyMode == config.PrivacyModeReal {
 		client, release := m.ai.Acquire()
 		releaseAI = release
-		m.metrics.IncAITargetSession(client.Address())
+		aiTarget = client.Address()
+		m.metrics.IncAITargetSession(aiTarget)
 		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
 		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
 		// 스트림 식별자를 선택할 수 없게 한다.
@@ -2126,12 +2137,13 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	processor.SetMosaicConfig(s.mosaicConfig)
 	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor
+	s.aiTarget = aiTarget
 	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 	// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
 	// Enqueue 경로가 끊기지 않는다.
 	egressFanout := s.egressFanout
 	s.mu.Unlock()
-	m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode)
+	m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode, "ai_target", aiTarget)
 	trackID := track.ID()
 	// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
 	// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그
@@ -2179,6 +2191,10 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 			s.rawTrackID = ""
 			s.processedTrackID = ""
 			s.UpdatedAt = time.Now().UTC()
+		}
+		// 새 파이프라인이 이미 자기 워커를 적었으면 건드리지 않는다.
+		if s.pipelineDone == pipelineDone {
+			s.aiTarget = ""
 		}
 		s.mu.Unlock()
 	}()

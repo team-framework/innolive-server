@@ -29,6 +29,14 @@ type AIStream interface {
 
 var errAIInputPaused = errors.New("AI input is paused")
 
+// aiInferenceTimeoutCode는 AI 워커가 자기 추론 제한 시간을 넘겨 그 프레임을
+// 포기했다는 응답 코드다. 워커가 잠깐 막힌 것일 수 있으므로 전송 타임아웃처럼
+// AI_TIMEOUT_LATCH_THRESHOLD까지는 세션을 잠그지 않는다(#499). 종전에는 다른 오류
+// 코드처럼 한 번에 잠갔다.
+const aiInferenceTimeoutCode = "INFERENCE_TIMEOUT"
+
+var errAIInferenceTimeout = errors.New("AI worker inference timed out")
+
 // defaultRecoveryProbeInterval은 잠긴 세션이 회복을 확인하려고 AI 경계를 다시
 // 시도하는 주기다. 회복한 워커가 1초 안팎에 세션을 재개할 만큼 짧고, 잠긴 세션이
 // 많아도 과부하 워커에 프레임마다 다시 몰리지 않을 만큼 길다.
@@ -410,8 +418,12 @@ func (p *Processor) processImage(frame []byte, timestamp int64, width, height ui
 	// error_code는 AI 서버가 RPC는 끝냈지만 프레임 처리 자체가 실패했을 때(예: 디코드
 	// 실패) 설정된다. 전송 수준에서 호출이 성공했다고 프레임이 안전하게 처리된 것은
 	// 아니므로, 전송 오류와 똑같이 fail-closed로 잠가야 한다.
-	if response.GetErrorCode() != "" {
-		return nil, fmt.Errorf("AI processing failed: error_code=%s error_message=%q", response.GetErrorCode(), response.GetErrorMessage())
+	if code := response.GetErrorCode(); code != "" {
+		err := fmt.Errorf("AI processing failed: error_code=%s error_message=%q", code, response.GetErrorMessage())
+		if code == aiInferenceTimeoutCode {
+			return nil, fmt.Errorf("%w: %w", errAIInferenceTimeout, err)
+		}
+		return nil, err
 	}
 	if !strings.EqualFold(response.GetStatusMessage(), "success") {
 		return nil, fmt.Errorf("AI processing failed: status=%q", response.GetStatusMessage())
@@ -526,7 +538,7 @@ func (p *Processor) blackoutFrame(reference []byte, width, height uint16) ([]byt
 // 아님, 빈 프레임)이나 전송 오류와 구분한다. 일시적 AI 워커 과부하가 만들 수 있는
 // 실패는 타임아웃뿐이라 회복 가능성이 있는 것으로 다룬다.
 func isTimeoutError(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errAIInferenceTimeout) {
 		return true
 	}
 	return status.Code(err) == codes.DeadlineExceeded
@@ -536,6 +548,8 @@ func isTimeoutError(err error) bool {
 // 무관한 실패(타임아웃·빈 프레임)에 와이어 형식 설명이 붙지 않게 한다.
 func latchHint(err error, wireFormat config.WireFormat) string {
 	switch {
+	case errors.Is(err, errAIInferenceTimeout):
+		return "the AI worker hit its own inference limit (GRPC_INFERENCE_TIMEOUT) on more consecutive frames than AI_TIMEOUT_LATCH_THRESHOLD; check the worker's readiness and host memory pressure (swap)"
 	case isTimeoutError(err):
 		return "AI round-trip exceeded AI_GRPC_TIMEOUT past AI_TIMEOUT_LATCH_THRESHOLD; a single Python AI worker caps near 10 concurrent streams — scale the AI_GRPC_TARGETS pool or raise AI_GRPC_TIMEOUT"
 	case wireFormat == config.WireFormatRaw:

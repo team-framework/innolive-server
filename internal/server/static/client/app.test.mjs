@@ -32,6 +32,9 @@ const buttonKeys = [
   "errorProbeBtn",
   "copyJsonBtn",
   "referenceFaceInput",
+  "referenceFaceState",
+  "referenceFaceDetail",
+  "referenceFaceList",
   "uploadReferenceFaceBtn",
   "refreshReferenceFaceBtn",
   "deleteReferenceFaceBtn",
@@ -236,7 +239,7 @@ async function loadApp({ fetchImpl, navigator } = {}) {
 
   const source = await readFile(appPath, "utf8");
   vm.runInNewContext(
-    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, togglePrivacy, applyMosaicConfig, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia };`,
+    `${source}\nglobalThis.__appTestHooks = { state, els, renderTargets, controlTarget, applyPlatformSelection, selectedPlatforms, prepareBroadcast, refreshPlan, modeAvailability, loadYoutubeCategories, setYoutubeCategory, renderSwitchStatus, pauseBroadcast, togglePrivacy, applyMosaicConfig, broadcastControlTargets, addRemoteCandidate, flushRemoteCandidateQueue, queueOrSendCandidate, rememberLocalCandidateGeneration, refreshCurrentSession, runNetworkRecoveryAttempt, startNetworkRecoveryStatusObserver, stopBroadcast, changeBroadcastMode, updateButtons, completeChzzkConnect, saveBroadcastSettings, searchChzzkCategories, applyChzzkCategorySelection, createSession, buildVideoConstraints, syncCaptureResolution, renderUpgradeOffer, acceptUpgradeOffer, confirmUpgradeOption, declineUpgradeOffer, applyLiveSettings, closeSessionOnPageHide, disconnectYoutube, disconnectChzzk, refreshStreamingAccounts, prepareTargetWithConfirm, renderSessionNotices, renderBroadcastWarnings, signIn, showView, renderAdminSessions, closeAdminSession, devRequest, handleDevSocialLogin, maskDevTokens, selectDevFeature, renderDevAccountTree, devSignUp, devRefreshToken, devLogout, devWithdraw, devCheckV1Routes, devPasswordResetStart, devPasswordResetVerify, ensureLocalMedia, renderReferenceFaceStatus, reregisterReferenceFace };`,
     context,
     { filename: appPath },
   );
@@ -1983,4 +1986,51 @@ test("블러 설정은 빈 칸을 빼고 0은 그대로 보낸다", async () => 
   assert.equal(calls[0].method, "PUT");
   assert.deepEqual(calls[0].body, { pixel_size: 4, mask_margin: 0 });
   assert.equal(els.mosaicConfigDetail.textContent, "현재: 반경 기본(24) · 크기 4 · 확장 0px");
+});
+
+test("재등록이 필요한 얼굴을 표시하고 face_id로 다시 등록한다", async () => {
+  const requests = [];
+  const restored = {
+    registered: true,
+    source: "api",
+    count: 2,
+    registered_at: "2026-10-20T00:00:00Z",
+    reregistration_required: false,
+    faces: [
+      { face_id: "aaaaaaaa-0001", registered_at: "2026-10-20T00:00:00Z", reregistration_required: false },
+      { face_id: "bbbbbbbb-0002", registered_at: "2026-10-20T00:00:00Z", reregistration_required: false },
+    ],
+  };
+  const { state, els, renderReferenceFaceStatus, reregisterReferenceFace } = await loadApp({
+    async fetchImpl(url, options) {
+      requests.push({ url: String(url), options });
+      return jsonResponse(restored, 201);
+    },
+  });
+  state.referenceFace = {
+    ...restored,
+    reregistration_required: true,
+    faces: [{ ...restored.faces[0], reregistration_required: true }, restored.faces[1]],
+  };
+
+  renderReferenceFaceStatus();
+  assert.equal(els.referenceFaceState.textContent, "재등록 필요");
+  const [marked, healthy] = els.referenceFaceList.children;
+  assert.match(marked.children[0].textContent, /재등록 필요/);
+  assert.doesNotMatch(healthy.children[0].textContent, /재등록 필요/);
+  assert.equal(marked.children[1].textContent, "다시 등록");
+
+  // 사진을 고르지 않으면 서버를 부르지 않는다.
+  await reregisterReferenceFace("aaaaaaaa-0001");
+  assert.equal(requests.length, 0);
+
+  els.referenceFaceInput.files = [new File(["face"], "face.jpg", { type: "image/jpeg" })];
+  await reregisterReferenceFace("aaaaaaaa-0001");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.method, "POST");
+  const form = requests[0].options.body;
+  assert.equal(form.get("face_id"), "aaaaaaaa-0001");
+  assert.equal(form.getAll("images").length, 1);
+  assert.equal(form.get("images").name, "face.jpg");
+  assert.equal(els.referenceFaceState.textContent, "등록됨");
 });

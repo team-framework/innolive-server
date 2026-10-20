@@ -385,6 +385,9 @@ WebSocket·카메라·마이크를 정리합니다. `peer_connection_recovery_ex
 | `GET`/`POST`/`DELETE` | `/reference-face` | 참조(본인) 얼굴 등록/조회/전체 삭제 |
 | `DELETE` | `/reference-face/{face_id}` | 참조 얼굴 개별 삭제 |
 
+- AI 워커는 화이트리스트를 메모리에만 두어 재시작하면 등록 얼굴을 잃습니다. 서버는 기동 직후와 1분마다 저장된 워커별 엔트리와 각 워커의 화이트리스트를 대조하고, 한 워커에서라도 빠진 얼굴을 `faces[].reregistration_required: true`로 표시합니다. 응답 최상위 `reregistration_required`는 표시된 얼굴이 하나라도 있는지입니다. 답하지 않은 워커는 판정에 쓰지 않습니다.
+- 서버는 얼굴 이미지·임베딩을 보관하지 않으므로 표시된 얼굴은 사용자가 사진을 다시 올려야 합니다. `POST /reference-face`에 `face_id` 필드와 이미지 1장을 함께 보내면 그 얼굴을 같은 `face_id`·이름으로 다시 등록하고 표시를 지웁니다(`name`을 함께 보내면 이름도 바꿉니다). 모르는 `face_id`는 404, 이미지가 1장이 아니면 400입니다. `image` 단일 필드 교체 업로드도 표시를 지웁니다.
+
 ### 인증
 
 | 메서드 | 경로 | 설명 |

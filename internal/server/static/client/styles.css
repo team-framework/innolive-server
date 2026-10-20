@@ -419,8 +419,15 @@ h2 {
 }
 
 .reference-face-item > span {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* 좁은 화면의 .button { width: 100% }가 버튼 두 개를 늘려 라벨을 글자 단위로 끊는다. */
+.reference-face-item .button {
+  flex: 0 0 auto;
+  width: auto;
 }
 
 .reference-face-controls {

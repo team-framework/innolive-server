@@ -566,6 +566,9 @@ func main() {
 	limitContext, stopLimitEnforcer := context.WithCancel(context.Background())
 	defer stopLimitEnforcer()
 	go application.RunLimitEnforcer(limitContext)
+	// AI 워커는 화이트리스트를 메모리에만 둬 재시작하면 등록 얼굴을 잃는다. 서버 기록과
+	// 대조해 잃은 얼굴을 재등록 필요로 표시한다(#501). AI가 꺼져 있으면 바로 끝난다.
+	go application.RunReferenceFaceCheck(limitContext)
 	qualityStore := experiencequality.NewStore(databaseConnection.DB)
 	application.SetExperienceQuality(qualityStore)
 	go qualityStore.RunRetention(limitContext, logger)

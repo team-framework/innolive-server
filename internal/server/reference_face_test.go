@@ -55,6 +55,11 @@ type fakeAIWorker struct {
 	// onAdd가 있으면 AddWhitelist마다 시작할 때 이미 등록된 엔트리 수와 호출
 	// 컨텍스트로 부른다. 같은 업로드의 두 파일 사이에 일어나는 일을 테스트가 조종한다.
 	onAdd func(ctx context.Context, registered int)
+
+	// statusErr가 있으면 GetWhitelistStatus가 그 오류로 답한다(답하지 않는 워커).
+	// deleteErrs는 엔트리 id별로 DeleteWhitelist가 돌려줄 오류다. 둘 다 mu로 지킨다.
+	statusErr  error
+	deleteErrs map[string]error
 }
 
 func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData) (*aiv1.WhitelistResponse, error) {
@@ -95,6 +100,9 @@ func (w *fakeAIWorker) DeleteWhitelist(_ context.Context, request *aiv1.DeleteWh
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.deleteErrs[request.GetEntryId()]; err != nil {
+		return nil, err
+	}
 	remaining := make([]string, 0, len(w.entries))
 	for _, entry := range w.entries {
 		if entry != request.GetEntryId() {
@@ -117,6 +125,12 @@ func (w *fakeAIWorker) GetWhitelistStatus(ctx context.Context, _ *aiv1.GetWhitel
 			return nil, ctx.Err()
 		}
 	}
+	w.mu.Lock()
+	err := w.statusErr
+	w.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return &aiv1.GetWhitelistStatusResponse{EntryIds: w.snapshot()}, nil
 }
 
@@ -129,6 +143,14 @@ func (w *fakeAIWorker) snapshot() []string {
 // newReferenceFaceTestServer는 AI 워커 workerCount개와, 그 전부를 담은 풀에 연결한
 // HTTP 서버를 띄운다.
 func newReferenceFaceTestServer(t *testing.T, workerCount int) (*httptest.Server, []*fakeAIWorker, string) {
+	t.Helper()
+	_, httpServer, workers, storePath := newReferenceFaceTestApplication(t, workerCount)
+	return httpServer, workers, storePath
+}
+
+// newReferenceFaceTestApplication은 newReferenceFaceTestServer와 같고, 대조를 직접
+// 돌릴 수 있게 Server도 돌려준다.
+func newReferenceFaceTestApplication(t *testing.T, workerCount int) (*Server, *httptest.Server, []*fakeAIWorker, string) {
 	t.Helper()
 	workers := make([]*fakeAIWorker, 0, workerCount)
 	targets := make([]string, 0, workerCount)
@@ -169,7 +191,7 @@ func newReferenceFaceTestServer(t *testing.T, workerCount int) (*httptest.Server
 	)
 	httpServer := httptest.NewServer(application.Handler())
 	t.Cleanup(httpServer.Close)
-	return httpServer, workers, storePath
+	return application, httpServer, workers, storePath
 }
 
 func uploadReferenceFaces(t *testing.T, baseURL string, count int) referenceStatus {

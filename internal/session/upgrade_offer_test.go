@@ -188,9 +188,9 @@ func TestProviderInUse(t *testing.T) {
 	}
 }
 
-// 한 채널은 동시에 한 사용자만 송출한다(#406). 다른 사용자의 같은 채널 준비는 거절하고,
-// 다른 채널은 막지 않는다. 방송이 끝나면 다시 쓸 수 있다.
-func TestBeginBroadcastPrepareOnChannelIsExclusivePerUser(t *testing.T) {
+// YouTube 외 플랫폼은 다른 사용자의 같은 채널 준비를 거절한다.
+// 다른 채널은 허용하고, 방송이 끝나면 같은 채널도 다시 쓸 수 있다.
+func TestBeginBroadcastPrepareOnNonYouTubeChannelIsExclusivePerUser(t *testing.T) {
 	manager, owner := newUpgradeTestManager(t, 0)
 	create := func(userID uuid.UUID) *Session {
 		t.Helper()
@@ -202,21 +202,37 @@ func TestBeginBroadcastPrepareOnChannelIsExclusivePerUser(t *testing.T) {
 	}
 	other := create(uuid.New())
 
-	if _, _, err := manager.BeginBroadcastPrepareOnChannel(owner.ID, "youtube/UC1", "youtube"); err != nil {
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(owner.ID, "chzzk/UC1", "chzzk"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC1", "youtube"); !errors.Is(err, ErrChannelInUseByOtherAccount) {
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "chzzk/UC1", "chzzk"); !errors.Is(err, ErrChannelInUseByOtherAccount) {
 		t.Fatalf("other user same channel error = %v, want ErrChannelInUseByOtherAccount", err)
 	}
-	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC2", "youtube"); err != nil {
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "chzzk/UC2", "chzzk"); err != nil {
 		t.Fatalf("other channel must not be blocked: %v", err)
 	}
-	manager.ResetBroadcastPreparation(other.ID, "youtube")
+	manager.ResetBroadcastPreparation(other.ID, "chzzk")
 
 	// 선점한 방송이 끝나면(idle) 다른 사용자가 같은 채널을 쓸 수 있다.
-	manager.ResetBroadcastPreparation(owner.ID, "youtube")
-	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UC1", "youtube"); err != nil {
+	manager.ResetBroadcastPreparation(owner.ID, "chzzk")
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "chzzk/UC1", "chzzk"); err != nil {
 		t.Fatalf("channel must be free after the broadcast ends: %v", err)
+	}
+}
+
+func TestBeginBroadcastPrepareOnYouTubeChannelAllowsOtherUser(t *testing.T) {
+	manager, owner := newUpgradeTestManager(t, 0)
+	other, _, err := manager.CreateForUserWithResolution(uuid.New(), DefaultProvider, "", Resolution720p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, live := range []*Session{owner, other} {
+		if _, _, err := manager.BeginBroadcastPrepareOnChannel(live.ID, "youtube/UCshared", "youtube"); err != nil {
+			t.Fatalf("shared channel preparation: %v", err)
+		}
+	}
+	if _, _, err := manager.BeginBroadcastPrepareOnChannel(other.ID, "youtube/UCshared", "youtube"); !errors.Is(err, ErrBroadcastPrepared) {
+		t.Fatalf("duplicate preparation = %v, want ErrBroadcastPrepared", err)
 	}
 }
 

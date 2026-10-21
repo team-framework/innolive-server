@@ -111,31 +111,33 @@ func TestParseVideoSize(t *testing.T) {
 }
 
 // TestVideoFilter는 EGRESS_VIDEO_SIZE 설정 여부에 따른 -vf 체인을 고정한다.
+// 어느 쪽이든 맨 앞에서 입력 중앙을 1.1배 확대한다.
 // 고정하지 않았을 때의 체인이 바뀌면 기존 송출 동작이 달라지므로 함께 잠근다.
 func TestVideoFilter(t *testing.T) {
+	const zoom = "crop=trunc(iw/1.1/2)*2:trunc(ih/1.1/2)*2"
 	cases := []struct {
 		name      string
 		wire      config.WireFormat
 		videoSize string
 		want      string
 	}{
-		{"jpeg/미고정", config.WireFormatJPEG, "", "scale=out_range=tv"},
-		{"raw/미고정", config.WireFormatRaw, "", ""},
+		{"jpeg/미고정", config.WireFormatJPEG, "", zoom + ",scale=720:1280,scale=out_range=tv"},
+		{"raw/미고정", config.WireFormatRaw, "", zoom + ",scale=720:1280"},
 		{
 			"jpeg/고정", config.WireFormatJPEG, "1280x720",
-			"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1,scale=out_range=tv",
+			zoom + ",scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1,scale=out_range=tv",
 		},
 		{
 			"raw/고정", config.WireFormatRaw, "1280x720",
-			"scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1",
+			zoom + ",scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:-1:-1",
 		},
-		{"jpeg/형식 오류는 무시", config.WireFormatJPEG, "hd", "scale=out_range=tv"},
+		{"jpeg/형식 오류는 무시", config.WireFormatJPEG, "hd", zoom + ",scale=720:1280,scale=out_range=tv"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := newTestEgress(c.wire, "out.flv")
 			e.videoSize = c.videoSize
-			if got := e.videoFilter(); got != c.want {
+			if got := e.videoFilter(720, 1280); got != c.want {
 				t.Errorf("videoFilter() = %q, want %q", got, c.want)
 			}
 		})

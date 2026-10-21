@@ -56,6 +56,11 @@ type planResponse struct {
 	FaceSlots               int         `json:"face_slots"`
 }
 
+// adminFaceSlots는 관리자(ADMIN_USER_IDS)에게 내려주는 얼굴 등록 슬롯이다. 서버는
+// 얼굴 수를 따로 세지 않고 클라이언트가 face_slots로 제한하므로, 플랜과 무관하게
+// 사실상 무제한인 값을 준다.
+const adminFaceSlots = 999
+
 func newPlanResponse(value plan.Plan) (planResponse, bool) {
 	policy, ok := value.Policy()
 	if !ok {
@@ -95,6 +100,9 @@ func (s *Server) handleGetMyPlan(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("user has unknown plan", "user_id", userID, "plan", value)
 		writeError(w, internalError())
 		return
+	}
+	if _, ok := s.adminUser(r); ok {
+		response.FaceSlots = adminFaceSlots
 	}
 	writeJSON(w, http.StatusOK, response)
 }

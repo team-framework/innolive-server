@@ -20,6 +20,7 @@ var cancelLandscapePNG []byte
 var cancelPortraitPNG []byte
 
 // cancellationSlateFrame은 현재 출력 크기에 맞는 취소 슬레이트를 만든다.
+// 카메라 프레임과 달리 송출 확대 뒤에도 1배로 보이도록 미리 줄여 그린다.
 // 입력 비율을 별도로 분류하지 않고, 가로·세로 방향만으로 에셋을 고른다. 에셋의
 // 중앙을 출력 비율에 맞게 잘라 리사이즈하므로 로고·문구의 비율을 유지하면서도
 // RTMP 출력 프레임 전체를 채운다. 생성한 프레임의 보관 수명은 RTMPEgress가
@@ -38,7 +39,7 @@ func cancellationSlateFrame(width, height uint16, format config.WireFormat) (fra
 		return frame{}, fmt.Errorf("decode cancellation slate: %w", err)
 	}
 
-	resized := renderCancellationSlate(source, width, height)
+	resized := renderZoomCompensatedSlate(source, width, height)
 
 	result := frame{width: width, height: height}
 	switch format {
@@ -87,6 +88,21 @@ func renderCancellationSlate(source image.Image, width, height uint16) *image.RG
 	resized := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
 	draw.CatmullRom.Scale(resized, resized.Bounds(), source, cancellationSlateCropRect(source.Bounds(), width, height), draw.Src, nil)
 	return resized
+}
+
+// renderZoomCompensatedSlate는 송출 인코더가 중앙을 inputZoomFactor배 확대한 뒤에도
+// 슬레이트가 1배로 보이도록, 인코더가 잘라낼 중앙 영역에만 슬레이트를 그린다.
+// 바깥은 인코더가 버리므로 비워 둔다. ffmpeg를 다시 띄우지 않으므로 슬레이트
+// 전환에 RTMP 재연결이 생기지 않는다.
+func renderZoomCompensatedSlate(source image.Image, width, height uint16) *image.RGBA {
+	canvas := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+	area := zoomCropRect(width, height)
+	if area.Empty() {
+		return renderCancellationSlate(source, width, height)
+	}
+	slate := renderCancellationSlate(source, uint16(area.Dx()), uint16(area.Dy()))
+	draw.Draw(canvas, area, slate, image.Point{}, draw.Src)
+	return canvas
 }
 
 // rgbaToYUV420P는 raw egress 테스트 경로까지 지원하기 위한 변환이다. 실제

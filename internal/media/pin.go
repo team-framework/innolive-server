@@ -2,6 +2,7 @@ package media
 
 import (
 	"fmt"
+	"image"
 	"math"
 )
 
@@ -80,6 +81,17 @@ const inputZoomFactor = 1.1
 // 중앙이고, yuv420p가 짝수 치수를 요구하므로 잘라낼 크기를 짝수로 내린다.
 func zoomCropFilter() string {
 	return fmt.Sprintf("crop=trunc(iw/%[1]g/2)*2:trunc(ih/%[1]g/2)*2", inputZoomFactor)
+}
+
+// zoomCropRect는 zoomCropFilter가 width×height 프레임에서 남기는 영역이다.
+// ffmpeg crop과 같은 순서로 double 연산 후 버리고, yuv420p 색차 정렬에 맞춰
+// 시작 좌표를 짝수로 내린다.
+func zoomCropRect(width, height uint16) image.Rectangle {
+	cropWidth := int(float64(width)/inputZoomFactor/2) * 2
+	cropHeight := int(float64(height)/inputZoomFactor/2) * 2
+	x := ((int(width) - cropWidth) / 2) &^ 1
+	y := ((int(height) - cropHeight) / 2) &^ 1
+	return image.Rect(x, y, x+cropWidth, y+cropHeight)
 }
 
 // zoomFilter는 중앙을 잘라낸 뒤 width×height로 되돌려 출력 치수를 유지하는

@@ -169,3 +169,34 @@ func TestAdminPlanRequestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminGetsUnlimitedFaceSlots(t *testing.T) {
+	requireUser, authenticateUser, adminHeader, _, adminID := testRequireUser(t)
+	_, _, userHeader, _, userID := testRequireUser(t)
+	application, manager := newTestApplicationWithUserMiddleware(t, requireUser, authenticateUser)
+	defer manager.CloseAll()
+	application.cfg.AdminUserIDs = []string{adminID.String()}
+	application.SetPlanStore(&memoryPlanStore{plans: map[uuid.UUID]plan.Plan{adminID: plan.Plasma, userID: plan.Plasma}})
+	httpServer := httptest.NewServer(application.Handler())
+	defer httpServer.Close()
+
+	faceSlots := func(headers http.Header) int {
+		t.Helper()
+		response := mustRequest(t, http.MethodGet, httpServer.URL+"/users/me/plan", nil, headers)
+		defer response.Body.Close()
+		var got planResponse
+		if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET /users/me/plan = %d", response.StatusCode)
+		}
+		return got.FaceSlots
+	}
+	if got := faceSlots(adminHeader); got != adminFaceSlots {
+		t.Fatalf("admin face_slots = %d, want %d", got, adminFaceSlots)
+	}
+	if got := faceSlots(userHeader); got != 10 {
+		t.Fatalf("plasma user face_slots = %d, want 10", got)
+	}
+}

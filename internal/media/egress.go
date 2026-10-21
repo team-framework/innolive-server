@@ -1140,12 +1140,18 @@ func (e *RTMPEgress) waitBackoff(ctx context.Context, delay time.Duration) bool 
 //
 // MJPEG 입력은 full-range yuvj420p로 디코딩되므로 FLV 스트림이 일반
 // yuv420p를 담도록 limited range로 압축한다.
-func (e *RTMPEgress) videoFilter() string {
+//
+// 맨 앞에서 입력 중앙을 inputZoomFactor배 확대한다. 고정 해상도가 있으면 그
+// scale이 확대를 겸하고, 없으면 입력 치수로 되돌린다.
+func (e *RTMPEgress) videoFilter(inputWidth, inputHeight uint16) string {
 	var stages []string
 	if width, height, ok := parseVideoSize(e.videoSize); ok {
 		stages = append(stages,
+			zoomCropFilter(),
 			fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", width, height),
 			fmt.Sprintf("pad=%d:%d:-1:-1", width, height))
+	} else {
+		stages = append(stages, zoomFilter(inputWidth, inputHeight))
 	}
 	if e.wireFormat != config.WireFormatRaw {
 		stages = append(stages, "scale=out_range=tv")
@@ -1226,9 +1232,7 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 			"-map", "0:v", "-map", "1:a",
 		)
 	}
-	if filter := e.videoFilter(); filter != "" {
-		arguments = append(arguments, "-vf", filter)
-	}
+	arguments = append(arguments, "-vf", e.videoFilter(width, height))
 	videoBitrate := e.videoBitrateFor(width, height)
 	arguments = append(arguments, e.videoEncoderArguments(videoBitrate, fps)...)
 	arguments = append(arguments,

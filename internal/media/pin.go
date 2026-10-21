@@ -68,3 +68,25 @@ func pinFilter(width, height uint16) string {
 		width, height, width, height,
 	)
 }
+
+// inputZoomFactor는 클라이언트 입력을 출력에서 확대해 보여주는 배율이다.
+// AI에는 원본 그대로 보내고, AI가 블러를 입혀 돌려준 프레임을 미리보기·송출
+// 인코더가 각각 확대한다. 블러가 이미 프레임에 들어가 있으므로 확대해도 위치가
+// 어긋나지 않는다.
+const inputZoomFactor = 1.1
+
+// zoomCropFilter는 입력 중앙을 1/inputZoomFactor 크기로 잘라내는 -vf 단계다.
+// 뒤따르는 scale이 출력 치수로 다시 키우면서 확대가 된다. crop의 x·y 기본값이
+// 중앙이고, yuv420p가 짝수 치수를 요구하므로 잘라낼 크기를 짝수로 내린다.
+func zoomCropFilter() string {
+	return fmt.Sprintf("crop=trunc(iw/%[1]g/2)*2:trunc(ih/%[1]g/2)*2", inputZoomFactor)
+}
+
+// zoomFilter는 중앙을 잘라낸 뒤 width×height로 되돌려 출력 치수를 유지하는
+// -vf 체인이다. 치수를 모르면(0) 잘라낸 크기를 같은 배율로 키운다.
+func zoomFilter(width, height uint16) string {
+	if width == 0 || height == 0 {
+		return fmt.Sprintf("%s,scale=trunc(iw*%[2]g/2)*2:trunc(ih*%[2]g/2)*2", zoomCropFilter(), inputZoomFactor)
+	}
+	return fmt.Sprintf("%s,scale=%d:%d", zoomCropFilter(), width, height)
+}

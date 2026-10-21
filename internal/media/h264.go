@@ -328,6 +328,7 @@ func (t *FFmpegTranscoder) startH264Encoder(ctx context.Context, width, height u
 	if t.options.EncoderThreads > 0 {
 		arguments = append(arguments, "-threads", strconv.Itoa(t.options.EncoderThreads))
 	}
+	arguments = append(arguments, "-vf", zoomFilter(width, height))
 	bitrate := returnVideoBitrateFor(width, height)
 	arguments = append(arguments,
 		"-an", "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", h264ReturnLevelFor(width, height),

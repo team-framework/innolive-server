@@ -480,6 +480,7 @@ func (t *FFmpegTranscoder) startEncoder(ctx context.Context, width, height uint1
 	if t.options.EncoderThreads > 0 {
 		arguments = append(arguments, "-threads", strconv.Itoa(t.options.EncoderThreads))
 	}
+	arguments = append(arguments, "-vf", zoomFilter(width, height))
 	arguments = append(arguments,
 		"-an", "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
 		"-lag-in-frames", "0", "-auto-alt-ref", "0", "-g", "30", "-b:v", returnVideoBitrateFor(width, height),

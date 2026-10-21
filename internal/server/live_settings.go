@@ -100,7 +100,12 @@ func (s *Server) handlePatchLiveBroadcast(w http.ResponseWriter, r *http.Request
 		if request.CategoryID != nil {
 			youtubeSettings.CategoryID = strings.TrimSpace(*request.CategoryID)
 		}
-		validation = youtubeSettings.Validate()
+		validation = youtubeSettings.ValidateFor(liveSession.FaceAnonymization)
+		// 저장값은 사용자 입력 그대로 두고, 플랫폼에는 합성 안내문을 붙여 보낸다.
+		if request.Description != nil {
+			platformDescription := session.PlatformDescription(liveSession.FaceAnonymization, *request.Description)
+			update.Description = &platformDescription
+		}
 	}
 	var invalidSetting session.InvalidBroadcastSettingsError
 	if errors.As(validation, &invalidSetting) {

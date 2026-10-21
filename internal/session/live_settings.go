@@ -39,11 +39,11 @@ func (m *Manager) CheckLiveSettingsTarget(id, provider string) (*Session, error)
 // CommitLiveBroadcastSettings는 플랫폼에 반영된 유튜브 설정을 저장한다. 플랫폼
 // 반영이 성공한 뒤에만 부른다 — 저장값과 실제 방송이 갈리지 않게 한다.
 func (m *Manager) CommitLiveBroadcastSettings(id, provider string, settings YouTubeBroadcastSettings) (*Session, error) {
-	if err := settings.Validate(); err != nil {
-		return nil, err
-	}
 	s, err := m.Get(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := settings.ValidateFor(s.FaceAnonymization); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()

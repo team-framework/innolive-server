@@ -139,6 +139,9 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 	if err != nil {
 		return nil, err
 	}
+	if err := validateDescriptionFor(s.FaceAnonymization, settings.Description); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.target(s.targetProvider(providers))

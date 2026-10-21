@@ -1,6 +1,11 @@
 package media
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"inno-live-server/internal/config"
+)
 
 func TestPinDimensions(t *testing.T) {
 	tests := []struct {
@@ -77,5 +82,45 @@ func TestPinFilter(t *testing.T) {
 	want := "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:-1:-1"
 	if got != want {
 		t.Fatalf("pinFilter = %q, want %q", got, want)
+	}
+}
+
+func TestZoomFilter(t *testing.T) {
+	if got, want := zoomFilter(720, 1280), "crop=trunc(iw/1.1/2)*2:trunc(ih/1.1/2)*2,scale=720:1280"; got != want {
+		t.Fatalf("zoomFilter = %q, want %q", got, want)
+	}
+	if got, want := zoomFilter(0, 0), "crop=trunc(iw/1.1/2)*2:trunc(ih/1.1/2)*2,scale=trunc(iw*1.1/2)*2:trunc(ih*1.1/2)*2"; got != want {
+		t.Fatalf("zoomFilter(0, 0) = %q, want %q", got, want)
+	}
+}
+
+// TestReturnEncoderArgumentsZoom은 미리보기 인코더(VP8·H.264)가 AI 뒤에서
+// 1.1배 확대하고, AI로 가는 디코더는 확대하지 않는지 확인한다.
+func TestReturnEncoderArgumentsZoom(t *testing.T) {
+	want := zoomFilter(720, 1280)
+	for _, wire := range []config.WireFormat{config.WireFormatJPEG, config.WireFormatRaw} {
+		vp8 := captureFFmpegArgs(t, TranscoderOptions{WireFormat: wire},
+			func(transcoder *FFmpegTranscoder) error {
+				process, err := transcoder.startEncoder(context.Background(), 720, 1280)
+				if err == nil {
+					process.close()
+				}
+				return err
+			})
+		h264 := captureFFmpegArgs(t, TranscoderOptions{WireFormat: wire, VideoCodec: VideoCodecH264},
+			func(transcoder *FFmpegTranscoder) error {
+				process, err := transcoder.startH264Encoder(context.Background(), 720, 1280)
+				if err == nil {
+					process.close()
+				}
+				return err
+			})
+		assertArgPair(t, vp8, "-vf", want)
+		assertArgPair(t, h264, "-vf", want)
+	}
+
+	transcoder := NewFFmpegTranscoder("ffmpeg", testLogger(), nil, TranscoderOptions{})
+	if _, _, filter, err := transcoder.decoderOutput(720, 1280); err != nil || filter != "" {
+		t.Fatalf("디코더(AI 입력)에 필터가 붙었다: %q, %v", filter, err)
 	}
 }

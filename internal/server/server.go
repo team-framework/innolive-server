@@ -644,7 +644,7 @@ func (s *Server) prepareTarget(ctx context.Context, liveSession *session.Session
 		// 준비에서는 스트림 키만 받는다.
 		options = streaming.PrepareOptions{}
 	} else {
-		options = prepareOptionsFrom(liveSession.BroadcastSettings())
+		options = prepareOptionsFrom(liveSession.BroadcastSettings(), liveSession.FaceAnonymization)
 		// 시청자층 신고는 플랫폼이 법적으로 요구하는 사용자 선택 항목이라
 		// 서버가 기본값으로 대신 신고하지 않는다. 치지직에는 없는 개념이라
 		// 이 검사는 유튜브 분기 안에 둔다.
@@ -1119,11 +1119,12 @@ func startStreamError(err error, sessionID string) *apiError {
 	}
 }
 
-// prepareOptionsFrom은 저장된 방송 설정을 플랫폼 준비 옵션으로 옮긴다.
-func prepareOptionsFrom(settings session.YouTubeBroadcastSettings) streaming.PrepareOptions {
+// prepareOptionsFrom은 저장된 방송 설정을 플랫폼 준비 옵션으로 옮긴다. 얼굴 합성
+// 세션이면 설명 앞에 합성 안내문을 붙인다.
+func prepareOptionsFrom(settings session.YouTubeBroadcastSettings, faceAnonymization string) streaming.PrepareOptions {
 	options := streaming.PrepareOptions{
 		Title:       settings.Title,
-		Description: settings.Description,
+		Description: session.PlatformDescription(faceAnonymization, settings.Description),
 		Privacy:     settings.Privacy,
 		MadeForKids: settings.MadeForKids,
 		CategoryID:  settings.CategoryID,
@@ -1277,7 +1278,7 @@ func (s *Server) handleGetBroadcastDefaults(w http.ResponseWriter, r *http.Reque
 		Tags         []string `json:"tags,omitempty"`
 	}{
 		Title:        defaults.Title,
-		Description:  defaults.Description,
+		Description:  session.StripFaceSwapNotice(defaults.Description),
 		Privacy:      defaults.Privacy,
 		MadeForKids:  defaults.MadeForKids,
 		CategoryID:   defaults.CategoryID,

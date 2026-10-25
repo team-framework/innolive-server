@@ -150,6 +150,8 @@ make proto        # protobuf 코드 생성
 | `AI_PREFLIGHT_TIMEOUT` | `30s` | preflight 프로브 제한 시간 |
 | `AI_PREFLIGHT_INTERVAL` | `30s` | 상시 감시 프로브 주기. `0`은 비활성이며 `AI_READINESS_TIMEOUT`보다 길어야 합니다. 응답 불가로 판정한 워커는 새 세션 배정에서 빠지고, 그 워커의 세션은 다른 워커로 옮깁니다 |
 | `AI_READINESS_TIMEOUT` | `10s` | 상시 감시 프로브 하나의 제한 시간 |
+| `AI_CONTROL_ADDR` | 없음 | AI 워커 교체 제어 API 주소(루프백 IP만, 예: `127.0.0.1:9091`). 배포 스크립트가 `POST /ai/workers/replace`로 새 워커를 띄운 뒤 진행 중인 방송을 다음 프레임부터 넘기고 옛 워커를 뺍니다. 비우면 끕니다 |
+| `AI_CONTROL_TOKEN` | 없음 | 제어 API Bearer 토큰(32자 이상). `AI_CONTROL_ADDR`를 쓰면 필수입니다 |
 | `AI_FRAME_WIRE_FORMAT` | `jpeg` | `jpeg` / `raw` |
 | `AI_FACE_SWAP_ENABLED` | `false` | 세션이 `face_anonymization: "face_swap"`을 고를 수 있는지 (AI 서버에 합성 모델·프리셋 필요) |
 | `AI_FACE_SWAP_TARGETS` | 없음 | 얼굴 합성 세션만 받는 AI 워커(쉼표 구분, `AI_GRPC_TARGETS`의 일부). `AI_FACE_SWAP_ENABLED=true`일 때 합성 세션은 여기에만, 블러 세션은 나머지 워커에만 배정합니다. 합성 워커가 모두 응답 불가면 합성 세션 생성은 503 `face_swap_unavailable`입니다. 비우면 모든 워커가 두 모드를 받습니다 |

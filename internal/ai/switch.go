@@ -226,10 +226,20 @@ func (s *SwitchableStream) switchableLocked(client *Client) error {
 }
 
 func (s *SwitchableStream) awaitSwitch(ctx context.Context, leg *switchLeg) error {
-	select {
-	case err := <-leg.done:
-		return err
-	case <-ctx.Done():
+	// 예열 중 프레임이 끊기면(일시 정지 등) 예열할 프레임도 없으므로 처음부터 멈춰 있던
+	// 스트림처럼 바로 바꾼다.
+	idleCheck := time.NewTicker(idleSwitchAfter / 4)
+	defer idleCheck.Stop()
+wait:
+	for {
+		select {
+		case err := <-leg.done:
+			return err
+		case <-ctx.Done():
+			break wait
+		case <-idleCheck.C:
+			s.promoteIfIdle(leg)
+		}
 	}
 	s.mu.Lock()
 	if s.candidate == leg && !leg.ready {
@@ -242,6 +252,18 @@ func (s *SwitchableStream) awaitSwitch(ctx context.Context, leg *switchLeg) erro
 	s.mu.Unlock()
 	// 그 사이 넘어갔거나 버려졌다. 어느 쪽이든 결과가 온다.
 	return <-leg.done
+}
+
+// promoteIfIdle은 후보 leg가 아직 후보이고 idleSwitchAfter 넘게 프레임이 없었으면
+// 예열을 마치지 않았어도 올린다. 처리 중인 예열 프레임이 있으면 그 결과를 기다린다.
+func (s *SwitchableStream) promoteIfIdle(leg *switchLeg) {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.candidate == leg && !leg.busy.Load() && time.Since(s.lastProcessAt) > idleSwitchAfter {
+		s.promoteLocked()
+	}
 }
 
 // Close는 열린 워커 스트림을 닫는다. 배정은 그대로이며 다음 Process가 스트림을 다시

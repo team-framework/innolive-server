@@ -79,13 +79,18 @@ type Config struct {
 	// AIFaceSwapTargets는 얼굴 합성 세션만 받는 AI 워커다(#507). AITargets의 일부이고,
 	// 합성이 켜져 있으면 합성 세션은 여기에만, 블러 세션은 나머지 워커에만 간다.
 	// 비우면 모든 워커가 두 모드를 받는다(모든 워커에 합성 모델을 올린 배포).
-	AIFaceSwapTargets          []string
-	AIFailurePolicy            AIFailurePolicy
-	AITimeoutLatchThreshold    int
-	AIPreflightTimeout         time.Duration
-	AIPreflightRequired        bool
-	AIPreflightInterval        time.Duration
-	AIReadinessTimeout         time.Duration
+	AIFaceSwapTargets       []string
+	AIFailurePolicy         AIFailurePolicy
+	AITimeoutLatchThreshold int
+	AIPreflightTimeout      time.Duration
+	AIPreflightRequired     bool
+	AIPreflightInterval     time.Duration
+	AIReadinessTimeout      time.Duration
+	// AIControlAddr는 AI 워커 교체 배포가 부르는 제어 API의 주소다(#515). 비우면 끈다.
+	// 같은 호스트의 배포 스크립트만 부르므로 루프백 주소만 받는다. AIControlToken은 그
+	// 요청이 실어야 하는 Bearer 토큰이다.
+	AIControlAddr              string
+	AIControlToken             string
 	AIMeImagePath              string
 	ReferenceStorePath         string
 	ReferenceDecodeConcurrency int
@@ -184,6 +189,8 @@ func Load() (Config, error) {
 		AIPreflightRequired:        envBool("AI_PREFLIGHT_REQUIRED", false),
 		AIPreflightInterval:        envDuration("AI_PREFLIGHT_INTERVAL", 30*time.Second),
 		AIReadinessTimeout:         envDuration("AI_READINESS_TIMEOUT", 10*time.Second),
+		AIControlAddr:              strings.TrimSpace(os.Getenv("AI_CONTROL_ADDR")),
+		AIControlToken:             strings.TrimSpace(os.Getenv("AI_CONTROL_TOKEN")),
 		AIMeImagePath:              strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
 		ReferenceStorePath:         strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
 		ReferenceDecodeConcurrency: envInt("REFERENCE_DECODE_CONCURRENCY", 4),
@@ -419,6 +426,14 @@ func (c Config) Validate() error {
 			c.AIReadinessTimeout, c.AIPreflightInterval,
 		)
 	}
+	if c.AIControlAddr != "" {
+		if err := validateLoopbackAddr(c.AIControlAddr); err != nil {
+			return fmt.Errorf("AI_CONTROL_ADDR: %w", err)
+		}
+		if len(c.AIControlToken) < 32 {
+			return errors.New("AI_CONTROL_TOKEN must be at least 32 characters when AI_CONTROL_ADDR is set")
+		}
+	}
 	if c.NegotiationTimeout < 0 {
 		return errors.New("SESSION_NEGOTIATION_TIMEOUT must not be negative")
 	}
@@ -472,6 +487,19 @@ func (c Config) Validate() error {
 			"DATABASE_MIGRATION_MODE must be one of auto, versioned, off: %q",
 			c.DatabaseMigrationMode,
 		)
+	}
+	return nil
+}
+
+// validateLoopbackAddr는 host:port의 host가 루프백 IP인지 확인한다. 이름은 받지
+// 않는다 — localhost가 어디로 풀릴지는 호스트 설정에 달렸다.
+func validateLoopbackAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("host %q must be a loopback IP such as 127.0.0.1", host)
 	}
 	return nil
 }

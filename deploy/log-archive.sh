@@ -12,6 +12,9 @@ set -euo pipefail
 
 ARCHIVE_DIR="${INNOLIVE_LOG_ARCHIVE_DIR:-/srv/innolive-logs}"
 UNIT="innolive-server"
+# 무중단 배포(#517) 뒤로는 슬롯 유닛(innolive-server@blue·green)에 남는다. 그 전 날짜는
+# 단일 유닛에 있으므로 둘 다 읽는다. 파일 이름은 종전대로 UNIT을 쓴다.
+UNIT_ARGS=(-u "${UNIT}" -u "${UNIT}@*")
 
 # 보관 디스크가 빠진 상태에서 루트 디스크의 빈 마운트 지점에 쓰는 사고를 막는다.
 if ! mountpoint -q "${ARCHIVE_DIR}"; then
@@ -27,7 +30,7 @@ mask() {
 }
 
 # head가 먼저 끝나 journalctl이 SIGPIPE를 받는 것은 정상이다 — 값은 아래에서 검증한다.
-first_day="$(journalctl -u "${UNIT}" -o short-iso --no-pager 2>/dev/null | head -1 | cut -c1-10 || true)"
+first_day="$(journalctl "${UNIT_ARGS[@]}" -o short-iso --no-pager 2>/dev/null | head -1 | cut -c1-10 || true)"
 if [[ ! "${first_day}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
   echo "log-archive: no journal entries for ${UNIT}" >&2
   exit 0
@@ -46,7 +49,7 @@ while [[ ! "${day}" > "${today}" ]]; do
   out="${ARCHIVE_DIR}/${UNIT}-${day}.log.zst"
   if [[ ! -e "${out}" || ! "${day}" < "${yesterday}" ]]; then
     tmp="$(mktemp "${ARCHIVE_DIR}/.${UNIT}-${day}.XXXXXX")"
-    journalctl -q -u "${UNIT}" -o short-iso --no-pager --since "${day} 00:00:00" --until "${next} 00:00:00" \
+    journalctl -q "${UNIT_ARGS[@]}" -o short-iso --no-pager --since "${day} 00:00:00" --until "${next} 00:00:00" \
       | mask | zstd -q -19 -f -o "${tmp}"
     chgrp adm "${tmp}"
     chmod 640 "${tmp}"

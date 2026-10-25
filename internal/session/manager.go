@@ -311,6 +311,9 @@ type Session struct {
 	// 다시 띄우지 않고 다음 프레임부터 다른 워커로 넘긴다(#515). 실제 AI 모드가 아니거나
 	// 파이프라인이 없으면 nil이다.
 	aiStream *ai.SwitchableStream
+	// handoff는 서버 교체 배포로 다른 프로세스에서 넘겨받은 세션의 이어 가기 상태다
+	// (#517). 직접 만든 세션이면 nil이다.
+	handoff *sessionHandoff
 	// upgradeOffer는 걸려 있는 화질 올리기 제안, upgradeOffered는 제안한 적이
 	// 있는지다(#278). 한 세션에 한 번만 제안한다.
 	upgradeOffer   *UpgradeOffer
@@ -2159,6 +2162,8 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	egressFanout := s.egressFanout
 	s.mu.Unlock()
 	m.logger.Info("received WebRTC video track", "session_id", s.ID, "track_id", track.ID(), "codec", track.Codec().MimeType, "mode", s.privacyMode, "ai_target", aiTarget)
+	// 넘겨받은 세션이면 클라이언트 영상이 다시 들어왔으니 송출을 다시 붙인다(#517).
+	go m.resumeHandoffEgress(s)
 	trackID := track.ID()
 	// sample builder가 gap 복구를 포기하면 파이프라인은 keyframe을 요청한다.
 	// decoder가 참조 프레임을 잃었으므로 송출자가 새 참조를 보낼 때까지 그

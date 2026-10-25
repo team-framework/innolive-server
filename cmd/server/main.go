@@ -693,10 +693,10 @@ func main() {
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
-	// AI 워커 교체 제어 API(#515). 같은 호스트의 배포 스크립트가 새 워커를 띄운 뒤
-	// 진행 중인 방송을 끊지 않고 옛 워커를 대신하게 한다. 공개 리스너와 따로 둔다.
+	// 제어 API. 같은 호스트의 배포 스크립트가 AI 워커를 교체하고(#515) 서버 교체 배포
+	// 때 세션을 새 프로세스로 넘긴다(#517). 공개 리스너와 따로 둔다.
 	var controlServer *http.Server
-	if aiPool != nil && cfg.AIControlAddr != "" {
+	if cfg.AIControlAddr != "" {
 		controlServer = &http.Server{
 			Addr:              cfg.AIControlAddr,
 			Handler:           application.AIControlHandler(),

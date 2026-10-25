@@ -274,6 +274,9 @@ func (s *Server) AIControlHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ai/workers", s.handleListAIWorkers)
 	mux.HandleFunc("POST /ai/workers/replace", s.handleReplaceAIWorker)
+	// 서버 교체 배포의 세션 이관(#517)도 같은 루프백 리스너·토큰을 쓴다.
+	mux.HandleFunc("POST /sessions/handoff", s.handleSessionHandoff)
+	mux.HandleFunc("POST /sessions/import", s.handleSessionImport)
 	return s.requireAIControlToken(mux)
 }
 

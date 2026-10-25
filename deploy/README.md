@@ -10,8 +10,52 @@ push하고, GPU 프로덕션 서버가 이미지를 pull해 컨테이너를 재�
 PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플로]
   → docker build & push (docker.io/<팀계정>/innolive-server:<커밋SHA>)
   → SSH(deploy 계정, forced command) → 서버 apply-release.sh
-  → 세션 게이트 → pull → systemd 재시작 → /health 확인 → 실패 시 이전 태그 롤백
+  → pull → 쉬는 슬롯 기동·/health → 세션 이관 준비 → Caddy 전환 → 세션 이관 확정 → 옛 슬롯 정지
 ```
+
+## 무중단 배포 (#517)
+
+미디어 서버는 슬롯 두 개(`innolive-server@blue`, `innolive-server@green`)를 번갈아 쓴다. 평소에는
+한 슬롯만 돈다. 배포는 쉬는 슬롯에 새 태그를 띄우고, 지금 슬롯이 방송 세션을 새 슬롯으로 넘긴 뒤
+지금 슬롯을 멈춘다. 클라이언트는 연결이 끊긴 뒤 같은 세션 id로 새 슬롯과 다시 협상하므로 방송은
+수 초 끊긴 뒤 이어진다(유튜브·치지직 방송은 끝나지 않는다).
+
+- 새 슬롯이 /health를 통과하지 못하거나 이관 준비가 실패하면 새 슬롯을 멈추고 끝난다. 방송 영향 없음.
+- 게스트 세션은 넘기지 않는다. 옛 슬롯은 게스트 세션이 끝나길 최대 10분 기다린 뒤 멈춘다
+  (`force_restart`면 기다리지 않는다).
+- iOS 클라이언트는 재연결 수정(innolive-client)이 배포된 버전부터 끊기지 않는다.
+
+### 슬롯 설정 (1회, root)
+1. 슬롯 포트 파일. `server.env`의 값을 슬롯마다 덮는다.
+   ```
+   # /etc/innolive/server-slot-blue.env  (root 600)
+   HTTP_ADDR=:8000
+   WEBRTC_UDP_MUX_PORT=50001
+   AI_CONTROL_ADDR=127.0.0.1:9091
+   # /etc/innolive/server-slot-green.env (root 600)
+   HTTP_ADDR=:8001
+   WEBRTC_UDP_MUX_PORT=50006
+   AI_CONTROL_ADDR=127.0.0.1:9092
+   ```
+   `server.env`의 `AI_CONTROL_TOKEN`은 두 슬롯이 같이 쓴다(슬롯끼리 세션을 넘길 때도 쓴다).
+2. **공유기 포트포워딩**: green의 `WEBRTC_UDP_MUX_PORT`(UDP 50006)를 blue(50001)와 같이 이 서버로 넘긴다.
+   빠지면 green 슬롯의 WebRTC는 TURN 경유로만 붙는다.
+3. `/etc/innolive/deploy.env`에 Caddy 위치를 더한다.
+   ```
+   CADDYFILE=/opt/innolive/server-src/monitoring/Caddyfile
+   CADDY_CONTAINER=innolive-caddy
+   ```
+4. Prometheus가 두 슬롯을 모두 긁도록 `targets: ["host.docker.internal:8000", "host.docker.internal:8001"]`.
+5. 파일 설치 후 단일 유닛에서 슬롯 유닛으로 옮긴다. **이 전환에서 한 번 방송이 끊긴다.**
+   ```bash
+   sudo install -o root -g root -m 755 apply-release.sh log-archive.sh /opt/innolive/deploy/
+   sudo install -o root -g root -m 644 compose.prod.yaml /opt/innolive/compose.prod.yaml
+   sudo install -o root -g root -m 644 innolive-server@.service /etc/systemd/system/
+   sudo cp /opt/innolive/deploy/current_tag /opt/innolive/deploy/current_tag-blue
+   sudo systemctl daemon-reload
+   sudo systemctl disable --now innolive-server.service
+   sudo systemctl enable --now innolive-server@blue.service
+   ```
 
 ## 배포 규칙 (단일 경로 원칙)
 
@@ -23,14 +67,15 @@ PR 머지 → main push → [CI: build-and-test(필수)] → [Deploy 워크플�
 
 ## 긴급 상황 (공식 비상 경로)
 
-- **활성 세션 때문에 배포가 보류됨** (`DEPLOY DEFERRED`): Actions → Deploy →
-  Run workflow에서 `force_restart` 체크 후 실행 — 세션 게이트를 생략하고 즉시 재시작한다.
-  방송이 끊기므로 정말 급할 때만.
+- **이관 확정 일부 실패** (`MANUAL INTERVENTION REQUIRED`): 넘기지 못한 세션은 옛 슬롯에 남고 두
+  슬롯이 모두 돈다. 상세 로그에서 실패 사유를 보고, 그 세션이 끝난 뒤 옛 슬롯을 멈춘다.
+- **남은 게스트 세션을 기다리지 않고 배포**: Actions → Deploy → Run workflow에서 `force_restart`
+  체크 후 실행 — 옛 슬롯에 남은 게스트 세션이 끊긴다.
 - **잘못된 버전이 나감 → 특정 과거 커밋으로 롤백**: 서버에서
   `sudo /opt/innolive/deploy/apply-release.sh <과거커밋SHA> --force`
   (이미지가 레지스트리에 남아 있으므로 어떤 과거 커밋으로든 즉시 이동 가능).
 - **배포 실패 원인 확인**: 러너 로그에는 의도적으로 요약만 남는다. 상세는 서버의
-  `/opt/innolive/deploy/logs/`(root 600)와 `journalctl -u innolive-server`에서 본다.
+  `/opt/innolive/deploy/logs/`(root 600)와 `journalctl -u 'innolive-server@*'`에서 본다.
 
 ## 서버 설치 절차 (1회, 이미 적용됨 — 재구축 시 참고)
 

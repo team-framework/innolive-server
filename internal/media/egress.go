@@ -350,6 +350,11 @@ func (e *RTMPEgress) SetNVENCDevice(index int) {
 // NVENCDevice는 이 egress에 배정된 GPU 번호다. -1이면 지정하지 않는다.
 func (e *RTMPEgress) NVENCDevice() int { return e.nvencDevice }
 
+// OutputURL은 송출 대상 RTMP URL이다. 스트림 키가 들어 있으므로 로그·응답에 싣지
+// 않는다. 서버 교체 배포가 같은 대상으로 송출을 이어 가려고 새 프로세스에 넘길 때만
+// 쓴다(#517).
+func (e *RTMPEgress) OutputURL() string { return e.outputURL }
+
 // ReconnectMaxElapsed는 이 egress가 쓰는 재연결 예산 상한이다.
 func (e *RTMPEgress) ReconnectMaxElapsed() time.Duration {
 	return e.reconnectPolicy.maxElapsed

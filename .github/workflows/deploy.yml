@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       force_restart:
-        description: "활성 방송 세션이 있어도 강제 재시작 (방송이 끊김 — 긴급시에만)"
+        description: "이관하지 않는 게스트 세션을 기다리지 않고 옛 슬롯 정지 (게스트 방송이 끊김)"
         type: boolean
         default: false
 

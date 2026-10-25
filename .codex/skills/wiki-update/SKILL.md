@@ -15,7 +15,7 @@ metadata:
 
 ## 진행
 
-1. 클론 경로를 모르면 한 번 묻는다. 원격과 Git 상태를 확인한다. 기존 변경은 보존하고, 깨끗한 별도 worktree에서 요청 범위만 작업한다.
+1. 클론 경로를 모르면 한 번 묻는다. 원격과 Git 상태를 확인한다. 기존 변경을 보존하고 현재 폴더의 새 브랜치에서 요청 범위만 작업한다. 같은 클론의 동시 작업과 충돌할 위험, 보존할 무관한 미커밋 변경, 위험하거나 되돌리기 어려운 변경의 격리가 필요한 경우에만 별도 worktree를 사용한다. PR push 후 또는 작업 중단 시 이 작업에서 만든 worktree만 정리한다. 미커밋·미푸시 변경이 있으면 삭제하지 않고 보고한다. 변경이 없으면 `git worktree remove <path>` 후 `git worktree prune`을 실행한다. 사용자 승인 없이 `--force`를 사용하지 않는다.
 2. `get_wiki_status`와 로컬 HEAD를 비교한다. `get_context`로 관련 문단을 찾고, 필요한 부분만 `get_note_outline`·`read_sections`로 읽는다. [MCP 조회 절차](references/mcp-retrieval.md)
 3. 기존 `question`에 맞는 문서를 우선 갱신한다. 근거, 담당 `owner`, `verification`, 시점을 정리하고 요청 밖의 변경을 빼둔다. [내용·메타데이터 기준](references/metadata-and-dates.md)
 4. 선택한 섹션만 고친다. 전체 문서·섹션 hash를 검증하는 로컬 patch CLI를 우선 사용하고, 사람이 diff를 확인한다. [편집·검토 절차](references/edit-review.md)

@@ -123,7 +123,7 @@ func (s *Server) replaceAIWorker(ctx context.Context, from, to string, allowReen
 	// 배정 제외 직전에 from을 받은 세션이 아직 파이프라인을 띄우는 중일 수 있어 한
 	// 번 더 본다.
 	for attempt := 0; attempt < 2 && activeStreams(s.ai, from) > 0; attempt++ {
-		report := s.sessions.SwitchSessionsOffAIWorker(ctx, from)
+		report := s.sessions.SwitchSessionsOffAIWorker(ctx, from, to)
 		result.MovedSessions += report.Moved
 		result.FailedSessions = report.Failed
 		if len(report.Failed) > 0 {

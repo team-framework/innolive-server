@@ -98,7 +98,7 @@ func (m *Manager) moveVideoPipelineOffAIWorker(s *Session, from string) {
 	s.aiMovedAt = time.Now()
 	s.mu.Unlock()
 
-	moved, err := m.switchSessionAIWorker(context.Background(), s, from)
+	moved, err := m.switchSessionAIWorker(context.Background(), s, from, "")
 	if moved {
 		return
 	}
@@ -135,8 +135,9 @@ const aiSwitchConcurrency = 2
 var errNoAIMoveTarget = errors.New("no ready AI worker to move the session to")
 
 // switchSessionAIWorker는 from 워커에 있는 세션의 AI 스트림을 준비된 다른 워커로
-// 넘긴다(#515). 세션이 이미 from에 없거나 AI 스트림이 없으면 moved=false, err=nil이다.
-func (m *Manager) switchSessionAIWorker(ctx context.Context, s *Session, from string) (moved bool, err error) {
+// 넘긴다(#515). prefer가 비어 있지 않으면 그 워커를 먼저 고른다. 세션이 이미 from에
+// 없거나 AI 스트림이 없으면 moved=false, err=nil이다.
+func (m *Manager) switchSessionAIWorker(ctx context.Context, s *Session, from, prefer string) (moved bool, err error) {
 	s.mu.RLock()
 	stream, target := s.aiStream, s.aiTarget
 	faceSwap := s.FaceAnonymization == FaceAnonymizationFaceSwap
@@ -144,7 +145,7 @@ func (m *Manager) switchSessionAIWorker(ctx context.Context, s *Session, from st
 	if stream == nil || target != from {
 		return false, nil
 	}
-	client, release, ok := m.ai.AcquireMoveTarget(faceSwap, from)
+	client, release, ok := m.ai.AcquireMoveTarget(faceSwap, from, prefer)
 	if !ok {
 		return false, errNoAIMoveTarget
 	}
@@ -174,8 +175,9 @@ type AIWorkerSwitchReport struct {
 
 // SwitchSessionsOffAIWorker는 from 워커에 배정된 모든 세션의 AI 스트림을 다음
 // 프레임부터 다른 워커로 넘긴다(#515). 워커 교체 배포가 옛 워커를 비울 때 쓴다.
+// 세션은 prefer(새 워커)로 먼저 보내고, prefer로 갈 수 없으면 가장 한가한 워커로 보낸다.
 // 호출 전에 from을 배정 제외로 둬야 그 사이 새 세션이 들어오지 않는다.
-func (m *Manager) SwitchSessionsOffAIWorker(ctx context.Context, from string) AIWorkerSwitchReport {
+func (m *Manager) SwitchSessionsOffAIWorker(ctx context.Context, from, prefer string) AIWorkerSwitchReport {
 	report := AIWorkerSwitchReport{}
 	if m.ai == nil {
 		return report
@@ -200,7 +202,7 @@ func (m *Manager) SwitchSessionsOffAIWorker(ctx context.Context, from string) AI
 		go func(s *Session) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			moved, err := m.switchSessionAIWorker(ctx, s, from)
+			moved, err := m.switchSessionAIWorker(ctx, s, from, prefer)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {

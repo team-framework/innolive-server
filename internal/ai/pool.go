@@ -195,7 +195,11 @@ func (p *Pool) Acquire(faceSwap bool) (*Client, func()) {
 // AcquireMoveTarget은 except에 배정된 faceSwap 모드 세션을 옮길 대상을 골라 배정한다
 // (#515). Acquire와 달리 갈 곳이 없으면 다른 대상으로 물러서지 않고 ok=false다 —
 // 배정 제외·응답 불가 대상으로 옮기면 세션을 더 나쁜 워커로 보내게 된다.
-func (p *Pool) AcquireMoveTarget(faceSwap bool, except string) (client *Client, release func(), ok bool) {
+//
+// prefer가 옮길 수 있는 대상이면 활성 수와 상관없이 그 대상을 고른다. 워커 교체는
+// 옛 워커의 세션을 새 워커가 그대로 받아야 다른 워커의 부하가 늘지 않는다. 비우면
+// 활성 스트림이 가장 적은 대상이다.
+func (p *Pool) AcquireMoveTarget(faceSwap bool, except, prefer string) (client *Client, release func(), ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	best := -1
@@ -203,6 +207,10 @@ func (p *Pool) AcquireMoveTarget(faceSwap bool, except string) (client *Client, 
 		address := candidate.Address()
 		if address == except || !p.servesLocked(address, faceSwap) || p.draining[address] || p.unready[address] {
 			continue
+		}
+		if address == prefer {
+			best = index
+			break
 		}
 		if best < 0 || p.active[index] < p.active[best] {
 			best = index

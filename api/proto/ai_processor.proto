@@ -20,6 +20,10 @@ service AiProcessor {
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   // Deletes an idle in-memory session. Active video streams prevent deletion.
   rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
+  // Exports one session's whitelist embeddings for a trusted worker-rollout client.
+  rpc ExportWhitelist(ExportWhitelistRequest) returns (ExportWhitelistResponse);
+  // Merges embeddings exported by another worker, keeping their entry IDs.
+  rpc ImportWhitelist(ImportWhitelistRequest) returns (WhitelistResponse);
 }
 
 message VideoChunk {
@@ -191,6 +195,31 @@ message GetWhitelistStatusResponse {
 message DeleteWhitelistRequest {
   string session_id = 1;
   string entry_id = 2;
+}
+
+// One whitelist exemplar as stored by a worker: a unit-norm AdaFace embedding.
+message WhitelistEmbedding {
+  string entry_id = 1;
+  repeated float values = 2;
+}
+
+message ExportWhitelistRequest {
+  string session_id = 1;
+}
+
+message ExportWhitelistResponse {
+  string session_id = 1;
+  // Identifies the recognition model that produced the embeddings. Importers reject
+  // a different value because embeddings from another model are not comparable.
+  string embedding_model = 2;
+  repeated WhitelistEmbedding entries = 3;
+  uint64 whitelist_version = 4;
+}
+
+message ImportWhitelistRequest {
+  string session_id = 1;
+  string embedding_model = 2;
+  repeated WhitelistEmbedding entries = 3;
 }
 
 message CreateSessionRequest {}

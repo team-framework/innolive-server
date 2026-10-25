@@ -693,6 +693,23 @@ func main() {
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
+	// AI 워커 교체 제어 API(#515). 같은 호스트의 배포 스크립트가 새 워커를 띄운 뒤
+	// 진행 중인 방송을 끊지 않고 옛 워커를 대신하게 한다. 공개 리스너와 따로 둔다.
+	var controlServer *http.Server
+	if aiPool != nil && cfg.AIControlAddr != "" {
+		controlServer = &http.Server{
+			Addr:              cfg.AIControlAddr,
+			Handler:           application.AIControlHandler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			logger.Info("AI control API started", "address", cfg.AIControlAddr)
+			if err := controlServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("AI control API stopped", "error", err)
+			}
+		}()
+	}
+
 	signalContext, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -720,6 +737,9 @@ func main() {
 	)
 	defer cancel()
 
+	if controlServer != nil {
+		_ = controlServer.Shutdown(shutdownContext)
+	}
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
 		logger.Error(
 			"graceful HTTP shutdown failed",

@@ -307,6 +307,10 @@ type Session struct {
 	// 이동 시각으로, 워커 상태가 오락가락해도 이동이 반복되지 않게 한다.
 	aiTarget  string
 	aiMovedAt time.Time
+	// aiStream은 지금 영상 파이프라인의 AI 스트림이다. 워커를 교체할 때 파이프라인을
+	// 다시 띄우지 않고 다음 프레임부터 다른 워커로 넘긴다(#515). 실제 AI 모드가 아니거나
+	// 파이프라인이 없으면 nil이다.
+	aiStream *ai.SwitchableStream
 	// upgradeOffer는 걸려 있는 화질 올리기 제안, upgradeOffered는 제안한 적이
 	// 있는지다(#278). 한 세션에 한 번만 제안한다.
 	upgradeOffer   *UpgradeOffer
@@ -2101,19 +2105,23 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	s.mu.Unlock()
 
 	var aiStream media.AIStream
+	var switchable *ai.SwitchableStream
 	// releaseAI는 이 파이프라인의 AI 워커 배정을 돌려준다. 파이프라인이 끝나거나
 	// 시작에 실패하면 반드시 불린다 — 그래야 다음 세션이 덜 붐비는 워커로 간다.
+	// 워커를 옮긴 뒤에도 그때 워커의 배정을 돌려준다.
 	releaseAI := func() {}
 	aiTarget := ""
 	if s.privacyMode == config.PrivacyModeReal {
-		client, release := m.ai.Acquire(s.FaceAnonymization == FaceAnonymizationFaceSwap)
-		releaseAI = release
+		faceSwap := s.FaceAnonymization == FaceAnonymizationFaceSwap
+		client, release := m.ai.Acquire(faceSwap)
 		aiTarget = client.Address()
 		m.metrics.IncAITargetSession(aiTarget)
 		// AI 서버는 비어 있지 않은 세션 scope를 요구한다. 서버가 계산한 AI
 		// client ID를 사용해 요청 metadata로 사용자별 reference-face bucket과
 		// 스트림 식별자를 선택할 수 없게 한다.
-		aiStream = client.NewStream(trackCtx, s.AIClientID, s.FaceAnonymization == FaceAnonymizationFaceSwap)
+		switchable = ai.NewSwitchableStream(trackCtx, client, release, s.AIClientID, faceSwap)
+		aiStream = switchable
+		releaseAI = switchable.Release
 	}
 	transcoder := media.NewFFmpegTranscoder(m.cfg.FFmpegPath, m.logger.With("session_id", s.ID), m.metrics, media.TranscoderOptions{
 		Gate:               m.spawnGate,
@@ -2144,6 +2152,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	processor.SetMosaicTally(s.mosaic)
 	s.processor = processor
 	s.aiTarget = aiTarget
+	s.aiStream = switchable
 	// egress는 직접 들지 않고 세션의 슬롯을 통한다(#83): 트랙 교체로
 	// 파이프라인이 재생성돼도, 방송 중 start/stop으로 egress가 갈려도
 	// Enqueue 경로가 끊기지 않는다.
@@ -2201,6 +2210,7 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 		// 새 파이프라인이 이미 자기 워커를 적었으면 건드리지 않는다.
 		if s.pipelineDone == pipelineDone {
 			s.aiTarget = ""
+			s.aiStream = nil
 		}
 		s.mu.Unlock()
 	}()

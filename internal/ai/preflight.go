@@ -45,7 +45,8 @@ func probeDimension(pinLongEdge int) int {
 // 있도록 정상 상태의 AI_GRPC_TIMEOUT과 의도적으로 분리했다.
 func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Duration, pinLongEdge int) error {
 	var errs []error
-	for _, client := range p.clients {
+	clients := p.Clients()
+	for _, client := range clients {
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		err := client.Preflight(callCtx, wireFormat, pinLongEdge)
 		cancel()
@@ -54,7 +55,7 @@ func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Du
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("AI preflight failed on %d/%d target(s): %w", len(errs), len(p.clients), errors.Join(errs...))
+		return fmt.Errorf("AI preflight failed on %d/%d target(s): %w", len(errs), len(clients), errors.Join(errs...))
 	}
 	return nil
 }

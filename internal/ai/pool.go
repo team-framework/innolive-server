@@ -20,6 +20,8 @@ import (
 type Pool struct {
 	clients []*Client
 	logger  *slog.Logger
+	// timeout은 AddTarget이 새 클라이언트에 줄 프레임 타임아웃이다.
+	timeout time.Duration
 
 	mu sync.Mutex
 	// active는 대상별로 지금 열려 있는 영상 파이프라인 수다.
@@ -42,6 +44,10 @@ type Pool struct {
 	// 나머지 대상에만 간다 — 합성 옵션 없이 띄운 워커는 합성 요청을 받으면 모델을
 	// CPU로 지연 로드해 그 워커의 블러 세션까지 멈춘다.
 	faceSwap map[string]bool
+	// draining은 새 세션을 배정하지 않는 대상이다(#515). 워커 교체 중 새 워커는
+	// 화이트리스트를 옮기고 예열을 마칠 때까지, 옛 워커는 세션을 다 넘길 때까지 여기
+	// 든다. 화이트리스트 브로드캐스트와 상태 점검은 계속 받는다.
+	draining map[string]bool
 }
 
 // SetFaceSwapTargets는 얼굴 합성 세션만 받을 대상을 정한다(#507). 세션을 배정하기
@@ -139,7 +145,7 @@ func NewPool(targets []string, timeout time.Duration) (*Pool, error) {
 		}
 		clients = append(clients, client)
 	}
-	pool := &Pool{clients: clients, active: make([]int, len(clients))}
+	pool := &Pool{clients: clients, active: make([]int, len(clients)), timeout: timeout}
 	for _, client := range clients {
 		client.onSuspect = pool.reportSuspect
 	}
@@ -164,11 +170,15 @@ func (p *Pool) Acquire(faceSwap bool) (*Client, func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	skipUnready := p.hasReadyTargetLocked("", faceSwap)
+	skipDraining := p.hasAssignableTargetLocked(faceSwap)
 	best := -1
 	for offset := 0; offset < len(p.clients); offset++ {
 		index := (p.next + offset) % len(p.clients)
 		address := p.clients[index].Address()
 		if !p.servesLocked(address, faceSwap) {
+			continue
+		}
+		if skipDraining && p.draining[address] {
 			continue
 		}
 		if skipUnready && p.unready[address] {
@@ -179,16 +189,49 @@ func (p *Pool) Acquire(faceSwap bool) (*Client, func()) {
 		}
 	}
 	p.next = (best + 1) % len(p.clients)
-	p.adjust(best, 1)
+	return p.claimLocked(best)
+}
+
+// AcquireMoveTarget은 except에 배정된 faceSwap 모드 세션을 옮길 대상을 골라 배정한다
+// (#515). Acquire와 달리 갈 곳이 없으면 다른 대상으로 물러서지 않고 ok=false다 —
+// 배정 제외·응답 불가 대상으로 옮기면 세션을 더 나쁜 워커로 보내게 된다.
+func (p *Pool) AcquireMoveTarget(faceSwap bool, except string) (client *Client, release func(), ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	best := -1
+	for index, candidate := range p.clients {
+		address := candidate.Address()
+		if address == except || !p.servesLocked(address, faceSwap) || p.draining[address] || p.unready[address] {
+			continue
+		}
+		if best < 0 || p.active[index] < p.active[best] {
+			best = index
+		}
+	}
+	if best < 0 {
+		return nil, nil, false
+	}
+	client, release = p.claimLocked(best)
+	return client, release, true
+}
+
+// claimLocked는 index의 대상에 스트림 하나를 배정하고 그 배정을 되돌리는 release를
+// 돌려준다. release는 클라이언트로 대상을 다시 찾는다 — 그 사이 다른 대상이 빠져
+// 순서가 바뀌었을 수 있다. p.mu를 쥔 채 불린다.
+func (p *Pool) claimLocked(index int) (*Client, func()) {
+	client := p.clients[index]
+	p.adjust(index, 1)
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			p.adjust(best, -1)
+			if current := p.indexLocked(client.Address()); current >= 0 && p.clients[current] == client {
+				p.adjust(current, -1)
+			}
 		})
 	}
-	return p.clients[best], release
+	return client, release
 }
 
 // adjust는 p.mu를 쥔 채 불린다.
@@ -261,7 +304,7 @@ func (p *Pool) HasReadyTarget(faceSwap bool) bool {
 func (p *Pool) hasReadyTargetLocked(except string, faceSwap bool) bool {
 	for _, client := range p.clients {
 		address := client.Address()
-		if address != except && p.servesLocked(address, faceSwap) && !p.unready[address] {
+		if address != except && p.servesLocked(address, faceSwap) && !p.draining[address] && !p.unready[address] {
 			return true
 		}
 	}
@@ -269,12 +312,152 @@ func (p *Pool) hasReadyTargetLocked(except string, faceSwap bool) bool {
 }
 
 func (p *Pool) hasTargetLocked(target string) bool {
+	return p.indexLocked(target) >= 0
+}
+
+// hasAssignableTargetLocked는 faceSwap 모드를 받는 대상 중 배정 제외가 아닌 대상이
+// 있는지다. p.mu를 쥔 채 불린다.
+func (p *Pool) hasAssignableTargetLocked(faceSwap bool) bool {
 	for _, client := range p.clients {
-		if client.Address() == target {
+		address := client.Address()
+		if p.servesLocked(address, faceSwap) && !p.draining[address] {
 			return true
 		}
 	}
 	return false
+}
+
+// indexLocked는 대상의 위치이고 없으면 -1이다. p.mu를 쥔 채 불린다.
+func (p *Pool) indexLocked(target string) int {
+	for index, client := range p.clients {
+		if client.Address() == target {
+			return index
+		}
+	}
+	return -1
+}
+
+// AddTarget은 실행 중에 AI 워커 대상을 하나 더한다(#515). 새 대상은 배정 제외 상태로
+// 들어온다 — 화이트리스트를 옮기고 예열을 마친 뒤 SetDraining(false)로 배정을 연다.
+// faceSwap은 합성 전용 대상이 정해진 배포에서 새 대상이 받을 모드다.
+func (p *Pool) AddTarget(address string, faceSwap bool) (*Client, error) {
+	client, err := New(address, p.timeout)
+	if err != nil {
+		return nil, err
+	}
+	client.onSuspect = p.reportSuspect
+	p.mu.Lock()
+	if p.hasTargetLocked(address) {
+		p.mu.Unlock()
+		_ = client.Close()
+		return nil, fmt.Errorf("AI target %q is already in the pool", address)
+	}
+	p.clients = append(p.clients, client)
+	p.active = append(p.active, 0)
+	if p.draining == nil {
+		p.draining = make(map[string]bool)
+	}
+	p.draining[address] = true
+	if faceSwap && len(p.faceSwap) > 0 {
+		p.faceSwap[address] = true
+	}
+	if p.observer != nil {
+		p.observer(address, 0)
+	}
+	p.mu.Unlock()
+	return client, nil
+}
+
+// RemoveTarget은 열린 스트림이 없는 대상을 풀에서 빼고 연결을 닫는다(#515).
+func (p *Pool) RemoveTarget(address string) error {
+	p.mu.Lock()
+	index := p.indexLocked(address)
+	if index < 0 {
+		p.mu.Unlock()
+		return fmt.Errorf("AI target %q is not in the pool", address)
+	}
+	if p.active[index] > 0 {
+		active := p.active[index]
+		p.mu.Unlock()
+		return fmt.Errorf("AI target %q still has %d active stream(s)", address, active)
+	}
+	if len(p.clients) == 1 {
+		p.mu.Unlock()
+		return errors.New("cannot remove the last AI target")
+	}
+	client := p.clients[index]
+	p.clients = append(p.clients[:index:index], p.clients[index+1:]...)
+	p.active = append(p.active[:index:index], p.active[index+1:]...)
+	if p.next >= len(p.clients) {
+		p.next = 0
+	}
+	delete(p.draining, address)
+	delete(p.unready, address)
+	delete(p.faceSwap, address)
+	p.mu.Unlock()
+	return client.Close()
+}
+
+// SetDraining은 대상에 새 세션을 배정할지 정한다(#515). 이미 배정된 세션은 그대로다.
+func (p *Pool) SetDraining(address string, draining bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.hasTargetLocked(address) {
+		return fmt.Errorf("AI target %q is not in the pool", address)
+	}
+	if !draining {
+		delete(p.draining, address)
+		return nil
+	}
+	if p.draining == nil {
+		p.draining = make(map[string]bool)
+	}
+	p.draining[address] = true
+	return nil
+}
+
+// TargetStatus는 대상 하나의 현재 상태다.
+type TargetStatus struct {
+	Address  string `json:"address"`
+	Ready    bool   `json:"ready"`
+	Draining bool   `json:"draining"`
+	FaceSwap bool   `json:"face_swap"`
+	Active   int    `json:"active_streams"`
+}
+
+// Targets는 모든 대상의 현재 상태를 풀 순서로 돌려준다.
+func (p *Pool) Targets() []TargetStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	targets := make([]TargetStatus, len(p.clients))
+	for index, client := range p.clients {
+		address := client.Address()
+		targets[index] = TargetStatus{
+			Address:  address,
+			Ready:    !p.unready[address],
+			Draining: p.draining[address],
+			FaceSwap: p.faceSwap[address],
+			Active:   p.active[index],
+		}
+	}
+	return targets
+}
+
+// Target은 대상의 클라이언트이고 없으면 nil이다.
+func (p *Pool) Target(address string) *Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if index := p.indexLocked(address); index >= 0 {
+		return p.clients[index]
+	}
+	return nil
+}
+
+// ServesFaceSwap은 대상이 합성 전용 대상인지다.
+func (p *Pool) ServesFaceSwap(address string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.faceSwap[address]
 }
 
 // SetSuspectHandler는 ProcessVideo가 워커 고장 신호를 받았을 때 부를 함수를 붙인다.
@@ -296,6 +479,8 @@ func (p *Pool) reportSuspect(client *Client) {
 }
 
 func (p *Pool) Clients() []*Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	result := make([]*Client, len(p.clients))
 	copy(result, p.clients)
 	return result
@@ -303,7 +488,7 @@ func (p *Pool) Clients() []*Client {
 
 func (p *Pool) Close() error {
 	var errs []error
-	for _, client := range p.clients {
+	for _, client := range p.Clients() {
 		if err := client.Close(); err != nil {
 			errs = append(errs, err)
 		}
@@ -414,8 +599,9 @@ func (p *Pool) WhitelistEntryIDs(ctx context.Context, sessionIDs []string) map[s
 		address string
 		entries map[string][]string
 	}
-	answers := make(chan answer, len(p.clients))
-	for _, client := range p.clients {
+	clients := p.Clients()
+	answers := make(chan answer, len(clients))
+	for _, client := range clients {
 		go func(c *Client) {
 			entries := make(map[string][]string, len(sessionIDs))
 			for _, sessionID := range sessionIDs {
@@ -430,8 +616,8 @@ func (p *Pool) WhitelistEntryIDs(ctx context.Context, sessionIDs []string) map[s
 			answers <- answer{address: c.Address(), entries: entries}
 		}(client)
 	}
-	result := make(map[string]map[string][]string, len(p.clients))
-	for range p.clients {
+	result := make(map[string]map[string][]string, len(clients))
+	for range clients {
 		worker := <-answers
 		result[worker.address] = worker.entries
 	}
@@ -457,17 +643,18 @@ func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse,
 		response *aiv1.WhitelistResponse
 		err      error
 	}
-	results := make(chan outcome, len(p.clients))
-	for _, client := range p.clients {
+	clients := p.Clients()
+	results := make(chan outcome, len(clients))
+	for _, client := range clients {
 		go func(c *Client) {
 			response, err := op(c)
 			results <- outcome{address: c.Address(), response: response, err: err}
 		}(client)
 	}
 
-	result := &WhitelistResult{EntryIDs: make(map[string]string, len(p.clients))}
+	result := &WhitelistResult{EntryIDs: make(map[string]string, len(clients))}
 	var errs []error
-	for range p.clients {
+	for range clients {
 		worker := <-results
 		if worker.err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", worker.address, worker.err))
@@ -483,15 +670,16 @@ func (p *Pool) broadcast(kind string, op func(*Client) (*aiv1.WhitelistResponse,
 	if len(errs) > 0 {
 		// 부분 결과를 오류와 함께 넘긴다. 성공한 워커의 엔트리 id는 다른 어디에도
 		// 없고, AddWhitelist가 부분 등록을 되돌리려면 그것이 필요하다.
-		return result, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
+		return result, fmt.Errorf("whitelist %s broadcast failed on %d/%d targets: %w", kind, len(errs), len(clients), errors.Join(errs...))
 	}
 	return result, nil
 }
 
 // runOnWorkers는 op를 모든 워커에 동시에 실행하고, 실패를 낸 대상과 함께 모은다.
 func (p *Pool) runOnWorkers(kind string, op func(*Client) error) error {
-	results := make(chan error, len(p.clients))
-	for _, client := range p.clients {
+	clients := p.Clients()
+	results := make(chan error, len(clients))
+	for _, client := range clients {
 		go func(c *Client) {
 			if err := op(c); err != nil {
 				results <- fmt.Errorf("%s: %w", c.Address(), err)
@@ -501,13 +689,13 @@ func (p *Pool) runOnWorkers(kind string, op func(*Client) error) error {
 		}(client)
 	}
 	var errs []error
-	for range p.clients {
+	for range clients {
 		if err := <-results; err != nil {
 			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("whitelist %s failed on %d/%d targets: %w", kind, len(errs), len(p.clients), errors.Join(errs...))
+		return fmt.Errorf("whitelist %s failed on %d/%d targets: %w", kind, len(errs), len(clients), errors.Join(errs...))
 	}
 	return nil
 }

@@ -31,7 +31,10 @@ type aiWorkerReplacement struct {
 	CopiedSessions int `json:"copied_sessions"`
 	// PrunedEntries는 복사 중 지워진 얼굴이라 새 워커에서 다시 지운 엔트리 수다.
 	PrunedEntries int `json:"pruned_entries"`
-	MovedSessions int `json:"moved_sessions"`
+	// WhitelistSkipped는 allowReenrollment로 화이트리스트를 옮기지 않고 넘어간 사유다.
+	// 그 얼굴들은 다음 대조에서 재등록 필요로 표시된다.
+	WhitelistSkipped string `json:"whitelist_skipped,omitempty"`
+	MovedSessions    int    `json:"moved_sessions"`
 	// FailedSessions는 넘기지 못해 옛 워커에 남은 세션 id와 사유다.
 	FailedSessions map[string]string `json:"failed_sessions,omitempty"`
 	// Removed는 옛 워커를 풀에서 뺐는지다. 남은 세션이 있으면 배정 제외로만 두며, 같은
@@ -48,7 +51,11 @@ type aiWorkerReplacement struct {
 //
 // 2단계까지 실패하면 to를 풀에서 빼 처음 상태로 돌린다. 이미 to가 풀에 있으면(앞선
 // 요청이 3단계에서 멈춤) 이어서 진행한다.
-func (s *Server) replaceAIWorker(ctx context.Context, from, to string) (aiWorkerReplacement, error) {
+//
+// allowReenrollment면 2단계의 화이트리스트 이동이 실패해도(옛 워커에 이동 RPC가 없는
+// 릴리스이거나 인식 모델이 바뀜) 진행한다. 옮기지 못한 얼굴은 대조가 재등록 필요로
+// 표시하고, 그 전까지 새 워커의 세션에서 등록한 사람도 블러된다.
+func (s *Server) replaceAIWorker(ctx context.Context, from, to string, allowReenrollment bool) (aiWorkerReplacement, error) {
 	result := aiWorkerReplacement{From: from, To: to}
 	if from == to {
 		return result, errAIWorkerSame
@@ -88,11 +95,20 @@ func (s *Server) replaceAIWorker(ctx context.Context, from, to string) (aiWorker
 		return abort(err)
 	}
 	copied, err := s.ai.CopyWhitelists(ctx, from, to)
-	if err != nil {
-		return abort(err)
-	}
-	result.CopiedSessions = len(copied)
-	if result.PrunedEntries, err = s.pruneCopiedWhitelists(ctx, from, to); err != nil {
+	switch {
+	case err == nil:
+		result.CopiedSessions = len(copied)
+		if result.PrunedEntries, err = s.pruneCopiedWhitelists(ctx, from, to); err != nil {
+			return abort(err)
+		}
+	case allowReenrollment:
+		// 옮기지 못한 얼굴의 to 기록을 지워야 대조가 빠진 얼굴로 본다.
+		if dropErr := s.references.dropWorkerEntries(to); dropErr != nil {
+			return abort(dropErr)
+		}
+		result.WhitelistSkipped = err.Error()
+		s.logger.Warn("AI worker replacement continues without whitelists; registered faces need re-enrollment", "from", from, "to", to, "error", err)
+	default:
 		return abort(err)
 	}
 
@@ -286,8 +302,9 @@ func (s *Server) handleReplaceAIWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From              string `json:"from"`
+		To                string `json:"to"`
+		AllowReenrollment bool   `json:"allow_reenrollment"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request); err != nil || request.From == "" || request.To == "" {
 		writeAIControlJSON(w, http.StatusBadRequest, map[string]string{"error": "body must be {\"from\": \"host:port\", \"to\": \"host:port\"}"})
@@ -295,7 +312,7 @@ func (s *Server) handleReplaceAIWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), aiControlReplaceTimeout)
 	defer cancel()
-	result, err := s.replaceAIWorker(ctx, request.From, request.To)
+	result, err := s.replaceAIWorker(ctx, request.From, request.To, request.AllowReenrollment)
 	if err != nil {
 		code := http.StatusBadGateway
 		switch {

@@ -78,7 +78,7 @@ func TestSwitchSessionsOffAIWorkerMovesStreamsAndAssignments(t *testing.T) {
 	}
 
 	// 갈 곳이 없으면 옮기지 않고 사유를 남긴다.
-	if report := m.SwitchSessionsOffAIWorker(context.Background(), from); report.Moved != 0 || report.Failed["moving"] == "" {
+	if report := m.SwitchSessionsOffAIWorker(context.Background(), from, to); report.Moved != 0 || report.Failed["moving"] == "" {
 		t.Fatalf("report with no open worker = %+v, want moving failed", report)
 	}
 
@@ -88,7 +88,7 @@ func TestSwitchSessionsOffAIWorkerMovesStreamsAndAssignments(t *testing.T) {
 	if err := pool.SetDraining(from, true); err != nil {
 		t.Fatal(err)
 	}
-	report := m.SwitchSessionsOffAIWorker(context.Background(), from)
+	report := m.SwitchSessionsOffAIWorker(context.Background(), from, to)
 	if report.Moved != 1 || len(report.Failed) != 0 {
 		t.Fatalf("report = %+v, want one session moved", report)
 	}

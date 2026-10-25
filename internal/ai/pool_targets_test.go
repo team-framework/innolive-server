@@ -34,10 +34,10 @@ func TestPoolRemoveTargetRequiresNoActiveStreams(t *testing.T) {
 	if err := pool.SetDraining("a:1", true); err != nil {
 		t.Fatalf("SetDraining() error = %v", err)
 	}
-	if client, _, ok := pool.AcquireMoveTarget(false, "b:1"); ok {
+	if client, _, ok := pool.AcquireMoveTarget(false, "b:1", ""); ok {
 		t.Fatalf("AcquireMoveTarget() chose draining %q", client.Address())
 	}
-	_, release, ok := pool.AcquireMoveTarget(false, "a:1")
+	_, release, ok := pool.AcquireMoveTarget(false, "a:1", "")
 	if !ok {
 		t.Fatal("AcquireMoveTarget() found no target, want b:1")
 	}
@@ -60,7 +60,7 @@ func TestPoolRemoveTargetRequiresNoActiveStreams(t *testing.T) {
 // 대상이 빠져 순서가 바뀌어도 release는 자기 대상의 활성 수만 되돌린다.
 func TestPoolReleaseFollowsTargetAfterRemoval(t *testing.T) {
 	pool := newTestPool(t, "a:1", "b:1", "c:1")
-	_, release, ok := pool.AcquireMoveTarget(false, "a:1")
+	_, release, ok := pool.AcquireMoveTarget(false, "a:1", "")
 	if !ok {
 		t.Fatal("AcquireMoveTarget() found no target")
 	}
@@ -91,11 +91,29 @@ func TestPoolAddedTargetKeepsFaceSwapSplit(t *testing.T) {
 	if !pool.ServesFaceSwap("swap:2") {
 		t.Fatal("ServesFaceSwap(swap:2) = false")
 	}
-	client, _, ok := pool.AcquireMoveTarget(true, "swap:1")
+	client, _, ok := pool.AcquireMoveTarget(true, "swap:1", "")
 	if !ok || client.Address() != "swap:2" {
 		t.Fatalf("AcquireMoveTarget(face swap) = %v, %v, want swap:2", client, ok)
 	}
-	if _, _, ok := pool.AcquireMoveTarget(false, "blur:1"); ok {
+	if _, _, ok := pool.AcquireMoveTarget(false, "blur:1", ""); ok {
 		t.Fatal("AcquireMoveTarget(blur) moved a blur session onto a face swap target")
+	}
+}
+
+// 워커 교체는 옛 워커의 세션을 새 워커로 보낸다. 새 워커로 갈 수 없으면 가장 한가한
+// 워커로 보낸다.
+func TestPoolAcquireMoveTargetPrefersReplacementWorker(t *testing.T) {
+	pool := newTestPool(t, "old:1", "idle:1", "new:1")
+	if client, _, ok := pool.AcquireMoveTarget(false, "old:1", "new:1"); !ok || client.Address() != "new:1" {
+		t.Fatalf("AcquireMoveTarget(prefer new) = %v, %v, want new:1 over the equally idle idle:1", client, ok)
+	}
+	if client, _, ok := pool.AcquireMoveTarget(false, "old:1", "new:1"); !ok || client.Address() != "new:1" {
+		t.Fatalf("second AcquireMoveTarget(prefer new) = %v, %v, want new:1 although it is busier", client, ok)
+	}
+	if err := pool.SetDraining("new:1", true); err != nil {
+		t.Fatal(err)
+	}
+	if client, _, ok := pool.AcquireMoveTarget(false, "old:1", "new:1"); !ok || client.Address() != "idle:1" {
+		t.Fatalf("AcquireMoveTarget(prefer draining) = %v, %v, want fallback to idle:1", client, ok)
 	}
 }

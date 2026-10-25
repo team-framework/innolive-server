@@ -117,6 +117,39 @@ func (c *Client) GetWhitelistStatus(ctx context.Context, sessionID string) (*aiv
 	return response, nil
 }
 
+// ListSessions는 워커가 메모리에 둔 세션 목록이다. 화이트리스트를 옮길 세션을 고른다.
+func (c *Client) ListSessions(ctx context.Context) (*aiv1.ListSessionsResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
+	defer cancel()
+	response, err := c.client.ListSessions(callCtx, &aiv1.ListSessionsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("call AI ListSessions: %w", err)
+	}
+	return response, nil
+}
+
+// ExportWhitelist는 세션 하나의 화이트리스트 임베딩을 읽는다(#515).
+func (c *Client) ExportWhitelist(ctx context.Context, sessionID string) (*aiv1.ExportWhitelistResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
+	defer cancel()
+	response, err := c.client.ExportWhitelist(callCtx, &aiv1.ExportWhitelistRequest{SessionId: sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("call AI ExportWhitelist: %w", err)
+	}
+	return response, nil
+}
+
+// ImportWhitelist는 다른 워커에서 읽은 임베딩을 엔트리 id 그대로 더한다(#515).
+func (c *Client) ImportWhitelist(ctx context.Context, request *aiv1.ImportWhitelistRequest) (*aiv1.WhitelistResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, c.whitelistTimeout())
+	defer cancel()
+	response, err := c.client.ImportWhitelist(callCtx, request)
+	if err != nil {
+		return nil, fmt.Errorf("call AI ImportWhitelist: %w", err)
+	}
+	return response, nil
+}
+
 type Stream struct {
 	ctx       context.Context
 	client    aiv1.AiProcessorClient

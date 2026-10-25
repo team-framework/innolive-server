@@ -624,6 +624,53 @@ func (p *Pool) WhitelistEntryIDs(ctx context.Context, sessionIDs []string) map[s
 	return result
 }
 
+// ErrEmbeddingModelMismatch는 두 워커의 얼굴 인식 모델이 달라 임베딩을 옮길 수 없을
+// 때다. 그 워커들 사이에서는 얼굴을 다시 등록해야 한다.
+var ErrEmbeddingModelMismatch = errors.New("AI workers use different face recognition models")
+
+// CopyWhitelists는 from 워커가 가진 모든 세션의 화이트리스트를 to 워커로 엔트리 id
+// 그대로 옮기고, 세션별로 옮긴 엔트리 id를 돌려준다(#515). 워커는 화이트리스트를
+// 메모리에만 두고 서버는 얼굴 원본을 보관하지 않으므로, 새 워커가 등록 얼굴을 갖는
+// 길은 이것뿐이다. 이미 있는 엔트리는 to가 건너뛰므로 다시 불러도 된다.
+func (p *Pool) CopyWhitelists(ctx context.Context, from, to string) (map[string][]string, error) {
+	source, target := p.Target(from), p.Target(to)
+	if source == nil || target == nil {
+		return nil, fmt.Errorf("copy whitelists %s -> %s: target is not in the pool", from, to)
+	}
+	sessions, err := source.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	copied := make(map[string][]string)
+	for _, session := range sessions.GetSessions() {
+		if session.GetEntryCount() == 0 {
+			continue
+		}
+		exported, err := source.ExportWhitelist(ctx, session.GetSessionId())
+		if err != nil {
+			return copied, err
+		}
+		if len(exported.GetEntries()) == 0 {
+			continue
+		}
+		_, err = target.ImportWhitelist(ctx, &aiv1.ImportWhitelistRequest{
+			SessionId:      exported.GetSessionId(),
+			EmbeddingModel: exported.GetEmbeddingModel(),
+			Entries:        exported.GetEntries(),
+		})
+		if status.Code(err) == codes.FailedPrecondition {
+			return copied, fmt.Errorf("%w: %w", ErrEmbeddingModelMismatch, err)
+		}
+		if err != nil {
+			return copied, err
+		}
+		for _, entry := range exported.GetEntries() {
+			copied[exported.GetSessionId()] = append(copied[exported.GetSessionId()], entry.GetEntryId())
+		}
+	}
+	return copied, nil
+}
+
 // ignoreNotFound는 워커가 없는 엔트리·세션에 대해 돌려준 오류를 버린다. 호출자는
 // 그것이 없어지길 원했고, 없다.
 func ignoreNotFound(err error) error {

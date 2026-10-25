@@ -311,3 +311,22 @@ func TestSwitchableStreamRejectsConcurrentSwitch(t *testing.T) {
 		t.Fatal("SwitchTo() onto the current worker succeeded")
 	}
 }
+
+// 예열 중 프레임이 끊기면(일시 정지 등) 예열을 기다리지 않고 바꾼다.
+func TestSwitchableStreamSwitchesWhenFramesStopDuringWarmup(t *testing.T) {
+	serverA, serverB := &taggingAIServer{name: "a"}, &taggingAIServer{name: "b"}
+	releaseA, releasedA := countRelease()
+	releaseB, _ := countRelease()
+	stream := NewSwitchableStream(context.Background(), newTaggingClient(t, serverA), releaseA, "session", false)
+	defer stream.Release()
+	processTag(t, stream, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*idleSwitchAfter)
+	defer cancel()
+	if err := stream.SwitchTo(ctx, newTaggingClient(t, serverB), releaseB); err != nil {
+		t.Fatalf("SwitchTo() error = %v", err)
+	}
+	if tag := processTag(t, stream, 2); tag != "b" || releasedA.Load() != 1 {
+		t.Fatalf("frame after idle switch from %q (a released %d), want b", tag, releasedA.Load())
+	}
+}

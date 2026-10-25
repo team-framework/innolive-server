@@ -222,7 +222,7 @@ func TestReplaceAIWorkerPrunesEntriesDeletedDuringCopy(t *testing.T) {
 	application, _, _ := newAIWorkerTestApplication(t, oldAddr)
 	application.references.faces["client-1"] = []referenceFace{{FaceID: "f1", EntryIDs: map[string]string{oldAddr: "e1"}}}
 
-	result, err := application.replaceAIWorker(context.Background(), oldAddr, newAddr)
+	result, err := application.replaceAIWorker(context.Background(), oldAddr, newAddr, false)
 	if err != nil {
 		t.Fatalf("replaceAIWorker() error = %v", err)
 	}
@@ -307,5 +307,30 @@ func TestAIControlRequiresToken(t *testing.T) {
 	payload, _ := io.ReadAll(response.Body)
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(payload), oldAddr) {
 		t.Fatalf("GET /ai/workers = %d %s", response.StatusCode, payload)
+	}
+}
+
+// 이동 RPC가 없는 릴리스에서 처음 바꿀 때는 재등록을 감수하고 진행할 수 있다. 옮기지
+// 못한 얼굴은 대조가 재등록 필요로 본다.
+func TestReplaceAIWorkerCanProceedWithoutWhitelists(t *testing.T) {
+	_, oldAddr := startRolloutWorker(t, "ir18:a", map[string][]string{"client-1": {"e1"}})
+	fresh, newAddr := startRolloutWorker(t, "ir18:b", nil)
+	application, pool, _ := newAIWorkerTestApplication(t, oldAddr)
+	application.references.faces["client-1"] = []referenceFace{{FaceID: "f1", EntryIDs: map[string]string{oldAddr: "e1"}}}
+
+	result, err := application.replaceAIWorker(context.Background(), oldAddr, newAddr, true)
+	if err != nil {
+		t.Fatalf("replaceAIWorker() error = %v", err)
+	}
+	if !result.Removed || result.WhitelistSkipped == "" {
+		t.Fatalf("result = %+v, want old worker removed with whitelist skipped", result)
+	}
+	if targets := pool.Targets(); len(targets) != 1 || targets[0].Address != newAddr {
+		t.Fatalf("pool targets = %+v, want only the new worker", targets)
+	}
+	face := application.references.snapshot()["client-1"][0]
+	verdict := judgeReferenceFace(face, "client-1", map[string]map[string][]string{newAddr: {"client-1": fresh.entryIDs("client-1")}})
+	if !slices.Equal(verdict.missing, []string{newAddr}) {
+		t.Fatalf("reference check verdict = %+v, want the face missing on the new worker", verdict)
 	}
 }

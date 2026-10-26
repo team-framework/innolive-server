@@ -174,3 +174,66 @@ go test -race -count=1 -json ./...
 - 파기: 삭제·취소·실패 및 계정 탈퇴(VOD 비활성 포함), 탈퇴 실패 롤백, 다른 사용자 보존, 늦은 작업 저장 충돌, 파일 파기 실패 시에도 이름 제거, 구조화/SQL/파기 감사 로그 미노출 확인
 - 마이그레이션: 000019 up/down 반복 적용, 작업 행 보존, 기존 행 NULL, auto/versioned SQL 일치, auto 재적용 확인; 기존 마이그레이션 수정 없음
 - `git diff --check` 통과; PR #519 변경 파일과 교집합 없음; 원격 쓰기 미수행
+
+## innolive-ai #83 QA: 한도와 오류 매핑 검증 (2026-10-26)
+
+- 기준: `/workspace/innolive-vod/interface-A.md` §6의 RPC 오류 6종·잡 오류 18종, 추가 RPC `UNIMPLEMENTED` 및 전송 취소·기한 오류
+- 저장소의 운영 기본값은 config·`.env.example`·문서·테스트 모두 3600초/2147483648 B; 운영 호스트의 실제 환경 변수는 접속 금지 조건에 따라 미확인
+- VOD 활성화 시 워커 한도 초과 설정은 서버 시작 오류; 더 작은 양의 상한 허용, 비활성 시 기존 설정 무시 정책 유지
+- 매핑 원본: `internal/vod/worker_errors.go`의 단일 테이블; 내부 경로·워커 주소·원문 오류 메시지는 저장된 공개 코드·API 응답에 미포함
+- OpenAPI 0.3.0: `VodFailureCode` 9종과 TypeScript 예시 일치, 실패/취소 결과 요청의 구체적 HTTP 오류 추가
+- 비동기 계약: 업로드 선검증 통과는 201, 이후 목록/상세는 200과 `status`·`failure.code` 제공; 아래 HTTP는 결과 다운로드 요청 기준
+
+| 워커 입력 | 작업 상태 | 결과 요청 HTTP / error.code |
+| --- | --- | --- |
+| RPC `INVALID_ARGUMENT` | failed | 400 / bad_request |
+| RPC `FAILED_PRECONDITION`, `UNIMPLEMENTED` | failed | 422 / processing_unsupported |
+| RPC `RESOURCE_EXHAUSTED` | paused, 기존 순번으로 재시도 | 409 / result_not_ready |
+| RPC `NOT_FOUND` | paused, 체크포인트 재개 | 409 / result_not_ready |
+| RPC `ALREADY_EXISTS` | processing, Get/Pause로 현재 상태 확인 | 409 / result_not_ready |
+| RPC `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `CANCELLED` | processing에서 확인, NOT_FOUND이면 paused | 409 / result_not_ready |
+| 알 수 없는 RPC (`UNKNOWN`, `INTERNAL` 등) | 상태 확인 후 NOT_FOUND이면 failed | 확인 중 409 / result_not_ready, 실패 확정 후 500 / processing_failed |
+| 잡 `INPUT_TOO_LARGE` | failed | 413 / upload_too_large |
+| 잡 `INPUT_TOO_LONG` | failed | 422 / duration_exceeded |
+| 잡 `INPUT_UNREADABLE`, `DECODER_FAILED` | failed | 422 / invalid_media |
+| 잡 `INPUT_UNSUPPORTED` | failed | 415 / unsupported_media_type |
+| 잡 `INPUT_NOT_FOUND`, `DISK_FULL` | failed | 503 / storage_failed |
+| 잡 `PATH_OUTSIDE_ROOT`, `OUTPUT_EXISTS`, `CHECKPOINT_INVALID`, `CHECKPOINT_MISMATCH`, `EMBEDDING_MODEL_MISMATCH`, `WHITELIST_SESSION_NOT_FOUND`, `ENCODER_FAILED`, `MUX_FAILED`, `INTERNAL`, 알 수 없는 잡 코드 | failed | 500 / processing_failed |
+| 잡 `RUNTIME_FAILED` | paused, 다른 워커에서 재개 | 409 / result_not_ready |
+| 잡 `CANCELLED` 또는 CANCELLED 상태 | cancelled | 409 / job_cancelled |
+
+- `RESOURCE_EXHAUSTED`는 사용자 입력 오류로 변환하지 않으며 `failure=null`, 큐 진입 시각·체크포인트·원본 보존 유지
+- 전송 오류는 Start 성공 응답 유실 가능성 때문에 확인 전에 lease 해제·중복 실행·원본 파기 금지; 정상 snapshot을 받으면 그 상태 우선
+- `INPUT_NOT_FOUND`는 서버 공유 저장소 오류이므로 사용자 작업 없음(404)과 구분; 경로·체크포인트·임베딩 불일치는 일반 처리 오류로 은닉
+- `RUNTIME_FAILED`는 DB의 paused 작업에 직전 실패 타깃을 보존하여 다음 배정에서 제외; 서버 재생성 후에도 적용, 다른 대기 작업 진행 허용, 이전 워커의 오래된 실패 snapshot 무시
+- 503/storage_failed도 작업 자체는 terminal이며 자동 재시도 없음; 클라이언트는 상세의 failed 상태와 함께 판정
+
+검증 환경은 Go 1.27.3, 로컬 PostgreSQL 17.11, UTF-8 `vod_test`, 포트 55433, ffmpeg/ffprobe 및 가짜 워커이다. 기존 `/tmp/innolive-vod-pg` 클러스터를 재사용했다.
+
+```bash
+/usr/lib/postgresql/17/bin/pg_ctl -D /tmp/innolive-vod-pg \
+  -l /tmp/innolive-vod-qa-pg.log -o '-h 127.0.0.1 -p 55433 -k /tmp' start
+export TEST_DATABASE_URL='postgres://box@127.0.0.1:55433/vod_test?sslmode=disable'
+go build ./...
+go vet ./...
+go test -race -count=1 -json ./... > /tmp/innolive-vod-qa-race.jsonl
+```
+
+| 검증 | 결과 |
+| --- | --- |
+| `go build ./...` | 통과 |
+| `go vet ./...` | 통과 |
+| `go test -race -count=1 -json ./...` | 1,405 통과 / 0 실패 / 1 건너뜀; race 0건; 테스트 패키지 15개 통과 |
+| 패키지별 pass 이벤트 | VOD 135개, AI 79개, config 66개 |
+| 오류 테이블 | RPC 9개·잡 18개 전 항목 기대값 검증; 잡 상태 저장·상세·결과 HTTP 검증 |
+| 가짜 gRPC 워커 | INPUT_TOO_LARGE → 상세 200/failure.code·결과 413, RESOURCE_EXHAUSTED → 큐 유지 후 재호출 확인 |
+| 한도 경계 | 설정 2 GiB·3600초 허용, +1 거부; 스트림 2 GiB/+1 B/긴 잔여 본문, HTTP 32/33 B·3600/3601초·3600.1초 확인 |
+| OpenAPI | YAML 파싱, 매핑 27개 HTTP 상태 및 공개 코드 9종·TypeScript 일치 확인 |
+
+- 테스트 수는 하위 테스트 포함 Go JSON pass/skip 이벤트 기준; 테스트 없는 5개 패키지는 건너뜀 수에서 제외
+- 유일한 건너뜀은 기존 `TestLocalDeviceMediaProbe`의 장치 probe opt-in 미설정
+- 바이트 2 GiB 경계는 메모리 고정 크기의 생성 reader/counting writer로 실제 해당 바이트 수를 처리하며 디스크 2 GiB 파일은 미생성; HTTP·DB·정리 검증은 32바이트 상한 사용
+- 길이 경계는 fake probe로 정확한 시간 값을 주입; 실제 ffmpeg/ffprobe는 기존 1초 H.264 허용·MPEG-4 거부 테스트 통과
+- 실제 AI 워커·NVIDIA GPU E2E, 운영 공유 경로·권한·배포는 미검증; 사용 가능한 다른 워커가 없거나 이전 실행 확인이 불가능하면 재시도 대기 지속
+- 체크포인트가 없는 실패는 기존 신규 시작 경로 사용; 유효한 토큰이 있는 경우만 Resume하며 워커의 체크포인트 검증 오류를 일반 실패로 보존
+- `git diff --check` 통과, PR #519 변경 경로와 교집합 없음; 원격 쓰기·운영 서버 접속·innolive-ai 수정 미수행

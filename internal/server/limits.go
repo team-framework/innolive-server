@@ -102,6 +102,8 @@ func broadcastRemaining(owner plan.Plan, onDevice bool, onAir, used time.Duratio
 // RunLimitEnforcer는 ctx가 끝날 때까지 주기적으로 한도를 집행한다. 원장·플랜
 // 저장소가 조립되지 않은 배포(벤치·로컬)에서는 곧바로 돌아온다.
 func (s *Server) RunLimitEnforcer(ctx context.Context) {
+	stopVOD := s.startVOD(ctx)
+	defer stopVOD()
 	if s.usageLedger == nil || s.plans == nil || s.sessions == nil {
 		return
 	}

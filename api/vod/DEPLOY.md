@@ -12,8 +12,8 @@
 | 워커 gRPC 주소 | 기존 `AI_GRPC_TARGETS`의 쉼표 구분 주소 목록 재사용. 비어 있으면 `AI_GRPC_ADDR` 하나 사용 | `internal/config/config.go:183-184,269-273,608-615`, `internal/ai/vod_client.go:5-6`. `AI_GRPC_ADDR` 코드 기본값은 `localhost:50051`이나 실제 운영 주소·포트는 **운영에서 확인 필요**. 별도 VOD 주소 env는 이 경로에 없음 |
 | AI 실행 모드 | `AI_PRIVACY_MODE=real`, 현재 연결 방식은 `AI_GRPC_INSECURE=true` | real일 때만 AI pool 생성, TLS 설정 false는 시작 오류: `cmd/server/main.go:138-150`. 실제 운영 설정은 **운영에서 확인 필요** |
 | `VOD_WORKER_GPUS` | `<실제 target>=<실제 GPU UUID>,<다른 target>=<실제 GPU UUID>` | 쉼표 구분 `target=GPU-UUID`: `internal/config/vod.go:95-100`, `internal/config/config.go:608-615`. 같은 물리 GPU의 모든 슬롯은 같은 UUID, pool의 모든 target과 교체 슬롯까지 매핑 필요. 누락 시 VOD 배정 중단: `internal/ai/vod.go:28-55`, `internal/vod/scheduler.go:525-535`. 실제 매핑은 **운영에서 확인 필요** |
-| `VOD_ROOT` | `/var/lib/innolive/vod` | 서버 기본값: `internal/config/vod.go:35`. 서버와 AI 워커가 같은 호스트의 같은 절대 경로를 공유하고 워커 `--vod-root`/`VOD_ROOT`도 일치해야 함: `/workspace/innolive-vod/interface-A.md:285-297`. 서버 마운트: `deploy/compose.prod.yaml:32-34` |
-| 소유자·권한 | 서버 UID `65532`. 서버는 생성·읽기·삭제, 워커는 입력 읽기와 작업/출력 생성·삭제 권한 필요 | `Dockerfile:13-17`, `internal/vod/http.go:135-149`, `internal/vod/sweeper.go:94-119`, `/workspace/innolive-vod/interface-A.md:287-297`. 실제 워커 UID/GID, 서버 GID, ACL, umask는 **운영에서 확인 필요** |
+| `VOD_ROOT` | `/var/lib/innolive-ai/vod`를 서버 `server.env`와 AI 워커(`VOD_ROOT`/`--vod-root`) 양쪽에 **명시** | 서버 코드 기본값은 `/var/lib/innolive/vod`(`internal/config/vod.go:35`)라 env를 빼면 경로가 어긋남. AI 워커 유닛이 `ProtectSystem=strict`, `ReadWritePaths=/var/lib/innolive-ai`라 `/var/lib/innolive` 아래에는 쓸 수 없어 공유 경로를 워커 쓰기 가능 경로로 통일(InnoLive PM 결정, 유닛 설정은 운영에서 확인 필요). 서버 컨테이너는 같은 절대 경로로 마운트: `deploy/compose.prod.yaml`의 `/var/lib/innolive-ai/vod:/var/lib/innolive-ai/vod`. 레이아웃 근거: `/workspace/innolive-vod/interface-A.md:285-297` |
+| 소유자·권한 | 디렉터리 소유 `innolive-ai`, POSIX ACL로 서버 UID `65532`와 `innolive-ai`에 `rwx`, 같은 내용의 default ACL 설정(아래 (b) 명령) | 공유 그룹+setgid 방식은 워커 umask(보통 022)가 그룹 쓰기를 지워 상대편이 하위 파일을 지울 수 없게 되므로 제외. default ACL이 있으면 새 파일·디렉터리에 umask 대신 ACL이 상속됨. 서버 UID: `Dockerfile:13-17`. **주의:** 서버는 작업 디렉터리를 `0750`으로 만든다(`internal/vod/http.go:137`). 생성 모드가 ACL mask를 `r-x`로 제한해 워커가 그 안에 `work/`·`output.mp4`를 만들 수 없으므로, 기능을 켜기 전에 `0770`으로 바꾸는 코드 수정이 필요(이 PR 범위 밖 후속, 꺼진 상태 머지에는 영향 없음). 원본 파일 `0640`은 워커가 읽기만 하므로 그대로 둠 |
 | `VOD_MAX_DURATION_SEC` | `3600`초 | `internal/config/vod.go:12-16,68-75,109-120`. 더 작은 양수 허용, 3600 초과는 VOD 활성화 시 서버 시작 오류 |
 | `VOD_MAX_UPLOAD_BYTES` | `2147483648` B = 2,147,483,648 B = 2 GiB | `internal/config/vod.go:12-16,56-63,109-120`. 더 작은 양수 허용, 워커 고정 상한 초과는 서버 시작 오류. 설정 오류 전파: `internal/config/config.go:252-255`, `cmd/server/main.go:34-37` |
 | `VOD_RESULT_RETENTION_SEC` | `604800`초 = 7일 | `internal/config/vod.go:35-37,68-75`, `internal/vod/service.go:133-138`. 성공 완료 시 결과 만료 시각 확정 |
@@ -70,15 +70,34 @@ env 미설정 시 `printenv`가 값을 출력하지 않을 수 있으므로 표�
 운영 담당자가 1절 권한 조건에 맞춰 경로를 준비한다. 호스트와 서버 컨테이너, 워커의 mount namespace에서 동일 저장소를 보는지 확인하고, 실제 샘플 작업 생성 후에도 0750/0640 권한을 다시 확인한다. 근거: `deploy/compose.prod.yaml:32-34`, `internal/vod/http.go:135-149`, `/workspace/innolive-vod/interface-A.md:285-297`.
 
 ```bash
-stat -c '%u:%g %a %n' /var/lib/innolive /var/lib/innolive/vod
-namei -l /var/lib/innolive/vod
-findmnt -T /var/lib/innolive/vod
-df -h /var/lib/innolive/vod
+stat -c '%u:%g %a %n' /var/lib/innolive /var/lib/innolive-ai/vod
+namei -l /var/lib/innolive-ai/vod
+findmnt -T /var/lib/innolive-ai/vod
+df -h /var/lib/innolive-ai/vod
 systemctl show "${VOD_WORKER_UNIT}" --property=User --property=Group --property=UMask
 docker exec "innolive-server-${VOD_SLOT}" id
-docker exec "innolive-server-${VOD_SLOT}" stat -c '%u:%g %a %n' /var/lib/innolive/vod
-docker exec "innolive-server-${VOD_SLOT}" sh -c 'test -r /var/lib/innolive/vod && test -w /var/lib/innolive/vod && test -x /var/lib/innolive/vod'
+docker exec "innolive-server-${VOD_SLOT}" stat -c '%u:%g %a %n' /var/lib/innolive-ai/vod
+docker exec "innolive-server-${VOD_SLOT}" sh -c 'test -r /var/lib/innolive-ai/vod && test -w /var/lib/innolive-ai/vod && test -x /var/lib/innolive-ai/vod'
 ```
+
+compose 반영: 레포의 `deploy/compose.prod.yaml`에 `/var/lib/innolive-ai/vod` 마운트를 추가했지만, 운영 유닛은 `/opt/innolive/compose.prod.yaml`을 쓰고(`deploy/innolive-server@.service:30-31`) 배포 워크플로는 이 파일을 복사하지 않는다(`deploy/` 경로는 `.github/workflows/deploy.yml:3-13` paths 밖). 따라서 운영 담당자가 `/opt/innolive/compose.prod.yaml`에 같은 마운트를 수동 반영한 뒤 슬롯을 재기동해야 한다.
+
+준비 명령(운영 담당자가 호스트에서 실행, 이 PR은 실행하지 않음). 워커 사용자 `innolive-ai`, 서버 컨테이너 UID `65532` 기준이다. 파일시스템이 POSIX ACL을 지원해야 한다(`acl` 패키지의 `setfacl`/`getfacl`).
+
+```bash
+# 1) 디렉터리 생성: 소유자는 워커, 다른 사용자 접근 없음
+sudo install -d -o innolive-ai -g innolive-ai -m 0770 /var/lib/innolive-ai/vod
+# 2) 서버 UID가 상위 경로를 통과할 수 있게(목록·쓰기 없이 x만)
+sudo setfacl -m u:65532:--x /var/lib/innolive-ai
+# 3) 공유 경로 자체 ACL
+sudo setfacl -m u:65532:rwx,u:innolive-ai:rwx,m::rwx /var/lib/innolive-ai/vod
+# 4) 새 하위 파일·디렉터리에 상속될 default ACL
+sudo setfacl -d -m u::rwx,g::---,o::---,u:65532:rwx,u:innolive-ai:rwx,m::rwx /var/lib/innolive-ai/vod
+# 5) 확인
+getfacl -p /var/lib/innolive-ai /var/lib/innolive-ai/vod
+```
+
+ACL은 숫자 UID로 적용되므로 컨테이너 안 UID `65532`에 그대로 적용된다. 서버가 만든 작업 디렉터리의 실효 권한은 `getfacl -p /var/lib/innolive-ai/vod/<job_id>`의 `mask`와 `#effective`로 확인한다.
 
 위 루트 디렉터리 확인만으로 작업 하위 디렉터리에 대한 워커 쓰기 권한까지 증명하지는 못한다. 실제 워커 사용자로 동일 경로를 읽고 쓸 수 있는지 스모크 작업의 권한과 함께 확인한다.
 
@@ -154,7 +173,7 @@ FROM vod_jobs WHERE id = :'vod_job_id'::uuid;
 SELECT job_id, file_kind, path_hash, deleted_at, reason
 FROM vod_deletion_logs WHERE job_id = :'vod_job_id'::uuid ORDER BY deleted_at;
 SQL
-find "/var/lib/innolive/vod/${VOD_JOB_ID}" -maxdepth 2 -type f -printf '%P\n'
+find "/var/lib/innolive-ai/vod/${VOD_JOB_ID}" -maxdepth 2 -type f -printf '%P\n'
 journalctl -u 'innolive-server@*' --since '30 minutes ago' --no-pager \
   | rg -o 'vod_file_destroyed|vod_retention_worker_unconfirmed|vod retention retry required|vod reconciliation pending|vod scheduling deferred'
 ```

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -115,7 +116,11 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if part.FormName() != "file" || part.FileName() == "" {
+	// Read the raw parameter: Part.FileName applies OS-specific path cleaning
+	// and can turn a trailing separator into a nonempty parent directory name.
+	_, disposition, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	filename, hasFilename := disposition["filename"]
+	if err != nil || part.FormName() != "file" || !hasFilename {
 		fail(w, 400, "bad_request")
 		return
 	}
@@ -126,6 +131,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.Now()
 	j := Job{ID: uuid.New(), UserID: user, Status: "uploaded", CreatedAt: now, UpdatedAt: now, QueuedAt: now, Version: 1}
+	j.OriginalFilename = sanitizeOriginalFilename(filename)
 	path := s.Path(j, "original")
 	dir := filepath.Dir(path)
 	if e = os.MkdirAll(dir, 0750); e != nil {

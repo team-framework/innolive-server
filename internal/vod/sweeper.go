@@ -28,6 +28,18 @@ func (s *Service) Sweep(ctx context.Context) error {
 	}
 	var errs []error
 	for _, j := range jobs {
+		// Metadata erasure must not wait for worker acknowledgement or successful
+		// filesystem cleanup. CAS also prevents stale worker writes restoring it.
+		if j.OriginalFilename != nil && j.filenameExpired(s.Now()) {
+			j.OriginalFilename = nil
+			j.UpdatedAt = s.Now()
+			if err := db.Save(ctx, &j); err != nil {
+				if !errors.Is(err, ErrConflict) {
+					errs = append(errs, err)
+				}
+				continue
+			}
+		}
 		if !j.Terminal() {
 			continue
 		}

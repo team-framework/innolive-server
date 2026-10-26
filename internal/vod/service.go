@@ -121,6 +121,9 @@ func (s *Service) Path(j Job, kind string) string {
 func (s *Service) Finish(j *Job, state string) {
 	now := s.Now()
 	j.Status = state
+	if j.filenameExpired(now) {
+		j.OriginalFilename = nil
+	}
 	j.UpdatedAt = now
 	if j.CompletedAt == nil {
 		j.CompletedAt = &now
@@ -138,6 +141,7 @@ func (s *Service) Finish(j *Job, state string) {
 
 type View struct {
 	ID               string     `json:"job_id"`
+	OriginalFilename *string    `json:"original_filename,omitempty"`
 	Status           string     `json:"status"`
 	Progress         int        `json:"progress"`
 	QueuePosition    *int       `json:"queue_position"`
@@ -156,6 +160,9 @@ type Failure struct {
 
 func (s *Service) View(j Job, queue []Job) View {
 	v := View{ID: j.ID.String(), Status: j.Status, Progress: j.Progress, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt, CompletedAt: j.CompletedAt, OriginalDeleteAt: j.OriginalDeleteAt, ResultExpiresAt: j.ResultExpiresAt}
+	if !j.filenameExpired(s.Now()) {
+		v.OriginalFilename = j.OriginalFilename
+	}
 	if j.ResultExpiresAt != nil && !s.Now().Before(*j.ResultExpiresAt) && j.Status == "done" {
 		v.Status = "expired"
 	}

@@ -15,8 +15,16 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
+//go:embed filename.sql
+var filenameSQL string
+
 func AutoMigrate(ctx context.Context, db *gorm.DB) error {
-	return db.WithContext(ctx).Exec(schemaSQL).Error
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(schemaSQL).Error; err != nil {
+			return err
+		}
+		return tx.Exec(filenameSQL).Error
+	})
 }
 
 type Job struct {
@@ -30,6 +38,7 @@ type Job struct {
 	CompletedAt      *time.Time
 	OriginalDeleteAt *time.Time
 	ResultExpiresAt  *time.Time
+	OriginalFilename *string
 	DeletedAt        *time.Time
 	DurationSec      float64
 	FramesDone       uint64

@@ -155,6 +155,7 @@ info:
     type VodFailureCode = 'processing_failed' | 'storage_failed';
     interface VodJob {
       job_id: string;
+      original_filename?: string;
       status: VodJobStatus;
       progress: number;
       queue_position: number | null;
@@ -486,6 +487,16 @@ components:
         job_id:
           type: string
           format: uuid
+        original_filename:
+          type: string
+          maxLength: 255
+          description: >-
+            multipart file의 정리된 원본 파일명. /와 역슬래시 기준 마지막 요소만 남기고
+            제어문자(NUL 포함) 제거, 잘못된 UTF-8을 U+FFFD로 치환, 앞뒤 공백 제거 후
+            UTF-8 경계에서 최대 255바이트로 자르고 끝 공백을 다시 제거한다.
+            빈 값, . 또는 .., 기존 미저장 작업은 필드 생략. 결과 보존기간(기본 7일,
+            VOD_RESULT_RETENTION_SEC) 만료 및 삭제·취소·실패·계정 탈퇴 시 DB에서 NULL로 파기한다.
+            만료 시 스위퍼 실행 전에도 응답에서 생략한다. 다운로드 파일명은 vod-<job_id>.mp4로 유지한다.
         status:
           $ref: '#/components/schemas/VodJobStatus'
         progress:
@@ -540,6 +551,7 @@ components:
               type: string
       example:
         job_id: 8f46f610-3207-4b86-8a22-18a1eeefb781
+        original_filename: video.mp4
         status: paused
         progress: 37
         queue_position: 1

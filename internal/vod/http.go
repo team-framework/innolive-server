@@ -151,11 +151,14 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "service_unavailable")
 		return
 	}
-	n, e := io.Copy(f, io.LimitReader(part, maxBytes+1))
-	syncErr := f.Sync()
+	n, e := copyUpload(f, part, maxBytes)
+	var syncErr error
+	if e == nil {
+		syncErr = f.Sync()
+	}
 	closeErr := f.Close()
 	var capErr *http.MaxBytesError
-	if n > maxBytes || errors.As(e, &capErr) {
+	if errors.Is(e, errUploadTooLarge) || errors.As(e, &capErr) {
 		tooLarge()
 		return
 	}
@@ -434,4 +437,24 @@ func (s *Service) result(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 	}
+}
+
+// Read at most one extra byte to detect overflow, without writing it or draining
+// the remainder. Multipart parsing may buffer a bounded amount ahead of us.
+var errUploadTooLarge = errors.New("upload too large")
+
+func copyUpload(dst io.Writer, src io.Reader, limit int64) (int64, error) {
+	n, err := io.Copy(dst, io.LimitReader(src, limit))
+	if err != nil {
+		return n, err
+	}
+	var extra [1]byte
+	count, err := io.ReadFull(src, extra[:])
+	if count != 0 {
+		return n, errUploadTooLarge
+	}
+	if err == io.EOF {
+		err = nil
+	}
+	return n, err
 }

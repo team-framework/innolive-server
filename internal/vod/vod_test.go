@@ -199,7 +199,7 @@ func TestUploadLimitsAndValidation(t *testing.T) {
 		duration float64
 		err      error
 		code     int
-	}{{"accepted", 10, 1, 60, nil, 201}, {"byte_boundary", 32, 1, 3600, nil, 201}, {"bytes", 33, 1, 60, nil, 413}, {"duration", 10, 1, 3600.1, nil, 422}, {"empty", 0, 1, 60, nil, 400}, {"duplicates", 10, 2, 60, nil, 400}, {"unsupported", 10, 1, 60, ErrUnsupported, 415}, {"corrupt", 10, 1, 0, ErrInvalidMedia, 422}}
+	}{{"accepted", 10, 1, 60, nil, 201}, {"byte_boundary", 32, 1, 3600, nil, 201}, {"bytes", 33, 1, 60, nil, 413}, {"duration", 10, 1, 3601, nil, 422}, {"fractional_duration", 10, 1, 3600.1, nil, 422}, {"empty", 0, 1, 60, nil, 400}, {"duplicates", 10, 2, 60, nil, 400}, {"unsupported", 10, 1, 60, ErrUnsupported, 415}, {"corrupt", 10, 1, 0, ErrInvalidMedia, 422}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := testService(t)
@@ -214,6 +214,12 @@ func TestUploadLimitsAndValidation(t *testing.T) {
 			handler(s).ServeHTTP(w, r)
 			if w.Code != tc.code {
 				t.Fatalf("%d: %s", w.Code, w.Body.String())
+			}
+			if tc.code == 413 && !strings.Contains(w.Body.String(), `"code":"upload_too_large"`) {
+				t.Fatal(w.Body.String())
+			}
+			if (tc.name == "duration" || tc.name == "fractional_duration") && !strings.Contains(w.Body.String(), `"code":"duration_exceeded"`) {
+				t.Fatal(w.Body.String())
 			}
 			jobs, e := s.store.Load().All(context.Background())
 			if e != nil {

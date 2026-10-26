@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// The AI worker enforces these fixed MVP limits, including on resume.
+const (
+	VODWorkerMaxUploadBytes int64 = 2147483648
+	VODWorkerMaxDuration          = 3600 * time.Second
+)
+
 // GPU identity must identify a physical GPU across all slots on a host.
 // Unknown targets fail closed for VOD; live target replacement remains unchanged.
 type VODConfig struct {
@@ -26,7 +32,7 @@ type VODConfig struct {
 }
 
 func DefaultVOD() VODConfig {
-	return VODConfig{Root: "/var/lib/innolive/vod", MaxUploadBytes: 2147483648, MaxDuration: time.Hour,
+	return VODConfig{Root: "/var/lib/innolive/vod", MaxUploadBytes: VODWorkerMaxUploadBytes, MaxDuration: VODWorkerMaxDuration,
 		Concurrency: 1, MinFreeMiB: 4096, ResultRetention: 7 * 24 * time.Hour, OriginalRetention: 24 * time.Hour,
 		SweepInterval: time.Minute, UploadTimeout: 30 * time.Minute, WorkerGPUs: map[string]string{}}
 }
@@ -99,6 +105,13 @@ func loadVOD() (VODConfig, error) {
 func (c VODConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	// Reject misconfiguration instead of silently advertising a different limit.
+	if c.MaxUploadBytes > VODWorkerMaxUploadBytes {
+		return fmt.Errorf("VOD_MAX_UPLOAD_BYTES must not exceed %d", VODWorkerMaxUploadBytes)
+	}
+	if c.MaxDuration > VODWorkerMaxDuration {
+		return fmt.Errorf("VOD_MAX_DURATION_SEC must not exceed 3600")
 	}
 	if !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) == "/" {
 		return fmt.Errorf("VOD_ROOT must be an absolute dedicated directory")

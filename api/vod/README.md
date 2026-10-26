@@ -29,6 +29,9 @@
 | `VOD_SWEEP_INTERVAL` | `1m` | 정리 재시도·고아 업로드 탐색 주기 |
 | `VOD_UPLOAD_TIMEOUT` | `30m` | 업로드 읽기 및 미디어 검사 기한 |
 
+- 활성화 시 `VOD_MAX_UPLOAD_BYTES > 2147483648` 또는 `VOD_MAX_DURATION_SEC > 3600`은 시작 오류; 더 작은 양의 상한은 허용
+- 워커의 고정 상한과 일치하도록 기본값 유지; 설정을 조용히 낮추면 지정값과 실제 허용량이 달라지므로 시작 시 명시적 거부 선택
+- 파일 바이트 상한까지 저장 후 초과 판별용 1바이트만 읽고 즉시 중단; 초과 바이트는 파일에 기록하지 않으며 multipart 파서의 제한된 read-ahead 외 남은 본문 미소비
 - GPU당 VOD 1건은 고정 정책; 같은 GPU의 다른 워커에 라이브가 있어도 VOD 배정 금지
 - 모든 현재 풀 타깃의 GPU UUID 매핑 필요; 누락된 교체 슬롯이나 GPU 메모리 조회 실패 시 VOD 배정 중단
 - `nvidia-smi --query-gpu=uuid,memory.free --format=csv,noheader,nounits`로 실제 여유 메모리 조회

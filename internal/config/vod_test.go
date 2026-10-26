@@ -28,3 +28,26 @@ func TestVODEnabledValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestVODWorkerLimitValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, bytes, seconds string
+		valid                bool
+	}{
+		{"defaults", "", "", true},
+		{"exact", "2147483648", "3600", true},
+		{"lower", "2147483647", "3599", true},
+		{"bytes_plus_one", "2147483649", "3600", false},
+		{"seconds_plus_one", "2147483648", "3601", false},
+		{"zero_duration", "2147483648", "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VOD_ENABLED", "true")
+			t.Setenv("VOD_MAX_UPLOAD_BYTES", tc.bytes)
+			t.Setenv("VOD_MAX_DURATION_SEC", tc.seconds)
+			if _, err := loadVOD(); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}

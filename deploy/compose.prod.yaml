@@ -21,6 +21,9 @@ services:
     # NVENC 인코딩용 GPU 노출. nvidia 런타임이 libcuda/libnvidia-encode를
     # 컨테이너에 주입한다 - 없으면 h264_nvenc가 libcuda.so.1에서 실패한다.
     runtime: nvidia
+    # Host innolive-vod GID from deploy.env; numeric fallback keeps VOD-disabled
+    # installations bootable. Set the real shared GID before enabling VOD.
+    group_add: ["${INNOLIVE_VOD_GID:-65532}"]
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -33,7 +36,7 @@ services:
       # 참조 얼굴 저장소(REFERENCE_STORE_PATH)
       - /var/lib/innolive:/var/lib/innolive
       # VOD 공유 저장소(VOD_ROOT). AI 워커 유닛의 ReadWritePaths(/var/lib/innolive-ai) 안이며
-      # 워커와 같은 절대 경로여야 한다. 권한은 api/vod/DEPLOY.md의 ACL 절차를 따른다.
+      # 워커와 같은 절대 경로여야 한다. 권한은 api/vod/DEPLOY.md의 공유 그룹 절차를 따른다.
       - /var/lib/innolive-ai/vod:/var/lib/innolive-ai/vod
       # Apple 로그인 개인키(.p8). 컨테이너 내 경로가 server-secrets.env 의
       # APPLE_PRIVATE_KEY_PATH 와 일치해야 하므로 호스트 경로를 그대로 마운트한다.

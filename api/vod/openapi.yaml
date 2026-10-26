@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: InnoLive VOD 작업 API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     # 범위와 근거
 
@@ -49,6 +49,7 @@ info:
       0은 종료 직후 파기이다. 스위퍼 주기를 더해 기한을 넘겨서는 안 된다.
     - VOD_RESULT_RETENTION_SEC: 성공 완료 후 결과 보존 기간, 양의 정수 초.
       무기한 보관이나 다운로드 시 기한 연장은 허용하지 않는다.
+    VOD 활성화 시 M > 2147483648 또는 D > 3600 설정은 시작 오류이며 더 작은 양의 값은 허용한다.
     기본값은 M=2147483648(2 GiB), D=3600(60분), 결과 보존 기간=604800초(7일)이다.
     상한 초과 오류 응답의 details에 적용 상한(max_upload_bytes, max_request_bytes,
     max_duration_sec)을 담는다. 설정 변경은 이미 확정된 삭제/만료 기한을 연장하지 않는다.
@@ -101,6 +102,26 @@ info:
     done/expired는 100, failed는 마지막 값이다. 목록/상세를 5초 간격으로 폴링한다.
     상태 변화가 빠르면 중간 상태를 관찰하지 못할 수 있다.
 
+    # 워커 오류와 비동기 응답
+
+    POST 201 뒤 발생한 워커 오류는 목록/상세의 HTTP 200 작업 상태와 failure.code로 전달한다.
+    GET result는 failed/cancelled 작업에 아래 HTTP 오류를 반환하며 워커 원문 메시지는 노출하지 않는다.
+    - INPUT_TOO_LARGE → failed, 413/upload_too_large; INPUT_TOO_LONG → failed, 422/duration_exceeded.
+    - INPUT_UNREADABLE, DECODER_FAILED → failed, 422/invalid_media; INPUT_UNSUPPORTED → failed, 415/unsupported_media_type.
+    - INPUT_NOT_FOUND, DISK_FULL → failed, 503/storage_failed (서버 공유 저장소 문제; 작업 자체는 terminal).
+    - PATH_OUTSIDE_ROOT, OUTPUT_EXISTS, CHECKPOINT_INVALID, CHECKPOINT_MISMATCH,
+      EMBEDDING_MODEL_MISMATCH, WHITELIST_SESSION_NOT_FOUND, ENCODER_FAILED, MUX_FAILED,
+      INTERNAL, 알 수 없는 잡 코드 → failed, 500/processing_failed.
+    - CANCELLED → cancelled, 409/job_cancelled. 삭제된 작업은 계속 404/not_found.
+    - RUNTIME_FAILED → paused, 다른 워커에서 체크포인트 재개; failure=null, result는 409/result_not_ready.
+    - RPC INVALID_ARGUMENT → failed, 400/bad_request; FAILED_PRECONDITION, UNIMPLEMENTED → failed, 422/processing_unsupported.
+    - RPC RESOURCE_EXHAUSTED → paused로 큐·순번 유지 후 재시도; HTTP 429/413 사용자 오류로 변환하지 않는다.
+    - RPC NOT_FOUND → paused 후 재개. ALREADY_EXISTS, UNAVAILABLE, DEADLINE_EXCEEDED,
+      CANCELLED는 processing에서 Get/Pause로 실제 상태 확인 후 반영하며 NOT_FOUND 확인 시 paused.
+    - 알 수 없는 RPC 오류도 먼저 상태 확인; NOT_FOUND 확인 시 failed, 500/processing_failed.
+      확인되지 않은 실행을 중복 시작하거나 파일을 파기하지 않는다.
+    - processing/paused/queued의 failure는 null, 결과 요청은 409/result_not_ready.
+
     # 보존과 시간
 
     모든 *_at은 UTC RFC 3339 문자열(Z, 소수 초 허용)이다. created_at/updated_at은
@@ -152,7 +173,10 @@ info:
     type VodJobStatus =
       | 'uploaded' | 'queued' | 'processing' | 'paused'
       | 'done' | 'failed' | 'cancelled' | 'expired';
-    type VodFailureCode = 'processing_failed' | 'storage_failed';
+    type VodFailureCode =
+      | 'bad_request' | 'upload_too_large' | 'duration_exceeded' | 'invalid_media'
+      | 'unsupported_media_type' | 'processing_unsupported' | 'job_cancelled'
+      | 'processing_failed' | 'storage_failed';
     interface VodJob {
       job_id: string;
       original_filename?: string;
@@ -381,7 +405,8 @@ paths:
       summary: 비식별 결과 파일 다운로드
       description: |
         본인 소유이며 done이고 현재 시각 < result_expires_at인 작업만 다운로드 가능하다.
-        uploaded/queued/processing/paused/failed/cancelled는 409/result_not_ready,
+        uploaded/queued/processing/paused는 409/result_not_ready, failed는 failure.code에 대응하는 오류,
+        cancelled는 409/job_cancelled,
         expired 또는 만료 시각 경과는 410/result_expired이다.
         타인 작업/삭제된 작업/없는 작업은 상태보다 먼저 판정하여 404이다.
         만료 전 파일을 일시적으로 읽을 수 없으면 503/service_unavailable이며 원본으로 대체하지 않는다.
@@ -429,6 +454,12 @@ paths:
           $ref: '#/components/responses/ResultNotReady'
         '410':
           $ref: '#/components/responses/ResultExpired'
+        '413':
+          $ref: '#/components/responses/UploadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
+        '422':
+          $ref: '#/components/responses/InvalidMedia'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -541,12 +572,11 @@ components:
         failure:
           type: object
           nullable: true
-          description: failed에서만 오류 객체, 그 외 null. 내부 경로/워커 주소/민감 데이터 미포함.
+          description: failed/cancelled의 오류 객체, 그 외 null. 내부 경로/워커 주소/민감 데이터 미포함.
           required: [code, message]
           properties:
             code:
-              type: string
-              enum: [processing_failed, storage_failed]
+              $ref: '#/components/schemas/VodFailureCode'
             message:
               type: string
       example:
@@ -562,6 +592,9 @@ components:
         original_delete_at: null
         result_expires_at: null
         failure: null
+    VodFailureCode:
+      type: string
+      enum: [bad_request, upload_too_large, duration_exceeded, invalid_media, unsupported_media_type, processing_unsupported, job_cancelled, processing_failed, storage_failed]
     VodJobList:
       type: object
       required: [jobs, next_cursor]
@@ -682,7 +715,8 @@ components:
           $ref: '#/components/headers/NoStore'
       description: |
         upload_too_large — 파일 크기 또는 전체 요청 본문 상한 초과.
-        details.max_upload_bytes와 details.max_request_bytes에 적용 상한 제공.
+        업로드 선검증에서 details.max_upload_bytes와 details.max_request_bytes에 적용 상한 제공.
+        워커 입력 크기 거부 후 결과 요청에도 같은 코드 사용(details 생략).
         예시의 수치는 운영 기본값이 아니다.
       content:
         application/json:
@@ -707,7 +741,8 @@ components:
           $ref: '#/components/headers/NoStore'
       description: |
         invalid_media — 손상 파일, 영상 트랙 부재, 길이를 조사할 수 없거나 길이 <= 0.
-        duration_exceeded — 영상 길이 상한 초과. details.max_duration_sec에 적용 상한 제공.
+        processing_unsupported — 워커가 지원하지 않는 처리 품질/모드 또는 VOD RPC.
+        duration_exceeded — 영상 길이 상한 초과. details.max_duration_sec에 업로드 선검증의 적용 상한 제공(워커 오류 후 결과 요청은 details 생략).
       content:
         application/json:
           schema:
@@ -718,7 +753,9 @@ components:
           $ref: '#/components/headers/RequestID'
         Cache-Control:
           $ref: '#/components/headers/NoStore'
-      description: result_not_ready — uploaded/queued/processing/paused/failed/cancelled 작업에 결과 요청.
+      description: |
+        result_not_ready — uploaded/queued/processing/paused 작업에 결과 요청.
+        job_cancelled — 취소된 작업에 결과 요청.
       content:
         application/json:
           schema:
@@ -753,7 +790,9 @@ components:
           $ref: '#/components/headers/RequestID'
         Cache-Control:
           $ref: '#/components/headers/NoStore'
-      description: internal_error — 예상하지 못한 서버 오류 또는 기존 인증 저장소 오류.
+      description: |
+        internal_error — 예상하지 못한 서버 오류 또는 기존 인증 저장소 오류.
+        processing_failed — 워커 내부 오류 또는 알 수 없는 실패 코드. 내부 정보 미노출.
       content:
         application/json:
           schema:
@@ -761,6 +800,7 @@ components:
     Unavailable:
       description: |
         service_unavailable — 작업 저장소/파일 저장소 등 일시적 장애.
+        storage_failed — 워커 입력 파일 없음/디스크 부족 또는 완료 결과 검증 실패. 해당 작업은 failed이며 자동 재실행되지 않음.
         demo_lockdown — 기존 RequireUser 시연 제한 정책. 라이브 자원 점유 자체는 503 사유가 아님.
       headers:
         X-Request-ID:

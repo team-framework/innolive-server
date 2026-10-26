@@ -22,12 +22,13 @@ func (fakeMemory) FreeMiB(context.Context) (map[string]int64, error) {
 }
 
 type fakeWorker struct {
-	mu         sync.Mutex
-	jobs       map[string]*pb.VodJobStatus
-	starts     []*pb.StartVodJobRequest
-	pauseGate  <-chan struct{}
-	startErr   error
-	remoteLive map[string]uint64
+	mu           sync.Mutex
+	jobs         map[string]*pb.VodJobStatus
+	starts       []*pb.StartVodJobRequest
+	pauseGate    <-chan struct{}
+	startErr     error
+	startFailure string
+	remoteLive   map[string]uint64
 }
 
 func newFakeWorker() *fakeWorker { return &fakeWorker{jobs: map[string]*pb.VodJobStatus{}} }
@@ -39,6 +40,12 @@ func (f *fakeWorker) Start(_ context.Context, target string, r *pb.StartVodJobRe
 	}
 	f.starts = append(f.starts, proto.Clone(r).(*pb.StartVodJobRequest))
 	v := &pb.VodJobStatus{JobId: r.JobId, State: pb.VodJobState_VOD_JOB_STATE_PROCESSING, CheckpointToken: r.CheckpointToken, Progress: &pb.VodProgress{FramesDone: 300, FramesTotal: 1800, Fraction: 1.0 / 6, ProcessingFps: 30}, WorkerTarget: target}
+	if f.startFailure != "" {
+		v.State = pb.VodJobState_VOD_JOB_STATE_FAILED
+		v.ErrorCode = f.startFailure
+		v.ErrorMessage = "private path"
+		v.CheckpointToken = "runtime-checkpoint"
+	}
 	f.jobs[r.JobId] = v
 	return proto.Clone(v).(*pb.VodJobStatus), nil
 }
@@ -346,5 +353,137 @@ func TestSchedulerPostgresLeaderExclusive(t *testing.T) {
 	f.mu.Unlock()
 	if starts != 1 {
 		t.Fatalf("multiple leaders admitted %d jobs", starts)
+	}
+}
+
+func TestRuntimeFailureResumesOnDifferentWorker(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	f.startFailure = "RUNTIME_FAILED"
+	j := createJob(t, s, "queued")
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.wg.Wait()
+	current, err := s.store.Load().Get(ctx, j.ID, j.UserID)
+	if err != nil || current.Status != "paused" || current.WorkerTarget == "" || current.CompletedAt != nil {
+		t.Fatal(current, err)
+	}
+	failedTarget := current.WorkerTarget
+	// A new engine demonstrates that the excluded worker is persisted in DB.
+	e = NewEngine(s, e.Pool, f, fakeMemory{})
+	f.mu.Lock()
+	f.startFailure = ""
+	f.mu.Unlock()
+	retryCtx, cancel := context.WithCancel(ctx)
+	defer func() { cancel(); e.wg.Wait() }()
+	if err := e.Tick(retryCtx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if len(f.starts) != 2 {
+			return false
+		}
+		req := f.starts[1]
+		snapshot := f.jobs[j.ID.String()]
+		return req.Resume && req.CheckpointToken == "runtime-checkpoint" && snapshot.WorkerTarget != failedTarget
+	})
+}
+
+func TestRPCAdmissionFailureOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		code           codes.Code
+		state, failure string
+	}{
+		{"invalid", codes.InvalidArgument, "failed", "bad_request"},
+		{"precondition", codes.FailedPrecondition, "failed", "processing_unsupported"},
+		{"unimplemented", codes.Unimplemented, "failed", "processing_unsupported"},
+		{"not_found", codes.NotFound, "paused", ""},
+		{"unavailable", codes.Unavailable, "paused", ""},
+		{"deadline", codes.DeadlineExceeded, "paused", ""},
+		{"cancelled_rpc", codes.Canceled, "paused", ""},
+		{"unknown", codes.Unknown, "failed", "processing_failed"},
+		{"internal", codes.Internal, "failed", "processing_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, e, f, ctx := setupEngine(t)
+			f.startErr = status.Error(tc.code, "private worker path")
+			j := createJob(t, s, "queued")
+			if err := e.Tick(ctx); err != nil {
+				t.Fatal(err)
+			}
+			e.wg.Wait()
+			current, err := s.store.Load().Get(ctx, j.ID, j.UserID)
+			if err != nil || current.Status != tc.state || current.FailureCode != tc.failure || current.WorkerTarget != "" {
+				t.Fatal(current, err)
+			}
+		})
+	}
+}
+
+func TestAlreadyExistsReconcilesExistingJob(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	j := createJob(t, s, "queued")
+	f.startErr = status.Error(codes.AlreadyExists, "private existing job")
+	f.jobs[j.ID.String()] = &pb.VodJobStatus{JobId: j.ID.String(), State: pb.VodJobState_VOD_JOB_STATE_PAUSED, CheckpointToken: "existing-checkpoint"}
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.wg.Wait()
+	current, err := s.store.Load().Get(ctx, j.ID, j.UserID)
+	if err != nil || current.Status != "paused" || current.CheckpointToken != "existing-checkpoint" || current.FailureCode != "" {
+		t.Fatal(current, err)
+	}
+}
+
+func TestRuntimeFailureDoesNotBlockOtherQueuedJobs(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	// Only the failed target is available. The retry waits, the next job can run.
+	e.Pool.SetTargetReady("b:1", false)
+	e.Pool.SetTargetReady("c:1", false)
+	first := createJob(t, s, "paused")
+	first.WorkerTarget = "a:1"
+	first.CheckpointToken = "saved"
+	saveJob(t, s, &first)
+	second := createJob(t, s, "queued")
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.starts) == 1 && f.starts[0].JobId == second.ID.String()
+	})
+	current, err := s.store.Load().Get(ctx, first.ID, first.UserID)
+	if err != nil || current.Status != "paused" || current.WorkerTarget != "a:1" {
+		t.Fatal(current, err)
+	}
+}
+
+type staleRuntimeWorker struct {
+	*fakeWorker
+	id string
+}
+
+func (w staleRuntimeWorker) List(_ context.Context, target string) ([]*pb.VodJobStatus, error) {
+	if target != "a:1" {
+		return nil, nil
+	}
+	return []*pb.VodJobStatus{{JobId: w.id, State: pb.VodJobState_VOD_JOB_STATE_FAILED, ErrorCode: "RUNTIME_FAILED", CheckpointToken: "stale"}}, nil
+}
+func TestReconcileIgnoresRuntimeFailureFromPreviousWorker(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	j := createJob(t, s, "paused")
+	j.CheckpointToken = "new-checkpoint"
+	saveJob(t, s, &j)
+	e.Worker = staleRuntimeWorker{f, j.ID.String()}
+	if err := e.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.store.Load().Get(ctx, j.ID, j.UserID)
+	if err != nil || current.CheckpointToken != "new-checkpoint" || current.WorkerTarget != "" {
+		t.Fatal(current, err)
 	}
 }

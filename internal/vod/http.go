@@ -356,6 +356,14 @@ func (s *Service) result(w http.ResponseWriter, r *http.Request) {
 		fail(w, 410, "result_expired")
 		return
 	}
+	if j.Status == "failed" || j.Status == "cancelled" {
+		mapped := publicFailure(j.FailureCode)
+		if j.Status == "cancelled" {
+			mapped = mapWorkerFailure("job:CANCELLED")
+		}
+		fail(w, mapped.HTTP, mapped.Code)
+		return
+	}
 	if j.Status != "done" || j.ResultExpiresAt == nil {
 		fail(w, 409, "result_not_ready")
 		return

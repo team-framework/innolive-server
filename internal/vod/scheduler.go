@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	pb "inno-live-server/api/gen/aiv1"
 	"inno-live-server/internal/ai"
 )
@@ -130,6 +128,11 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 		}
 		for _, v := range list {
 			j, exists := known[v.JobId]
+			// A failed runtime can retain its terminal snapshot after this job
+			// resumed elsewhere. Do not restore that old checkpoint or target.
+			if exists && v.State == pb.VodJobState_VOD_JOB_STATE_FAILED && v.ErrorCode == "RUNTIME_FAILED" && j.WorkerTarget != target.Address {
+				continue
+			}
 			call, cancel := context.WithTimeout(ctx, 5*time.Second)
 			if !exists || j.DeletedAt != nil {
 				_, err = e.Worker.Cancel(call, target.Address, v.JobId)
@@ -166,11 +169,8 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 			v, err = e.Worker.Pause(call, j.WorkerTarget, j.ID.String())
 			if err == nil {
 				err = e.apply(ctx, &j, v)
-			} else if status.Code(err) == codes.NotFound {
-				j.Status = "paused"
-				j.WorkerTarget = ""
-				j.UpdatedAt = e.Service.Now()
-				err = db.Save(ctx, &j)
+			} else if workerMissing(err) {
+				err = e.applyFailure(ctx, &j, mapRPCFailure(err), false)
 			}
 		}
 		cancel()
@@ -232,9 +232,13 @@ func (e *Engine) Tick(ctx context.Context) error {
 			e.mu.Unlock()
 			continue
 		}
-		lease := e.Pool.ReserveVOD(e.Service.Config.WorkerGPUs, free, e.Service.Config.MinFreeMiB, e.Service.Config.Concurrency)
+		lease := e.Pool.ReserveVOD(e.Service.Config.WorkerGPUs, free, e.Service.Config.MinFreeMiB, e.Service.Config.Concurrency, j.WorkerTarget)
 		if lease == nil {
 			e.mu.Unlock()
+			if j.WorkerTarget != "" {
+				// This job excludes its failed worker; other jobs may still run.
+				continue
+			}
 			break
 		}
 		if j.Status == "paused" {
@@ -272,6 +276,7 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 	// Persist target before admission: restart reconciliation can locate a job
 	// even if the Start response or the subsequent DB write was lost.
 	j.Status = "processing"
+	j.FailureCode = ""
 	j.WorkerTarget = lease.Target
 	j.UpdatedAt = e.Service.Now()
 	if err := db.Save(ctx, &j); err != nil {
@@ -294,17 +299,16 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 	call, cancel = context.WithTimeout(ctx, 10*time.Second)
 	v, err := e.Worker.Start(call, lease.Target, req)
 	cancel()
-	if status.Code(err) == codes.ResourceExhausted || status.Code(err) == codes.FailedPrecondition || status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.Unimplemented {
-		if status.Code(err) != codes.ResourceExhausted {
-			e.Service.Finish(&j, "failed")
-			j.FailureCode = "processing_failed"
-			j.WorkerTarget = ""
-			_ = db.Save(ctx, &j)
-		} else {
-			e.failUnstarted(ctx, &j)
+	var admissionFailure *workerFailure
+	if err != nil {
+		mapped := mapRPCFailure(err)
+		if !mapped.Reconcile {
+			_ = e.applyFailure(ctx, &j, mapped, false)
+			return
 		}
-		return
+		admissionFailure = &mapped
 	}
+
 	if err == nil {
 		if saveErr := e.apply(ctx, &j, v); saveErr == nil && j.Status != "processing" {
 			return
@@ -351,6 +355,7 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 			yield = true
 			preempt = nil
 		case v := <-updates:
+			admissionFailure = nil
 			if err := e.refreshApply(ctx, &j, v); err == nil && j.Status != "processing" {
 				return
 			}
@@ -423,14 +428,16 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 			v, err = e.Worker.Get(call, lease.Target, j.ID.String())
 		}
 		c()
-		if status.Code(err) == codes.NotFound {
-			j.Status = "paused"
-			j.WorkerTarget = ""
-			j.UpdatedAt = e.Service.Now()
-			_ = db.Save(ctx, &j)
+		if workerMissing(err) {
+			mapped := mapRPCFailure(err)
+			if admissionFailure != nil && admissionFailure.State == "failed" {
+				mapped = *admissionFailure
+			}
+			_ = e.applyFailure(ctx, &j, mapped, false)
 			return
 		}
 		if err == nil {
+			admissionFailure = nil
 			if err = e.refreshApply(ctx, &j, v); err == nil && j.Status != "processing" {
 				return
 			}
@@ -493,12 +500,9 @@ func (e *Engine) apply(ctx context.Context, j *Job, v *pb.VodJobStatus) error {
 		}
 		j.WorkerTarget = ""
 	case pb.VodJobState_VOD_JOB_STATE_FAILED:
-		e.Service.Finish(j, "failed")
-		j.FailureCode = "processing_failed"
-		j.WorkerTarget = ""
+		return e.applyFailure(ctx, j, mapWorkerFailure("job:"+v.ErrorCode), v.ErrorCode == "RUNTIME_FAILED")
 	case pb.VodJobState_VOD_JOB_STATE_CANCELLED:
-		e.Service.Finish(j, "cancelled")
-		j.WorkerTarget = ""
+		return e.applyFailure(ctx, j, mapWorkerFailure("job:CANCELLED"), false)
 	default:
 		return fmt.Errorf("unknown VOD worker state")
 	}
@@ -554,4 +558,27 @@ func (e *Engine) preempt(ctx context.Context, lease *ai.VODLease, id string) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (e *Engine) applyFailure(ctx context.Context, j *Job, mapped workerFailure, avoidWorker bool) error {
+	if j.Terminal() || j.DeletedAt != nil {
+		return nil
+	}
+	if mapped.State == "failed" || mapped.State == "cancelled" {
+		e.Service.Finish(j, mapped.State)
+	} else {
+		j.Status = mapped.State
+	}
+	j.FailureCode = mapped.Code
+	// A paused runtime failure retains the target solely to exclude it on retry.
+	// Persisting this also preserves the exclusion across server restarts.
+	if !avoidWorker {
+		j.WorkerTarget = ""
+	}
+	j.UpdatedAt = e.Service.Now()
+	err := e.Service.store.Load().Save(ctx, j)
+	if err == nil && j.Terminal() {
+		e.Service.WakeSweep()
+	}
+	return err
 }

@@ -16,15 +16,23 @@ import (
 type rpcWorker struct {
 	pb.UnimplementedVodProcessorServer
 	pb.UnimplementedAiProcessorServer
-	mu     sync.Mutex
-	start  *pb.StartVodJobRequest
-	purged bool
+	mu           sync.Mutex
+	start        *pb.StartVodJobRequest
+	purged       bool
+	startFailure string
+	startError   error
 }
 
 func (f *rpcWorker) StartVodJob(_ context.Context, r *pb.StartVodJobRequest) (*pb.VodJobStatus, error) {
 	f.mu.Lock()
 	f.start = proto.Clone(r).(*pb.StartVodJobRequest)
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	if f.startError != nil {
+		return nil, f.startError
+	}
+	if f.startFailure != "" {
+		return &pb.VodJobStatus{JobId: r.JobId, State: pb.VodJobState_VOD_JOB_STATE_FAILED, ErrorCode: f.startFailure, ErrorMessage: "private worker path"}, nil
+	}
 	return &pb.VodJobStatus{JobId: r.JobId, State: pb.VodJobState_VOD_JOB_STATE_PROCESSING, CheckpointToken: r.CheckpointToken}, nil
 }
 func (f *rpcWorker) WatchVodJob(r *pb.VodJobRef, stream grpc.ServerStreamingServer[pb.VodJobStatus]) error {

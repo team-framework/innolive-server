@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"slices"
 	"sync"
 )
 
@@ -24,7 +25,7 @@ func (l *VODLease) Release() {
 
 // ReserveVOD and live claim use the same mutex. VOD never changes live counters
 // or ranking. Preemption is a channel close only: no RPC or I/O under pool.mu.
-func (p *Pool) ReserveVOD(mapping map[string]string, freeMiB map[string]int64, minFree int64, limit int) *VODLease {
+func (p *Pool) ReserveVOD(mapping map[string]string, freeMiB map[string]int64, minFree int64, limit int, excludedTargets ...string) *VODLease {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, c := range p.clients {
@@ -36,6 +37,9 @@ func (p *Pool) ReserveVOD(mapping map[string]string, freeMiB map[string]int64, m
 		return nil
 	}
 	for i, c := range p.clients {
+		if slices.Contains(excludedTargets, c.Address()) {
+			continue
+		}
 		gpu := mapping[c.Address()]
 		free, known := freeMiB[gpu]
 		if gpu == "" || !known || free < minFree || p.vod[gpu] != nil || p.active[i] > 0 || p.unready[c.Address()] || p.draining[c.Address()] || p.faceSwap[c.Address()] {

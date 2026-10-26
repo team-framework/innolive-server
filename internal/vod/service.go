@@ -166,8 +166,8 @@ func (s *Service) View(j Job, queue []Job) View {
 	if j.ResultExpiresAt != nil && !s.Now().Before(*j.ResultExpiresAt) && j.Status == "done" {
 		v.Status = "expired"
 	}
-	if j.FailureCode != "" {
-		v.Failure = &Failure{Code: j.FailureCode, Message: "Video processing failed."}
+	if j.FailureCode != "" && (j.Status == "failed" || j.Status == "cancelled") {
+		v.Failure = &Failure{Code: publicFailure(j.FailureCode).Code, Message: "Video processing failed."}
 	}
 	var speed float64
 	var samples int

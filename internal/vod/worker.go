@@ -17,6 +17,7 @@ import (
 // Worker is the interface-A contract. Callers own deadlines, cancellation and
 // checkpoint persistence. Whitelist embeddings are never written to disk.
 type Worker interface {
+	LiveStreams(context.Context, string) (uint64, error)
 	Start(context.Context, string, *pb.StartVodJobRequest) (*pb.VodJobStatus, error)
 	Watch(context.Context, string, string, func(*pb.VodJobStatus) error) error
 	Get(context.Context, string, string) (*pb.VodJobStatus, error)
@@ -134,4 +135,21 @@ func (NvidiaMemory) FreeMiB(ctx context.Context) (map[string]int64, error) {
 		result[strings.TrimSpace(fields[0])] = n
 	}
 	return result, nil
+}
+
+// ListSessions observes live streams from other server slots as well as this pool.
+func (w GRPCWorker) LiveStreams(ctx context.Context, target string) (uint64, error) {
+	c := w.Pool.Target(target)
+	if c == nil {
+		return 0, status.Error(codes.Unavailable, "worker removed")
+	}
+	response, err := c.ListSessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var count uint64
+	for _, session := range response.Sessions {
+		count += uint64(session.ActiveStreamCount)
+	}
+	return count, nil
 }

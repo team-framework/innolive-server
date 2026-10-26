@@ -58,9 +58,11 @@ func (e *Engine) Run(ctx context.Context) {
 				e.lead(ctx, conn)
 			}
 			// A connection with a possibly held advisory lock must not return to the pool.
-			if _, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", leaderKey); unlockErr != nil {
+			unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if _, unlockErr := conn.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1)", leaderKey); unlockErr != nil {
 				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 			}
+			unlockCancel()
 			_ = conn.Close()
 		}
 		select {
@@ -216,7 +218,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 	}
 	call, cancel := context.WithTimeout(ctx, 2*time.Second)
-	free, err := e.Memory.FreeMiB(call)
+	free, err := e.availableMemory(call)
 	cancel()
 	if err != nil {
 		return err
@@ -235,6 +237,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 			e.mu.Unlock()
 			break
 		}
+		if j.Status == "paused" {
+			j.Status = "queued"
+			j.UpdatedAt = e.Service.Now()
+			if err := db.Save(ctx, &j); err != nil {
+				lease.Release()
+				e.mu.Unlock()
+				continue
+			}
+		}
 		e.running[j.ID.String()] = true
 		e.wg.Add(1)
 		e.mu.Unlock()
@@ -248,6 +259,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 	return nil
 }
 func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
+	// This control path remains responsive even if Start, a database write or
+	// telemetry is slow. Pause is idempotent; snapshots are persisted by the
+	// single runner below. A NotFound during admission is retried until Start
+	// has actually admitted the job or the runner exits.
+	interruptCtx, stopInterrupt := context.WithCancel(ctx)
+	interruptDone := make(chan struct{})
+	go func(id string) { defer close(interruptDone); e.preempt(interruptCtx, lease, id) }(j.ID.String())
+	defer func() { stopInterrupt(); <-interruptDone }()
+
 	db := e.Service.store.Load()
 	// Persist target before admission: restart reconciliation can locate a job
 	// even if the Start response or the subsequent DB write was lost.
@@ -274,8 +294,8 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 	call, cancel = context.WithTimeout(ctx, 10*time.Second)
 	v, err := e.Worker.Start(call, lease.Target, req)
 	cancel()
-	if status.Code(err) == codes.ResourceExhausted || status.Code(err) == codes.FailedPrecondition {
-		if status.Code(err) == codes.FailedPrecondition {
+	if status.Code(err) == codes.ResourceExhausted || status.Code(err) == codes.FailedPrecondition || status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.Unimplemented {
+		if status.Code(err) != codes.ResourceExhausted {
 			e.Service.Finish(&j, "failed")
 			j.FailureCode = "processing_failed"
 			j.WorkerTarget = ""
@@ -338,6 +358,19 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 			watchDone = nil
 		case <-poll.C:
 		}
+
+		// Live preemption reaches the worker even while the database or GPU
+		// telemetry is unavailable. Neither is on the pause control path.
+		if yield {
+			call, c := context.WithTimeout(ctx, 3*time.Second)
+			paused, pauseErr := e.Worker.Pause(call, lease.Target, jobID)
+			c()
+			if pauseErr == nil {
+				if err := e.refreshApply(ctx, &j, paused); err == nil && j.Status != "processing" {
+					return
+				}
+			}
+		}
 		current, err := db.Get(ctx, j.ID, j.UserID)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -373,9 +406,12 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 			}
 			continue
 		}
+		if yield {
+			continue
+		}
 		// Memory pressure yields existing work as well as preventing new admissions.
 		call, c := context.WithTimeout(ctx, 2*time.Second)
-		free, memErr := e.Memory.FreeMiB(call)
+		free, memErr := e.availableMemory(call)
 		c()
 		if memErr != nil || free[lease.GPU] < e.Service.Config.MinFreeMiB {
 			yield = true
@@ -430,8 +466,12 @@ func (e *Engine) apply(ctx context.Context, j *Job, v *pb.VodJobStatus) error {
 		if p.ProcessingFps > 0 && !math.IsInf(p.ProcessingFps, 0) && !math.IsNaN(p.ProcessingFps) {
 			j.ProcessingFPS = p.ProcessingFps
 		}
-		if p.Fraction >= 0 && p.Fraction <= 1 {
-			j.Progress = max(j.Progress, min(99, int(p.Fraction*100)))
+		// API progress counts durable segments, unlike the worker fraction which
+		// also includes the current, discardable segment. Keep the high-water
+		// mark across estimated frame count changes and checkpoint replay.
+		if p.FramesTotal > 0 {
+			committed := min(uint64(p.SegmentsDone)*300, p.FramesTotal)
+			j.Progress = max(j.Progress, min(99, int(float64(committed)*100/float64(p.FramesTotal))))
 		}
 	}
 	if v.CheckpointToken != "" {
@@ -468,4 +508,50 @@ func (e *Engine) apply(ctx context.Context, j *Job, v *pb.VodJobStatus) error {
 		e.Service.WakeSweep()
 	}
 	return err
+}
+
+func (e *Engine) availableMemory(ctx context.Context) (map[string]int64, error) {
+	free, err := e.Memory.FreeMiB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if free == nil {
+		free = map[string]int64{}
+	}
+	// A new unmapped replacement slot may share any GPU. Suspend VOD until
+	// operators provide its physical identity; live routing remains unaffected.
+	for _, target := range e.Pool.Targets() {
+		gpu := e.Service.Config.WorkerGPUs[target.Address]
+		if gpu == "" {
+			return nil, fmt.Errorf("missing VOD GPU mapping")
+		}
+		live, err := e.Worker.LiveStreams(ctx, target.Address)
+		if err != nil || live > 0 {
+			free[gpu] = -1
+		}
+	}
+	return free, nil
+}
+
+func (e *Engine) preempt(ctx context.Context, lease *ai.VODLease, id string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-lease.Preempt:
+	}
+	for ctx.Err() == nil {
+		call, cancel := context.WithTimeout(ctx, 3*time.Second)
+		v, err := e.Worker.Pause(call, lease.Target, id)
+		cancel()
+		if err == nil && v != nil && v.State != pb.VodJobState_VOD_JOB_STATE_PROCESSING && v.State != pb.VodJobState_VOD_JOB_STATE_UNSPECIFIED {
+			return
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }

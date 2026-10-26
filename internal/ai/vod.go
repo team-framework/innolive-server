@@ -27,6 +27,11 @@ func (l *VODLease) Release() {
 func (p *Pool) ReserveVOD(mapping map[string]string, freeMiB map[string]int64, minFree int64, limit int) *VODLease {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	for _, c := range p.clients {
+		if mapping[c.Address()] == "" {
+			return nil
+		}
+	}
 	if len(p.vod) >= limit {
 		return nil
 	}
@@ -62,6 +67,12 @@ func (p *Pool) ReserveVOD(mapping map[string]string, freeMiB map[string]int64, m
 	return nil
 }
 func (p *Pool) preemptVODLocked(target string) {
+	if p.vodGPUs[target] == "" {
+		for _, l := range p.vod {
+			l.interrupt()
+		}
+		return
+	}
 	if l := p.vod[p.vodGPUs[target]]; l != nil {
 		l.interrupt()
 	}

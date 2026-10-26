@@ -351,18 +351,28 @@ func (s *Service) result(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "result_not_ready")
 		return
 	}
-	path := s.Path(j, "result")
-	info, e := os.Lstat(path)
-	if e != nil || !info.Mode().IsRegular() {
+	root, e := os.OpenRoot(s.Config.Root)
+	if e != nil {
 		fail(w, 503, "service_unavailable")
 		return
 	}
-	f, e := os.Open(path)
+	defer root.Close()
+	relative, e := filepath.Rel(s.Config.Root, s.Path(j, "result"))
+	if e != nil {
+		fail(w, 503, "service_unavailable")
+		return
+	}
+	f, e := root.Open(relative)
 	if e != nil {
 		fail(w, 503, "service_unavailable")
 		return
 	}
 	defer f.Close()
+	info, e := f.Stat()
+	if e != nil || !info.Mode().IsRegular() {
+		fail(w, 503, "service_unavailable")
+		return
+	}
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Now().Add(j.ResultExpiresAt.Sub(s.Now())))
 	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
@@ -396,6 +406,13 @@ func (s *Service) result(w http.ResponseWriter, r *http.Request) {
 	buf := make([]byte, 64*1024)
 	for {
 		if ctx.Err() != nil || !s.Now().Before(*j.ResultExpiresAt) {
+			panic(http.ErrAbortHandler)
+		}
+		// Re-authorize each chunk across server slots. The watcher above also
+		// interrupts a write blocked on a slow client; polling alone could let
+		// a fast transfer finish after DELETE before the next watcher tick.
+		current, checkErr := db.Get(ctx, j.ID, j.UserID)
+		if checkErr != nil || current.Status != "done" {
 			panic(http.ErrAbortHandler)
 		}
 		n, e := f.Read(buf)

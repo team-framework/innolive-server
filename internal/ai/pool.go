@@ -18,6 +18,8 @@ import (
 // 적은 대상에 배정한다. MPS(또는 소프트웨어 자원 상한)로 워커 프로세스마다 GPU
 // 몫이 정해져 있으므로, 세션을 워커에 나눠야 그 격리가 스트림별 격리가 된다.
 type Pool struct {
+	vod     map[string]*VODLease
+	vodGPUs map[string]string
 	clients []*Client
 	logger  *slog.Logger
 	// timeout은 AddTarget이 새 클라이언트에 줄 프레임 타임아웃이다.
@@ -228,6 +230,7 @@ func (p *Pool) AcquireMoveTarget(faceSwap bool, except, prefer string) (client *
 // 순서가 바뀌었을 수 있다. p.mu를 쥔 채 불린다.
 func (p *Pool) claimLocked(index int) (*Client, func()) {
 	client := p.clients[index]
+	p.preemptVODLocked(client.Address())
 	p.adjust(index, 1)
 	var once sync.Once
 	release := func() {
@@ -274,6 +277,7 @@ func (p *Pool) SetTargetReady(target string, ready bool) bool {
 			p.unready = make(map[string]bool)
 		}
 		p.unready[target] = true
+		p.preemptVODLocked(target)
 	}
 	observer := p.readinessObserver
 	p.mu.Unlock()
@@ -394,6 +398,7 @@ func (p *Pool) RemoveTarget(address string) error {
 		return errors.New("cannot remove the last AI target")
 	}
 	client := p.clients[index]
+	p.preemptVODLocked(address)
 	p.clients = append(p.clients[:index:index], p.clients[index+1:]...)
 	p.active = append(p.active[:index:index], p.active[index+1:]...)
 	if p.next >= len(p.clients) {
@@ -421,6 +426,7 @@ func (p *Pool) SetDraining(address string, draining bool) error {
 		p.draining = make(map[string]bool)
 	}
 	p.draining[address] = true
+	p.preemptVODLocked(address)
 	return nil
 }
 

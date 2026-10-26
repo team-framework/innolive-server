@@ -134,7 +134,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	j.OriginalFilename = sanitizeOriginalFilename(filename)
 	path := s.Path(j, "original")
 	dir := filepath.Dir(path)
-	if e = os.MkdirAll(dir, 0750); e != nil {
+	if e = mkdirShared(dir); e != nil {
 		fail(w, 503, "service_unavailable")
 		return
 	}
@@ -146,8 +146,14 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-	f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640)
+	f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0660)
 	if e != nil {
+		fail(w, 503, "service_unavailable")
+		return
+	}
+	// Creation modes are filtered by umask; the worker must retain group write.
+	if e = f.Chmod(0660); e != nil {
+		_ = f.Close()
 		fail(w, 503, "service_unavailable")
 		return
 	}

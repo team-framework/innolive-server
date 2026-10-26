@@ -32,6 +32,9 @@ services:
     volumes:
       # 참조 얼굴 저장소(REFERENCE_STORE_PATH)
       - /var/lib/innolive:/var/lib/innolive
+      # VOD 공유 저장소(VOD_ROOT). AI 워커 유닛의 ReadWritePaths(/var/lib/innolive-ai) 안이며
+      # 워커와 같은 절대 경로여야 한다. 권한은 api/vod/DEPLOY.md의 ACL 절차를 따른다.
+      - /var/lib/innolive-ai/vod:/var/lib/innolive-ai/vod
       # Apple 로그인 개인키(.p8). 컨테이너 내 경로가 server-secrets.env 의
       # APPLE_PRIVATE_KEY_PATH 와 일치해야 하므로 호스트 경로를 그대로 마운트한다.
       - "${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:ro"

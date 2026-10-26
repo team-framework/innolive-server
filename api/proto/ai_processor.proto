@@ -241,3 +241,138 @@ message SessionInfo {
 message ListSessionsResponse {
   repeated SessionInfo sessions = 1;
 }
+
+// File-in/file-out VOD anonymization on the worker's already-loaded runtime.
+// Live ProcessVideo frames always take precedence on the shared inference lane.
+service VodProcessor {
+  // Starts a new job or resumes one from its checkpoint. Returns once the job is
+  // admitted (inputs probed, outputs reserved); processing continues asynchronously.
+  rpc StartVodJob(StartVodJobRequest) returns (VodJobStatus);
+  // Streams status: first message is the current snapshot, then progress updates.
+  // Ends after a PAUSED, DONE, FAILED, or CANCELLED message. Closing it never affects the job.
+  rpc WatchVodJob(VodJobRef) returns (stream VodJobStatus);
+  // One-shot snapshot.
+  rpc GetVodJob(VodJobRef) returns (VodJobStatus);
+  // Stops GPU use within one frame, persists the last completed segment, returns PAUSED.
+  rpc PauseVodJob(PauseVodJobRequest) returns (VodJobStatus);
+  // Stops the job, deletes partial output; with purge_work_dir also deletes checkpoint/segments.
+  rpc CancelVodJob(CancelVodJobRequest) returns (VodJobStatus);
+  // Jobs known to this worker process (for server reconciliation after restarts/slot switches).
+  rpc ListVodJobs(ListVodJobsRequest) returns (ListVodJobsResponse);
+}
+
+enum VodJobState {
+  VOD_JOB_STATE_UNSPECIFIED = 0;
+  VOD_JOB_STATE_PROCESSING = 1;
+  VOD_JOB_STATE_PAUSED = 2;
+  VOD_JOB_STATE_DONE = 3;
+  VOD_JOB_STATE_FAILED = 4;
+  VOD_JOB_STATE_CANCELLED = 5;
+}
+
+enum VodQuality {
+  // Mode A: one pass, live-parity pipeline (detection→tracking→recognition→mosaic).
+  VOD_QUALITY_STANDARD = 0;
+  // Mode B (high precision: lookahead/backfill, multi-pass). Rejected with
+  // FAILED_PRECONDITION until implemented; field reserved now so the server need not change.
+  VOD_QUALITY_HIGH = 1;
+}
+
+enum VodPauseReason {
+  VOD_PAUSE_REASON_UNSPECIFIED = 0;
+  VOD_PAUSE_REASON_REQUESTED = 1;        // server PauseVodJob (e.g. live demand)
+  VOD_PAUSE_REASON_WORKER_DRAINING = 2;  // set_accepting(False) / rolling replace / SIGTERM
+  VOD_PAUSE_REASON_RUNTIME_RECOVERY = 3; // worker entered runtime recovery
+}
+
+message VodWhitelist {
+  // Must equal ExportWhitelistResponse.embedding_model of this worker, else EMBEDDING_MODEL_MISMATCH.
+  string embedding_model = 1;
+  repeated WhitelistEmbedding entries = 2;   // existing message; unit-norm AdaFace vectors
+}
+
+message VodOutputOptions {
+  // "auto" (h264_nvenc when available, else libx264), "h264_nvenc", "libx264".
+  string video_encoder = 1;
+  // Constant-quality target: NVENC -cq / x264 -crf. 0 = default (20).
+  uint32 quality = 2;
+  // Re-encode audio to AAC even when stream copy is possible.
+  bool force_audio_aac = 3;
+}
+
+message StartVodJobRequest {
+  // Server-generated stable ID (UUID). Same ID across pause/resume and across workers.
+  string job_id = 1;
+  // Absolute paths under the worker's --vod-root (shared local disk). Symlinks resolved; outside root → rejected.
+  string input_path = 2;
+  string output_path = 3;     // final file, written as <output_path>.part then renamed atomically on DONE
+  string work_dir = 4;        // checkpoint.json + segments/; created if absent
+  // Registered-person exclusion. Empty entries = protect everyone.
+  oneof whitelist_source {
+    VodWhitelist whitelist = 5;          // preferred: server ExportWhitelist()s the user's session from any worker
+    string whitelist_session_id = 6;     // convenience: a session already on THIS worker; snapshot taken at start
+  }
+  VodQuality quality = 7;
+  MosaicConfig mosaic_config = 8;        // existing message; fixed for the job
+  FaceAnonymizationMode anonymization_mode = 9; // v1 accepts BLUR only; others → FAILED_PRECONDITION
+  VodOutputOptions output = 10;
+  // false = new job (work_dir must have no checkpoint, output must not exist unless overwrite_output).
+  // true  = resume from work_dir/checkpoint.json; checkpoint_token must match.
+  bool resume = 11;
+  string checkpoint_token = 12;
+  bool overwrite_output = 13;
+  // Segment length in source frames at which checkpoints are cut. 0 = default 300.
+  uint32 segment_frames = 14;
+}
+
+message VodJobRef {
+  string job_id = 1;
+}
+
+message PauseVodJobRequest {
+  string job_id = 1;
+}
+
+message CancelVodJobRequest {
+  string job_id = 1;
+  bool purge_work_dir = 2;
+}
+
+message ListVodJobsRequest {}
+
+message ListVodJobsResponse {
+  repeated VodJobStatus jobs = 1;
+}
+
+message VodProgress {
+  uint64 frames_done = 1;          // source frames fully processed and committed or in the current segment
+  uint64 frames_total = 2;         // from ffprobe nb_frames, else round(duration × avg_frame_rate)
+  bool frames_total_estimated = 3; // true when nb_frames was absent
+  double fraction = 4;             // frames_done / frames_total, clamped to [0,1]; 1.0 only at DONE
+  uint32 segments_done = 5;
+  uint32 segments_total = 6;
+  double processing_fps = 7;       // EWMA over the last ~10 s of active processing
+  double eta_seconds = 8;          // (frames_total-frames_done)/processing_fps; -1 if unknown
+}
+
+message VodJobStatus {
+  string job_id = 1;
+  VodJobState state = 2;
+  VodProgress progress = 3;
+  // Opaque token naming the last durable checkpoint (empty before the first segment commits).
+  // Pass back in StartVodJobRequest.checkpoint_token to resume.
+  string checkpoint_token = 4;
+  VodPauseReason pause_reason = 5;
+  string error_code = 6;       // §6, set for FAILED (and CANCELLED = "CANCELLED")
+  string error_message = 7;
+  string output_path = 8;      // set at DONE
+  int64 updated_at_unix_ms = 9;
+  // Source facts from probe (set from admission onward).
+  uint32 width = 10;
+  uint32 height = 11;
+  double avg_frame_rate = 12;
+  double duration_seconds = 13;
+  bool has_audio = 14;
+  uint64 input_size_bytes = 16; // stat size at admission, checked against --vod-max-input-bytes
+  string worker_target = 15;   // host:port this worker listens on, for server bookkeeping
+}

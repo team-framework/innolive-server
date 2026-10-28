@@ -24,6 +24,7 @@
 | `VOD_MAX_CONCURRENCY` | `1` | 전체 VOD 동시성 상한 |
 | `VOD_WORKER_GPUS` | 빈 값 | 쉼표로 구분한 `host:port=GPU-UUID` 매핑 |
 | `VOD_MIN_FREE_MIB` | `4096` | GPU 여유 메모리 하한 |
+| `VOD_STATIC_FREE_MIB` | 미설정 | 설정 시 `nvidia-smi` 대신 고정 여유 메모리(로컬·CPU E2E). 운영은 미설정 |
 | `VOD_RESULT_RETENTION_SEC` | `604800` | 완료 후 결과 보관 7일 |
 | `VOD_ORIGINAL_RETENTION_SEC` | `86400` | 종료 후 원본 파기 상한, 0..86400 |
 | `VOD_SWEEP_INTERVAL` | `1m` | 정리 재시도·고아 업로드 탐색 주기 |

@@ -29,6 +29,20 @@ func TestVODEnabledValidation(t *testing.T) {
 	}
 }
 
+func TestVODStaticFreeMemory(t *testing.T) {
+	t.Setenv("VOD_ENABLED", "true")
+	t.Setenv("VOD_WORKER_GPUS", "127.0.0.1:50051=CPU-LOCAL")
+	t.Setenv("VOD_STATIC_FREE_MIB", "8192")
+	c, err := loadVOD()
+	if err != nil || c.StaticFreeMiB == nil || *c.StaticFreeMiB != 8192 {
+		t.Fatalf("static free: %+v %v", c.StaticFreeMiB, err)
+	}
+	t.Setenv("VOD_STATIC_FREE_MIB", "-1")
+	if _, err := loadVOD(); err == nil {
+		t.Fatal("negative static free accepted")
+	}
+}
+
 func TestVODWorkerLimitValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, bytes, seconds string

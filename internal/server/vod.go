@@ -52,7 +52,11 @@ func (s *Server) startVOD(ctx context.Context) func() {
 		defer conn.Close()
 		runtime.service.SetStore(vod.NewStore(conn.DB))
 		defer runtime.service.SetStore(nil)
-		engine := vod.NewEngine(runtime.service, s.ai, vod.GRPCWorker{Pool: s.ai}, vod.NvidiaMemory{})
+		var memory vod.MemoryProbe = vod.NvidiaMemory{}
+		if s.cfg.VOD.StaticFreeMiB != nil {
+			memory = vod.StaticMemory{Free: *s.cfg.VOD.StaticFreeMiB, GPUs: s.cfg.VOD.WorkerGPUs}
+		}
+		engine := vod.NewEngine(runtime.service, s.ai, vod.GRPCWorker{Pool: s.ai}, memory)
 		engine.Run(child)
 	}()
 	return cancel

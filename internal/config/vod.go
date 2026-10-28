@@ -18,12 +18,15 @@ const (
 // GPU identity must identify a physical GPU across all slots on a host.
 // Unknown targets fail closed for VOD; live target replacement remains unchanged.
 type VODConfig struct {
-	Enabled           bool
-	Root              string
-	MaxUploadBytes    int64
-	MaxDuration       time.Duration
-	Concurrency       int
-	MinFreeMiB        int64
+	Enabled        bool
+	Root           string
+	MaxUploadBytes int64
+	MaxDuration    time.Duration
+	Concurrency    int
+	MinFreeMiB     int64
+	// StaticFreeMiB, when set, replaces nvidia-smi with a fixed free-memory map
+	// for local/CPU E2E. Production leaves this nil and uses NvidiaMemory.
+	StaticFreeMiB     *int64
 	ResultRetention   time.Duration
 	OriginalRetention time.Duration
 	SweepInterval     time.Duration
@@ -61,6 +64,13 @@ func loadVOD() (VODConfig, error) {
 			}
 			*v.dest = n
 		}
+	}
+	if raw := os.Getenv("VOD_STATIC_FREE_MIB"); raw != "" {
+		n, e := strconv.ParseInt(raw, 10, 64)
+		if e != nil || n < 0 {
+			return c, fmt.Errorf("invalid VOD_STATIC_FREE_MIB")
+		}
+		c.StaticFreeMiB = &n
 	}
 	for _, v := range []struct {
 		key  string

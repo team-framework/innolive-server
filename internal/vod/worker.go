@@ -137,6 +137,27 @@ func (NvidiaMemory) FreeMiB(ctx context.Context) (map[string]int64, error) {
 	return result, nil
 }
 
+// StaticMemory reports a fixed free MiB for every configured worker GPU id.
+// Used when VOD_STATIC_FREE_MIB is set (local/CPU E2E without nvidia-smi).
+type StaticMemory struct {
+	Free int64
+	GPUs map[string]string // target -> GPU id (same map as VOD_WORKER_GPUS)
+}
+
+func (m StaticMemory) FreeMiB(context.Context) (map[string]int64, error) {
+	result := map[string]int64{}
+	for _, gpu := range m.GPUs {
+		if gpu == "" {
+			continue
+		}
+		result[gpu] = m.Free
+	}
+	if len(result) == 0 {
+		return nil, errors.New("static VOD memory has no GPU ids")
+	}
+	return result, nil
+}
+
 // ListSessions observes live streams from other server slots as well as this pool.
 func (w GRPCWorker) LiveStreams(ctx context.Context, target string) (uint64, error) {
 	c := w.Pool.Target(target)

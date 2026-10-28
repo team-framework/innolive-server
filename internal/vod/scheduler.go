@@ -295,7 +295,7 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 		return
 	default:
 	}
-	req := &pb.StartVodJobRequest{JobId: j.ID.String(), InputPath: e.Service.Path(j, "original"), OutputPath: e.Service.Path(j, "result"), WorkDir: e.Service.Path(j, "work"), WhitelistSource: &pb.StartVodJobRequest_Whitelist{Whitelist: whitelist}, AnonymizationMode: pb.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_BLUR, Resume: j.CheckpointToken != "", CheckpointToken: j.CheckpointToken, SegmentFrames: 300}
+	req := &pb.StartVodJobRequest{JobId: j.ID.String(), InputPath: e.Service.Path(j, "original"), OutputPath: e.Service.Path(j, "result"), WorkDir: e.Service.Path(j, "work"), WhitelistSource: &pb.StartVodJobRequest_Whitelist{Whitelist: whitelist}, AnonymizationMode: pb.FaceAnonymizationMode_FACE_ANONYMIZATION_MODE_BLUR, Output: &pb.VodOutputOptions{VideoEncoder: "auto"}, Resume: j.CheckpointToken != "", CheckpointToken: j.CheckpointToken, SegmentFrames: 300}
 	call, cancel = context.WithTimeout(ctx, 10*time.Second)
 	v, err := e.Worker.Start(call, lease.Target, req)
 	cancel()

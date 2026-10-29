@@ -49,11 +49,27 @@ func acceptedUploadContentType(raw string) bool {
 		return false
 	}
 	switch strings.ToLower(mediaType) {
-	case "video/mp4", "video/quicktime", "video/x-quicktime", "application/octet-stream":
+	case "video/mp4", "video/quicktime", "video/x-quicktime", "video/mov",
+		"video/x-m4v", "application/mp4", "application/octet-stream":
 		return true
 	default:
 		return false
 	}
+}
+
+// acceptedUploadPart accepts either a known MIME or a .mov/.mp4/.m4v filename.
+// Some browsers/OS send non-standard types (e.g. video/MOV); ffprobe still gates bytes.
+func acceptedUploadPart(contentType, filename string) bool {
+	if acceptedUploadContentType(contentType) {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(filename))
+	for _, ext := range []string{".mov", ".mp4", ".m4v"} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func fail(w http.ResponseWriter, code int, key string, details ...map[string]any) {
@@ -144,7 +160,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad_request")
 		return
 	}
-	if !acceptedUploadContentType(part.Header.Get("Content-Type")) {
+	if !acceptedUploadPart(part.Header.Get("Content-Type"), filename) {
 		fail(w, 415, "unsupported_media_type")
 		return
 	}

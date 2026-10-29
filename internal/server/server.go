@@ -42,6 +42,7 @@ const maxBroadcastBody = 4 << 20
 const platformCleanupTimeout = 10 * time.Second
 
 type Server struct {
+	vod               *vodRuntime
 	cfg               config.Config
 	logger            *slog.Logger
 	metrics           *metrics.Registry
@@ -111,6 +112,7 @@ func New(
 	}
 	mux := http.NewServeMux()
 	s.mux = mux
+	s.configureVOD()
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -226,6 +228,9 @@ func (s *Server) SetGuestQueue(queue *GuestQueue) {
 // guest 얼굴 정리가 끝날 때까지 기다린다. 세션별 작업에는 자체 10초 제한이 있고,
 // 전달받은 context는 shutdown 대기 시간만 제한한다.
 func (s *Server) WaitGuestCleanup(ctx context.Context) error {
+	if err := s.stopVOD(ctx); err != nil {
+		return err
+	}
 	done := make(chan struct{})
 	go func() {
 		s.guestCleanup.Wait()
@@ -1427,6 +1432,9 @@ func recoverMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
 				logger.Error("HTTP handler panicked", "method", r.Method, "path", r.URL.Path, "panic", recovered)
 				writeError(w, internalError())
 			}
@@ -1513,7 +1521,7 @@ func corsMiddleware(logger *slog.Logger, origins origin.Config, next http.Handle
 			if allowCredentials && allowedOrigin != "*" {
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
-			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, Location, Content-Disposition, Content-Length, Retry-After")
 			if allowedOrigin != "*" {
 				w.Header().Add("Vary", "Origin")
 			}

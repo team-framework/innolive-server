@@ -11,6 +11,7 @@ import (
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/usage"
+	"inno-live-server/internal/vod"
 
 	"gorm.io/gorm"
 )
@@ -39,7 +40,10 @@ func Run(
 		if err := experiencequality.AutoMigrate(ctx, db); err != nil {
 			return err
 		}
-		return analytics.AutoMigrate(ctx, db)
+		if err := analytics.AutoMigrate(ctx, db); err != nil {
+			return err
+		}
+		return vod.AutoMigrate(ctx, db)
 
 	case config.DatabaseMigrationModeVersioned:
 		return runVersioned(databaseURL)

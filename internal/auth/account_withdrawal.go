@@ -100,6 +100,9 @@ func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID
 		if user.Status != UserStatusActive {
 			return ErrUserInactive
 		}
+		if err := clearVODOriginalFilenames(tx, userID); err != nil {
+			return err
+		}
 
 		// 계정이 가진 행을 한 트랜잭션에서 모두 지운다. 아래 사용자 조회가 더는 행을
 		// 찾지 못하므로 인증은 이전 access token을 거절하고, 플랫폼 subject와 이메일

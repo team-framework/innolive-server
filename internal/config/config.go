@@ -65,6 +65,7 @@ const (
 )
 
 type Config struct {
+	VOD               VODConfig
 	HTTPAddr          string
 	PrivacyMode       PrivacyMode
 	PrivacyFixedDelay time.Duration
@@ -248,6 +249,12 @@ func Load() (Config, error) {
 		),
 	}
 
+	vodConfig, vodErr := loadVOD()
+	if vodErr != nil {
+		return Config{}, vodErr
+	}
+	cfg.VOD = vodConfig
+
 	minPort, err := envUint16("WEBRTC_UDP_PORT_MIN", 50000)
 	if err != nil {
 		return Config{}, err
@@ -272,6 +279,9 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if err := c.VOD.Validate(); err != nil {
+		return err
+	}
 	switch c.PrivacyMode {
 	case PrivacyModeBypass, PrivacyModeFixedDelay, PrivacyModeReal:
 	default:

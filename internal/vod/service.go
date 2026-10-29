@@ -41,8 +41,8 @@ func acceptedProbeVideoCodec(name string) bool {
 	}
 }
 
-// Keep in sync with innolive-ai COPYABLE_AUDIO_CODECS plus PCM variants the
-// worker re-encodes to AAC on mux.
+// Keep in sync with innolive-ai remuxable/re-encodable audio codecs. Apple spatial
+// audio (apac) and similar tracks are intentionally omitted — probe skips them.
 func acceptedProbeAudioCodec(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "aac", "mp3", "opus", "ac3", "eac3", "alac",
@@ -62,6 +62,54 @@ type Prober interface {
 }
 type FFProbe struct{}
 
+type probeStream struct {
+	CodecType     string `json:"codec_type"`
+	CodecName     string `json:"codec_name"`
+	NBFrames      string `json:"nb_frames"`
+	Width, Height int
+}
+
+// evaluateProbeStreams accepts iPhone QuickTime layouts: one H.264/HEVC video,
+// optional AAC/PCM audio, while ignoring MJPEG thumbnails, APAC/spatial audio,
+// and timed-metadata/data tracks. Those extras used to yield 415.
+func evaluateProbeStreams(formatName, durationRaw string, streams []probeStream) (Media, error) {
+	duration, e := strconv.ParseFloat(durationRaw, 64)
+	if e != nil || duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return Media{}, ErrInvalidMedia
+	}
+	if !acceptedProbeContainer(formatName) {
+		return Media{}, ErrUnsupported
+	}
+	videos := 0
+	var frames uint64
+	for _, s := range streams {
+		switch s.CodecType {
+		case "video":
+			// Ignore cover-art / preview thumbnails (common MJPEG second video on iPhone).
+			if !acceptedProbeVideoCodec(s.CodecName) {
+				continue
+			}
+			if s.Width > 1920 || s.Height > 1920 {
+				return Media{}, ErrUnsupported
+			}
+			videos++
+			frames, _ = strconv.ParseUint(s.NBFrames, 10, 64)
+		case "audio":
+			// Audio never rejects the upload. APAC/spatial and other non-remuxable
+			// tracks are skipped by the worker; AAC/PCM are kept.
+		default:
+			// data / metadata / tmcd / mebx — ignore
+		}
+	}
+	if videos == 0 {
+		return Media{}, ErrInvalidMedia
+	}
+	if videos != 1 {
+		return Media{}, ErrUnsupported
+	}
+	return Media{duration, frames}, nil
+}
+
 func (FFProbe) Probe(ctx context.Context, path string) (Media, error) {
 	b, e := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,nb_frames,width,height", "-of", "json", path).Output()
 	if e != nil {
@@ -72,49 +120,12 @@ func (FFProbe) Probe(ctx context.Context, path string) (Media, error) {
 			FormatName string `json:"format_name"`
 			Duration   string
 		}
-		Streams []struct {
-			CodecType     string `json:"codec_type"`
-			CodecName     string `json:"codec_name"`
-			NBFrames      string `json:"nb_frames"`
-			Width, Height int
-		}
+		Streams []probeStream
 	}
 	if json.Unmarshal(b, &data) != nil {
 		return Media{}, ErrInvalidMedia
 	}
-	duration, e := strconv.ParseFloat(data.Format.Duration, 64)
-	if e != nil || duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
-		return Media{}, ErrInvalidMedia
-	}
-	if !acceptedProbeContainer(data.Format.FormatName) {
-		return Media{}, ErrUnsupported
-	}
-	videos := 0
-	var frames uint64
-	for _, s := range data.Streams {
-		switch s.CodecType {
-		case "video":
-			videos++
-			// H.264 and HEVC (typical iPhone .mov). Worker re-encodes to H.264 output.
-			if !acceptedProbeVideoCodec(s.CodecName) || s.Width > 1920 || s.Height > 1920 {
-				return Media{}, ErrUnsupported
-			}
-			frames, _ = strconv.ParseUint(s.NBFrames, 10, 64)
-		case "audio":
-			// Reject only codecs the worker cannot decode/remux; AAC is preferred but
-			// PCM/ALAC/etc. are re-encoded to AAC at finalize.
-			if !acceptedProbeAudioCodec(s.CodecName) {
-				return Media{}, ErrUnsupported
-			}
-		}
-	}
-	if videos == 0 {
-		return Media{}, ErrInvalidMedia
-	}
-	if videos != 1 {
-		return Media{}, ErrUnsupported
-	}
-	return Media{duration, frames}, nil
+	return evaluateProbeStreams(data.Format.FormatName, data.Format.Duration, data.Streams)
 }
 
 type Service struct {

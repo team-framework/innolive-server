@@ -36,6 +36,26 @@ func (s *Service) Register(mux *http.ServeMux, requireUser func(http.Handler) ht
 		}))
 	}
 }
+// acceptedUploadContentType allows landing/browser MIME values for MP4 and QuickTime
+// (.mov) uploads. Empty Content-Type is treated like application/octet-stream so
+// browsers that omit a type for .mov still reach the ffprobe byte check.
+func acceptedUploadContentType(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(mediaType) {
+	case "video/mp4", "video/quicktime", "video/x-quicktime", "application/octet-stream":
+		return true
+	default:
+		return false
+	}
+}
+
 func fail(w http.ResponseWriter, code int, key string, details ...map[string]any) {
 	body := map[string]any{"code": key, "message": strings.ReplaceAll(key, "_", " ")}
 	if len(details) > 0 {
@@ -124,8 +144,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad_request")
 		return
 	}
-	mime := part.Header.Get("Content-Type")
-	if mime != "video/mp4" && mime != "application/octet-stream" {
+	if !acceptedUploadContentType(part.Header.Get("Content-Type")) {
 		fail(w, 415, "unsupported_media_type")
 		return
 	}

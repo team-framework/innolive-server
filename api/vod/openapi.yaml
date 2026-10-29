@@ -34,9 +34,10 @@ info:
     multipart/form-data의 `file` 파트 하나만 허용한다. 빈 파일, 여러 파일, 중복 file,
     알 수 없는 파트는 400/bad_request이다. 파일 이름은 표시 용도로만 사용하며 경로나
     작업 식별자로 사용하지 않는다. 브라우저가 multipart boundary를 생성해야 한다.
-    MVP 입력은 MP4 컨테이너의 H.264 영상과 AAC 오디오(또는 무음)이다. 파일 파트의
-    Content-Type은 video/mp4 또는 application/octet-stream을 허용하되 실제 바이트를
-    검사한다. 지원하지 않는 컨테이너/코덱은 415/unsupported_media_type,
+    MVP 입력은 MP4/QuickTime(.mov) 컨테이너의 H.264 영상과 AAC 오디오(또는 무음)이다. 파일 파트의
+    Content-Type은 video/mp4, video/quicktime, video/x-quicktime 또는 application/octet-stream을
+    허용하되(비어 있으면 octet-stream과 동일) 실제 바이트를 검사한다.
+    지원하지 않는 컨테이너/코덱은 415/unsupported_media_type,
     손상되거나 영상 트랙·유효한 길이가 없는 파일은 422/invalid_media이다.
     결과는 MP4/H.264이며 AAC 오디오는 무변환 복사한다. 확장자나 MIME만 신뢰하지 않는다.
 
@@ -250,7 +251,7 @@ paths:
                   description: 파일 하나, 0 < 바이트 수 <= VOD_MAX_UPLOAD_BYTES. 길이 <= VOD_MAX_DURATION_SEC.
             encoding:
               file:
-                contentType: video/mp4, application/octet-stream
+                contentType: video/mp4, video/quicktime, video/x-quicktime, application/octet-stream
       responses:
         '201':
           description: 업로드 검증과 영속 저장 완료. status는 uploaded 또는 queued.

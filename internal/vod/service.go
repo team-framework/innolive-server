@@ -20,6 +20,18 @@ import (
 var ErrUnsupported = errors.New("unsupported media")
 var ErrInvalidMedia = errors.New("invalid media")
 
+// acceptedProbeContainer allows MP4 and QuickTime/MOV ffprobe format_name values
+// (e.g. "mov,mp4,m4a,3gp,3g2,mj2").
+func acceptedProbeContainer(formatName string) bool {
+	for _, name := range strings.Split(formatName, ",") {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "mp4", "mov", "isom", "iso2", "mp42", "mp41":
+			return true
+		}
+	}
+	return false
+}
+
 type Media struct {
 	Duration float64
 	Frames   uint64
@@ -53,7 +65,7 @@ func (FFProbe) Probe(ctx context.Context, path string) (Media, error) {
 	if e != nil || duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
 		return Media{}, ErrInvalidMedia
 	}
-	if !strings.Contains(data.Format.FormatName, "mp4") {
+	if !acceptedProbeContainer(data.Format.FormatName) {
 		return Media{}, ErrUnsupported
 	}
 	videos := 0

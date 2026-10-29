@@ -94,6 +94,11 @@ test('제목·브랜치·연결 이슈 번호 불일치 거부', () => {
   assert.ok(validatePullRequest({ ...pr, body: body.replace('#123', '#124') }).errors.length);
 });
 test('부분 완료 PR의 Refs 허용', () => assert.deepEqual(validatePullRequest({ ...pr, body: body.replace('Closes', 'Refs') }).errors, []));
+test('Cursor PR footer HTML은 관련 이슈 검사에서 무시', () => {
+  const withFooter = `${body}\n<!-- CURSOR_AGENT_PR_BODY_END -->\n\n<div><a href="https://cursor.com/agents/example">Open</a></div>\n`;
+  assert.deepEqual(validatePullRequest({ ...pr, body: withFooter }).errors, []);
+  assert.deepEqual(validateReadiness({ ...pr, draft: false, body: withFooter.replace('- [ ]', '- [x]') }).errors, []);
+});
 test('다른 저장소 이슈만으로 로컬 브랜치 이슈를 대체하지 못함', () => assert.ok(validatePullRequest({ ...pr, body: body.replace('Closes #123', 'Refs other/repo#123') }).errors.length));
 test('자동 동기화 예외는 지정 Bot과 고정 브랜치에만 허용', () => {
   const sync = { ...pr, title: 'chore: framework-agent-harness-sync', head: { ref: 'harness-sync/framework-agent' }, user: { login: 'framework-harness-sync[bot]' }, body: body.replace('- Closes #123', '- 관련 이슈 없음: 자동 하네스 동기화') };

@@ -32,6 +32,27 @@ func acceptedProbeContainer(formatName string) bool {
 	return false
 }
 
+func acceptedProbeVideoCodec(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "h264", "hevc", "h265":
+		return true
+	default:
+		return false
+	}
+}
+
+// Keep in sync with innolive-ai COPYABLE_AUDIO_CODECS plus PCM variants the
+// worker re-encodes to AAC on mux.
+func acceptedProbeAudioCodec(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "aac", "mp3", "opus", "ac3", "eac3", "alac",
+		"pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_f32le", "pcm_f32be":
+		return true
+	default:
+		return false
+	}
+}
+
 type Media struct {
 	Duration float64
 	Frames   uint64
@@ -74,12 +95,15 @@ func (FFProbe) Probe(ctx context.Context, path string) (Media, error) {
 		switch s.CodecType {
 		case "video":
 			videos++
-			if s.CodecName != "h264" || s.Width > 1920 || s.Height > 1920 {
+			// H.264 and HEVC (typical iPhone .mov). Worker re-encodes to H.264 output.
+			if !acceptedProbeVideoCodec(s.CodecName) || s.Width > 1920 || s.Height > 1920 {
 				return Media{}, ErrUnsupported
 			}
 			frames, _ = strconv.ParseUint(s.NBFrames, 10, 64)
 		case "audio":
-			if s.CodecName != "aac" {
+			// Reject only codecs the worker cannot decode/remux; AAC is preferred but
+			// PCM/ALAC/etc. are re-encoded to AAC at finalize.
+			if !acceptedProbeAudioCodec(s.CodecName) {
 				return Media{}, ErrUnsupported
 			}
 		}

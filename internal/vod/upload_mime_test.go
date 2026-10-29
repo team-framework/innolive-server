@@ -53,6 +53,25 @@ func TestAcceptedProbeContainer(t *testing.T) {
 	}
 }
 
+func TestAcceptedProbeCodecs(t *testing.T) {
+	for _, name := range []string{"h264", "hevc", "h265", "HEVC"} {
+		if !acceptedProbeVideoCodec(name) {
+			t.Fatalf("video %q rejected", name)
+		}
+	}
+	if acceptedProbeVideoCodec("mpeg4") || acceptedProbeVideoCodec("vp9") {
+		t.Fatal("unexpected video codec accepted")
+	}
+	for _, name := range []string{"aac", "pcm_s16le", "alac", "mp3"} {
+		if !acceptedProbeAudioCodec(name) {
+			t.Fatalf("audio %q rejected", name)
+		}
+	}
+	if acceptedProbeAudioCodec("speex") {
+		t.Fatal("unexpected audio codec accepted")
+	}
+}
+
 func TestUploadAcceptsQuickTimeMIME(t *testing.T) {
 	s := testService(t)
 	s.Probe = fakeProbe{duration: 3, err: nil}

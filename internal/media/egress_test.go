@@ -757,6 +757,9 @@ func TestEgressTransitionTable(t *testing.T) {
 		{name: "송출 중 해상도 변경", current: EgressPhaseStreaming, event: egressTransitionReconfigure, want: EgressPhaseReconfiguring, allowed: true},
 		{name: "정지 중 일시 중지 금지", current: EgressPhaseStopped, event: egressTransitionPause, want: EgressPhaseStopped, allowed: false},
 		{name: "프로필 전 일시 중지 금지", current: EgressPhaseIdle, event: egressTransitionPause, want: EgressPhaseIdle, allowed: false},
+		{name: "일시 중지 상태로 시작", current: EgressPhaseIdle, event: egressTransitionStartPaused, want: EgressPhasePausedReconfiguring, allowed: true},
+		{name: "송출 중 일시 중지 시작 금지", current: EgressPhaseStreaming, event: egressTransitionStartPaused, want: EgressPhaseStreaming, allowed: false},
+		{name: "일시 중지 시작 뒤 첫 프로필", current: EgressPhasePausedReconfiguring, event: egressTransitionProfileReady, want: EgressPhasePaused, allowed: true},
 		{name: "재연결 중 재개 금지", current: EgressPhasePausedReconnecting, event: egressTransitionResume, want: EgressPhasePausedReconnecting, allowed: false},
 		{name: "모든 생존 상태에서 정지", current: EgressPhasePausedReconnecting, event: egressTransitionStop, want: EgressPhaseStopped, allowed: true},
 	}
@@ -768,6 +771,68 @@ func TestEgressTransitionTable(t *testing.T) {
 				t.Fatalf("nextEgressPhase(%q, %d) = (%q, %t), want (%q, %t)", tc.current, tc.event, got, allowed, tc.want, tc.allowed)
 			}
 		})
+	}
+}
+
+// 일시 중지 상태로 시작한 egress는 첫 프로필 측정에 쓴 카메라 프레임을 내보내지
+// 않고 슬레이트부터 쓰며, 오디오도 처음부터 무음이다(#526).
+func TestStartPausedEgressWritesSlateWithoutCameraFrames(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	if !e.StartPaused() {
+		t.Fatal("StartPaused returned false for an idle egress")
+	}
+	if status := e.Status(); status.Phase != EgressPhasePausedReconfiguring || status.PausedAt == nil {
+		t.Fatalf("status after StartPaused = %+v, want paused_reconfiguring with PausedAt", status)
+	}
+	if !e.audioShouldMute() {
+		t.Fatal("audio must be muted before the first FFmpeg spawn")
+	}
+	if e.StartPaused() {
+		t.Fatal("StartPaused must be rejected once the egress left idle")
+	}
+
+	slate, err := e.cancellationSlate(320, 180)
+	if err != nil {
+		t.Fatalf("cancellationSlate: %v", err)
+	}
+	camera := append([]byte(nil), slate.data...)
+	camera[len(camera)/2] ^= 0x01
+	writer := &recordingWriteCloser{}
+	e.startProcess = func(ctx context.Context, _ uint16, _ uint16, _ int) (*ffmpegProcess, error) {
+		command := exec.CommandContext(ctx, "sleep", "10")
+		if err := command.Start(); err != nil {
+			return nil, err
+		}
+		return &ffmpegProcess{cmd: command, stdin: writer, metrics: e.metrics}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	for index := 0; index < egressMeasureFrames; index++ {
+		e.input <- frame{data: camera, timestamp: uint32(index * 1500), width: 320, height: 180}
+	}
+
+	deadline := time.After(2 * time.Second)
+	for e.Status().Phase != EgressPhasePaused || writer.count() == 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("paused start did not write a slate: status=%+v writes=%d", e.Status(), writer.count())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if writer.contains(camera) {
+		t.Fatal("paused start wrote a startup camera frame")
+	}
+	if !writer.contains(slate.data) {
+		t.Fatal("paused start did not write the cancellation slate")
 	}
 }
 

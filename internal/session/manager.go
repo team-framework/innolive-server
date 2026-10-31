@@ -1299,6 +1299,9 @@ type StreamOptions struct {
 	// Provider는 이 egress를 붙일 대상이다. 비우면 세션의 기본 대상이다.
 	Provider            string
 	ReconnectMaxElapsed time.Duration
+	// Paused는 일시 중지 상태로 시작한다. 다른 프로세스에서 일시 중지 중이던 송출을
+	// 이어 붙일 때(#517) 첫 프레임부터 슬레이트·무음을 내야 한다.
+	Paused bool
 }
 
 // StartStream은 세션의 처리(블러) 완료 출력에 RTMP egress를 붙인다.
@@ -1362,8 +1365,10 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		EgressVideoEncoder: m.cfg.EgressVideoEncoder,
 	}, outputURL, s.audioPipe, m.cfg.EgressLatencyLog, m.cfg.EgressAudioOffset, m.cfg.EgressVideoBitrate, m.cfg.EgressVideoSize)
 	// 예산·카드 배정은 Run이 시작하면 고정되므로 고루틴을 띄우기 전에 정한다.
+	paused := false
 	if len(options) > 0 {
 		egress.SetReconnectMaxElapsed(options[0].ReconnectMaxElapsed)
+		paused = options[0].Paused && egress.StartPaused()
 	}
 	egress.SetNVENCDevice(lease.Device())
 	if s.processor != nil {
@@ -1396,10 +1401,44 @@ func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*
 		m.runEgress(s, provider, egress, egressCtx, usageID)
 	}()
 	m.recordUsage(UsageEvent{Kind: UsageBroadcastStarted, SessionID: s.ID, BroadcastID: usageID, Provider: provider})
+	// 이미 라이브인 대상에 다시 붙인 송출(이관, #517)은 라이브 전환을 거치지 않는다.
+	// 원장은 라이브 시각이 있는 세대만 세므로 지금부터 라이브로 기록한다.
+	if t.phase == BroadcastPhaseLive {
+		m.recordUsage(UsageEvent{Kind: UsageBroadcastLive, BroadcastID: usageID})
+	}
+	if paused {
+		m.recordUsage(UsageEvent{Kind: UsageBroadcastPaused, BroadcastID: usageID})
+		go m.syncAIInputPauseAfterProfile(egressCtx, s, egress)
+	}
 	m.logger.Info("RTMP egress started", "session_id", s.ID, "provider", provider, "url", egress.Status().TargetURL,
 		"reconnect_max_elapsed", egress.ReconnectMaxElapsed(), "nvenc_device", egress.NVENCDevice(),
 		"egress_slots_used", m.egressSlots.Used())
 	return s, nil
+}
+
+// egressProfilePollInterval은 일시 중지로 시작한 egress의 첫 프로필 확정을 확인하는
+// 간격이다. 프로필 측정은 수십 프레임(약 1초)이 걸린다.
+const egressProfilePollInterval = 100 * time.Millisecond
+
+// syncAIInputPauseAfterProfile은 일시 중지로 시작한 egress가 첫 출력 프로필을
+// 확정한 뒤 AI 입력 차단을 다시 맞춘다. 프로필 측정에는 처리 프레임이 필요해 그
+// 전에는 차단하지 않는다(allTargetsPaused). egress가 끝나면 함께 끝난다.
+func (m *Manager) syncAIInputPauseAfterProfile(ctx context.Context, s *Session, egress *media.RTMPEgress) {
+	ticker := time.NewTicker(egressProfilePollInterval)
+	defer ticker.Stop()
+	for egress.Status().Phase == media.EgressPhasePausedReconfiguring {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.setAIInputPaused(allTargetsPausedLocked(s))
 }
 
 // egressClaimFor는 세션의 송출 회계 정보다(#272). 유닛은 세션 단위로 합산되고
@@ -1622,13 +1661,15 @@ func allTargetsPausedLocked(s *Session) bool {
 // 실제 영상을 내보내는 중이면 끊을 수 없다 — 입력은 세션에 하나뿐이라 끊는
 // 순간 그 대상 시청자의 화면도 멈춘다. 이미 끝난(stopped) 대상은 세지 않는다:
 // 활성으로 세면 한 대상이 스스로 끝났을 때 나머지의 일시 중지가 풀린다.
+// 출력 프로필을 측정 중인(paused_reconfiguring) 대상은 처리 프레임을 받아야 측정을
+// 끝내므로 차단하지 않는다 — 프레임은 측정에만 쓰고 송출하지 않는다.
 func allTargetsPaused(phases []media.EgressPhase) bool {
 	paused := 0
 	for _, phase := range phases {
 		switch phase {
 		case media.EgressPhaseStopped:
 			continue
-		case media.EgressPhasePaused, media.EgressPhasePausedReconfiguring, media.EgressPhasePausedReconnecting:
+		case media.EgressPhasePaused, media.EgressPhasePausedReconnecting:
 			paused++
 		default:
 			return false
@@ -1825,6 +1866,11 @@ func (m *Manager) Delete(id, reason string) error {
 	// 걸려 있던 화질 올리기 제안의 보류를 돌려준다(#278).
 	m.egressSlots.ReleaseHold(id)
 	m.metrics.SetActiveSessions(count)
+	if s.handoffPending() {
+		s.close(reason, m.logger)
+		m.logger.Info("dropped uncommitted handed-off session", "session_id", id, "reason", reason)
+		return nil
+	}
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
@@ -1874,6 +1920,10 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(0)
 	for _, s := range sessions {
+		if s.handoffPending() {
+			s.close("application_shutdown", m.logger)
+			continue
+		}
 		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
 		m.recordSessionEnded(s, "application_shutdown")

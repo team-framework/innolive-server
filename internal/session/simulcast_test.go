@@ -131,6 +131,9 @@ func TestAllTargetsPausedRequiresEveryTarget(t *testing.T) {
 		{"한쪽은 멈추고 한쪽은 종료됨", []media.EgressPhase{media.EgressPhasePaused, media.EgressPhaseStopped}, true},
 		{"전부 종료됨", []media.EgressPhase{media.EgressPhaseStopped, media.EgressPhaseStopped}, false},
 		{"종료된 대상 + 송출 중", []media.EgressPhase{media.EgressPhaseStopped, media.EgressPhaseStreaming}, false},
+		// 출력 프로필을 측정 중인 대상은 처리 프레임을 받아야 측정을 끝낸다(#526).
+		{"일시 중지로 시작해 프로필 측정 중", []media.EgressPhase{media.EgressPhasePausedReconfiguring}, false},
+		{"한쪽은 멈추고 한쪽은 프로필 측정 중", []media.EgressPhase{media.EgressPhasePaused, media.EgressPhasePausedReconfiguring}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

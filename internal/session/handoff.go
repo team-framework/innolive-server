@@ -150,8 +150,10 @@ func (m *Manager) ExportSession(id string) (SessionSnapshot, error) {
 			status := t.egress.Status()
 			if status.Phase != media.EgressPhaseStopped {
 				target.Egress = &EgressSnapshot{
-					OutputURL:           t.egress.OutputURL(),
-					Paused:              status.Phase == media.EgressPhasePaused || status.Phase == media.EgressPhasePausedReconfiguring,
+					OutputURL: t.egress.OutputURL(),
+					// 재연결 중인 일시 중지도 일시 중지다. 빠뜨리면 이관 뒤 송출이 풀린다.
+					Paused: status.Phase == media.EgressPhasePaused || status.Phase == media.EgressPhasePausedReconfiguring ||
+						status.Phase == media.EgressPhasePausedReconnecting,
 					ReconnectMaxElapsed: t.egress.ReconnectMaxElapsed(),
 				}
 			}
@@ -339,17 +341,24 @@ func (m *Manager) resumeHandoffEgress(s *Session) {
 	s.mu.Unlock()
 
 	for provider, egress := range pending {
-		if _, err := m.StartStream(s.ID, egress.OutputURL, StreamOptions{Provider: provider, ReconnectMaxElapsed: egress.ReconnectMaxElapsed}); err != nil {
+		// 일시 중지는 시작할 때 싣는다. 시작 뒤에 멈추면 첫 프로필이 정해질 때까지
+		// pause가 거절돼(idle) 카메라와 마이크가 그대로 나간다.
+		options := StreamOptions{Provider: provider, ReconnectMaxElapsed: egress.ReconnectMaxElapsed, Paused: egress.Paused}
+		if _, err := m.StartStream(s.ID, egress.OutputURL, options); err != nil {
 			m.logger.Error("resuming handed-off RTMP egress failed", "session_id", s.ID, "provider", provider, "error", err)
 			continue
 		}
-		if egress.Paused {
-			if _, err := m.PauseStream(s.ID, provider); err != nil {
-				m.logger.Warn("re-pausing handed-off RTMP egress failed", "session_id", s.ID, "provider", provider, "error", err)
-			}
-		}
 		m.logger.Info("resumed handed-off RTMP egress", "session_id", s.ID, "provider", provider, "paused", egress.Paused)
 	}
+}
+
+// handoffPending은 옛 프로세스가 아직 놓지 않은 넘겨받은 세션인지다. 이 세션의
+// 플랫폼 방송·실사용 기록·정리 훅은 아직 옛 프로세스의 것이다. 배포가 롤백되거나
+// commit이 실패해 이 세션을 버릴 때 정리하면 옛 프로세스에서 송출 중인 방송이 끝난다.
+func (s *Session) handoffPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.handoff != nil && !s.handoff.committed
 }
 
 // DetachSession은 다른 프로세스로 넘긴 세션을 이 프로세스에서 놓는다. 평소 삭제와

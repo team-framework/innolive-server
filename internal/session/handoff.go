@@ -352,6 +352,15 @@ func (m *Manager) resumeHandoffEgress(s *Session) {
 	}
 }
 
+// handoffPending은 옛 프로세스가 아직 놓지 않은 넘겨받은 세션인지다. 이 세션의
+// 플랫폼 방송·실사용 기록·정리 훅은 아직 옛 프로세스의 것이다. 배포가 롤백되거나
+// commit이 실패해 이 세션을 버릴 때 정리하면 옛 프로세스에서 송출 중인 방송이 끝난다.
+func (s *Session) handoffPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.handoff != nil && !s.handoff.committed
+}
+
 // DetachSession은 다른 프로세스로 넘긴 세션을 이 프로세스에서 놓는다. 평소 삭제와
 // 달리 플랫폼 방송을 끝내지 않고, 세션 종료 실사용 기록·정리 훅도 부르지 않는다 —
 // 세션은 새 프로세스에서 이어진다. 서버 egress는 끊고(그 세대의 실사용은

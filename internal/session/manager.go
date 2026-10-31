@@ -1866,6 +1866,11 @@ func (m *Manager) Delete(id, reason string) error {
 	// 걸려 있던 화질 올리기 제안의 보류를 돌려준다(#278).
 	m.egressSlots.ReleaseHold(id)
 	m.metrics.SetActiveSessions(count)
+	if s.handoffPending() {
+		s.close(reason, m.logger)
+		m.logger.Info("dropped uncommitted handed-off session", "session_id", id, "reason", reason)
+		return nil
+	}
 	// close가 phase를 건드리지는 않지만, 정리 대상 판단은 닫기 전에 읽는다.
 	m.cleanupPlatformBroadcast(s)
 	s.close(reason, m.logger)
@@ -1915,6 +1920,10 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 	m.metrics.SetActiveSessions(0)
 	for _, s := range sessions {
+		if s.handoffPending() {
+			s.close("application_shutdown", m.logger)
+			continue
+		}
 		m.cleanupPlatformBroadcast(s)
 		s.close("application_shutdown", m.logger)
 		m.recordSessionEnded(s, "application_shutdown")

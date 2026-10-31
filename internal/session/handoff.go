@@ -150,8 +150,10 @@ func (m *Manager) ExportSession(id string) (SessionSnapshot, error) {
 			status := t.egress.Status()
 			if status.Phase != media.EgressPhaseStopped {
 				target.Egress = &EgressSnapshot{
-					OutputURL:           t.egress.OutputURL(),
-					Paused:              status.Phase == media.EgressPhasePaused || status.Phase == media.EgressPhasePausedReconfiguring,
+					OutputURL: t.egress.OutputURL(),
+					// 재연결 중인 일시 중지도 일시 중지다. 빠뜨리면 이관 뒤 송출이 풀린다.
+					Paused: status.Phase == media.EgressPhasePaused || status.Phase == media.EgressPhasePausedReconfiguring ||
+						status.Phase == media.EgressPhasePausedReconnecting,
 					ReconnectMaxElapsed: t.egress.ReconnectMaxElapsed(),
 				}
 			}
@@ -339,14 +341,12 @@ func (m *Manager) resumeHandoffEgress(s *Session) {
 	s.mu.Unlock()
 
 	for provider, egress := range pending {
-		if _, err := m.StartStream(s.ID, egress.OutputURL, StreamOptions{Provider: provider, ReconnectMaxElapsed: egress.ReconnectMaxElapsed}); err != nil {
+		// 일시 중지는 시작할 때 싣는다. 시작 뒤에 멈추면 첫 프로필이 정해질 때까지
+		// pause가 거절돼(idle) 카메라와 마이크가 그대로 나간다.
+		options := StreamOptions{Provider: provider, ReconnectMaxElapsed: egress.ReconnectMaxElapsed, Paused: egress.Paused}
+		if _, err := m.StartStream(s.ID, egress.OutputURL, options); err != nil {
 			m.logger.Error("resuming handed-off RTMP egress failed", "session_id", s.ID, "provider", provider, "error", err)
 			continue
-		}
-		if egress.Paused {
-			if _, err := m.PauseStream(s.ID, provider); err != nil {
-				m.logger.Warn("re-pausing handed-off RTMP egress failed", "session_id", s.ID, "provider", provider, "error", err)
-			}
 		}
 		m.logger.Info("resumed handed-off RTMP egress", "session_id", s.ID, "provider", provider, "paused", egress.Paused)
 	}

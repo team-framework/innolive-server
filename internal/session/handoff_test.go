@@ -4,11 +4,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"inno-live-server/internal/config"
+	"inno-live-server/internal/media"
 	"inno-live-server/internal/metrics"
 
 	"github.com/google/uuid"
@@ -334,5 +336,111 @@ func TestHandoffEgressWaitsForCommitAndVideo(t *testing.T) {
 	}
 	if pending() != 1 {
 		t.Fatal("egress resumed before client video arrived")
+	}
+}
+
+func (r *recordedUsage) kindsFor(broadcastID string) []UsageEventKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var kinds []UsageEventKind
+	for _, event := range r.events {
+		if event.BroadcastID == broadcastID {
+			kinds = append(kinds, event.Kind)
+		}
+	}
+	return kinds
+}
+
+// 넘겨받은 송출은 옛 프로세스의 일시 중지를 그대로 이어 시작하고, 라이브 대상의 새
+// 송출 세대는 라이브 시각과 일시 중지를 함께 기록한다(#526).
+func TestHandoffResumesEgressWithPauseAndLiveUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		paused    bool
+		wantPhase media.EgressPhase
+		wantKinds []UsageEventKind
+	}{
+		{"일시 중지 송출", true, media.EgressPhasePausedReconfiguring, []UsageEventKind{UsageBroadcastStarted, UsageBroadcastLive, UsageBroadcastPaused}},
+		{"송출 중", false, media.EgressPhaseIdle, []UsageEventKind{UsageBroadcastStarted, UsageBroadcastLive}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old, _, _ := newHandoffTestManager(t, time.Minute)
+			s, _ := liveSessionForHandoff(t, old)
+			snapshot, err := old.ExportSession(s.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Targets[0].Egress = &EgressSnapshot{OutputURL: "rtmp://example.invalid/live/key", Paused: tc.paused}
+			fresh, freshUsage, _ := newHandoffTestManager(t, time.Minute)
+			if err := fresh.ImportSession(snapshot, true); err != nil {
+				t.Fatal(err)
+			}
+			imported, err := fresh.Get(s.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			imported.mu.Lock()
+			imported.rawTrackID = "video"
+			imported.mu.Unlock()
+
+			fresh.resumeHandoffEgress(imported)
+
+			imported.mu.RLock()
+			target := imported.targets[imported.Provider]
+			phase := target.egress.Status().Phase
+			usageID := target.usageID
+			aiInputPaused := imported.aiInputPaused
+			imported.mu.RUnlock()
+			if phase != tc.wantPhase {
+				t.Fatalf("resumed egress phase = %q, want %q", phase, tc.wantPhase)
+			}
+			// 첫 프로필을 측정하려면 처리 프레임이 필요하므로 AI 입력은 막지 않는다.
+			if aiInputPaused {
+				t.Fatal("AI input was suspended before the resumed egress measured its profile")
+			}
+			if got := freshUsage.kindsFor(usageID); !slices.Equal(got, tc.wantKinds) {
+				t.Fatalf("usage events for resumed egress = %v, want %v", got, tc.wantKinds)
+			}
+		})
+	}
+}
+
+// 옛 프로세스가 놓기 전의 넘겨받은 세션은 버려도(배포 롤백·commit 실패) 플랫폼 방송을
+// 끝내거나 세션 종료를 기록하지 않는다. 그 방송은 옛 프로세스에서 송출 중이다(#526).
+func TestUncommittedHandoffDropKeepsPlatformBroadcast(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drop func(*Manager, string)
+	}{
+		{"복구 창 만료", func(m *Manager, id string) { m.expireRecovery(id, 1) }},
+		{"프로세스 종료", func(m *Manager, _ string) { m.CloseAll() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old, _, _ := newHandoffTestManager(t, time.Minute)
+			s, _ := liveSessionForHandoff(t, old)
+			snapshot, err := old.ExportSession(s.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh, freshUsage, freshCleanups := newHandoffTestManager(t, time.Minute)
+			if err := fresh.ImportSession(snapshot, false); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.drop(fresh, s.ID)
+
+			if _, err := fresh.Get(s.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("Get() after drop error = %v, want ErrNotFound", err)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if freshCleanups.count() != 0 {
+				t.Fatalf("dropping an uncommitted handoff ended %d platform broadcasts", freshCleanups.count())
+			}
+			for _, kind := range freshUsage.kinds() {
+				if kind == UsageSessionEnded || kind == UsageBroadcastEnded {
+					t.Fatalf("dropping an uncommitted handoff recorded %v", kind)
+				}
+			}
+		})
 	}
 }

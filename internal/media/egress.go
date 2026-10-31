@@ -133,6 +133,9 @@ const (
 	egressTransitionReconnect
 	egressTransitionReconfigure
 	egressTransitionStop
+	// egressTransitionStartPaused는 첫 프로필 전에 일시 중지 의도를 싣는다. 사용자
+	// pause(egressTransitionPause)는 idle에서 거절하는 계약을 그대로 둔다.
+	egressTransitionStartPaused
 )
 
 type egressTransition struct {
@@ -429,7 +432,7 @@ func (e *RTMPEgress) transition(change egressTransition) bool {
 		if e.status.StartedAt == nil {
 			e.status.StartedAt = &now
 		}
-	case egressTransitionPause:
+	case egressTransitionPause, egressTransitionStartPaused:
 		e.status.PausedAt = &now
 	case egressTransitionReconnect:
 		e.status.ReconnectAttempts = change.reconnectAttempts
@@ -489,6 +492,12 @@ func nextEgressPhase(current EgressPhase, event egressTransitionEvent) (EgressPh
 		case EgressPhasePaused:
 			return EgressPhasePausedReconfiguring, true
 		}
+	case egressTransitionStartPaused:
+		// 첫 프로필이 확정되면 paused_reconfiguring → paused로 이어져, 카메라
+		// 프레임을 한 장도 쓰지 않고 슬레이트부터 낸다.
+		if current == EgressPhaseIdle {
+			return EgressPhasePausedReconfiguring, true
+		}
 	case egressTransitionStop:
 		return EgressPhaseStopped, true
 	}
@@ -517,6 +526,13 @@ func (e *RTMPEgress) Pause() bool {
 		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
 	}
 	return true
+}
+
+// StartPaused는 Run 전에 일시 중지 상태로 시작하게 한다. 일시 중지 중이던 송출을
+// 다른 프로세스에서 이어 붙일 때(#517) 첫 프레임부터 슬레이트·무음을 내기 위해
+// 쓴다. 첫 프로필 측정 전(idle)에서만 성공한다.
+func (e *RTMPEgress) StartPaused() bool {
+	return e.transition(egressTransition{event: egressTransitionStartPaused})
 }
 
 // Resume은 paused 상태를 streaming 상태로 전환한다. PausedAt은 마지막 일시

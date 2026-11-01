@@ -804,6 +804,10 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 					return
 				}
 				e.logger.Error("start RTMP egress FFmpeg failed", "error", e.sanitizeError(err))
+				// 재연결을 기다리는 동안 시작 프레임이 오래된다. 다시 시작한
+				// FFmpeg에는 그 사이 익명화 설정이 바뀌었을 수도 있는 지난 화면
+				// 대신 새로 들어오는 프레임을 쓴다.
+				pending = nil
 				if !e.waitForReconnect(ctx, &budget, err) {
 					return
 				}

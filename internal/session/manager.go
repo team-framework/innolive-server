@@ -1524,8 +1524,14 @@ func (m *Manager) runEgress(s *Session, provider string, egress *media.RTMPEgres
 	}
 	// egress가 스스로 끝난 경우에도 플랫폼 방송과 단계를 정리한다. 그러지
 	// 않으면 단계가 live에 남아 설정 변경이 영구히 409로 막히고, 유튜브 쪽
-	// 방송도 다음 송출과 겹친다.
-	broadcast, phase := takeBroadcastLocked(s, provider)
+	// 방송도 다음 송출과 겹친다. 중지가 요청된 세대는 중지한 쪽이 이미
+	// 정리했다 — 종료 유예 안에 같은 대상을 다시 준비했다면 지금 남은 방송은
+	// 그 새 준비의 것이다.
+	var broadcast PlatformBroadcast
+	phase := BroadcastPhaseIdle
+	if t.stopReason == nil {
+		broadcast, phase = takeBroadcastLocked(s, provider)
+	}
 	s.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
 	m.disposeBroadcast(s.UserID, broadcast, phase)
@@ -1666,16 +1672,23 @@ func allTargetsPausedLocked(s *Session) bool {
 func allTargetsPaused(phases []media.EgressPhase) bool {
 	paused := 0
 	for _, phase := range phases {
-		switch phase {
-		case media.EgressPhaseStopped:
+		switch {
+		case phase == media.EgressPhaseStopped:
 			continue
-		case media.EgressPhasePaused, media.EgressPhasePausedReconnecting:
+		case egressSuspendsAIInput(phase):
 			paused++
 		default:
 			return false
 		}
 	}
 	return paused > 0
+}
+
+// egressSuspendsAIInput은 대상이 처리 프레임 없이 버티는 일시 중지 단계인지다.
+// AI 입력 차단(allTargetsPaused)과 입력 없음 판정(BroadcastActivity)이 같은
+// 기준을 써야 한다 — 끊긴 동안에는 프레임이 없어 입력 없음으로 오판한다.
+func egressSuspendsAIInput(phase media.EgressPhase) bool {
+	return phase == media.EgressPhasePaused || phase == media.EgressPhasePausedReconnecting
 }
 
 // ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은

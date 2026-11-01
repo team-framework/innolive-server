@@ -144,6 +144,28 @@ func TestAllTargetsPausedRequiresEveryTarget(t *testing.T) {
 	}
 }
 
+// TestIdleCheckPauseMatchesAIInputPause: 입력 없음 판정은 AI 입력이 끊긴 대상을
+// 멈춘 대상으로 세야 한다. 끊긴 동안에는 처리 프레임이 없으므로, 두 판정이 다르면
+// 일시 중지한 채 RTMP를 재연결하는 방송이 입력 없음으로 종료된다(#530).
+func TestIdleCheckPauseMatchesAIInputPause(t *testing.T) {
+	if !egressSuspendsAIInput(media.EgressPhasePausedReconnecting) {
+		t.Fatal("paused_reconnecting must count as paused for the idle check")
+	}
+	for _, phase := range []media.EgressPhase{
+		media.EgressPhaseIdle,
+		media.EgressPhaseStreaming,
+		media.EgressPhasePaused,
+		media.EgressPhaseReconfiguring,
+		media.EgressPhasePausedReconfiguring,
+		media.EgressPhaseReconnecting,
+		media.EgressPhasePausedReconnecting,
+	} {
+		if got, want := egressSuspendsAIInput(phase), allTargetsPaused([]media.EgressPhase{phase}); got != want {
+			t.Errorf("egressSuspendsAIInput(%q) = %v, allTargetsPaused = %v", phase, got, want)
+		}
+	}
+}
+
 // TestWithdrawalClearsEveryTargetBroadcast: 탈퇴는 대상마다 만들어진 방송을
 // 모두 치워야 한다 — 하나만 훑으면 나머지 플랫폼에 방송이 남는다.
 func TestWithdrawalClearsEveryTargetBroadcast(t *testing.T) {

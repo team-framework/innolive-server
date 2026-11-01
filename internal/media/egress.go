@@ -282,9 +282,9 @@ type RTMPEgress struct {
 	// 테스트에서 짧게 바꾼다.
 	gapFillAfter time.Duration
 	freezeMax    time.Duration
-	// minHeldGeneration은 정지 화면으로 다시 써도 되는 프레임의 최소 익명화
-	// 설정 세대다. 설정이 바뀌면 새 세대로 올려, 바뀌기 전에 처리된 프레임을
-	// 다시 내보내지 않게 한다.
+	// minHeldGeneration은 내보내도 되는 프레임의 최소 익명화 설정 세대다.
+	// 설정이 바뀌면 새 세대로 올려, 바뀌기 전에 처리된 프레임을 정지 화면으로도
+	// 카메라 프레임으로도 내보내지 않게 한다.
 	minHeldGeneration atomic.Uint64
 
 	statusMu sync.Mutex
@@ -804,6 +804,10 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 					return
 				}
 				e.logger.Error("start RTMP egress FFmpeg failed", "error", e.sanitizeError(err))
+				// 재연결을 기다리는 동안 시작 프레임이 오래된다. 다시 시작한
+				// FFmpeg에는 그 사이 익명화 설정이 바뀌었을 수도 있는 지난 화면
+				// 대신 새로 들어오는 프레임을 쓴다.
+				pending = nil
 				if !e.waitForReconnect(ctx, &budget, err) {
 					return
 				}
@@ -919,7 +923,9 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		if resolutionChanged(item, width, height) {
 			return &item, nil
 		}
-		if !e.validFrame(item) {
+		// 익명화 설정이 바뀌기 전(또는 바뀌는 도중, 세대 0)에 처리된 프레임은
+		// 바뀐 뒤에 내보내지 않는다.
+		if !e.validFrame(item) || item.privacyGeneration < e.minHeldGeneration.Load() {
 			e.metrics.IncEgressFrameDropped()
 			return nil, nil
 		}

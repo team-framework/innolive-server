@@ -937,6 +937,130 @@ func TestCollectStartupFramesTimesOut(t *testing.T) {
 	}
 }
 
+// markedCameraFrame은 슬레이트를 바탕으로 한 바이트만 바꾼 JPEG 카메라 프레임이다.
+// 어떤 프레임이 FFmpeg에 쓰였는지 구분하려고 쓴다.
+func markedCameraFrame(t *testing.T, e *RTMPEgress, mark byte) []byte {
+	t.Helper()
+	slate, err := e.cancellationSlate(320, 180)
+	if err != nil {
+		t.Fatalf("cancellationSlate: %v", err)
+	}
+	camera := append([]byte(nil), slate.data...)
+	camera[len(camera)/2] ^= mark
+	return camera
+}
+
+// waitWritten은 writer에 value가 쓰일 때까지 기다린다.
+func waitWritten(t *testing.T, writer *recordingWriteCloser, value []byte) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for !writer.contains(value) {
+		select {
+		case <-deadline:
+			t.Fatalf("frame was not written: writes=%d", writer.count())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// FFmpeg 시작이 실패하면 재연결을 기다리는 동안 시작 프레임이 오래된다. 다시
+// 시작한 FFmpeg에는 그 프레임 대신 새로 들어온 프레임을 써야 한다(#534).
+func TestRunDropsStartupFramesAfterStartFailure(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	e.reconnectPolicy = reconnectPolicy{
+		maxAttempts: 3,
+		maxElapsed:  time.Second,
+		minBackoff:  20 * time.Millisecond,
+		maxBackoff:  20 * time.Millisecond,
+	}
+	stale := markedCameraFrame(t, e, 0x01)
+	fresh := markedCameraFrame(t, e, 0x02)
+	writer := &recordingWriteCloser{}
+	var starts atomic.Int32
+	e.startProcess = func(ctx context.Context, _ uint16, _ uint16, _ int) (*ffmpegProcess, error) {
+		if starts.Add(1) == 1 {
+			return nil, errors.New("spawn failed")
+		}
+		command := exec.CommandContext(ctx, "sleep", "10")
+		if err := command.Start(); err != nil {
+			return nil, err
+		}
+		return &ffmpegProcess{cmd: command, stdin: writer, metrics: e.metrics}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	for index := 0; index < egressMeasureFrames; index++ {
+		e.input <- frame{data: stale, timestamp: uint32(index * 1500), width: 320, height: 180}
+	}
+	deadline := time.After(2 * time.Second)
+	for starts.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("FFmpeg was not restarted: starts=%d", starts.Load())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	e.input <- frame{data: fresh, timestamp: 1, width: 320, height: 180}
+	waitWritten(t, writer, fresh)
+	if writer.contains(stale) {
+		t.Fatal("restarted FFmpeg received startup frames collected before the failed start")
+	}
+}
+
+// 익명화 설정이 바뀌기 전에 처리돼 큐에 남은 프레임은 바뀐 뒤에 송출하지 않는다.
+// 세대가 0인 프레임은 처리 도중 설정이 바뀐 프레임이라 역시 버린다(#534).
+func TestWriteFramesDropsFramesFromInvalidatedPrivacyGeneration(t *testing.T) {
+	e := newTestEgress(config.WireFormatJPEG, "rtmp://a.rtmp.youtube.com/live2/secretkey")
+	startup := markedCameraFrame(t, e, 0x01)
+	stale := markedCameraFrame(t, e, 0x02)
+	changing := markedCameraFrame(t, e, 0x04)
+	fresh := markedCameraFrame(t, e, 0x08)
+	writer := &recordingWriteCloser{}
+	e.startProcess = func(ctx context.Context, _ uint16, _ uint16, _ int) (*ffmpegProcess, error) {
+		command := exec.CommandContext(ctx, "sleep", "10")
+		if err := command.Start(); err != nil {
+			return nil, err
+		}
+		return &ffmpegProcess{cmd: command, stdin: writer, metrics: e.metrics}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	for index := 0; index < egressMeasureFrames; index++ {
+		e.input <- frame{data: startup, timestamp: uint32(index * 1500), width: 320, height: 180, privacyGeneration: 5}
+	}
+	waitWritten(t, writer, startup)
+
+	e.InvalidateHeldFrame(6)
+	e.input <- frame{data: stale, timestamp: 1, width: 320, height: 180, privacyGeneration: 5}
+	e.input <- frame{data: changing, timestamp: 2, width: 320, height: 180}
+	e.input <- frame{data: fresh, timestamp: 3, width: 320, height: 180, privacyGeneration: 6}
+	waitWritten(t, writer, fresh)
+	if writer.contains(stale) {
+		t.Fatal("frame processed before the privacy change was written after it")
+	}
+	if writer.contains(changing) {
+		t.Fatal("frame processed during the privacy change was written after it")
+	}
+}
+
 func TestRunStopsAfterReconnectBudgetExhausted(t *testing.T) {
 	e := newTestEgress(config.WireFormatJPEG, "rtmp://host/live2/secret-key")
 	e.reconnectPolicy = reconnectPolicy{

@@ -81,11 +81,13 @@ func TestInputGapUsesSlateWhenFrameCannotBeHeld(t *testing.T) {
 		name       string
 		generation uint64
 		invalidate uint64
+		// dropped는 프레임 자체도 쓰지 않는 경우다(#534).
+		dropped bool
 	}{
 		// 처리 도중 익명화 설정이 바뀐 프레임.
 		{name: "changed while processing", generation: 0},
-		// 익명화 설정이 바뀌기 전에 처리된 프레임.
-		{name: "processed before setting change", generation: 1, invalidate: 2},
+		// 익명화 설정이 바뀌기 전에 처리된 프레임. 바뀐 뒤에는 한 번도 쓰지 않는다.
+		{name: "processed before setting change", generation: 1, invalidate: 2, dropped: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			e, camera, slate := newGapTestEgress(t)
@@ -93,6 +95,12 @@ func TestInputGapUsesSlateWhenFrameCannotBeHeld(t *testing.T) {
 			writer := runGapWriteFrames(t, e, []frame{{data: camera, width: 320, height: 180, privacyGeneration: test.generation}}, 200*time.Millisecond)
 
 			kinds := writer.kinds(camera, slate)
+			if test.dropped {
+				if len(kinds) == 0 || bytes.ContainsAny([]byte(kinds), "c?") {
+					t.Fatalf("writes = %q, want slate only", kinds)
+				}
+				return
+			}
 			if len(kinds) < 2 || kinds[0] != 'c' || bytes.ContainsAny([]byte(kinds[1:]), "c?") {
 				t.Fatalf("writes = %q, want one camera frame then slate only", kinds)
 			}

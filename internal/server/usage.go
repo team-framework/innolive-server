@@ -61,10 +61,13 @@ type usageResponse struct {
 	UsedSeconds      int64  `json:"used_seconds"`
 	RemainingSeconds *int64 `json:"remaining_seconds"`
 	// device_*는 온디바이스 시간(유닛-시간)이다(#469). null이면 무제한이다.
-	DeviceLimitSeconds     *int64                   `json:"device_limit_seconds"`
-	DeviceUsedSeconds      int64                    `json:"device_used_seconds"`
-	DeviceRemainingSeconds *int64                   `json:"device_remaining_seconds"`
-	Broadcasts             []usageBroadcastResponse `json:"broadcasts"`
+	DeviceLimitSeconds     *int64 `json:"device_limit_seconds"`
+	DeviceUsedSeconds      int64  `json:"device_used_seconds"`
+	DeviceRemainingSeconds *int64 `json:"device_remaining_seconds"`
+	// DeviceLocalSeconds는 device_used_seconds 중 iOS 로컬 모드 촬영 시간이다.
+	// 로컬 촬영은 broadcasts에 넣지 않는다.
+	DeviceLocalSeconds int64                    `json:"device_local_seconds"`
+	Broadcasts         []usageBroadcastResponse `json:"broadcasts"`
 	// AvailableByMode는 서버 송출 방식별 실제 방송 가능 시간이다(#276). 월 잔여만 반영한다.
 	AvailableByMode []modeAvailability `json:"available_by_mode"`
 	// MaxPerBroadcastSeconds는 1회 최대 방송 시간이다. 월 잔여가 많아도 한 번에 이보다
@@ -138,6 +141,11 @@ func (s *Server) handleGetMyUsage(w http.ResponseWriter, r *http.Request) {
 
 	response := usageResponse{Month: from.Format("2006-01"), Plan: string(owner), Broadcasts: []usageBroadcastResponse{}}
 	for _, charge := range charges {
+		if charge.Local {
+			response.DeviceUsedSeconds += int64(charge.Charged.Seconds())
+			response.DeviceLocalSeconds += int64(charge.Charged.Seconds())
+			continue
+		}
 		processing := session.AIProcessingServer
 		if charge.OnDevice {
 			processing = session.AIProcessingOnDevice

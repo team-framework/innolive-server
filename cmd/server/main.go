@@ -569,7 +569,10 @@ func main() {
 	// 세션 생성이 소유자 플랜을 싣고, 플랜 조회·관리자 지정 라우트가 붙는다(#270).
 	application.SetPlanStore(auth.NewPlanStore(databaseConnection.DB))
 	// 월 방송 시간 사용 내역(#274). 월 한도가 플랜에서 오므로 플랜 저장소 뒤에 붙인다.
-	application.SetUsageLedger(usage.NewLedger(databaseConnection.DB))
+	usageLedger := usage.NewLedger(databaseConnection.DB)
+	application.SetUsageLedger(usageLedger)
+	// iOS 로컬 모드 촬영 시간 업로드. 온디바이스 월 사용량에 합산한다.
+	application.SetLocalTakeRecorder(usageLedger)
 	// 온디바이스 직접 송출 하트비트(#434).
 	application.SetHeartbeatStore(usage.NewHeartbeatStore(databaseConnection.DB))
 	// 직접 송출 종료 시 플랫폼 실제 방송 시각 대조(#437).

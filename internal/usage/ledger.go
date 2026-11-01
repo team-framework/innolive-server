@@ -158,8 +158,10 @@ type SessionCharge struct {
 	Providers  []string
 	// OnDevice는 온디바이스 처리 세션이다. 서버 시간과 따로 센다(#469).
 	OnDevice bool
-	OnAir    time.Duration
-	Charged  time.Duration
+	// Local은 서버 세션 없이 기기에 저장한 로컬 촬영이다. SessionID가 take_id다.
+	Local   bool
+	OnAir   time.Duration
+	Charged time.Duration
 }
 
 // Ledger는 사용자의 월 방송 시간을 계산한다.
@@ -173,6 +175,7 @@ func NewLedger(db *gorm.DB) *Ledger {
 
 // Month는 userID의 [from, to) 안 방송들을 차감과 함께 돌려준다. 라이브로 가지
 // 않은 세션(차감 0)은 빠진다. 해상도 기록이 없는 행(#271 이전·백필)은 720p로 본다.
+// 로컬 촬영은 세션 뒤에 붙는다.
 func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time.Time) ([]SessionCharge, error) {
 	db := l.db.WithContext(ctx)
 	var sessions []Session
@@ -181,7 +184,7 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 		return nil, fmt.Errorf("read usage sessions: %w", err)
 	}
 	if len(sessions) == 0 {
-		return nil, nil
+		return l.localTakeCharges(ctx, userID, from, to)
 	}
 	sessionIDs := make([]uuid.UUID, len(sessions))
 	for i, s := range sessions {
@@ -249,5 +252,9 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 		sort.Strings(providers)
 		charges = append(charges, SessionCharge{SessionID: s.ID, StartedAt: s.StartedAt, Resolution: resolution, Providers: providers, OnDevice: onDevice, OnAir: onAir, Charged: charged})
 	}
-	return charges, nil
+	local, err := l.localTakeCharges(ctx, userID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return append(charges, local...), nil
 }

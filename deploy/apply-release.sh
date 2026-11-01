@@ -72,11 +72,13 @@ active_sessions() {
 
 control_post() {
   # control_post <slot> <path> <json> — 응답 본문은 상세 로그에만 남기고 HTTP 코드를 출력한다
+  # 토큰은 ps로 보이는 curl 인자 대신 stdin(-H @-)으로 넘긴다.
   local token
   token="$(sed -n 's/^AI_CONTROL_TOKEN=//p' "${SERVER_ENV}" | tail -1)"
   curl -sS -o >(cat >>"${DETAIL_LOG}") -w '%{http_code}' --max-time 330 \
-    -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
-    --data "$3" "http://$(control_addr "$1")$2" 2>>"${DETAIL_LOG}" || echo 000
+    -H @- -H 'Content-Type: application/json' \
+    --data "$3" "http://$(control_addr "$1")$2" 2>>"${DETAIL_LOG}" \
+    <<<"Authorization: Bearer ${token}" || echo 000
 }
 
 # switch_caddy <port> — Caddy가 미디어 서버로 보내는 업스트림 포트를 바꾼다. Caddyfile은

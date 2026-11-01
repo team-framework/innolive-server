@@ -1672,16 +1672,23 @@ func allTargetsPausedLocked(s *Session) bool {
 func allTargetsPaused(phases []media.EgressPhase) bool {
 	paused := 0
 	for _, phase := range phases {
-		switch phase {
-		case media.EgressPhaseStopped:
+		switch {
+		case phase == media.EgressPhaseStopped:
 			continue
-		case media.EgressPhasePaused, media.EgressPhasePausedReconnecting:
+		case egressSuspendsAIInput(phase):
 			paused++
 		default:
 			return false
 		}
 	}
 	return paused > 0
+}
+
+// egressSuspendsAIInput은 대상이 처리 프레임 없이 버티는 일시 중지 단계인지다.
+// AI 입력 차단(allTargetsPaused)과 입력 없음 판정(BroadcastActivity)이 같은
+// 기준을 써야 한다 — 끊긴 동안에는 프레임이 없어 입력 없음으로 오판한다.
+func egressSuspendsAIInput(phase media.EgressPhase) bool {
+	return phase == media.EgressPhasePaused || phase == media.EgressPhasePausedReconnecting
 }
 
 // ResumeStream은 일시 중단된 egress를 다시 실제 영상 상태로 표시한다. 같은

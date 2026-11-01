@@ -69,6 +69,7 @@ func (s *Session) restartMediaIdleClock(at time.Time) {
 
 // BroadcastActivity는 라이브인 송출 대상과 그중 멈추지 않은 수다. 모든 대상이
 // 멈추면 AI 입력도 멈추므로, 입력 없음 판정은 멈추지 않은 대상이 있을 때만 한다.
+// 멈춤의 기준은 AI 입력 차단과 같다(egressSuspendsAIInput).
 func (s *Session) BroadcastActivity() (live []string, unpaused int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -81,7 +82,7 @@ func (s *Session) BroadcastActivity() (live []string, unpaused int) {
 			continue
 		}
 		live = append(live, provider)
-		if phase != media.EgressPhasePaused && phase != media.EgressPhasePausedReconfiguring {
+		if !egressSuspendsAIInput(phase) {
 			unpaused++
 		}
 	}

@@ -470,6 +470,15 @@ func (m *Manager) endDirectUsageLocked(s *Session, t *streamTarget, reason strin
 	t.usageID = ""
 }
 
+// endDirectUsages는 세션의 직접 송출 세대를 모두 닫는다.
+func (m *Manager) endDirectUsages(s *Session, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.targets {
+		m.endDirectUsageLocked(s, t, reason)
+	}
+}
+
 // SetDirectBroadcastEnded는 직접 송출 세대가 닫힐 때 부를 훅을 등록한다(#437).
 // 서버가 플랫폼의 실제 방송 시각을 읽어 실사용 기록과 대조한다. 서버 조립 직후
 // 한 번만 호출한다.
@@ -1105,6 +1114,9 @@ func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uui
 	}
 
 	for _, liveSession := range sessions {
+		// 직접 송출 세대는 egress가 없어 서버가 닫는다. 방송을 떼어내기 전에 닫아야
+		// 플랫폼 시각 대조(#437)가 방송 정보를 받는다(P1-35).
+		m.endDirectUsages(liveSession, "user_withdrawal")
 		taken := takeWithdrawalBroadcasts(liveSession)
 		liveSession.close("user_withdrawal", m.logger)
 		m.recordSessionEnded(liveSession, "user_withdrawal")

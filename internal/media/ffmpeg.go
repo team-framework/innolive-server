@@ -26,6 +26,8 @@ const (
 	// ffmpegShutdownGrace는 teardown이 FFmpeg의 자체 종료(stdin EOF 또는
 	// SIGINT)를 얼마나 기다린 뒤 SIGKILL로 넘어갈지를 정한다.
 	ffmpegShutdownGrace = 2 * time.Second
+	// stderrDrainWait은 close가 Wait 전에 stderr 끝을 기다리는 상한이다.
+	stderrDrainWait = 250 * time.Millisecond
 	// decoderStallTimeout은 디코더가 출력 없이 입력만 받아 메타데이터 큐(64)가 찬
 	// 채로 버티는 상한이다. 디코더는 입력 하나에 출력 하나를 가정하는데, 패킷
 	// 손실 뒤 FFmpeg가 프레임을 내지 않으면 큐가 차고 쓰기·읽기가 서로를 기다려
@@ -691,10 +693,14 @@ func (p *ffmpegProcess) close() {
 		started := time.Now()
 		done := make(chan error, 1)
 		go func() {
-			// stderr를 다 읽은 뒤에 Wait한다. 프로세스가 끝나지 않으면 아래
-			// 타이머의 kill이 stderr를 닫아 이 대기를 푼다.
+			// stderr를 다 읽은 뒤에 Wait한다. Wait가 파이프를 닫으면 남은 마지막
+			// 오류 줄을 잃는다. 다만 FFmpeg가 띄운 자식이 stderr를 물려받아 쥐고
+			// 있으면 EOF가 오지 않으므로 오래 기다리지 않는다.
 			if p.stderrDone != nil {
-				<-p.stderrDone
+				select {
+				case <-p.stderrDone:
+				case <-time.After(stderrDrainWait):
+				}
 			}
 			done <- p.cmd.Wait()
 		}()

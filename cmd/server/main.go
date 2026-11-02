@@ -737,9 +737,13 @@ func main() {
 		}
 	}
 
+	// HTTP 종료는 짧게 끊는다. 대기열 SSE 같은 긴 연결은 스스로 끝나지 않아 Shutdown이
+	// 기한을 다 쓰고, 그 뒤 세션 정리(플랫폼 방송 종료·사용 기록)가 정지 유예를 넘겨
+	// SIGKILL을 맞는다(P1-25). 기한이 지나면 남은 연결을 닫는다. 정지 유예는
+	// compose.prod.yaml의 stop_grace_period다.
 	shutdownContext, cancel := context.WithTimeout(
 		context.Background(),
-		10*time.Second,
+		5*time.Second,
 	)
 	defer cancel()
 
@@ -747,10 +751,11 @@ func main() {
 		_ = controlServer.Shutdown(shutdownContext)
 	}
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
-		logger.Error(
-			"graceful HTTP shutdown failed",
+		logger.Warn(
+			"graceful HTTP shutdown timed out; closing remaining connections",
 			"error", err,
 		)
+		_ = httpServer.Close()
 	}
 }
 

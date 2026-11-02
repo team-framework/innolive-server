@@ -53,6 +53,9 @@ const (
 // 돌려준다.
 var errImageTooLarge = errors.New("image exceeds decode limits")
 
+// errImageUndecodable은 서버가 이미지를 디코드하지 못할 때 downscaleForAI가 돌려준다.
+var errImageUndecodable = errors.New("image cannot be decoded")
+
 // decodeGate는 프로세스 전체에서 동시에 디코드하는 업로드 이미지 수를 제한한다.
 // 디코드마다 전체 비트맵(maxDecodePixels 이하)을 잠시 할당하므로, 제한이 없으면
 // 동시 업로드가 그 메모리를 쌓아 실시간 미디어 경로를 굶긴다. 토큰은 디코드
@@ -90,23 +93,24 @@ func (g *decodeGate) release() {
 }
 
 // downscaleForAI는 업로드한 얼굴 이미지의 긴 변이 maxAIFaceEdge 이하가 되도록
-// 줄여 JPEG로 다시 인코딩한다. 이미 한계 안이거나 여기서 디코드하지 못한
-// 이미지는 그대로 돌려줘 AI 워커가 자체 검증과 오류 보고를 하게 한다. 헤더가
+// 줄여 JPEG로 다시 인코딩한다. 이미 한계 안인 이미지는 그대로 돌려준다. 헤더가
 // 알린 크기가 maxDecodeEdge/maxDecodePixels를 넘으면 전체 비트맵을 디코드하기
-// 전에 errImageTooLarge로 거절한다.
+// 전에 errImageTooLarge로, 디코드하지 못하면 errImageUndecodable로 거절한다 —
+// 워커에 넘기기 전에 거절해야 교체 업로드가 이전 얼굴을 건드리지 않는다.
 func downscaleForAI(data []byte) ([]byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return data, nil
+		return nil, errImageUndecodable
 	}
 	if cfg.Width > maxDecodeEdge || cfg.Height > maxDecodeEdge || cfg.Width*cfg.Height > maxDecodePixels {
 		return nil, errImageTooLarge
 	}
-	if cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge {
-		return data, nil
-	}
+	// 헤더만 멀쩡하고 본문이 잘린 파일도 거르도록 작은 이미지도 끝까지 디코드한다.
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
+		return nil, errImageUndecodable
+	}
+	if cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge {
 		return data, nil
 	}
 	b := src.Bounds()
@@ -400,8 +404,12 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		}
 		scaled, err := downscaleForAI(data)
 		s.referenceDecode.release()
-		if err != nil {
+		if errors.Is(err, errImageTooLarge) {
 			writeError(w, badRequest("이미지 크기가 너무 큽니다.", map[string]any{"reason": "image_too_large", "max_edge": maxDecodeEdge, "max_pixels": maxDecodePixels}))
+			return
+		}
+		if err != nil {
+			writeError(w, apiError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "이미지를 읽을 수 없습니다."})
 			return
 		}
 		prepared = append(prepared, preparedFace{faceID: uuid.NewString(), data: scaled})

@@ -7,6 +7,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"inno-live-server/internal/media"
+
 	"github.com/google/uuid"
 )
 
@@ -372,12 +374,15 @@ func (m *Manager) CompleteGoLive(id string, providers ...string) (aborted bool, 
 	if t.platformBroadcast != nil {
 		broadcast = *t.platformBroadcast
 	}
-	if s.closed || t.goLiveStopRequested {
+	// 전환 왕복 중에 egress가 끝났으면 runEgress는 방송을 정리하지 않고 넘겼다.
+	// live로 올리면 송출 없는 live에 갇히므로 중지와 같이 끝낸다(P1-8).
+	egressEnded := t.egress != nil && t.egress.Status().Phase == media.EgressPhaseStopped
+	if s.closed || t.goLiveStopRequested || (egressEnded && t.phase == BroadcastPhaseGoingLive) {
 		t.platformBroadcast = nil
 		t.phase = BroadcastPhaseIdle
 		t.goLiveStopRequested = false
 		s.UpdatedAt = time.Now().UTC()
-		m.logger.Info("go live aborted by stop", "session_id", s.ID, "broadcast_id", broadcast.BroadcastID)
+		m.logger.Info("go live aborted by stop", "session_id", s.ID, "broadcast_id", broadcast.BroadcastID, "egress_ended", egressEnded)
 		return true, broadcast, nil
 	}
 	if t.phase != BroadcastPhaseGoingLive {

@@ -81,6 +81,9 @@ func (r heartbeatRequest) missingField() string {
 // handleHeartbeat은 온디바이스 직접 송출 중인 앱의 상태 보고를 받는다(#434).
 // 연결된 대상이 있는 보고가 입력 없음 시계를 연다(#436). 응답은 세션의 알림과 남은
 // 시간을 함께 실어 앱이 세션을 따로 조회하지 않게 한다.
+// heartbeatMinRecordInterval은 한 세션의 하트비트를 저장하는 최소 간격이다.
+const heartbeatMinRecordInterval = 2 * time.Second
+
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	if liveSession.AIProcessing != session.AIProcessingOnDevice {
 		writeError(w, heartbeatNotApplicable(liveSession.ID, "Heartbeats are only accepted for on-device sessions."))
@@ -136,6 +139,12 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, liveSes
 	// 연결된 대상이 없는 보고는 송출 중이 아니므로 시계를 열지 않는다.
 	if connected > 0 {
 		liveSession.MarkHeartbeat(heartbeat.ReceivedAt)
+	}
+	// 저장은 간격을 둔다. 몰아 보낸 보고가 보존 기간 없는 표에 그대로 쌓이면 안
+	// 된다(P1-33). 응답(종료 대상·알림)은 매번 돌려준다.
+	if !liveSession.AllowHeartbeatRecord(heartbeat.ReceivedAt, heartbeatMinRecordInterval) {
+		writeHeartbeatResponse(w, liveSession, liveSession.TakeDirectStops())
+		return
 	}
 	if err := s.heartbeats.SaveHeartbeat(r.Context(), heartbeat); err != nil {
 		s.logger.Error("save heartbeat failed", "session_id", liveSession.ID, "error", err)

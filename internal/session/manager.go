@@ -292,6 +292,8 @@ type Session struct {
 	// 라이브 전환에서도 다시 시작한다 — 첫 하트비트 전의 공백을 입력 없음으로
 	// 보지 않는다.
 	heartbeatNano atomic.Int64
+	// heartbeatRecordedNano는 마지막으로 저장한 하트비트를 받은 시각이다(P1-33).
+	heartbeatRecordedNano atomic.Int64
 	// directStops는 서버가 끝낸 직접 송출 대상과 사유다(#436). 앱만 연결을 끊을
 	// 수 있으므로 다음 하트비트 응답으로 넘기고 비운다. Session.mu로 보호한다.
 	directStops map[string]string

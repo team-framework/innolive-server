@@ -112,26 +112,44 @@ func (s *Server) handOffSession(ctx context.Context, target *url.URL, id string,
 		select {
 		case <-time.After(handoffBusyRetryInterval):
 		case <-ctx.Done():
-			return ctx.Err()
+			return session.SessionSnapshot{}, ctx.Err()
 		}
 	}
-	if err != nil {
-		return err
-	}
-	if err := s.postSessionImport(ctx, target, snapshot, commit); err != nil {
-		return err
-	}
-	if !commit {
-		return nil
-	}
-	return s.sessions.DetachSession(id)
+	return snapshot, err
 }
+
+// handoffClient는 이관 import 전용 클라이언트다. 스냅샷에는 스트림 키가 들어
+// 있으므로 리다이렉트를 따라가 검증하지 않은 주소로 본문을 다시 보내지 않는다(P1-41).
+var handoffClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// handoffCommitAttempts는 확정 import를 보내는 횟수다. 새 프로세스가 처리한 뒤
+// 응답만 유실되면 옛 프로세스가 세션을 놓지 않아 양쪽에 남는다(P1-41). 확정 import는
+// 다시 보내도 같은 결과(이미 확정된 세션은 그대로 확정)라 전송 오류면 다시 보낸다.
+const handoffCommitAttempts = 2
 
 func (s *Server) postSessionImport(ctx context.Context, target *url.URL, snapshot session.SessionSnapshot, commit bool) error {
 	body, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
+	attempts := 1
+	if commit {
+		attempts = handoffCommitAttempts
+	}
+	for attempt := 1; ; attempt++ {
+		retry, err := s.sendSessionImport(ctx, target, body, commit)
+		if err == nil || !retry || attempt >= attempts || ctx.Err() != nil {
+			return err
+		}
+		s.logger.Warn("session import response was lost; retrying", "session_id", snapshot.ID, "attempt", attempt, "error", err)
+	}
+}
+
+// sendSessionImport는 import 한 번을 보낸다. retry는 응답을 받지 못한 전송 오류라
+// 결과를 모른다는 뜻이다.
+func (s *Server) sendSessionImport(ctx context.Context, target *url.URL, body []byte, commit bool) (retry bool, err error) {
 	endpoint := target.JoinPath("sessions", "import")
 	if commit {
 		endpoint.RawQuery = "commit=true"
@@ -140,20 +158,20 @@ func (s *Server) postSessionImport(ctx context.Context, target *url.URL, snapsho
 	defer cancel()
 	request, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
-		return err
+		return false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+s.cfg.AIControlToken)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := handoffClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("post session import: %w", err)
+		return true, fmt.Errorf("post session import: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return fmt.Errorf("session import returned %d: %s", response.StatusCode, bytes.TrimSpace(detail))
+		return false, fmt.Errorf("session import returned %d: %s", response.StatusCode, bytes.TrimSpace(detail))
 	}
-	return nil
+	return false, nil
 }
 
 // maxSessionSnapshotBytes는 세션 스냅샷 하나의 상한이다. 설정·방송 상태뿐이라 수 KB다.

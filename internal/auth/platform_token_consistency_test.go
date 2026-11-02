@@ -213,3 +213,27 @@ func TestChzzkRejectedRotationRetriesWithTokenRotatedElsewhere(t *testing.T) {
 		t.Fatalf("refresh calls used %v, want rt-1 then rt-2", used)
 	}
 }
+
+// 거절된 access token을 버리면 다음 호출은 캐시 대신 refresh token으로 새로 받는다
+// (P1-15). 다른 값의 토큰은 건드리지 않는다.
+func TestYouTubeInvalidateAccessTokenForcesRefresh(t *testing.T) {
+	cipher := testProviderTokenCipher(t)
+	store := newMemoryStreamingAccountStore()
+	userID := youTubeAccountWithToken(t, store, cipher, "rt-valid")
+	oauth := &stubYouTubeAuthorizer{refreshToken: YouTubeTokenResponse{AccessToken: "at-1", ExpiresIn: 3600}}
+	provider, err := NewYouTubeAccessTokenProvider(oauth, store, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.AccessToken(context.Background(), userID); err != nil {
+		t.Fatal(err)
+	}
+	provider.InvalidateAccessToken("some-other-token")
+	if _, err := provider.AccessToken(context.Background(), userID); err != nil || oauth.refreshCalls.Load() != 1 {
+		t.Fatalf("unrelated invalidation forced a refresh (calls %d, err %v)", oauth.refreshCalls.Load(), err)
+	}
+	provider.InvalidateAccessToken("at-1")
+	if _, err := provider.AccessToken(context.Background(), userID); err != nil || oauth.refreshCalls.Load() != 2 {
+		t.Fatalf("refresh calls after invalidation = %d (err %v), want 2", oauth.refreshCalls.Load(), err)
+	}
+}

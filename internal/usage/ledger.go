@@ -150,6 +150,48 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 
+// broadcastEnd는 송출 행의 끝과 unclean 여부를 정한다(P0-10). 종료 이벤트가
+// 유실돼 열린 송출은 세션이 끝났다면 세션 종료 시각에서 자른다 — 그러지 않으면
+// 지금까지 계속 차감한다. 프로세스가 죽어 unclean으로 마감된 송출은 앱이 보낸 마지막
+// 하트비트(온디바이스 직접 송출)까지로 본다. 둘 다 없으면 끝난 시각을 모르므로
+// unclean으로 남겨 차감하지 않는다.
+func broadcastEnd(b Broadcast, s Session, lastHeartbeat map[uuid.UUID]time.Time) (*time.Time, bool) {
+	if b.EndedAt != nil {
+		return b.EndedAt, false
+	}
+	if s.EndedAt != nil {
+		return s.EndedAt, false
+	}
+	if b.EndReason == nil {
+		return nil, false
+	}
+	if last, ok := lastHeartbeat[s.ID]; ok {
+		return &last, false
+	}
+	return nil, true
+}
+
+// lastHeartbeats는 세션마다 마지막으로 받은 하트비트 시각이다.
+func (l *Ledger) lastHeartbeats(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
+	last := map[uuid.UUID]time.Time{}
+	if len(sessionIDs) == 0 {
+		return last, nil
+	}
+	var rows []struct {
+		SessionID  uuid.UUID
+		ReceivedAt time.Time
+	}
+	if err := l.db.WithContext(ctx).Model(&Heartbeat{}).
+		Select("session_id, MAX(received_at) AS received_at").
+		Where("session_id IN ?", sessionIDs).Group("session_id").Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("read usage heartbeats: %w", err)
+	}
+	for _, row := range rows {
+		last[row.SessionID] = row.ReceivedAt
+	}
+	return last, nil
+}
+
 // SessionCharge는 사용 내역의 한 줄(방송 한 번 = 세션 하나)이다.
 type SessionCharge struct {
 	SessionID  uuid.UUID
@@ -218,8 +260,16 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 		switchesBySession[c.SessionID] = append(switchesBySession[c.SessionID], ResolutionSwitch{At: c.ChangedAt, FHD: c.Resolution == "fhd"})
 	}
 	bySession := map[uuid.UUID][]Broadcast{}
+	var uncleanSessions []uuid.UUID
 	for _, b := range broadcasts {
 		bySession[b.SessionID] = append(bySession[b.SessionID], b)
+		if b.EndedAt == nil && b.EndReason != nil {
+			uncleanSessions = append(uncleanSessions, b.SessionID)
+		}
+	}
+	lastHeartbeat, err := l.lastHeartbeats(ctx, uncleanSessions)
+	if err != nil {
+		return nil, err
 	}
 
 	var charges []SessionCharge
@@ -232,10 +282,11 @@ func (l *Ledger) Month(ctx context.Context, userID uuid.UUID, from, to, now time
 		providers := []string{}
 		seen := map[string]bool{}
 		for _, b := range bySession[s.ID] {
+			endedAt, unclean := broadcastEnd(b, s, lastHeartbeat)
 			timelines = append(timelines, TargetTimeline{
 				LiveAt:              *b.LiveAt,
-				EndedAt:             b.EndedAt,
-				Unclean:             b.EndedAt == nil && b.EndReason != nil,
+				EndedAt:             endedAt,
+				Unclean:             unclean,
 				Pauses:              pausesByBroadcast[b.ID],
 				LegacyPausedSeconds: b.PausedSeconds,
 			})

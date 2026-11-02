@@ -340,6 +340,16 @@ func (s *referenceStore) storedFaces() map[string][]referenceFace {
 	return faces
 }
 
+// restoreClientLocked는 저장하지 못한 clientID의 변경을 되돌린다. 호출자가 s.mu를
+// 쓰기로 쥐고 있어야 한다.
+func (s *referenceStore) restoreClientLocked(clientID string, faces []referenceFace, had bool) {
+	if had {
+		s.faces[clientID] = faces
+	} else {
+		delete(s.faces, clientID)
+	}
+}
+
 // clientFaces는 클라이언트 얼굴 기록의 사본이다.
 func (s *referenceStore) clientFaces(clientID string) []referenceFace {
 	s.mu.RLock()
@@ -566,6 +576,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.references.mu.Lock()
+	before, hadBefore := s.references.faces[clientID]
+	before = slices.Clone(before) // 다시 등록은 기록을 제자리에서 고친다
 	switch {
 	case reregisterID != "":
 		faces := s.references.faces[clientID]
@@ -589,7 +601,19 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	default:
 		s.references.faces[clientID] = append(s.references.faces[clientID], registered...)
 	}
-	_ = s.references.save(clientID)
+	if err := s.references.save(clientID); err != nil {
+		// 저장하지 못한 등록을 성공으로 알리면 재시작 뒤 응답과 다른 목록이 복원된다.
+		s.references.restoreClientLocked(clientID, before, hadBefore)
+		s.references.mu.Unlock()
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "error", err)
+		s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+		if replace || reregisterID != "" {
+			// 이전 엔트리는 이미 지웠다. 되돌린 기록의 재등록 표시는 대조가 정한다.
+			s.RequestReferenceFaceCheck()
+		}
+		writeError(w, internalError())
+		return
+	}
 	s.references.mu.Unlock()
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
@@ -642,10 +666,13 @@ func (s *Server) clearReferenceFaces(w http.ResponseWriter, r *http.Request, cli
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}
-	s.references.mu.Lock()
-	delete(s.references.faces, clientID)
-	_ = s.references.save(clientID)
-	s.references.mu.Unlock()
+	// 저장하지 못하면 기록을 되돌리고 실패로 알린다. 워커 쪽 삭제는 다시 해도 같아
+	// 재시도로 맞춘다.
+	if err := s.references.deleteClient(clientID); err != nil {
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "error", err)
+		writeError(w, internalError())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -688,6 +715,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.references.mu.Lock()
+	before := slices.Clone(s.references.faces[clientID])
 	remaining := s.references.faces[clientID][:0]
 	for _, f := range s.references.faces[clientID] {
 		if f.FaceID != faceID {
@@ -699,8 +727,17 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	} else {
 		s.references.faces[clientID] = remaining
 	}
-	_ = s.references.save(clientID)
+	err := s.references.save(clientID)
+	if err != nil {
+		// 워커 쪽 삭제는 다시 해도 같아(이미 없는 엔트리는 지운 것으로 친다) 재시도로 맞춘다.
+		s.references.restoreClientLocked(clientID, before, true)
+	}
 	s.references.mu.Unlock()
+	if err != nil {
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "face_id", faceID, "error", err)
+		writeError(w, internalError())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -761,8 +798,8 @@ func (s *referenceStore) deleteClient(clientID string) error {
 	previous, hadPrevious := s.faces[clientID]
 	delete(s.faces, clientID)
 	err := s.save(clientID)
-	if err != nil && hadPrevious {
-		s.faces[clientID] = previous
+	if err != nil {
+		s.restoreClientLocked(clientID, previous, hadPrevious)
 	}
 	s.mu.Unlock()
 	return err

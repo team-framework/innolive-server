@@ -85,9 +85,6 @@ func (m *Manager) aiWorkerMoves(now time.Time) ([]aiWorkerMove, time.Duration) {
 // 세션 슬롯을 통하므로 끊기지 않는다(#83). 재시작 사이에는 egress가 마지막 프레임(잠긴
 // 동안의 블러 프레임)을 채운다.
 func (m *Manager) moveVideoPipelineOffAIWorker(s *Session, from string) {
-	s.resolutionMu.Lock()
-	defer s.resolutionMu.Unlock()
-
 	s.mu.Lock()
 	// 기다리는 사이 세션이 닫혔거나, 파이프라인이 이미 다른 워커로 갔거나, 방금 옮겼으면
 	// 할 일이 없다.
@@ -98,6 +95,9 @@ func (m *Manager) moveVideoPipelineOffAIWorker(s *Session, from string) {
 	s.aiMovedAt = time.Now()
 	s.mu.Unlock()
 
+	// 스트림 전환은 파이프라인을 다시 띄우지 않으므로 해상도 잠금 없이 한다. 새 워커
+	// 예열을 최대 aiSwitchTimeout 기다리는데, 그동안 해상도 전환을 막으면 송출 공백이
+	// 길어진다(P2-11). 배포의 SwitchSessionsOffAIWorker도 같은 이유로 잠그지 않는다.
 	moved, err := m.switchSessionAIWorker(context.Background(), s, from, "")
 	if moved {
 		return
@@ -107,6 +107,8 @@ func (m *Manager) moveVideoPipelineOffAIWorker(s *Session, from string) {
 			"session_id", s.ID, "from_target", from, "error", err)
 	}
 
+	s.resolutionMu.Lock()
+	defer s.resolutionMu.Unlock()
 	s.mu.Lock()
 	track, done := s.videoTrack, s.pipelineDone
 	// 다른 경로가 다시 띄우는 중이면 할 일이 없다.

@@ -711,7 +711,26 @@ func (e *RTMPEgress) resetReconnectStatus() {
 // 제거한다. RTMP endpoint가 오류 문구를 그대로 되돌려도 API 응답으로 비밀값이
 // 나가지 않게 한다.
 func (e *RTMPEgress) sanitizeError(cause error) string {
-	return strings.ReplaceAll(cause.Error(), e.outputURL, maskStreamKey(e.outputURL))
+	message := strings.ReplaceAll(cause.Error(), e.outputURL, maskStreamKey(e.outputURL))
+	// 오류가 URL 전체를 싣지 않고 다른 호스트의 URL이나 키만 실을 수 있다. 키 자체도
+	// 가린다(P1-24). 너무 짧은 마지막 경로(예: "live")는 키가 아니라 건너뛴다.
+	if key := streamKeyOf(e.outputURL); len(key) >= minMaskedStreamKey {
+		message = strings.ReplaceAll(message, key, "****")
+	}
+	return message
+}
+
+// minMaskedStreamKey는 키로 보고 가리는 마지막 경로의 최소 길이다. 플랫폼 키는
+// 모두 이보다 길다.
+const minMaskedStreamKey = 8
+
+// streamKeyOf는 출력 URL의 마지막 경로(스트림 키)다.
+func streamKeyOf(url string) string {
+	index := strings.LastIndex(url, "/")
+	if index < 0 || index == len(url)-1 {
+		return ""
+	}
+	return url[index+1:]
 }
 
 // beginReconfiguring은 입력 프레임의 해상도가 바뀌어 새 출력 프로필을

@@ -44,5 +44,5 @@ services:
       # Apple 로그인 개인키(.p8). 컨테이너 내 경로가 server-secrets.env 의
       # APPLE_PRIVATE_KEY_PATH 와 일치해야 하므로 호스트 경로를 그대로 마운트한다.
       - "${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:ro"
-    # 재시작 정책은 systemd(innolive-server.service)가 관리한다.
+    # 재시작 정책은 systemd(innolive-server@<slot>.service)가 관리한다.
     restart: "no"

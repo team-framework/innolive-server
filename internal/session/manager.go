@@ -1606,8 +1606,10 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 			s.UpdatedAt = time.Now().UTC()
 			return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 		}
-		if t.phase == BroadcastPhasePrepared || (s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseLive) {
-			if t.phase == BroadcastPhaseLive && reason != "user_requested" {
+		// 이관 재개(StartStream)에 실패한 서버 처리 대상도 egress 없는 live로 남는다.
+		// 놓아주지 않으면 멈출 길이 없다(P1-38).
+		if t.phase == BroadcastPhasePrepared || (t.egress == nil && t.phase == BroadcastPhaseLive) {
+			if s.AIProcessing == AIProcessingOnDevice && t.phase == BroadcastPhaseLive && reason != "user_requested" {
 				// 사용자가 아니라 서버가 끝낸 직접 송출은 앱이 모르므로 알린다.
 				if s.directStops == nil {
 					s.directStops = make(map[string]string)

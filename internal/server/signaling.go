@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"inno-live-server/internal/auth"
 	"inno-live-server/internal/session"
 
 	"github.com/google/uuid"
@@ -410,6 +411,9 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs
 // verifySignalingSession은 세션의 1회용 소유자 토큰에 더해, WebSocket 동작마다 세션을
 // 만든 같은 활성 사용자에 묶는다. 브라우저는 WebSocket 업그레이드 요청에
 // Authorization 헤더를 붙일 수 없어 access_token을 암호화된 WebSocket 메시지에 싣는다.
+// signalingAuthLookupTimeout은 시그널링 인증의 사용자 상태 조회 상한이다.
+const signalingAuthLookupTimeout = 5 * time.Second
+
 func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) (func(), *apiError) {
 	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
 	if errors.Is(err, session.ErrNotFound) {
@@ -438,7 +442,16 @@ func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerTok
 	if s.authenticateUser == nil {
 		return func() {}, nil
 	}
-	userID, err := s.authenticateUser(ctx, strings.TrimSpace(accessToken))
+	// 시그널링은 요청 컨텍스트가 없어 조회 기한을 따로 건다. 저장소 장애는 자격
+	// 정보 오류와 구분해 503으로 알린다 — 401이면 앱이 다시 로그인을 시킨다(P1-30).
+	lookupCtx, cancel := context.WithTimeout(ctx, signalingAuthLookupTimeout)
+	userID, err := s.authenticateUser(lookupCtx, strings.TrimSpace(accessToken))
+	cancel()
+	if err != nil && !errors.Is(err, auth.ErrAuthenticationRequired) && !errors.Is(err, auth.ErrUserInactive) && !errors.Is(err, auth.ErrDemoLockdown) {
+		s.logger.Warn("signaling authentication is unavailable", "session_id", sessionID, "error", err)
+		result := apiError{Status: http.StatusServiceUnavailable, Code: "auth_unavailable", Message: "Authentication is unavailable. Retry shortly."}
+		return nil, &result
+	}
 	if err != nil {
 		result := apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "Authentication is required."}
 		return nil, &result

@@ -298,9 +298,12 @@ type Session struct {
 	// videoTrack·pipelineDone은 해상도 변경(#283)이 같은 트랙으로 파이프라인을
 	// 다시 띄우는 데 쓴다. pipelineDone은 현재 파이프라인이 끝나면 닫힌다.
 	// resolutionMu는 변경 요청을 하나씩 처리한다.
-	videoTrack       *webrtc.TrackRemote
-	pipelineDone     chan struct{}
-	resolutionMu     sync.Mutex
+	videoTrack   *webrtc.TrackRemote
+	pipelineDone chan struct{}
+	resolutionMu sync.Mutex
+	// aiSettingsMu는 익명화·화면 블러·블러 설정 변경을 하나씩 processor에
+	// 적용한다. 적용은 진행 중인 AI 호출을 기다리므로 Session.mu 밖에서 한다(P1-1).
+	aiSettingsMu     sync.Mutex
 	resolutionSwitch *ResolutionSwitchState
 	// aiTarget은 지금 영상 파이프라인이 배정받은 AI 워커 주소다. 그 워커가 응답
 	// 불가가 되면 파이프라인을 다시 띄워 다른 워커로 옮긴다(#499). aiMovedAt은 마지막
@@ -1738,57 +1741,60 @@ func (m *Manager) ResumeStream(id string, providers ...string) (*Session, error)
 // 꺼져 있는 동안에는 원본 프레임이 두 출력으로 그대로 나가고, 빠른 재활성화를
 // 위해 기존 gRPC bidi stream은 열어 둔다.
 func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, error) {
+	return m.changeAISetting(id, func(s *Session) {
+		s.anonymizationEnabled = enabled
+	}, func(processor *media.Processor) {
+		processor.SetAnonymizationEnabled(enabled)
+	}, "anonymization changed", "enabled", enabled)
+}
+
+// changeAISetting은 세션의 AI 처리 설정을 바꾼다. 세션 상태는 Session.mu 안에서
+// 바꾸고, processor 적용은 그 밖에서 한다. processor는 진행 중인 AI 호출이 끝나야
+// 설정을 바꾸므로(최대 AI 타임아웃) 잠금을 쥔 채 기다리면 같은 세션의 조회와 다른
+// API가 모두 멈춘다(P1-1). 적용 뒤에는 바뀌기 전에 처리된 프레임이 입력 공백 때
+// 정지 화면으로 다시 나가지 않게 한다(#311). 그사이 새로 붙은 egress도 포함하도록
+// 적용 뒤의 목록을 쓴다.
+func (m *Manager) changeAISetting(id string, update func(*Session), apply func(*media.Processor), message string, attrs ...any) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
+	s.aiSettingsMu.Lock()
+	defer s.aiSettingsMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil, ErrNotFound
 	}
 	if s.AIProcessing == AIProcessingOnDevice {
+		s.mu.Unlock()
 		return nil, ErrOnDeviceProcessing
 	}
-	s.anonymizationEnabled = enabled
-	if s.processor != nil {
-		s.processor.SetAnonymizationEnabled(enabled)
-		// 바뀌기 전에 처리된 프레임이 입력 공백 때 정지 화면으로 다시
-		// 나가지 않게 한다(#311).
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
+	update(s)
+	processor := s.processor
 	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("anonymization changed", "session_id", s.ID, "enabled", enabled)
+	s.mu.Unlock()
+
+	if processor != nil {
+		apply(processor)
+		s.mu.Lock()
+		for _, egress := range activeEgressesLocked(s) {
+			egress.InvalidateHeldFrame(processor.PrivacyGeneration())
+		}
+		s.mu.Unlock()
+	}
+	m.logger.Info(message, append([]any{"session_id", s.ID}, attrs...)...)
 	return s, nil
 }
 
 // SetScreenBlurEnabled는 송출을 끊지 않고 화면 전체 블러를 켜고 끈다(#465).
 // 켜져 있는 동안 두 출력 모두 AI 결과 대신 화면 전체 블러가 나간다.
 func (m *Manager) SetScreenBlurEnabled(id string, enabled bool) (*Session, error) {
-	s, err := m.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, ErrNotFound
-	}
-	if s.AIProcessing == AIProcessingOnDevice {
-		return nil, ErrOnDeviceProcessing
-	}
-	s.screenBlurEnabled = enabled
-	if s.processor != nil {
-		s.processor.SetScreenBlurEnabled(enabled)
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
-	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("screen blur changed", "session_id", s.ID, "enabled", enabled)
-	return s, nil
+	return m.changeAISetting(id, func(s *Session) {
+		s.screenBlurEnabled = enabled
+	}, func(processor *media.Processor) {
+		processor.SetScreenBlurEnabled(enabled)
+	}, "screen blur changed", "enabled", enabled)
 }
 
 // SetMosaicConfig는 송출을 끊지 않고 다음 프레임부터 블러 강도·영역을 바꾼다(#483).
@@ -1798,28 +1804,11 @@ func (m *Manager) SetMosaicConfig(id string, cfg media.MosaicConfig) (*Session, 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	s, err := m.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, ErrNotFound
-	}
-	if s.AIProcessing == AIProcessingOnDevice {
-		return nil, ErrOnDeviceProcessing
-	}
-	s.mosaicConfig = cfg.Clone()
-	if s.processor != nil {
-		s.processor.SetMosaicConfig(cfg)
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
-	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("mosaic config changed", "session_id", s.ID, "mosaic_config", cfg)
-	return s, nil
+	return m.changeAISetting(id, func(s *Session) {
+		s.mosaicConfig = cfg.Clone()
+	}, func(processor *media.Processor) {
+		processor.SetMosaicConfig(cfg)
+	}, "mosaic config changed", "mosaic_config", cfg)
 }
 
 func pauseEgress(egress streamPauseController) error {

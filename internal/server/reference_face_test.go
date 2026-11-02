@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,9 @@ type fakeAIWorker struct {
 	entries []string
 	next    int
 
+	// addCalls는 시작된 AddWhitelist 호출 수다. allowAdd에서 기다리는 호출도 센다.
+	addCalls atomic.Int32
+
 	addStarted       chan struct{}
 	allowAdd         chan struct{}
 	addStartedOnce   sync.Once
@@ -68,6 +72,7 @@ func (w *fakeAIWorker) AddWhitelist(ctx context.Context, request *aiv1.FaceData)
 	if request.GetSessionId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session_id must not be empty")
 	}
+	w.addCalls.Add(1)
 	if w.addStarted != nil {
 		w.addStartedOnce.Do(func() { close(w.addStarted) })
 		select {

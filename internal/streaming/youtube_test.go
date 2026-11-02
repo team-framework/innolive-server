@@ -153,6 +153,10 @@ type youtubeAPIStub struct {
 	lastBroadcast    map[string]any
 	bindQuery        string
 	blockLive        bool
+	// bindFailures는 실패시킬 bind 호출 수, bindFailStatus·bindFailBody는 그 응답이다.
+	bindFailures   int
+	bindFailStatus int
+	bindFailBody   string
 	// 선택 항목(카테고리·썸네일) 기록·실패 주입.
 	videoUpdates       int
 	lastVideoUpdate    map[string]any
@@ -251,6 +255,12 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/bind"):
 			s.binds++
 			s.bindQuery = r.URL.RawQuery
+			if s.bindFailures > 0 {
+				s.bindFailures--
+				w.WriteHeader(s.bindFailStatus)
+				_, _ = w.Write([]byte(s.bindFailBody))
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):

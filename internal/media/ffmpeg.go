@@ -91,13 +91,16 @@ type FFmpegTranscoder struct {
 }
 
 type ffmpegProcess struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Reader
-	wait    sync.Once
-	waitErr error
-	metrics *metrics.Registry
-	logger  *slog.Logger
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
+	// stderrDone은 stderr를 끝까지 읽었을 때 닫힌다. Wait는 파이프를 닫으므로
+	// 그 전에 읽기가 끝나야 마지막 오류 줄을 잃지 않는다. nil이면 기다리지 않는다.
+	stderrDone chan struct{}
+	wait       sync.Once
+	waitErr    error
+	metrics    *metrics.Registry
+	logger     *slog.Logger
 }
 
 func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Registry, options TranscoderOptions) *FFmpegTranscoder {
@@ -517,41 +520,54 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 		return cmd.Process.Signal(os.Interrupt)
 	}
 	cmd.WaitDelay = ffmpegShutdownGrace
+	// 시작하지 못하면 extra file의 부모 쪽 사본도 닫는다. 호출자는 쓰는 끝만
+	// 들고 있으므로 여기서 닫지 않으면 읽는 끝이 샌다.
+	closeExtraFiles := func() {
+		for _, file := range extraFiles {
+			_ = file.Close()
+		}
+	}
 	// 파이프를 만들기 전에 gate를 먼저 얻는다. 큐에서 대기하다 취소된 시작이
 	// 파일 디스크립터를 이미 할당해 두면 안 되기 때문이다(exec은 Start 자체의
 	// 정리 경로로만 닫는데, 이 경로에서는 그게 실행되지 않는다).
 	if err := t.options.Gate.Acquire(ctx); err != nil {
+		closeExtraFiles()
 		return nil, err
+	}
+	fail := func(stage string, err error) (*ffmpegProcess, error) {
+		t.options.Gate.Release()
+		closeExtraFiles()
+		return nil, fmt.Errorf("%s for FFmpeg %s: %w", stage, role, err)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		t.options.Gate.Release()
-		return nil, err
+		return fail("open stdin", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		t.options.Gate.Release()
-		return nil, err
+		_ = stdin.Close()
+		return fail("open stdout", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		t.options.Gate.Release()
-		return nil, err
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return fail("open stderr", err)
 	}
 	err = cmd.Start()
 	t.options.Gate.Release()
 	// 자식이 extra fd를 상속(dup)했으므로 부모 쪽 사본을 닫는다. 그래야 쓰는
 	// 쪽이 닫힐 때 오디오 파이프의 읽기 끝이 EOF에 도달한다.
-	for _, file := range extraFiles {
-		_ = file.Close()
-	}
+	closeExtraFiles()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("start FFmpeg %s: %w", role, err)
 	}
 	if t.metrics != nil {
 		t.metrics.RegisterChildProcess(cmd.Process.Pid)
 	}
+	stderrDone := make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			if stderrLine != nil {
@@ -560,13 +576,17 @@ func (t *FFmpegTranscoder) startFFmpeg(ctx context.Context, role string, stderrL
 			}
 			logger.Warn("FFmpeg reported an error", "message", scanner.Text())
 		}
+		// 줄이 스캐너 한도(64KB)를 넘으면 Scan이 멈춘다. 나머지를 버리지 않으면
+		// stderr 파이프가 차서 FFmpeg가 쓰기에서 멈춘다.
+		_, _ = io.Copy(io.Discard, stderr)
 	}()
 	return &ffmpegProcess{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  bufio.NewReaderSize(stdout, 1<<20),
-		metrics: t.metrics,
-		logger:  logger,
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     bufio.NewReaderSize(stdout, 1<<20),
+		stderrDone: stderrDone,
+		metrics:    t.metrics,
+		logger:     logger,
 	}, nil
 }
 
@@ -589,7 +609,14 @@ func (p *ffmpegProcess) close() {
 		}
 		started := time.Now()
 		done := make(chan error, 1)
-		go func() { done <- p.cmd.Wait() }()
+		go func() {
+			// stderr를 다 읽은 뒤에 Wait한다. 프로세스가 끝나지 않으면 아래
+			// 타이머의 kill이 stderr를 닫아 이 대기를 푼다.
+			if p.stderrDone != nil {
+				<-p.stderrDone
+			}
+			done <- p.cmd.Wait()
+		}()
 		timer := time.NewTimer(ffmpegShutdownGrace)
 		defer timer.Stop()
 		select {

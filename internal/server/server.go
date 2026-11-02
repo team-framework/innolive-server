@@ -504,6 +504,17 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 //
 // 준비 옵션은 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 단일 출처다 —
 // 요청 바디로 덮어쓰는 경로를 두면 설정 화면과 실제 방송이 어긋난다.
+// platformChangeTimeout은 플랫폼 방송을 만들거나 바꾸는 왕복의 상한이다. 호출
+// 하나는 15초에 끊기고, 준비는 생성·스트림·바인드 등 여러 호출로 이뤄진다.
+const platformChangeTimeout = 2 * time.Minute
+
+// platformChangeContext는 플랫폼 상태를 바꾸는 왕복에 쓴다. 클라이언트가 중간에
+// 끊어도 왕복을 끝까지 마쳐, 만들다 만 방송이 플랫폼에 고아로 남지 않게 한다(P1-10).
+// 요청에 실린 값(송출 연결 등)은 그대로 물려받는다.
+func platformChangeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), platformChangeTimeout)
+}
+
 func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Provider string `json:"provider"`
@@ -531,8 +542,10 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if providerName == "" {
 		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
+	platformCtx, cancel := platformChangeContext(r.Context())
+	defer cancel()
 	// 송출 채널을 먼저 확정한다. 이후 확인·준비는 모두 이 채널로 간다.
-	ctx, failure := s.streamingAccountContext(r.Context(), liveSession.UserID, providerName, requestedAccount)
+	ctx, failure := s.streamingAccountContext(platformCtx, liveSession.UserID, providerName, requestedAccount)
 	if failure != nil {
 		writeError(w, *failure)
 		return
@@ -719,9 +732,11 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	}
 	failures := make([]goLiveFailure, 0, len(providers))
 	var firstFailure *apiError
+	platformCtx, cancel := platformChangeContext(r.Context())
+	defer cancel()
 	for _, name := range providers {
 		providerName := auth.StreamingProvider(name)
-		failure := s.goLiveTarget(r.Context(), liveSession, providerName)
+		failure := s.goLiveTarget(platformCtx, liveSession, providerName)
 		if failure == nil {
 			continue
 		}

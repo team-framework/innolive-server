@@ -27,7 +27,7 @@ func TestReferenceFaceNamePersistsAndRejectsInvalidNameBeforeAI(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := part.Write([]byte("face-0")); err != nil {
+		if _, err := part.Write(referenceImage("face-0")); err != nil {
 			t.Fatal(err)
 		}
 		if err := writer.Close(); err != nil {

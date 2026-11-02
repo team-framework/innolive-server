@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -230,8 +231,8 @@ func (s *referenceStore) dropWorkerEntries(address string) error {
 func (s *referenceStore) updateEntryIDs(change func(map[string]string) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	changed := false
-	for _, faces := range s.faces {
+	var changed []string
+	for clientID, faces := range s.faces {
 		for index := range faces {
 			entryIDs := maps.Clone(faces[index].EntryIDs)
 			if entryIDs == nil {
@@ -239,14 +240,16 @@ func (s *referenceStore) updateEntryIDs(change func(map[string]string) bool) err
 			}
 			if change(entryIDs) {
 				faces[index].EntryIDs = entryIDs
-				changed = true
+				if !slices.Contains(changed, clientID) {
+					changed = append(changed, clientID)
+				}
 			}
 		}
 	}
-	if !changed {
+	if len(changed) == 0 {
 		return nil
 	}
-	return s.save()
+	return s.save(changed...)
 }
 
 // workerEntryIDs는 클라이언트별로 address 워커에 기록된 엔트리 id다.

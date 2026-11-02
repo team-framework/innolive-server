@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -52,6 +54,9 @@ const (
 // errImageTooLarge는 헤더가 알린 크기가 디코드 한계를 넘을 때 downscaleForAI가
 // 돌려준다.
 var errImageTooLarge = errors.New("image exceeds decode limits")
+
+// errImageUndecodable은 서버가 이미지를 디코드하지 못할 때 downscaleForAI가 돌려준다.
+var errImageUndecodable = errors.New("image cannot be decoded")
 
 // decodeGate는 프로세스 전체에서 동시에 디코드하는 업로드 이미지 수를 제한한다.
 // 디코드마다 전체 비트맵(maxDecodePixels 이하)을 잠시 할당하므로, 제한이 없으면
@@ -90,23 +95,24 @@ func (g *decodeGate) release() {
 }
 
 // downscaleForAI는 업로드한 얼굴 이미지의 긴 변이 maxAIFaceEdge 이하가 되도록
-// 줄여 JPEG로 다시 인코딩한다. 이미 한계 안이거나 여기서 디코드하지 못한
-// 이미지는 그대로 돌려줘 AI 워커가 자체 검증과 오류 보고를 하게 한다. 헤더가
+// 줄여 JPEG로 다시 인코딩한다. 이미 한계 안인 이미지는 그대로 돌려준다. 헤더가
 // 알린 크기가 maxDecodeEdge/maxDecodePixels를 넘으면 전체 비트맵을 디코드하기
-// 전에 errImageTooLarge로 거절한다.
+// 전에 errImageTooLarge로, 디코드하지 못하면 errImageUndecodable로 거절한다 —
+// 워커에 넘기기 전에 거절해야 교체 업로드가 이전 얼굴을 건드리지 않는다.
 func downscaleForAI(data []byte) ([]byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return data, nil
+		return nil, errImageUndecodable
 	}
 	if cfg.Width > maxDecodeEdge || cfg.Height > maxDecodeEdge || cfg.Width*cfg.Height > maxDecodePixels {
 		return nil, errImageTooLarge
 	}
-	if cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge {
-		return data, nil
-	}
+	// 헤더만 멀쩡하고 본문이 잘린 파일도 거르도록 작은 이미지도 끝까지 디코드한다.
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
+		return nil, errImageUndecodable
+	}
+	if cfg.Width <= maxAIFaceEdge && cfg.Height <= maxAIFaceEdge {
 		return data, nil
 	}
 	b := src.Bounds()
@@ -255,18 +261,39 @@ func (s *referenceStore) load() {
 	}
 }
 
-// save는 클라이언트→얼굴 맵을 저장한다. 호출자가 s.mu를 쓰기로 쥐고 있어야 한다.
-func (s *referenceStore) save() error {
+// save는 clientIDs의 얼굴 기록을 메타 파일에 반영한다. 호출자가 s.mu를 쓰기로 쥐고
+// 있어야 한다.
+//
+// 배포 중에는 두 슬롯(blue·green)이 같은 파일을 쓴다. 메모리 맵 전체로 덮어쓰면
+// 다른 슬롯이 저장한 사용자의 얼굴이 사라지므로, 파일을 다시 읽어 바꾼 사용자의
+// 항목만 고쳐 쓴다. 읽고 쓰는 사이는 파일 잠금으로 다른 슬롯과 직렬화한다.
+func (s *referenceStore) save(clientIDs ...string) error {
 	if s.path == "" {
 		return nil
-	}
-	data, err := json.Marshal(s.faces)
-	if err != nil {
-		return fmt.Errorf("marshal reference metadata: %w", err)
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create reference metadata directory: %w", err)
+	}
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open reference metadata lock: %w", err)
+	}
+	defer lock.Close() // 닫으면 잠금도 풀린다
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock reference metadata: %w", err)
+	}
+	faces := s.storedFaces()
+	for _, clientID := range clientIDs {
+		if current := s.faces[clientID]; len(current) > 0 {
+			faces[clientID] = current
+		} else {
+			delete(faces, clientID)
+		}
+	}
+	data, err := json.Marshal(faces)
+	if err != nil {
+		return fmt.Errorf("marshal reference metadata: %w", err)
 	}
 	// 같은 디렉터리에 쓰고 이름을 바꾼다. WriteFile로 바로 쓰면 I/O 오류 전에 유일한
 	// 사본을 잘라 다른 사용자의 메타데이터까지 읽을 수 없게 될 수 있다. rename은
@@ -296,6 +323,76 @@ func (s *referenceStore) save() error {
 		return fmt.Errorf("publish reference metadata: %w", err)
 	}
 	return nil
+}
+
+// storedFaces는 지금 파일에 저장된 맵이다. 파일이 없으면 빈 맵이다. 읽거나 해석하지
+// 못하면 메모리 맵의 사본을 바탕으로 한다 — 손상된 파일 때문에 저장이 계속 막히지
+// 않게 한다. 호출자가 s.mu를 쥐고 있어야 한다.
+func (s *referenceStore) storedFaces() map[string][]referenceFace {
+	data, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return make(map[string][]referenceFace)
+	}
+	var faces map[string][]referenceFace
+	if err != nil || json.Unmarshal(data, &faces) != nil || faces == nil {
+		return maps.Clone(s.faces)
+	}
+	return faces
+}
+
+// restoreClientLocked는 저장하지 못한 clientID의 변경을 되돌린다. 호출자가 s.mu를
+// 쓰기로 쥐고 있어야 한다.
+func (s *referenceStore) restoreClientLocked(clientID string, faces []referenceFace, had bool) {
+	if had {
+		s.faces[clientID] = faces
+	} else {
+		delete(s.faces, clientID)
+	}
+}
+
+// clientFaces는 클라이언트 얼굴 기록의 사본이다.
+func (s *referenceStore) clientFaces(clientID string) []referenceFace {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.faces[clientID])
+}
+
+// referenceClientLocks는 AI 클라이언트 하나의 기준 얼굴 변경(워커 화이트리스트와 메타)을
+// 직렬화한다. 요청이 겹치면 한쪽이 등록한 엔트리가 목록에 남지 않은 채 워커에 남아 그
+// 얼굴이 계속 블러에서 빠진다. zero 값을 바로 쓸 수 있다.
+type referenceClientLocks struct {
+	mu      sync.Mutex
+	entries map[string]*referenceClientLock
+}
+
+type referenceClientLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (l *referenceClientLocks) Lock(clientID string) (unlock func()) {
+	l.mu.Lock()
+	if l.entries == nil {
+		l.entries = make(map[string]*referenceClientLock)
+	}
+	entry := l.entries[clientID]
+	if entry == nil {
+		entry = &referenceClientLock{}
+		l.entries[clientID] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.entries, clientID)
+		}
+		l.mu.Unlock()
+	}
 }
 
 func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +441,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	// 잃은 얼굴을 face_id와 이름을 유지한 채 되살린다. 서버는 얼굴 원본을 보관하지
 	// 않으므로 사용자가 사진을 다시 올려야 한다.
 	reregisterID := strings.TrimSpace(r.FormValue("face_id"))
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
 	var previous referenceFace
 	if reregisterID != "" {
 		if len(files) != 1 {
@@ -359,16 +458,6 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	}
 	// "image"(단일 필드)는 클라이언트의 얼굴 집합을 교체하고, "images[]"는 추가한다.
 	replace := reregisterID == "" && len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
-	if replace {
-		// 클라이언트의 기존 워커 화이트리스트를 먼저 비워 오래된 얼굴이 더는 제외되지
-		// 않게 한다(Python의 교체 동작과 같다). 여기서 실패하면 업로드를 중단해야
-		// 한다 — 이전 얼굴을 화이트리스트에 남기면 방금 교체한 사람을 계속 제외한다.
-		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
-			s.logger.Error("clear whitelist before replace failed", "client_id", clientID, "error", err)
-			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
-			return
-		}
-	}
 	// AI 워커를 건드리기 전에 모든 파일을 검증·디코드한다. 잘못된 파일이 있으면
 	// 아무것도 등록하지 않고 요청을 끝내므로, 뒤 파일의 형식·크기 오류가 앞 파일의
 	// 얼굴을 워커에 남기는 일이 없다.
@@ -400,8 +489,12 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		}
 		scaled, err := downscaleForAI(data)
 		s.referenceDecode.release()
-		if err != nil {
+		if errors.Is(err, errImageTooLarge) {
 			writeError(w, badRequest("이미지 크기가 너무 큽니다.", map[string]any{"reason": "image_too_large", "max_edge": maxDecodeEdge, "max_pixels": maxDecodePixels}))
+			return
+		}
+		if err != nil {
+			writeError(w, apiError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "이미지를 읽을 수 없습니다."})
 			return
 		}
 		prepared = append(prepared, preparedFace{faceID: uuid.NewString(), data: scaled})
@@ -434,6 +527,24 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 		}
 		registered = append(registered, referenceFace{Name: name, FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
 	}
+	if replace {
+		// 교체는 새 얼굴이 모두 자리 잡은 뒤에 이전 얼굴을 지운다. 새 파일이 거절되면
+		// 이전 얼굴이 워커와 목록에 그대로 남는다. 엔트리 id가 없는 옛 기록은 워커가
+		// 재시작으로 이미 잃었다.
+		for _, face := range s.references.clientFaces(clientID) {
+			if len(face.EntryIDs) == 0 {
+				continue
+			}
+			if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, face.EntryIDs); err != nil {
+				s.logger.Error("delete previous whitelist entries during replace failed", "client_id", clientID, "face_id", face.FaceID, "error", err)
+				s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+				// 이전 얼굴 일부가 워커에서 이미 빠졌을 수 있다. 대조가 표시를 다시 정한다.
+				s.RequestReferenceFaceCheck()
+				writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
+				return
+			}
+		}
+	}
 	if reregisterID != "" && len(previous.EntryIDs) > 0 {
 		// 새 엔트리가 자리 잡은 뒤에 이전 엔트리를 지운다. 새 사진이 거절돼도 아직
 		// 남은 이전 등록은 그대로 둔다. 일부 워커에만 남은 얼굴이면 이전 엔트리를 지워야
@@ -465,6 +576,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.references.mu.Lock()
+	before, hadBefore := s.references.faces[clientID]
+	before = slices.Clone(before) // 다시 등록은 기록을 제자리에서 고친다
 	switch {
 	case reregisterID != "":
 		faces := s.references.faces[clientID]
@@ -488,7 +601,19 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	default:
 		s.references.faces[clientID] = append(s.references.faces[clientID], registered...)
 	}
-	_ = s.references.save()
+	if err := s.references.save(clientID); err != nil {
+		// 저장하지 못한 등록을 성공으로 알리면 재시작 뒤 응답과 다른 목록이 복원된다.
+		s.references.restoreClientLocked(clientID, before, hadBefore)
+		s.references.mu.Unlock()
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "error", err)
+		s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+		if replace || reregisterID != "" {
+			// 이전 엔트리는 이미 지웠다. 되돌린 기록의 재등록 표시는 대조가 정한다.
+			s.RequestReferenceFaceCheck()
+		}
+		writeError(w, internalError())
+		return
+	}
 	s.references.mu.Unlock()
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
@@ -528,15 +653,26 @@ func (s *Server) handleDeleteReferenceFace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clientID := referenceClientID(r)
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
+	s.clearReferenceFaces(w, r, clientID)
+}
+
+// clearReferenceFaces는 클라이언트의 얼굴을 워커와 기록에서 모두 지운다. 호출자가
+// 클라이언트 잠금을 쥐고 있어야 한다.
+func (s *Server) clearReferenceFaces(w http.ResponseWriter, r *http.Request, clientID string) {
 	if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
 		s.logger.Error("AI ClearWhitelist failed", "client_id", clientID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
 		return
 	}
-	s.references.mu.Lock()
-	delete(s.references.faces, clientID)
-	_ = s.references.save()
-	s.references.mu.Unlock()
+	// 저장하지 못하면 기록을 되돌리고 실패로 알린다. 워커 쪽 삭제는 다시 해도 같아
+	// 재시도로 맞춘다.
+	if err := s.references.deleteClient(clientID); err != nil {
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "error", err)
+		writeError(w, internalError())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -547,6 +683,8 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	}
 	clientID := referenceClientID(r)
 	faceID := r.PathValue("face_id")
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
 	s.references.mu.RLock()
 	found := false
 	var entryIDs map[string]string
@@ -568,7 +706,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		// 있지 않은 등록을 알리느니 클라이언트의 다른 얼굴도 함께 지운다.
 		s.logger.Warn("reference face has no worker entry ids; clearing the whole client whitelist",
 			"client_id", clientID, "face_id", faceID)
-		s.handleDeleteReferenceFace(w, r)
+		s.clearReferenceFaces(w, r, clientID)
 		return
 	}
 	if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, entryIDs); err != nil {
@@ -577,6 +715,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.references.mu.Lock()
+	before := slices.Clone(s.references.faces[clientID])
 	remaining := s.references.faces[clientID][:0]
 	for _, f := range s.references.faces[clientID] {
 		if f.FaceID != faceID {
@@ -588,8 +727,17 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	} else {
 		s.references.faces[clientID] = remaining
 	}
-	_ = s.references.save()
+	err := s.references.save(clientID)
+	if err != nil {
+		// 워커 쪽 삭제는 다시 해도 같아(이미 없는 엔트리는 지운 것으로 친다) 재시도로 맞춘다.
+		s.references.restoreClientLocked(clientID, before, true)
+	}
 	s.references.mu.Unlock()
+	if err != nil {
+		s.logger.Error("save reference metadata failed", "client_id", clientID, "face_id", faceID, "error", err)
+		writeError(w, internalError())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -649,9 +797,9 @@ func (s *referenceStore) deleteClient(clientID string) error {
 	s.mu.Lock()
 	previous, hadPrevious := s.faces[clientID]
 	delete(s.faces, clientID)
-	err := s.save()
-	if err != nil && hadPrevious {
-		s.faces[clientID] = previous
+	err := s.save(clientID)
+	if err != nil {
+		s.restoreClientLocked(clientID, previous, hadPrevious)
 	}
 	s.mu.Unlock()
 	return err

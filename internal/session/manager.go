@@ -377,8 +377,9 @@ type Manager struct {
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
-	// MaxSessions 사용량에 계속 포함한다.
-	pipelines map[string]struct{}
+	// MaxSessions 사용량에 계속 포함한다. 값은 세션의 실행 중인 파이프라인 수다 —
+	// 카메라를 전환하면 이전 파이프라인이 끝나기 전에 새 파이프라인이 뜬다(P1-4).
+	pipelines map[string]int
 
 	// broadcastCleanup은 세션이 끝날 때 남은 플랫폼 방송을 치우는 훅이다.
 	// 세션 계층은 플랫폼 provider를 몰라야 하므로(역방향 결합) 서버가 조립
@@ -555,7 +556,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		ice:                         iceServers,
 		sessions:                    make(map[string]*Session),
 		pendingUsers:                make(map[uuid.UUID]*pendingCreate),
-		pipelines:                   make(map[string]struct{}),
+		pipelines:                   make(map[string]int),
 		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
 		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
 	}
@@ -593,6 +594,24 @@ func (m *Manager) Capacity() (active, limit int) {
 	active = len(m.sessions) + m.pending
 	m.mu.RUnlock()
 	return active, m.cfg.MaxSessions
+}
+
+// pipelineStarted·pipelineDone은 세션의 실행 중인 파이프라인 수를 센다. 이전
+// 파이프라인의 종료가 새 파이프라인의 등록을 지우면 안 된다(P1-4).
+func (m *Manager) pipelineStarted(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pipelines[id]++
+}
+
+func (m *Manager) pipelineDone(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pipelines[id] <= 1 {
+		delete(m.pipelines, id)
+		return
+	}
+	m.pipelines[id]--
 }
 
 // capacityInUseLocked는 실행 중인 세션, 진행 중인 예약, 종료 중인 FFmpeg 쌍이
@@ -2242,14 +2261,8 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	go func() {
 		defer close(pipelineDone)
 		defer releaseAI()
-		m.mu.Lock()
-		m.pipelines[s.ID] = struct{}{}
-		m.mu.Unlock()
-		defer func() {
-			m.mu.Lock()
-			delete(m.pipelines, s.ID)
-			m.mu.Unlock()
-		}()
+		m.pipelineStarted(s.ID)
+		defer m.pipelineDone(s.ID)
 		media.RunTrack(
 			trackCtx,
 			m.logger.With("session_id", s.ID),

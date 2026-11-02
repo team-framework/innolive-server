@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -36,6 +37,9 @@ var (
 	// ErrStreamingAccountSelectionRequired는 유튜브 채널이 여러 개 연결돼 있는데
 	// 어느 연결로 송출할지 지정하지 않았다(#390). 서버가 대신 고르지 않는다.
 	ErrStreamingAccountSelectionRequired = errors.New("streaming account must be selected")
+	// ErrRefreshTokenChanged는 갱신하는 사이 저장된 refresh token이 바뀌었다는
+	// 뜻이다(다른 프로세스의 회전·재연결). 덮어쓰지 않는다(P1-13).
+	ErrRefreshTokenChanged = errors.New("stored refresh token changed during refresh")
 	// ErrStreamingAccountLimit은 유튜브 채널 연결이 상한(MaxYouTubeChannels)에 닿았다.
 	ErrStreamingAccountLimit = errors.New("streaming account limit reached")
 )
@@ -142,13 +146,18 @@ type StreamingAccountStore interface {
 	// ListByUser는 사용자의 모든 플랫폼 연결을 provider 순으로 돌려준다.
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]StreamingAccount, error)
 	// UpdateRefreshToken은 토큰 갱신 응답이 새 refresh token을 담아온 경우
-	// 행 락 하에 교체한다 — 한 사용자의 다중 세션이 동시에 갱신할 때 나중에
-	// 실패한 쓰기가 최신 토큰을 덮지 않도록 잠근다.
-	UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error
+	// 행 락 하에 교체한다. 저장된 토큰이 previous(갱신에 쓴 토큰)가 아니면 그 사이
+	// 다른 프로세스가 회전했거나 사용자가 다시 연결한 것이라 덮지 않고
+	// ErrRefreshTokenChanged를 돌려준다(P1-13). 교체하면 재연결 필요 표식도 지운다.
+	UpdateRefreshToken(ctx context.Context, id uuid.UUID, previous, ciphertext []byte, version *int16, expiresAt *time.Time) error
 	// UpdateStreamInfo는 프리로딩된 재사용 스트림 정보를 행 락 하에 저장한다.
 	UpdateStreamInfo(ctx context.Context, id uuid.UUID, info StreamInfo) error
 	// MarkReconnectRequired는 토큰 갱신이 무효 토큰으로 거절됐음을 기록한다.
-	MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error
+	// rejected(거절된 토큰)가 아직 저장된 토큰일 때만 기록한다 — 그 사이 다른
+	// 프로세스가 회전한 정상 연결을 망가뜨리지 않는다(P1-13).
+	MarkReconnectRequired(ctx context.Context, id uuid.UUID, rejected []byte, at time.Time) error
+	// ClearReconnectRequired는 갱신에 성공한 연결의 재연결 필요 표식을 지운다(P1-14).
+	ClearReconnectRequired(ctx context.Context, id uuid.UUID) error
 	// Delete는 연결 행을 삭제한다. 없으면 ErrStreamingAccountNotFound.
 	Delete(ctx context.Context, id uuid.UUID) error
 	// UpdateChannel은 플랫폼 쪽 채널 표시 정보를 갱신한다(사용자가 채널명을
@@ -343,26 +352,33 @@ func (s *gormStreamingAccountStore) ListByUser(ctx context.Context, userID uuid.
 	return accounts, nil
 }
 
-func (s *gormStreamingAccountStore) MarkReconnectRequired(ctx context.Context, id uuid.UUID, at time.Time) error {
+func (s *gormStreamingAccountStore) MarkReconnectRequired(ctx context.Context, id uuid.UUID, rejected []byte, at time.Time) error {
 	if s == nil || s.db == nil {
 		return errors.New("streaming account database is nil")
 	}
-	result := s.db.WithContext(ctx).Model(&StreamingAccount{}).
-		Where("id = ?", id).
+	// 거절된 토큰이 이미 교체됐으면 표식하지 않는다. 행이 없는 경우와 구분하지
+	// 않는다 — 어느 쪽이든 표식할 연결이 없다.
+	return s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ? AND refresh_token_ciphertext = ?", id, rejected).
 		Updates(map[string]any{
 			"reconnect_required_at": at,
 			"updated_at":            s.now(),
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrStreamingAccountNotFound
-	}
-	return nil
+		}).Error
 }
 
-func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
+func (s *gormStreamingAccountStore) ClearReconnectRequired(ctx context.Context, id uuid.UUID) error {
+	if s == nil || s.db == nil {
+		return errors.New("streaming account database is nil")
+	}
+	return s.db.WithContext(ctx).Model(&StreamingAccount{}).
+		Where("id = ? AND reconnect_required_at IS NOT NULL", id).
+		Updates(map[string]any{
+			"reconnect_required_at": nil,
+			"updated_at":            s.now(),
+		}).Error
+}
+
+func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id uuid.UUID, previous, ciphertext []byte, version *int16, expiresAt *time.Time) error {
 	if s == nil || s.db == nil {
 		return errors.New("streaming account database is nil")
 	}
@@ -378,10 +394,14 @@ func (s *gormStreamingAccountStore) UpdateRefreshToken(ctx context.Context, id u
 		if result.Error != nil {
 			return result.Error
 		}
+		if !bytes.Equal(current.RefreshTokenCiphertext, previous) {
+			return ErrRefreshTokenChanged
+		}
 		return tx.Model(&StreamingAccount{}).Where("id = ?", id).Updates(map[string]any{
 			"refresh_token_ciphertext": ciphertext,
 			"token_key_version":        version,
 			"refresh_token_expires_at": expiresAt,
+			"reconnect_required_at":    nil,
 			"updated_at":               now,
 		}).Error
 	})

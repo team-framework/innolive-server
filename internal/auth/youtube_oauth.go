@@ -35,7 +35,12 @@ var (
 	ErrYouTubeChannelMissing   = errors.New("Google account has no YouTube channel")
 	ErrYouTubeTokenExchange    = errors.New("YouTube token exchange failed")
 	ErrYouTubeAuthCodeRejected = errors.New("YouTube authorization code was rejected")
-	ErrStreamingNotConnected   = errors.New("streaming account is not connected")
+	// ErrYouTubeRefreshTokenInvalid는 Google이 refresh token 자체를 무효로
+	// 판정했다는 뜻이다(error=invalid_grant: 만료·권한 취소). 재연결만이 해법이다.
+	// 다른 4xx(예: invalid_client)는 서버 설정 문제라 사용자 연결을 망가진 것으로
+	// 표시하지 않는다(P1-14).
+	ErrYouTubeRefreshTokenInvalid = errors.New("YouTube refresh token is invalid")
+	ErrStreamingNotConnected      = errors.New("streaming account is not connected")
 	// ErrStreamingReconnectRequired: 저장된 refresh token이 무효화됨(사용자의
 	// 플랫폼 쪽 권한 취소 등). 재시도로 복구되지 않으며 재연결이 유일한 해법
 	// 이라 일반 실패와 구분한다.
@@ -219,7 +224,10 @@ func (c *youtubeOAuthClient) requestToken(ctx context.Context, form url.Values) 
 		// 응답 본문을 버리면 실패 원인(client_secret 불일치·코드 만료·
 		// redirect_uri 불일치)을 서버에서도 알 수 없다. 자격증명은 요청에만
 		// 있고 응답에는 없으므로 error/error_description은 남겨도 안전하다.
-		detail := googleTokenErrorDetail(response.Body)
+		detail, errorCode := googleTokenErrorDetail(response.Body)
+		if errorCode == "invalid_grant" {
+			return YouTubeTokenResponse{}, fmt.Errorf("%w: %w: HTTP %d%s", ErrYouTubeAuthCodeRejected, ErrYouTubeRefreshTokenInvalid, response.StatusCode, detail)
+		}
 		// 4xx는 코드 자체의 문제(만료·재사용·위조)라 클라이언트 오류로,
 		// 그 외는 Google 쪽 장애로 구분한다.
 		if response.StatusCode >= 400 && response.StatusCode < 500 {
@@ -240,7 +248,7 @@ func (c *youtubeOAuthClient) requestToken(ctx context.Context, form url.Values) 
 // googleTokenErrorDetail은 토큰 엔드포인트 오류 응답의 error /
 // error_description을 사람이 읽을 수 있는 접미사로 만든다. 본문이 JSON이
 // 아니거나 필드가 없으면 빈 문자열을 돌려준다.
-func googleTokenErrorDetail(body io.Reader) string {
+func googleTokenErrorDetail(body io.Reader) (string, string) {
 	var payload struct {
 		Error       string `json:"error"`
 		Description string `json:"error_description"`
@@ -251,19 +259,19 @@ func googleTokenErrorDetail(body io.Reader) string {
 	// 하던 일이다.
 	_, _ = io.Copy(io.Discard, limited)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	code := truncateTokenMetadata(strings.TrimSpace(payload.Error), 128)
 	description := truncateTokenMetadata(strings.TrimSpace(payload.Description), 256)
 	switch {
 	case code != "" && description != "":
-		return fmt.Sprintf(" (%s: %s)", code, description)
+		return fmt.Sprintf(" (%s: %s)", code, description), code
 	case code != "":
-		return " (" + code + ")"
+		return " (" + code + ")", code
 	case description != "":
-		return " (" + description + ")"
+		return " (" + description + ")", code
 	}
-	return ""
+	return "", code
 }
 
 // ChannelForToken은 토큰이 매핑되는 YouTube 채널을 식별한다. 채널이 없는
@@ -512,11 +520,11 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	}
 	response, err := p.oauth.RefreshAccessToken(ctx, refreshToken)
 	if err != nil {
-		// 토큰 엔드포인트의 4xx는 refresh token 자체가 무효라는 뜻이다(만료·
-		// 권한 취소). 재연결 필요로 표식하고 전용 에러로 구분한다 — 표식
-		// 실패는 무시한다(다음 시도에서 다시 표식된다).
-		if errors.Is(err, ErrYouTubeAuthCodeRejected) {
-			_ = p.store.MarkReconnectRequired(ctx, account.ID, p.now())
+		// invalid_grant만 refresh token 자체가 무효라는 뜻이다(만료·권한 취소).
+		// 재연결 필요로 표식하고 전용 에러로 구분한다 — 표식 실패는 무시한다(다음
+		// 시도에서 다시 표식된다). 그 사이 토큰이 바뀌었으면 표식하지 않는다(P1-13·14).
+		if errors.Is(err, ErrYouTubeRefreshTokenInvalid) {
+			_ = p.store.MarkReconnectRequired(ctx, account.ID, account.RefreshTokenCiphertext, p.now())
 			return "", fmt.Errorf("%w: %v", ErrStreamingReconnectRequired, err)
 		}
 		return "", err
@@ -532,9 +540,15 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 			at := p.now().Add(time.Duration(response.RefreshTokenExpiresIn) * time.Second)
 			expiresAt = &at
 		}
-		if err := p.store.UpdateRefreshToken(ctx, account.ID, ciphertext, version, expiresAt); err != nil {
+		// 그 사이 사용자가 다시 연결했으면 새 연결을 덮지 않는다. 받은 access
+		// token은 유효하므로 그대로 쓴다(P1-13).
+		if err := p.store.UpdateRefreshToken(ctx, account.ID, account.RefreshTokenCiphertext, ciphertext, version, expiresAt); err != nil && !errors.Is(err, ErrRefreshTokenChanged) {
 			return "", fmt.Errorf("persist rotated refresh token: %w", err)
 		}
+	} else if account.ReconnectRequiredAt != nil {
+		// 갱신에 성공했으니 재연결 필요 표식은 틀렸다. 지우지 않으면 연결 목록이
+		// 계속 "재연결 필요"로 보인다(P1-14). 실패해도 다음 갱신에서 다시 지운다.
+		_ = p.store.ClearReconnectRequired(ctx, account.ID)
 	}
 	state.token = response.AccessToken
 	state.expiresAt = p.now().Add(time.Duration(response.ExpiresIn) * time.Second)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -51,6 +52,12 @@ const (
 	// egressFreezeMax는 마지막 프레임 반복(정지 화면)을 허용하는 공백 상한이다.
 	// 넘으면 슬레이트로 바꾼다.
 	egressFreezeMax = 3 * time.Second
+	// egressWriteTimeout은 FFmpeg stdin에 프레임 하나를 쓰는 상한이다. RTMP
+	// 인제스트가 멈추면 FFmpeg가 입력을 읽지 않아 쓰기가 막히는데, 기한이 없으면
+	// egress는 streaming으로 보이는 채 재연결도 못 한다(P1-5). 넘기면 쓰기 오류로
+	// 보고 기존 재연결 경로를 탄다. 인코더의 일시적인 지연은 넘기지 않도록 넉넉히
+	// 둔다.
+	egressWriteTimeout = 5 * time.Second
 )
 
 var errReconnectInputTimeout = errors.New("timed out waiting for input frames while reconfiguring RTMP egress")
@@ -282,6 +289,8 @@ type RTMPEgress struct {
 	// 테스트에서 짧게 바꾼다.
 	gapFillAfter time.Duration
 	freezeMax    time.Duration
+	// writeTimeout은 FFmpeg stdin 쓰기 기한이다(egressWriteTimeout).
+	writeTimeout time.Duration
 	// minHeldGeneration은 내보내도 되는 프레임의 최소 익명화 설정 세대다.
 	// 설정이 바뀌면 새 세대로 올려, 바뀌기 전에 처리된 프레임을 정지 화면으로도
 	// 카메라 프레임으로도 내보내지 않게 한다.
@@ -320,6 +329,7 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		reconnectPolicy: defaultReconnectPolicy,
 		gapFillAfter:    egressGapFillAfter,
 		freezeMax:       egressFreezeMax,
+		writeTimeout:    egressWriteTimeout,
 		status: EgressStatus{
 			Phase:     EgressPhaseIdle,
 			TargetURL: maskStreamKey(outputURL),
@@ -844,6 +854,16 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 	}
 }
 
+// writeWithDeadline은 w가 쓰기 기한을 지원하면(exec의 stdin 파이프) 기한을 걸고
+// 쓴다. 0 이하의 timeout은 기한 없이 쓴다.
+func writeWithDeadline(w io.Writer, data []byte, timeout time.Duration) error {
+	if deadline, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok && timeout > 0 {
+		_ = deadline.SetWriteDeadline(time.Now().Add(timeout))
+	}
+	_, err := w.Write(data)
+	return err
+}
+
 // collectStartupFrames는 fps·해상도 측정에 쓸 프레임을 모은다. seed는 해상도
 // 재기동 시 이월되는 새 해상도의 첫 프레임으로, 수집 목표 수에 포함된다.
 // deadline이 0이면 첫 시작처럼 시간 제한 없이 기다린다. 재구성·복구 경로는
@@ -905,6 +925,9 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 	// 슬레이트로 채운다.
 	var held []byte
 	var heldGeneration uint64
+	write := func(data []byte) error {
+		return writeWithDeadline(process.stdin, data, e.writeTimeout)
+	}
 	lastInputAt := time.Now()
 	stalled := e.inputStalledNow()
 	writeCamera := func(item frame) (*frame, error) {
@@ -917,7 +940,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			e.metrics.IncEgressFrameDropped()
 			return nil, nil
 		}
-		if _, err := process.stdin.Write(item.data); err != nil {
+		if err := write(item.data); err != nil {
 			return nil, err
 		}
 		noteWritten()
@@ -936,7 +959,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		if err != nil {
 			return err
 		}
-		if _, err := process.stdin.Write(slate.data); err != nil {
+		if err := write(slate.data); err != nil {
 			return err
 		}
 		noteWritten()
@@ -955,7 +978,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			e.logger.Warn("RTMP egress input stalled; filling gap", "gap", gap, "holding_last_frame", held != nil)
 		}
 		if held != nil && gap < e.freezeMax && e.holdable(heldGeneration) {
-			if _, err := process.stdin.Write(held); err != nil {
+			if err := write(held); err != nil {
 				return err
 			}
 			noteWritten()

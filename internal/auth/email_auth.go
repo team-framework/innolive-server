@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"os"
@@ -205,6 +206,9 @@ type VerificationEmailSender interface {
 	SendVerificationCode(ctx context.Context, recipient, code string, purpose EmailPurpose) error
 }
 
+// smtpSendTimeout은 인증 메일 한 통을 보내는 상한이다.
+const smtpSendTimeout = 30 * time.Second
+
 type smtpVerificationEmailSender struct {
 	config EmailAuthConfig
 }
@@ -221,19 +225,32 @@ func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, 
 		return err
 	}
 
+	// 서버가 연결만 받고 응답하지 않으면 발송이 기한 없이 멈춰 가입·재설정 요청을
+	// 붙잡는다(P1-16). 연결 전체에 기한을 건다.
+	deadline := time.Now().Add(smtpSendTimeout)
+	if requestDeadline, ok := ctx.Deadline(); ok && requestDeadline.Before(deadline) {
+		deadline = requestDeadline
+	}
 	address := fmt.Sprintf("%s:%d", s.config.SMTPHost, s.config.SMTPPort)
-	var connection *smtp.Client
+	dialer := &net.Dialer{Deadline: deadline}
+	var raw net.Conn
 	var err error
 	if s.config.ImplicitTLS {
-		raw, dialErr := tls.Dial("tcp", address, &tls.Config{ServerName: s.config.SMTPHost, MinVersion: tls.VersionTLS12})
-		if dialErr != nil {
-			return fmt.Errorf("connect SMTP: %w", dialErr)
-		}
-		connection, err = smtp.NewClient(raw, s.config.SMTPHost)
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: s.config.SMTPHost, MinVersion: tls.VersionTLS12}}
+		raw, err = tlsDialer.DialContext(ctx, "tcp", address)
 	} else {
-		connection, err = smtp.Dial(address)
+		raw, err = dialer.DialContext(ctx, "tcp", address)
 	}
 	if err != nil {
+		return fmt.Errorf("connect SMTP: %w", err)
+	}
+	if err := raw.SetDeadline(deadline); err != nil {
+		_ = raw.Close()
+		return fmt.Errorf("connect SMTP: %w", err)
+	}
+	connection, err := smtp.NewClient(raw, s.config.SMTPHost)
+	if err != nil {
+		_ = raw.Close()
 		return fmt.Errorf("connect SMTP: %w", err)
 	}
 	defer connection.Quit()

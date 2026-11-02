@@ -1499,12 +1499,33 @@ func (w *reqWriter) Flush() {
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if id == "" {
+		if !safeRequestID(id) {
 			id = uuid.NewString()
 		}
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(&reqWriter{ResponseWriter: w, requestID: id}, r)
 	})
+}
+
+// maxRequestIDLength는 클라이언트가 보낸 X-Request-ID를 그대로 쓰는 최대 길이다.
+const maxRequestIDLength = 128
+
+// safeRequestID는 클라이언트가 보낸 요청 ID를 응답·로그에 그대로 실어도 되는지다.
+// 길이 제한 없이 받으면 로그를 부풀리고, 제어 문자는 로그를 위조한다(P2-9). 영문·숫자와
+// "-_.:"만 받고 나머지는 새로 만든다.
+func safeRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLength {
+		return false
+	}
+	for _, char := range id {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case char == '-', char == '_', char == '.', char == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // truncateOrigin은 로그에 남길 Origin 길이를 제한한다. Origin은 인증 전

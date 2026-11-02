@@ -309,6 +309,44 @@ func (s *referenceStore) clientFaces(clientID string) []referenceFace {
 	return slices.Clone(s.faces[clientID])
 }
 
+// referenceClientLocks는 AI 클라이언트 하나의 기준 얼굴 변경(워커 화이트리스트와 메타)을
+// 직렬화한다. 요청이 겹치면 한쪽이 등록한 엔트리가 목록에 남지 않은 채 워커에 남아 그
+// 얼굴이 계속 블러에서 빠진다. zero 값을 바로 쓸 수 있다.
+type referenceClientLocks struct {
+	mu      sync.Mutex
+	entries map[string]*referenceClientLock
+}
+
+type referenceClientLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (l *referenceClientLocks) Lock(clientID string) (unlock func()) {
+	l.mu.Lock()
+	if l.entries == nil {
+		l.entries = make(map[string]*referenceClientLock)
+	}
+	entry := l.entries[clientID]
+	if entry == nil {
+		entry = &referenceClientLock{}
+		l.entries[clientID] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.entries, clientID)
+		}
+		l.mu.Unlock()
+	}
+}
+
 func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request) {
 	if s.ai == nil {
 		writeError(w, apiError{Status: http.StatusBadRequest, Code: "bad_request", Message: "AI privacy mode is not enabled.", Details: map[string]any{"reason": "ai_disabled"}})
@@ -355,6 +393,8 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	// 잃은 얼굴을 face_id와 이름을 유지한 채 되살린다. 서버는 얼굴 원본을 보관하지
 	// 않으므로 사용자가 사진을 다시 올려야 한다.
 	reregisterID := strings.TrimSpace(r.FormValue("face_id"))
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
 	var previous referenceFace
 	if reregisterID != "" {
 		if len(files) != 1 {
@@ -551,6 +591,14 @@ func (s *Server) handleDeleteReferenceFace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clientID := referenceClientID(r)
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
+	s.clearReferenceFaces(w, r, clientID)
+}
+
+// clearReferenceFaces는 클라이언트의 얼굴을 워커와 기록에서 모두 지운다. 호출자가
+// 클라이언트 잠금을 쥐고 있어야 한다.
+func (s *Server) clearReferenceFaces(w http.ResponseWriter, r *http.Request, clientID string) {
 	if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
 		s.logger.Error("AI ClearWhitelist failed", "client_id", clientID, "error", err)
 		writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist deletion failed."})
@@ -570,6 +618,8 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	}
 	clientID := referenceClientID(r)
 	faceID := r.PathValue("face_id")
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
 	s.references.mu.RLock()
 	found := false
 	var entryIDs map[string]string
@@ -591,7 +641,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 		// 있지 않은 등록을 알리느니 클라이언트의 다른 얼굴도 함께 지운다.
 		s.logger.Warn("reference face has no worker entry ids; clearing the whole client whitelist",
 			"client_id", clientID, "face_id", faceID)
-		s.handleDeleteReferenceFace(w, r)
+		s.clearReferenceFaces(w, r, clientID)
 		return
 	}
 	if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, entryIDs); err != nil {

@@ -50,6 +50,7 @@ type Server struct {
 	ai                *ai.Pool
 	references        *referenceStore
 	referenceDecode   *decodeGate
+	referenceClients  referenceClientLocks
 	origins           origin.Config
 	streaming         map[auth.StreamingProvider]streaming.Provider
 	authenticateUser  func(context.Context, string) (uuid.UUID, error)
@@ -286,6 +287,8 @@ func (s *Server) withUserOperation(next http.Handler) http.Handler {
 // 알리는 일이 없게 한다.
 func (s *Server) ClearUserReferenceData(ctx context.Context, userID uuid.UUID) error {
 	clientID := session.AIClientIDForUser(userID)
+	unlock := s.referenceClients.Lock(clientID)
+	defer unlock()
 	if s.ai != nil {
 		if err := s.ai.ClearWhitelist(ctx, clientID); err != nil {
 			return fmt.Errorf("clear AI whitelist: %w", err)

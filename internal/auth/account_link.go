@@ -274,10 +274,15 @@ func mergeUser(tx *gorm.DB, from, into uuid.UUID, now time.Time) error {
 		return fmt.Errorf("move oauth accounts: %w", err)
 	}
 
+	// 치지직은 사용자당 1개라 into에 없을 때만 옮긴다. 유튜브는 채널 단위다(#390).
 	if err := tx.Model(&StreamingAccount{}).
-		Where("user_id = ? AND provider NOT IN (?)", from, tx.Model(&StreamingAccount{}).Select("provider").Where("user_id = ?", into)).
+		Where("user_id = ? AND provider <> ? AND provider NOT IN (?)", from, StreamingProviderYouTube,
+			tx.Model(&StreamingAccount{}).Select("provider").Where("user_id = ?", into)).
 		Update("user_id", into).Error; err != nil {
 		return fmt.Errorf("move streaming accounts: %w", err)
+	}
+	if err := moveYouTubeChannels(tx, from, into); err != nil {
+		return err
 	}
 
 	// usage 패키지가 auth에 의존하므로 모델 대신 테이블 이름으로 옮긴다. 사용 기록을
@@ -305,6 +310,34 @@ func mergeUser(tx *gorm.DB, from, into uuid.UUID, now time.Time) error {
 	}
 	if err := tx.Where("id = ?", from).Delete(&User{}).Error; err != nil {
 		return fmt.Errorf("delete merged user: %w", err)
+	}
+	return nil
+}
+
+// moveYouTubeChannels는 into에 없는 from의 유튜브 채널을 상한(MaxYouTubeChannels)까지
+// 옮긴다. 겹치는 채널은 into의 연결을 남기고, 상한을 넘는 채널은 from 삭제와 함께
+// 지워진다.
+func moveYouTubeChannels(tx *gorm.DB, from, into uuid.UUID) error {
+	var owned int64
+	if err := tx.Model(&StreamingAccount{}).Where("user_id = ? AND provider = ?", into, StreamingProviderYouTube).Count(&owned).Error; err != nil {
+		return fmt.Errorf("count youtube channels: %w", err)
+	}
+	room := MaxYouTubeChannels - int(owned)
+	if room <= 0 {
+		return nil
+	}
+	var ids []uuid.UUID
+	if err := tx.Model(&StreamingAccount{}).
+		Where("user_id = ? AND provider = ? AND channel_id NOT IN (?)", from, StreamingProviderYouTube,
+			tx.Model(&StreamingAccount{}).Select("channel_id").Where("user_id = ? AND provider = ?", into, StreamingProviderYouTube)).
+		Order("created_at, id").Limit(room).Pluck("id", &ids).Error; err != nil {
+		return fmt.Errorf("select youtube channels: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := tx.Model(&StreamingAccount{}).Where("id IN ?", ids).Update("user_id", into).Error; err != nil {
+		return fmt.Errorf("move youtube channels: %w", err)
 	}
 	return nil
 }

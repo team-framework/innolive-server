@@ -377,6 +377,8 @@ type Manager struct {
 	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
 	// 전에 이 작업들을 기다린다.
 	deleting sync.WaitGroup
+	// platformCleanups는 진행 중인 플랫폼 방송 정리 고루틴이다(P1-26).
+	platformCleanups sync.WaitGroup
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
@@ -518,7 +520,13 @@ func (m *Manager) disposeBroadcast(userID uuid.UUID, broadcast PlatformBroadcast
 	if m.broadcastCleanup == nil || phase == BroadcastPhaseIdle || broadcast.BroadcastID == "" {
 		return
 	}
-	go m.broadcastCleanup(userID, broadcast, phase)
+	// 종료(WaitForDeletes)가 기다리도록 센다. 기다리지 않으면 프로세스가 먼저 끝나
+	// 라이브 종료 호출이 나가지 않고 방송이 autoStop까지 남는다(P1-26).
+	m.platformCleanups.Add(1)
+	go func() {
+		defer m.platformCleanups.Done()
+		m.broadcastCleanup(userID, broadcast, phase)
+	}()
 }
 
 // streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
@@ -1949,6 +1957,8 @@ func (m *Manager) WaitForDeletes(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		m.deleting.Wait()
+		// 삭제가 끝나면 그 삭제가 시작한 플랫폼 방송 정리도 기다린다.
+		m.platformCleanups.Wait()
 		close(done)
 	}()
 	select {

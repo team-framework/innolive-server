@@ -147,15 +147,16 @@ func TestPostgresLinkMergesOAuthOnlyUser(t *testing.T) {
 	}
 	var streams []StreamingAccount
 	db.Where("user_id = ?", member).Order("provider").Find(&streams)
-	if len(streams) != 2 {
-		t.Fatalf("streaming accounts = %+v, want member youtube + moved chzzk", streams)
+	if len(streams) != 3 {
+		t.Fatalf("streaming accounts = %+v, want member youtube + moved youtube + moved chzzk", streams)
 	}
+	channels := map[string]bool{}
 	for _, stream := range streams {
-		if stream.Provider == StreamingProviderYouTube && stream.ChannelID != "member-channel" {
-			t.Fatalf("overlapping youtube replaced member's own: %+v", stream)
-		}
-		if stream.Provider == StreamingProviderChzzk && stream.ChannelID != "legacy-chzzk" {
-			t.Fatalf("chzzk not moved: %+v", stream)
+		channels[stream.ChannelID] = true
+	}
+	for _, channel := range []string{"member-channel", "legacy-channel", "legacy-chzzk"} {
+		if !channels[channel] {
+			t.Fatalf("streaming accounts = %+v, missing %s", streams, channel)
 		}
 	}
 	var usageOwner string
@@ -620,5 +621,39 @@ func TestPostgresLinkMergeMovesBillingRows(t *testing.T) {
 		if err := db.Raw("SELECT user_id::text FROM "+table+" WHERE id = ?", id).Scan(&owner).Error; err != nil || owner != member.String() {
 			t.Fatalf("%s owner = %q, %v, want member", table, owner, err)
 		}
+	}
+}
+
+func TestPostgresMergeKeepsDistinctYouTubeChannelsUpToLimit(t *testing.T) {
+	db := newAccountLinkTestDB(t)
+	store := NewAccountLinkStore(db)
+	ctx := context.Background()
+	member := createLinkTestUser(t, db, "member@example.com", plan.Spark)
+	createLinkTestStreaming(t, db, member, StreamingProviderYouTube, "shared")
+	createLinkTestStreaming(t, db, member, StreamingProviderYouTube, "member-only")
+	createLinkTestStreaming(t, db, member, StreamingProviderChzzk, "member-chzzk")
+	legacy := createLinkTestUser(t, db, "", plan.Spark)
+	createLinkTestIdentity(t, db, legacy, OAuthProviderGoogle, "legacy-google")
+	createLinkTestStreaming(t, db, legacy, StreamingProviderYouTube, "shared")
+	for _, channel := range []string{"legacy-1", "legacy-2", "legacy-3", "legacy-4"} {
+		createLinkTestStreaming(t, db, legacy, StreamingProviderYouTube, channel)
+	}
+	createLinkTestStreaming(t, db, legacy, StreamingProviderChzzk, "legacy-chzzk")
+
+	if _, err := store.Link(ctx, member, LinkIdentity{Provider: OAuthProviderGoogle, Subject: "legacy-google"}); err != nil {
+		t.Fatalf("merge link: %v", err)
+	}
+
+	var youtube []string
+	db.Model(&StreamingAccount{}).Where("user_id = ? AND provider = ?", member, StreamingProviderYouTube).
+		Order("channel_id").Pluck("channel_id", &youtube)
+	want := []string{"legacy-1", "legacy-2", "legacy-3", "member-only", "shared"}
+	if strings.Join(youtube, ",") != strings.Join(want, ",") {
+		t.Fatalf("youtube channels after merge = %v, want %v", youtube, want)
+	}
+	var chzzk []string
+	db.Model(&StreamingAccount{}).Where("user_id = ? AND provider = ?", member, StreamingProviderChzzk).Pluck("channel_id", &chzzk)
+	if len(chzzk) != 1 || chzzk[0] != "member-chzzk" {
+		t.Fatalf("chzzk after merge = %v, want member's own", chzzk)
 	}
 }

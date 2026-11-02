@@ -26,6 +26,11 @@ func (h *tokenHTTPHandler) authenticatedUserID(w http.ResponseWriter, r *http.Re
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return uuid.Nil, false
 	}
+	// 인증 미들웨어를 거치지 않으므로 시연 모드(#490)를 여기서 확인한다(P1-19).
+	if err := h.service.demoLockdown().Admit(userID); err != nil {
+		h.writeDemoLockdown(w, r)
+		return uuid.Nil, false
+	}
 	return userID, true
 }
 

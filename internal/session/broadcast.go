@@ -153,7 +153,8 @@ func (m *Manager) SetBroadcastSettings(id string, settings YouTubeBroadcastSetti
 	switch t.phase {
 	case BroadcastPhasePreparing, BroadcastPhasePrepared:
 		return nil, ErrBroadcastPrepared
-	case BroadcastPhaseLive:
+	case BroadcastPhaseGoingLive, BroadcastPhaseLive:
+		// 전환 왕복 중 저장은 이미 나간 전환 요청에 반영되지 않는다(P1-9).
 		return nil, ErrBroadcastLive
 	}
 	settings.UpdatedAt = time.Now().UTC()

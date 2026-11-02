@@ -59,7 +59,7 @@ func (h *tokenHTTPHandler) handleNativeAccountSetup(w http.ResponseWriter, r *ht
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid account setup request.")
 		return
 	}
-	token, err := h.email.StartAccountSetup(r.Context(), request.SetupToken, request.Email, request.Password, requestClientInfo(r).IPAddress)
+	token, err := h.email.StartAccountSetup(r.Context(), request.SetupToken, request.Email, request.Password, requestClientInfo(r).RateLimitIP)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrInvalidSetupToken):

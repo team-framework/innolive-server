@@ -224,8 +224,9 @@ func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (string, error
 
 func requestClientInfo(r *http.Request) ClientInfo {
 	return ClientInfo{
-		UserAgent: truncateTokenMetadata(strings.TrimSpace(r.UserAgent()), 512),
-		IPAddress: clientip.FromRequest(r),
+		UserAgent:   truncateTokenMetadata(strings.TrimSpace(r.UserAgent()), 512),
+		IPAddress:   clientip.FromRequest(r),
+		RateLimitIP: clientip.RateLimitIP(r),
 	}
 }
 

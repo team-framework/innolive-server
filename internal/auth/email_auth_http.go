@@ -46,7 +46,7 @@ func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.
 			h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
 			return
 		}
-		token, err = h.email.StartSignupV2(r.Context(), request.Email, request.Password, request.Name, requestClientInfo(r).IPAddress)
+		token, err = h.email.StartSignupV2(r.Context(), request.Email, request.Password, request.Name, requestClientInfo(r).RateLimitIP)
 		h.finishEmailSignup(w, r, native, token, err)
 		return
 	}
@@ -55,7 +55,7 @@ func (h *tokenHTTPHandler) handleEmailSignupMode(w http.ResponseWriter, r *http.
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid email signup request.")
 		return
 	}
-	token, err = h.email.StartSignup(r.Context(), request.Email, request.Password, requestClientInfo(r).IPAddress)
+	token, err = h.email.StartSignup(r.Context(), request.Email, request.Password, requestClientInfo(r).RateLimitIP)
 	h.finishEmailSignup(w, r, native, token, err)
 }
 
@@ -293,7 +293,7 @@ func (h *tokenHTTPHandler) handlePasswordReset(w http.ResponseWriter, r *http.Re
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset request.")
 		return
 	}
-	token, err := h.email.StartPasswordReset(r.Context(), request.Email, request.NewPassword, requestClientInfo(r).IPAddress)
+	token, err := h.email.StartPasswordReset(r.Context(), request.Email, request.NewPassword, requestClientInfo(r).RateLimitIP)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrEmailSignupInvalid):

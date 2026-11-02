@@ -68,22 +68,51 @@ func (r Resolver) trustedIP(ip net.IP) bool {
 	return false
 }
 
+// Limitable은 X-Forwarded-For가 붙었는데 직접 연결한 상대를 신뢰하지 않는 경우에
+// false다. 그때 고른 IP는 프록시 주소라 모든 사용자가 한 버킷을 공유하므로 IP 기준
+// 제한에 쓰면 정상 사용자를 막는다.
+func (r Resolver) Limitable(remoteAddr, forwardedFor string) bool {
+	return strings.TrimSpace(forwardedFor) == "" || r.RemoteTrusted(remoteAddr)
+}
+
 type contextKey struct{}
 
+type resolved struct {
+	ip        string
+	limitable bool
+}
+
 // Middleware는 판정한 클라이언트 IP를 요청 context에 싣는다. 핸들러는
-// FromRequest로 읽는다.
+// FromRequest·RateLimitIP로 읽는다.
 func (r Resolver) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		ip := r.IP(req.RemoteAddr, req.Header.Get("X-Forwarded-For"))
-		next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), contextKey{}, ip)))
+		forwardedFor := req.Header.Get("X-Forwarded-For")
+		value := resolved{ip: r.IP(req.RemoteAddr, forwardedFor), limitable: r.Limitable(req.RemoteAddr, forwardedFor)}
+		next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), contextKey{}, value)))
 	})
 }
 
 // FromRequest는 Middleware가 실은 클라이언트 IP를 돌려준다. Middleware를 거치지
 // 않은 요청(테스트·직접 조립)은 TCP peer 주소를 쓴다.
 func FromRequest(req *http.Request) string {
-	if ip, ok := req.Context().Value(contextKey{}).(string); ok {
-		return ip
+	if value, ok := req.Context().Value(contextKey{}).(resolved); ok {
+		return value.ip
+	}
+	return peerHost(req.RemoteAddr)
+}
+
+// RateLimitIP는 IP 기준 제한에 써도 되는 클라이언트 IP다. 신뢰하지 않는 프록시
+// 뒤라 실제 클라이언트를 알 수 없으면 빈 문자열이고, 호출자는 IP 기준 제한을
+// 건너뛴다.
+func RateLimitIP(req *http.Request) string {
+	if value, ok := req.Context().Value(contextKey{}).(resolved); ok {
+		if !value.limitable {
+			return ""
+		}
+		return value.ip
+	}
+	if strings.TrimSpace(req.Header.Get("X-Forwarded-For")) != "" {
+		return ""
 	}
 	return peerHost(req.RemoteAddr)
 }

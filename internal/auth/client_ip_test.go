@@ -31,4 +31,7 @@ func TestRequestClientInfoUsesSharedClientIP(t *testing.T) {
 	if info.IPAddress != "198.51.100.4" {
 		t.Fatalf("client IP from untrusted peer = %q, want peer address", info.IPAddress)
 	}
+	if info.RateLimitIP != "" {
+		t.Fatalf("rate-limit IP behind an untrusted proxy = %q, want empty", info.RateLimitIP)
+	}
 }

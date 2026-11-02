@@ -46,3 +46,24 @@ func TestMiddlewareCarriesResolvedIPToHandlers(t *testing.T) {
 		t.Fatal("request outside the middleware must fall back to the peer address")
 	}
 }
+
+func TestRateLimitIPIsEmptyBehindUntrustedProxy(t *testing.T) {
+	var limitIP string
+	handler := NewResolver(nil).Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		limitIP = RateLimitIP(r)
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/auth/sign-in", nil)
+	request.RemoteAddr = "172.17.0.1:51000"
+	request.Header.Set("X-Forwarded-For", "203.0.113.7")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if limitIP != "" {
+		t.Fatalf("rate-limit IP behind an untrusted proxy = %q, want empty", limitIP)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/auth/sign-in", nil)
+	request.RemoteAddr = "198.51.100.4:51000"
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if limitIP != "198.51.100.4" {
+		t.Fatalf("rate-limit IP for a direct client = %q", limitIP)
+	}
+}

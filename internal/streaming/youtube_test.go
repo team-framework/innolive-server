@@ -90,12 +90,15 @@ func (s *memoryStore) Get(_ context.Context, userID uuid.UUID, provider auth.Str
 	return auth.StreamingAccount{}, auth.ErrStreamingAccountNotFound
 }
 
-func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
+func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, previous, ciphertext []byte, version *int16, expiresAt *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, ok := s.accounts[id]
 	if !ok {
 		return auth.ErrStreamingAccountNotFound
+	}
+	if !bytes.Equal(account.RefreshTokenCiphertext, previous) {
+		return auth.ErrRefreshTokenChanged
 	}
 	account.RefreshTokenCiphertext = ciphertext
 	account.TokenKeyVersion = version
@@ -104,15 +107,27 @@ func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, cipher
 	return nil
 }
 
-func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+func (s *memoryStore) ClearReconnectRequired(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if account, ok := s.accounts[id]; ok {
+		account.ReconnectRequiredAt = nil
+		s.accounts[id] = account
+	}
+	return nil
+}
+
+func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, rejected []byte, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, ok := s.accounts[id]
 	if !ok {
 		return auth.ErrStreamingAccountNotFound
 	}
-	account.ReconnectRequiredAt = &at
-	s.accounts[id] = account
+	if bytes.Equal(account.RefreshTokenCiphertext, rejected) {
+		account.ReconnectRequiredAt = &at
+		s.accounts[id] = account
+	}
 	return nil
 }
 

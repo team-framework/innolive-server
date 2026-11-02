@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -329,11 +330,15 @@ func (s *memoryStreamingAccountStore) Get(ctx context.Context, userID uuid.UUID,
 	}
 }
 
-func (s *memoryStreamingAccountStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
+func (s *memoryStreamingAccountStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, previous, ciphertext []byte, version *int16, expiresAt *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, account := range s.accounts {
 		if account.ID == id {
+			if !bytes.Equal(account.RefreshTokenCiphertext, previous) {
+				return ErrRefreshTokenChanged
+			}
+			account.ReconnectRequiredAt = nil
 			account.RefreshTokenCiphertext = ciphertext
 			account.TokenKeyVersion = version
 			account.RefreshTokenExpiresAt = expiresAt
@@ -344,13 +349,27 @@ func (s *memoryStreamingAccountStore) UpdateRefreshToken(_ context.Context, id u
 	return ErrStreamingAccountNotFound
 }
 
-func (s *memoryStreamingAccountStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+func (s *memoryStreamingAccountStore) ClearReconnectRequired(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, account := range s.accounts {
 		if account.ID == id {
-			account.ReconnectRequiredAt = &at
+			account.ReconnectRequiredAt = nil
 			s.accounts[key] = account
+		}
+	}
+	return nil
+}
+
+func (s *memoryStreamingAccountStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, rejected []byte, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.ID == id {
+			if bytes.Equal(account.RefreshTokenCiphertext, rejected) {
+				account.ReconnectRequiredAt = &at
+				s.accounts[key] = account
+			}
 			return nil
 		}
 	}
@@ -687,7 +706,7 @@ func TestYouTubeAccessTokenProviderClearsDeletedUserCache(t *testing.T) {
 }
 
 // TestYouTubeAccessTokenProviderMarksReconnectRequired: refresh token이 토큰
-// 엔드포인트에서 4xx로 거절되면(권한 취소·만료) 전용 에러로 구분되고 계정에
+// 엔드포인트에서 invalid_grant로 거절되면(권한 취소·만료) 전용 에러로 구분되고 계정에
 // 재연결 필요 표식이 남아야 한다 — 조회 API가 API 호출 없이 판별하는 근거.
 func TestYouTubeAccessTokenProviderMarksReconnectRequired(t *testing.T) {
 	cipher := testProviderTokenCipher(t)
@@ -706,7 +725,7 @@ func TestYouTubeAccessTokenProviderMarksReconnectRequired(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	oauth := &stubYouTubeAuthorizer{refreshErr: ErrYouTubeAuthCodeRejected}
+	oauth := &stubYouTubeAuthorizer{refreshErr: fmt.Errorf("%w: %w", ErrYouTubeAuthCodeRejected, ErrYouTubeRefreshTokenInvalid)}
 	provider, err := NewYouTubeAccessTokenProvider(oauth, store, cipher)
 	if err != nil {
 		t.Fatal(err)

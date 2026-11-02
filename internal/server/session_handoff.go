@@ -101,7 +101,36 @@ func (s *Server) handOffSessions(ctx context.Context, target *url.URL, commit bo
 	return result
 }
 
+// handoffStaleAttempts는 확정 중 세션이 바뀌어 다시 보내는 횟수다. 계속 바뀌면
+// 마지막 스냅샷으로 놓는다 — 놓지 않으면 세션이 양쪽 프로세스에 남는다.
+const handoffStaleAttempts = 3
+
 func (s *Server) handOffSession(ctx context.Context, target *url.URL, id string, commit bool) error {
+	for attempt := 1; ; attempt++ {
+		snapshot, err := s.exportForHandoff(ctx, id, commit)
+		if err != nil {
+			return err
+		}
+		if err := s.postSessionImport(ctx, target, snapshot, commit); err != nil {
+			return err
+		}
+		if !commit {
+			return nil
+		}
+		if attempt >= handoffStaleAttempts {
+			s.logger.Warn("session kept changing during handoff; detaching with the last snapshot", "session_id", id)
+			return s.sessions.DetachSession(id)
+		}
+		err = s.sessions.DetachSessionIfUnchanged(snapshot)
+		if !errors.Is(err, session.ErrHandoffStale) {
+			return err
+		}
+	}
+}
+
+// exportForHandoff는 스냅샷을 뜬다. 확정 단계에서 플랫폼 왕복 중인 세션은 잠시
+// 기다렸다 다시 뜬다.
+func (s *Server) exportForHandoff(ctx context.Context, id string, commit bool) (session.SessionSnapshot, error) {
 	var snapshot session.SessionSnapshot
 	var err error
 	for attempt := 0; ; attempt++ {

@@ -30,6 +30,8 @@ var (
 	// ErrHandoffConflict는 새 프로세스에 이미 같은 id의 세션이 클라이언트와 연결돼 있을
 	// 때다. 이관이 끝난 세션을 덮어쓰지 않는다.
 	ErrHandoffConflict = errors.New("session is already live on this server")
+	// ErrHandoffStale은 스냅샷을 뜬 뒤 세션이 바뀌었다는 뜻이다. 다시 떠서 보낸다.
+	ErrHandoffStale = errors.New("session changed after the handoff snapshot")
 )
 
 // SessionSnapshot은 다른 프로세스로 넘기는 세션 상태다. 송출 URL(스트림 키)과 소유자
@@ -56,6 +58,8 @@ type SessionSnapshot struct {
 	BroadcastRemaining   *int64                    `json:"broadcast_remaining,omitempty"`
 	DirectStops          map[string]string         `json:"direct_stops,omitempty"`
 	Targets              []TargetSnapshot          `json:"targets"`
+	// exportedVersion은 스냅샷을 뜬 시점의 세션 UpdatedAt이다. 넘기지 않는다.
+	exportedVersion time.Time
 }
 
 // TargetSnapshot은 송출 대상 하나의 상태다.
@@ -121,6 +125,7 @@ func (m *Manager) ExportSession(id string) (SessionSnapshot, error) {
 		ScreenBlurEnabled:    s.screenBlurEnabled,
 		MosaicConfig:         s.mosaicConfig.Clone(),
 		Notices:              append([]Notice(nil), s.notices...),
+		exportedVersion:      s.UpdatedAt,
 	}
 	if s.broadcast != nil {
 		copy := *s.broadcast
@@ -366,11 +371,31 @@ func (s *Session) handoffPending() bool {
 // 세션은 새 프로세스에서 이어진다. 서버 egress는 끊고(그 세대의 실사용은
 // server_handoff로 닫힌다) PeerConnection을 닫아 클라이언트가 다시 붙게 한다.
 func (m *Manager) DetachSession(id string) error {
+	return m.detachSession(id, nil)
+}
+
+// DetachSessionIfUnchanged는 snapshot을 뜬 뒤 세션이 바뀌지 않았을 때만 놓는다.
+// import가 오가는 사이(최대 10초)에 바뀐 상태는 새 프로세스에 가지 않았으므로,
+// 바뀌었으면 ErrHandoffStale을 돌려 다시 떠서 보내게 한다(P1-39).
+func (m *Manager) DetachSessionIfUnchanged(snapshot SessionSnapshot) error {
+	return m.detachSession(snapshot.ID, &snapshot.exportedVersion)
+}
+
+func (m *Manager) detachSession(id string, exportedVersion *time.Time) error {
 	m.mu.Lock()
 	s := m.sessions[id]
 	if s == nil {
 		m.mu.Unlock()
 		return ErrNotFound
+	}
+	if exportedVersion != nil {
+		s.mu.RLock()
+		stale := !s.UpdatedAt.Equal(*exportedVersion)
+		s.mu.RUnlock()
+		if stale {
+			m.mu.Unlock()
+			return ErrHandoffStale
+		}
 	}
 	delete(m.sessions, id)
 	count := len(m.sessions)

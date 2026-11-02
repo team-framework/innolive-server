@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/jpeg"
 	"strings"
+	"sync"
 	"time"
 
 	aiv1 "inno-live-server/api/gen/aiv1"
@@ -43,15 +44,29 @@ func probeDimension(pinLongEdge int) int {
 // 실패로 바뀐다. 겸해서 실제 모델의 첫 추론 JIT 비용을 미리 치르는 warmup 호출
 // 역할도 한다. target별 deadline은 timeout에서 가져오며, 첫 추론 warmup을 흡수할 수
 // 있도록 정상 상태의 AI_GRPC_TIMEOUT과 의도적으로 분리했다.
+//
+// 워커는 서로 독립이라 함께 확인한다. 하나씩 기다리면 워커 수만큼 기동과 배포
+// 헬스 대기가 길어진다(P1-27). 오류는 target 순서대로 모은다.
 func (p *Pool) Preflight(ctx context.Context, wireFormat string, timeout time.Duration, pinLongEdge int) error {
-	var errs []error
 	clients := p.Clients()
-	for _, client := range clients {
-		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		err := client.Preflight(callCtx, wireFormat, pinLongEdge)
-		cancel()
+	results := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for index, client := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			callCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			if err := client.Preflight(callCtx, wireFormat, pinLongEdge); err != nil {
+				results[index] = fmt.Errorf("%s: %w", client.Address(), err)
+			}
+		}()
+	}
+	wg.Wait()
+	var errs []error
+	for _, err := range results {
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", client.Address(), err))
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {

@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -194,6 +196,17 @@ func newReferenceFaceTestApplication(t *testing.T, workerCount int) (*Server, *h
 	return application, httpServer, workers, storePath
 }
 
+// referenceImage는 디코드되는 작은 JPEG 뒤에 tag를 붙인다. 서버는 JPEG 끝(EOI) 뒤를
+// 읽지 않고, 가짜 워커는 tag로 거절 여부를 정한다.
+func referenceImage(tag string) []byte {
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, image.NewGray(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		panic(err)
+	}
+	out.WriteString(tag)
+	return out.Bytes()
+}
+
 func uploadReferenceFaces(t *testing.T, baseURL string, count int) referenceStatus {
 	t.Helper()
 	var body bytes.Buffer
@@ -206,7 +219,7 @@ func uploadReferenceFaces(t *testing.T, baseURL string, count int) referenceStat
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := part.Write([]byte(fmt.Sprintf("face-%d", index))); err != nil {
+		if _, err := part.Write(referenceImage(fmt.Sprintf("face-%d", index))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -488,7 +501,7 @@ func guestReferenceUploadRequest(t *testing.T, baseURL, sessionID, owner, guest 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("face")); err != nil {
+	if _, err := part.Write(referenceImage("face")); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -570,7 +583,7 @@ func TestReplaceUploadClearsPreviousWorkerEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("replacement")); err != nil {
+	if _, err := part.Write(referenceImage("replacement")); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -672,6 +685,8 @@ type referenceUploadPart struct {
 	filename    string
 	contentType string
 	content     string
+	// raw면 content를 이미지로 감싸지 않고 그대로 올린다.
+	raw bool
 }
 
 // postReferenceFaces는 임의의 파트를 올리고 응답을 그대로 돌려준다.
@@ -687,7 +702,11 @@ func postReferenceFaces(t *testing.T, baseURL string, parts []referenceUploadPar
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := part.Write([]byte(p.content)); err != nil {
+		content := referenceImage(p.content)
+		if p.raw {
+			content = []byte(p.content)
+		}
+		if _, err := part.Write(content); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -797,7 +816,7 @@ func TestUploadCancelledMidRequestRollsBackRegisteredEntries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := part.Write([]byte("ok")); err != nil {
+		if _, err := part.Write(referenceImage("ok")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -850,7 +869,7 @@ func TestUploadStalledBodyHitsReadDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("ok")); err != nil {
+	if _, err := part.Write(referenceImage("ok")); err != nil {
 		t.Fatal(err)
 	}
 	// writer는 일부러 열어 둔다. multipart 종결자가 오지 않으므로 핸들러는 기한이

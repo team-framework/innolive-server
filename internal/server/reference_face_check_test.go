@@ -61,7 +61,7 @@ func postReregistration(t *testing.T, baseURL, faceID string, contents ...string
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := part.Write([]byte(content)); err != nil {
+		if _, err := part.Write(referenceImage(content)); err != nil {
 			t.Fatal(err)
 		}
 	}

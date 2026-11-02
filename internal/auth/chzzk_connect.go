@@ -243,6 +243,28 @@ func (p *ChzzkAccessTokenProvider) refreshTokenChanged(ctx context.Context, user
 	return err == nil && len(account.RefreshTokenCiphertext) > 0 && !bytes.Equal(account.RefreshTokenCiphertext, used)
 }
 
+// InvalidateAccessToken은 플랫폼이 거절(401)한 access token을 캐시에서 버린다.
+// 다음 호출은 refresh token으로 새로 받는다(P1-15).
+func (p *ChzzkAccessTokenProvider) InvalidateAccessToken(token string) {
+	if p == nil || token == "" {
+		return
+	}
+	p.mu.Lock()
+	states := make([]*userAccessToken, 0, len(p.users))
+	for _, state := range p.users {
+		states = append(states, state)
+	}
+	p.mu.Unlock()
+	for _, state := range states {
+		state.mu.Lock()
+		if state.token == token {
+			state.token = ""
+			state.expiresAt = time.Time{}
+		}
+		state.mu.Unlock()
+	}
+}
+
 func (p *ChzzkAccessTokenProvider) ClearCachedToken(userID uuid.UUID) {
 	if p == nil || userID == uuid.Nil {
 		return

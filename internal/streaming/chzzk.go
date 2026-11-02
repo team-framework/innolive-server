@@ -196,6 +196,7 @@ func (p *ChzzkProvider) do(ctx context.Context, accessToken, method, path string
 			message = *envelope.Message
 		}
 		if envelope.Code == http.StatusUnauthorized {
+			dropRejectedToken(p.tokens, accessToken)
 			return fmt.Errorf("%w: %s %s: %s", auth.ErrStreamingReconnectRequired, method, path, message)
 		}
 		return fmt.Errorf("%w: %s %s: platform code %d: %s", ErrChzzkPlatform, method, path, envelope.Code, message)

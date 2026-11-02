@@ -555,6 +555,28 @@ func (p *YouTubeAccessTokenProvider) AccessToken(ctx context.Context, userID uui
 	return state.token, nil
 }
 
+// InvalidateAccessToken은 플랫폼이 거절(401)한 access token을 캐시에서 버린다.
+// 다음 호출은 refresh token으로 새로 받는다(P1-15).
+func (p *YouTubeAccessTokenProvider) InvalidateAccessToken(token string) {
+	if p == nil || token == "" {
+		return
+	}
+	p.mu.Lock()
+	states := make([]*accountAccessToken, 0, len(p.accounts))
+	for _, state := range p.accounts {
+		states = append(states, state)
+	}
+	p.mu.Unlock()
+	for _, state := range states {
+		state.mu.Lock()
+		if state.token == token {
+			state.token = ""
+			state.expiresAt = time.Time{}
+		}
+		state.mu.Unlock()
+	}
+}
+
 // ClearCachedToken은 계정 삭제·연결 해제 뒤 그 사용자의 모든 채널 access token을
 // 잊는다. refresh token은 탈퇴 트랜잭션이 지우고, 이 캐시까지 버려 삭제된 계정이
 // 실행 중인 프로세스에 쓸 수 있는 플랫폼 자격 정보를 남기지 않게 한다. 남은 채널은

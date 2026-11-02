@@ -65,6 +65,20 @@ type AccessTokenProvider interface {
 	AccessToken(ctx context.Context, userID uuid.UUID) (string, error)
 }
 
+// accessTokenInvalidator는 플랫폼이 거절(401)한 access token을 캐시에서 버린다.
+// 버리지 않으면 만료(최대 하루)까지 같은 토큰으로 계속 실패한다(P1-15). 실패한
+// 호출은 그대로 실패로 돌려주고, 다음 호출이 새 토큰을 받는다.
+type accessTokenInvalidator interface {
+	InvalidateAccessToken(token string)
+}
+
+// dropRejectedToken은 tokens가 지원하면 거절된 access token을 버린다.
+func dropRejectedToken(tokens AccessTokenProvider, accessToken string) {
+	if invalidator, ok := tokens.(accessTokenInvalidator); ok {
+		invalidator.InvalidateAccessToken(accessToken)
+	}
+}
+
 // YouTubeProvider는 YouTube Live 방송 라이프사이클 구현이다.
 // 라이브 전환은 GoLive의 transition 호출이 담당하고(enableAutoStart=false),
 // 종료만 enableAutoStop에 맡긴다(실측: 송출 중단 → 57.6초에 complete).
@@ -675,6 +689,9 @@ func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, cont
 		return fmt.Errorf("request YouTube Live API: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		dropRejectedToken(p.tokens, accessToken)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return decodeYouTubeAPIError(response)
 	}

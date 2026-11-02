@@ -302,6 +302,13 @@ func (s *referenceStore) save() error {
 	return nil
 }
 
+// clientFaces는 클라이언트 얼굴 기록의 사본이다.
+func (s *referenceStore) clientFaces(clientID string) []referenceFace {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.faces[clientID])
+}
+
 func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request) {
 	if s.ai == nil {
 		writeError(w, apiError{Status: http.StatusBadRequest, Code: "bad_request", Message: "AI privacy mode is not enabled.", Details: map[string]any{"reason": "ai_disabled"}})
@@ -363,16 +370,6 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	}
 	// "image"(단일 필드)는 클라이언트의 얼굴 집합을 교체하고, "images[]"는 추가한다.
 	replace := reregisterID == "" && len(r.MultipartForm.File["image"]) > 0 && len(r.MultipartForm.File["images"]) == 0
-	if replace {
-		// 클라이언트의 기존 워커 화이트리스트를 먼저 비워 오래된 얼굴이 더는 제외되지
-		// 않게 한다(Python의 교체 동작과 같다). 여기서 실패하면 업로드를 중단해야
-		// 한다 — 이전 얼굴을 화이트리스트에 남기면 방금 교체한 사람을 계속 제외한다.
-		if err := s.ai.ClearWhitelist(r.Context(), clientID); err != nil {
-			s.logger.Error("clear whitelist before replace failed", "client_id", clientID, "error", err)
-			writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
-			return
-		}
-	}
 	// AI 워커를 건드리기 전에 모든 파일을 검증·디코드한다. 잘못된 파일이 있으면
 	// 아무것도 등록하지 않고 요청을 끝내므로, 뒤 파일의 형식·크기 오류가 앞 파일의
 	// 얼굴을 워커에 남기는 일이 없다.
@@ -441,6 +438,24 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		registered = append(registered, referenceFace{Name: name, FaceID: face.faceID, EntryIDs: result.EntryIDs, RegisteredAt: time.Now().UTC()})
+	}
+	if replace {
+		// 교체는 새 얼굴이 모두 자리 잡은 뒤에 이전 얼굴을 지운다. 새 파일이 거절되면
+		// 이전 얼굴이 워커와 목록에 그대로 남는다. 엔트리 id가 없는 옛 기록은 워커가
+		// 재시작으로 이미 잃었다.
+		for _, face := range s.references.clientFaces(clientID) {
+			if len(face.EntryIDs) == 0 {
+				continue
+			}
+			if err := s.ai.DeleteWhitelistEntries(r.Context(), clientID, face.EntryIDs); err != nil {
+				s.logger.Error("delete previous whitelist entries during replace failed", "client_id", clientID, "face_id", face.FaceID, "error", err)
+				s.rollbackReferenceRegistrations(r.Context(), clientID, registered)
+				// 이전 얼굴 일부가 워커에서 이미 빠졌을 수 있다. 대조가 표시를 다시 정한다.
+				s.RequestReferenceFaceCheck()
+				writeError(w, apiError{Status: http.StatusBadGateway, Code: "ai_unavailable", Message: "AI whitelist replacement failed."})
+				return
+			}
+		}
 	}
 	if reregisterID != "" && len(previous.EntryIDs) > 0 {
 		// 새 엔트리가 자리 잡은 뒤에 이전 엔트리를 지운다. 새 사진이 거절돼도 아직

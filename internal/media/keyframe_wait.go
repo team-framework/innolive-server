@@ -65,6 +65,16 @@ func (w *keyframeWait) discard() {
 	w.request()
 }
 
+// restart는 멈춘 디코더를 다시 띄우기 전에 대기 기록을 비운다. 새 대기의 첫
+// 폐기에서 바로 키프레임을 요청하고, 종료 로그도 새 대기만 센다.
+func (w *keyframeWait) restart() {
+	if w == nil {
+		return
+	}
+	w.discarded, w.requests = 0, 0
+	w.firstDiscardAt, w.lastRequestAt = time.Time{}, time.Time{}
+}
+
 // end는 대기가 끝나면 한 번 부른다. 버린 프레임이 있었으면 폐기 수·요청 수·대기
 // 시간을 남긴다. 긴 대기는 드물어서(재시작 3주 65회 중 1초 초과 3회) 카운터
 // 합계만으로는 재요청이 대기를 줄였는지 가를 수 없으므로 건마다 남긴다.

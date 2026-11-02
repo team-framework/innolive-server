@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync/atomic"
 
 	"inno-live-server/internal/config"
 )
@@ -18,13 +19,38 @@ const h264AnnexBStartCode = "\x00\x00\x00\x01"
 // FFmpeg가 항상 SPS/PPS 다음에 디코드 가능한 픽처로 시작하게 한다.
 func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan frame, output chan<- frame, keyframes *keyframeWait) error {
 	bootstrap := h264Bootstrap{}
-	var first frame
-	var width, height uint16
+	first, width, height, ok := t.waitH264IDR(&bootstrap, input, keyframes)
+	if !ok {
+		return nil
+	}
+
+	// 입력 방향(세로·가로)이 바뀌면 그 IDR부터 디코더를 새 치수로 다시
+	// 띄운다(#449). 같은 방향 안의 해상도 변화(램프업)는 핀이 흡수한다.
+	for {
+		next, err := t.decodeH264Segment(ctx, &bootstrap, first, width, height, input, output)
+		if errors.Is(err, errDecoderStalled) {
+			t.logDecoderStall(VideoCodecH264)
+			keyframes.restart()
+			if first, width, height, ok = t.waitH264IDR(&bootstrap, input, keyframes); !ok {
+				return nil
+			}
+			continue
+		}
+		if err != nil || next == nil {
+			return err
+		}
+		first, width, height = next.item, next.width, next.height
+	}
+}
+
+// waitH264IDR은 디코더를 띄울 IDR이 올 때까지 앞 액세스 유닛을 버린다. ok가
+// false면 IDR 없이 입력이 끝났다.
+func (t *FFmpegTranscoder) waitH264IDR(bootstrap *h264Bootstrap, input <-chan frame, keyframes *keyframeWait) (frame, uint16, uint16, bool) {
 	for {
 		item, ok := <-input
 		if !ok {
 			keyframes.end(t.logger, VideoCodecH264, false)
-			return nil
+			return frame{}, 0, 0, false
 		}
 		data, idr, w, h := bootstrap.prepare(item.data)
 		if len(data) == 0 || !idr || w == 0 || h == 0 {
@@ -32,18 +58,8 @@ func (t *FFmpegTranscoder) decodeH264Stream(ctx context.Context, input <-chan fr
 			continue
 		}
 		keyframes.end(t.logger, VideoCodecH264, true)
-		first, first.data, width, height = item, data, w, h
-		break
-	}
-
-	// 입력 방향(세로·가로)이 바뀌면 그 IDR부터 디코더를 새 치수로 다시
-	// 띄운다(#449). 같은 방향 안의 해상도 변화(램프업)는 핀이 흡수한다.
-	for {
-		next, err := t.decodeH264Segment(ctx, &bootstrap, first, width, height, input, output)
-		if err != nil || next == nil {
-			return err
-		}
-		first, width, height = next.item, next.width, next.height
+		item.data = data
+		return item, w, h, true
 	}
 }
 
@@ -77,8 +93,9 @@ func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h26
 	// repin은 방향이 바뀐 IDR이다. 쓰기 고루틴이 metadata를 닫기 전에만 쓰고,
 	// 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
 	var repin *h264Repin
-	metadata := make(chan frame, 64)
+	metadata := make(chan frame, decoderMetadataQueue)
 	writeError := make(chan error, 1)
+	var stalled atomic.Bool
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
@@ -90,12 +107,7 @@ func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h26
 			if _, err := process.stdin.Write(item.data); err != nil {
 				return err
 			}
-			select {
-			case metadata <- item:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+			return t.sendDecodeMetadata(ctx, metadata, item, &stalled)
 		}
 		if err := write(first); err != nil {
 			writeError <- err
@@ -151,6 +163,9 @@ func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h26
 			item.data, err = readJPEG(process.stdout)
 		}
 		if err != nil {
+			if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
+				return nil, errDecoderStalled
+			}
 			return nil, fmt.Errorf("read decoded frame from FFmpeg H.264 decoder: %w", err)
 		}
 		select {
@@ -160,6 +175,9 @@ func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h26
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
+		if errors.Is(err, errDecoderStalled) {
+			return nil, errDecoderStalled
+		}
 		return nil, fmt.Errorf("write H.264 stream to FFmpeg decoder: %w", err)
 	}
 	return repin, nil

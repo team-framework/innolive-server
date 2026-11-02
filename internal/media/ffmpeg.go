@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,9 +26,19 @@ const (
 	// ffmpegShutdownGrace는 teardown이 FFmpeg의 자체 종료(stdin EOF 또는
 	// SIGINT)를 얼마나 기다린 뒤 SIGKILL로 넘어갈지를 정한다.
 	ffmpegShutdownGrace = 2 * time.Second
+	// decoderStallTimeout은 디코더가 출력 없이 입력만 받아 메타데이터 큐(64)가 찬
+	// 채로 버티는 상한이다. 디코더는 입력 하나에 출력 하나를 가정하는데, 패킷
+	// 손실 뒤 FFmpeg가 프레임을 내지 않으면 큐가 차고 쓰기·읽기가 서로를 기다려
+	// 영상이 멈춘다(P0-4, 10/21 실측 미출력 75장). 넘기면 그 디코더를 끝내고 다음
+	// 키프레임부터 다시 띄운다.
+	decoderStallTimeout  = 2 * time.Second
+	decoderMetadataQueue = 64
 )
 
 var ErrKeyframeRequired = errors.New("a video keyframe is required to initialize the decoder")
+
+// errDecoderStalled는 디코더 세그먼트가 출력을 멈춰 다시 띄워야 한다는 뜻이다.
+var errDecoderStalled = errors.New("FFmpeg decoder stopped producing frames")
 
 // VideoCodec은 한 세션에서 쓰는 압축 WebRTC 비디오 코덱이다. offer에서 골라
 // answer를 만들기 전에 정해지고, 그 뒤로는 협상된 media section의 수명 동안
@@ -88,6 +99,8 @@ type FFmpegTranscoder struct {
 	metrics    *metrics.Registry
 	options    TranscoderOptions
 	newCommand commandFactory
+	// stallTimeout은 decoderStallTimeout이다. 테스트에서 짧게 바꾼다.
+	stallTimeout time.Duration
 }
 
 type ffmpegProcess struct {
@@ -111,12 +124,52 @@ func NewFFmpegTranscoder(path string, logger *slog.Logger, registry *metrics.Reg
 		options.VideoCodec = VideoCodecVP8
 	}
 	return &FFmpegTranscoder{
-		path:       path,
-		logger:     logger,
-		metrics:    registry,
-		options:    options,
-		newCommand: exec.CommandContext,
+		path:         path,
+		logger:       logger,
+		metrics:      registry,
+		options:      options,
+		newCommand:   exec.CommandContext,
+		stallTimeout: decoderStallTimeout,
 	}
+}
+
+// sendDecodeMetadata는 디코더에 넣은 프레임의 메타데이터를 읽기 루프로 넘긴다.
+// 큐가 찬 채로 stallTimeout이 지나면 디코더가 출력을 멈춘 것이다. 큐가 차는 것은
+// 디코더가 출력 없이 64장을 받았을 때뿐이다 — 읽기 루프는 출력이 오는 대로 큐를
+// 비우고, 그 뒤 단계(keepLatestDecoded)는 막히지 않는다.
+func (t *FFmpegTranscoder) sendDecodeMetadata(ctx context.Context, metadata chan<- frame, item frame, stalled *atomic.Bool) error {
+	select {
+	case metadata <- item:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(t.stallTimeout)
+	defer timer.Stop()
+	select {
+	case metadata <- item:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		stalled.Store(true)
+		return errDecoderStalled
+	}
+}
+
+// decodeSegmentError는 세그먼트를 끝낸 오류를 정리한다. 디코더가 멈춰 쓰기 쪽이
+// stdin을 닫으면 읽기 쪽은 EOF를 받는데, 이것은 디코더 고장이 아니라 재시작
+// 신호다.
+func decodeSegmentError(err error, stalled *atomic.Bool) error {
+	if stalled.Load() {
+		return errDecoderStalled
+	}
+	return err
+}
+
+// logDecoderStall은 멈춘 디코더를 다시 띄운다는 기록을 남긴다.
+func (t *FFmpegTranscoder) logDecoderStall(codec VideoCodec) {
+	t.logger.Warn("FFmpeg decoder stopped producing frames; restarting from next keyframe",
+		"codec", codec, "pending_frames", decoderMetadataQueue, "stall_timeout", t.stallTimeout)
 }
 
 // DecodeStream은 압축 프레임을 디코드한다. keyframes는 첫 키프레임을 기다리며
@@ -129,39 +182,65 @@ func (t *FFmpegTranscoder) DecodeStream(ctx context.Context, input <-chan frame,
 }
 
 func (t *FFmpegTranscoder) decodeVP8Stream(ctx context.Context, input <-chan frame, output chan<- frame, keyframes *keyframeWait) error {
-	first, ok := <-input
-	if !ok {
-		return nil
-	}
-	width, height, err := vp8KeyframeDimensions(first.data)
-	for errors.Is(err, ErrKeyframeRequired) {
-		keyframes.discard()
-		select {
-		case <-ctx.Done():
-			keyframes.end(t.logger, VideoCodecVP8, false)
-			return ctx.Err()
-		case first, ok = <-input:
-			if !ok {
-				keyframes.end(t.logger, VideoCodecVP8, false)
-				return nil
-			}
-			width, height, err = vp8KeyframeDimensions(first.data)
-		}
-	}
-	keyframes.end(t.logger, VideoCodecVP8, err == nil)
-	if err != nil {
+	first, width, height, ok, err := t.waitVP8Keyframe(ctx, input, keyframes)
+	if !ok || err != nil {
 		return err
 	}
 	// 입력 방향(세로·가로)이 바뀌면 그 키프레임부터 디코더를 새 치수로 다시
 	// 띄운다(#449). 같은 방향 안의 해상도 변화(램프업)는 핀이 흡수한다.
 	for {
 		next, err := t.decodeVP8Segment(ctx, first, width, height, input, output)
+		if errors.Is(err, errDecoderStalled) {
+			t.logDecoderStall(VideoCodecVP8)
+			keyframes.restart()
+			first, width, height, ok, err = t.waitVP8Keyframe(ctx, input, keyframes)
+			if !ok || err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil || next == nil {
 			return err
 		}
 		first = *next
 		width, height, _ = vp8KeyframeDimensions(first.data)
 	}
+}
+
+// waitVP8Keyframe은 디코더를 띄울 키프레임이 올 때까지 앞 프레임을 버린다.
+// ok가 false면 키프레임 없이 입력이 끝났다.
+func (t *FFmpegTranscoder) waitVP8Keyframe(ctx context.Context, input <-chan frame, keyframes *keyframeWait) (frame, uint16, uint16, bool, error) {
+	var first frame
+	select {
+	case <-ctx.Done():
+		return frame{}, 0, 0, false, ctx.Err()
+	case item, ok := <-input:
+		if !ok {
+			return frame{}, 0, 0, false, nil
+		}
+		first = item
+	}
+	width, height, err := vp8KeyframeDimensions(first.data)
+	for errors.Is(err, ErrKeyframeRequired) {
+		keyframes.discard()
+		var ok bool
+		select {
+		case <-ctx.Done():
+			keyframes.end(t.logger, VideoCodecVP8, false)
+			return frame{}, 0, 0, false, ctx.Err()
+		case first, ok = <-input:
+			if !ok {
+				keyframes.end(t.logger, VideoCodecVP8, false)
+				return frame{}, 0, 0, false, nil
+			}
+			width, height, err = vp8KeyframeDimensions(first.data)
+		}
+	}
+	keyframes.end(t.logger, VideoCodecVP8, err == nil)
+	if err != nil {
+		return frame{}, 0, 0, false, err
+	}
+	return first, width, height, true, nil
 }
 
 // decodeVP8Segment는 키프레임 first부터 디코더 하나를 돌린다. 입력 방향이 바뀐
@@ -188,8 +267,9 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
 	var repin *frame
 
-	metadata := make(chan frame, 64)
+	metadata := make(chan frame, decoderMetadataQueue)
 	writeError := make(chan error, 1)
+	var stalled atomic.Bool
 	go func() {
 		defer close(metadata)
 		defer process.stdin.Close()
@@ -220,12 +300,7 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 			// 프레임이 이제 압축 큐와 디코더 stdin 역압을 지났다. 경계를 표시해 읽기 루프가
 			// 합쳐진 "decode" 단계를 대기와 FFmpeg 왕복으로 나누게 한다(#177).
 			item.decodeInAt = time.Now()
-			select {
-			case metadata <- item:
-				return false, nil
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
+			return false, t.sendDecodeMetadata(ctx, metadata, item, &stalled)
 		}
 		if _, err := write(first); err != nil {
 			writeError <- err
@@ -259,6 +334,9 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 			decoded, err = readJPEG(process.stdout)
 		}
 		if err != nil {
+			if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
+				return nil, errDecoderStalled
+			}
 			return nil, fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 		}
 		item.data = decoded
@@ -274,6 +352,9 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 		}
 	}
 	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
+		if errors.Is(err, errDecoderStalled) {
+			return nil, errDecoderStalled
+		}
 		return nil, fmt.Errorf("write VP8 stream to FFmpeg decoder: %w", err)
 	}
 	return repin, nil

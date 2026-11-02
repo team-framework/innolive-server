@@ -522,9 +522,7 @@ func (e *RTMPEgress) Pause() bool {
 	if !e.transition(egressTransition{event: egressTransitionPause}) {
 		return false
 	}
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
+	e.applyAudioMute()
 	return true
 }
 
@@ -541,9 +539,7 @@ func (e *RTMPEgress) Resume() bool {
 	if !e.transition(egressTransition{event: egressTransitionResume}) {
 		return false
 	}
-	if e.audio != nil && !e.inputRecovering() && !e.inputStalledNow() {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), false)
-	}
+	e.applyAudioMute()
 	return true
 }
 
@@ -558,10 +554,8 @@ func (e *RTMPEgress) BeginInputRecovery() bool {
 	}
 	e.status.InputRecovering = true
 	e.status.UpdatedAt = time.Now().UTC()
+	e.applyAudioMuteLocked()
 	e.statusMu.Unlock()
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
 	return true
 }
 
@@ -575,9 +569,7 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 	}
 	e.status.InputRecovering = false
 	e.status.UpdatedAt = time.Now().UTC()
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), userPausePhase(e.status.Phase) || e.inputStalled)
-	}
+	e.applyAudioMuteLocked()
 	e.statusMu.Unlock()
 	return true
 }
@@ -611,9 +603,7 @@ func (e *RTMPEgress) beginInputStall() {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	e.inputStalled = true
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
+	e.applyAudioMuteLocked()
 }
 
 // endInputStall은 카메라 프레임이 돌아왔을 때 공백 무음을 푼다. pause나 입력
@@ -622,9 +612,7 @@ func (e *RTMPEgress) endInputStall() {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	e.inputStalled = false
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), e.status.InputRecovering || userPausePhase(e.status.Phase))
-	}
+	e.applyAudioMuteLocked()
 }
 
 func (e *RTMPEgress) inputStalledNow() bool {
@@ -1051,12 +1039,6 @@ func (e *RTMPEgress) clearCancellationSlate() {
 	e.slateMu.Unlock()
 }
 
-func (e *RTMPEgress) inputRecovering() bool {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	return e.status.InputRecovering
-}
-
 // currentAudioWriteEnd는 지금 붙어 있는 스트림의 write end다(없으면 nil).
 func (e *RTMPEgress) currentAudioWriteEnd() *os.File {
 	e.audioMu.Lock()
@@ -1076,7 +1058,36 @@ func (e *RTMPEgress) setAudioWriteEnd(writeEnd *os.File) {
 func (e *RTMPEgress) audioShouldMute() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
+	return e.audioShouldMuteLocked()
+}
+
+func (e *RTMPEgress) audioShouldMuteLocked() bool {
 	return e.status.InputRecovering || userPausePhase(e.status.Phase) || e.inputStalled
+}
+
+// applyAudioMute는 지금 상태로 음소거 여부를 판정해 붙어 있는 스트림에 적용한다.
+// 판정과 적용을 statusMu 안에서 한 번에 해야, 동시에 도는 Pause·Resume·Attach가
+// 오래된 판정을 나중에 덮어쓰지 못한다(P0-6). 잠금 순서는 statusMu → audioMu →
+// AudioPipe.mu이고, 막힌 대상의 쓰기는 audioSinkWriteTimeout에서 끊긴다.
+func (e *RTMPEgress) applyAudioMute() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.applyAudioMuteLocked()
+}
+
+func (e *RTMPEgress) applyAudioMuteLocked() {
+	if e.audio != nil {
+		e.audio.SetMuted(e.currentAudioWriteEnd(), e.audioShouldMuteLocked())
+	}
+}
+
+// attachAudio는 새 FFmpeg의 pipe:3을 붙인다. 판정과 Attach를 statusMu 안에서
+// 하므로 그 사이에 들어온 Pause가 아직 없는 스트림에 적용되고 사라지지 않는다.
+func (e *RTMPEgress) attachAudio(writeEnd *os.File) error {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.setAudioWriteEnd(writeEnd)
+	return e.audio.Attach(writeEnd, e.audioShouldMuteLocked())
 }
 
 func (e *RTMPEgress) shouldWriteCancellationSlate() bool {
@@ -1284,7 +1295,7 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 	}
 	e.setAudioWriteEnd(audioWriteEnd)
 	if audioWriteEnd != nil {
-		if err := e.audio.Attach(audioWriteEnd, e.audioShouldMute()); err != nil {
+		if err := e.attachAudio(audioWriteEnd); err != nil {
 			_ = audioWriteEnd.Close()
 			process.close()
 			return nil, fmt.Errorf("attach audio egress pipe: %w", err)

@@ -100,7 +100,11 @@ func (s *referenceStore) applyMarks(marks []referenceMark) ([]referenceMark, err
 	if len(changed) == 0 {
 		return nil, nil
 	}
-	return changed, s.save()
+	clientIDs := make([]string, 0, len(changed))
+	for _, mark := range changed {
+		clientIDs = append(clientIDs, mark.clientID)
+	}
+	return changed, s.save(clientIDs...)
 }
 
 // checkReferenceFaces는 서버 기록과 워커 화이트리스트를 한 번 대조해 재등록 필요

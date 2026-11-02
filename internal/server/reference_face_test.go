@@ -642,7 +642,7 @@ func TestReferenceStoreDeleteClientRestoresDataWhenSaveFails(t *testing.T) {
 		"target": {{FaceID: "target-face"}},
 		"other":  {{FaceID: "other-face"}},
 	}
-	if err := store.save(); err != nil {
+	if err := store.save("target", "other"); err != nil {
 		t.Fatal(err)
 	}
 	original, err := os.ReadFile(path)

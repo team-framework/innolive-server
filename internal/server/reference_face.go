@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -259,18 +261,39 @@ func (s *referenceStore) load() {
 	}
 }
 
-// save는 클라이언트→얼굴 맵을 저장한다. 호출자가 s.mu를 쓰기로 쥐고 있어야 한다.
-func (s *referenceStore) save() error {
+// save는 clientIDs의 얼굴 기록을 메타 파일에 반영한다. 호출자가 s.mu를 쓰기로 쥐고
+// 있어야 한다.
+//
+// 배포 중에는 두 슬롯(blue·green)이 같은 파일을 쓴다. 메모리 맵 전체로 덮어쓰면
+// 다른 슬롯이 저장한 사용자의 얼굴이 사라지므로, 파일을 다시 읽어 바꾼 사용자의
+// 항목만 고쳐 쓴다. 읽고 쓰는 사이는 파일 잠금으로 다른 슬롯과 직렬화한다.
+func (s *referenceStore) save(clientIDs ...string) error {
 	if s.path == "" {
 		return nil
-	}
-	data, err := json.Marshal(s.faces)
-	if err != nil {
-		return fmt.Errorf("marshal reference metadata: %w", err)
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create reference metadata directory: %w", err)
+	}
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open reference metadata lock: %w", err)
+	}
+	defer lock.Close() // 닫으면 잠금도 풀린다
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock reference metadata: %w", err)
+	}
+	faces := s.storedFaces()
+	for _, clientID := range clientIDs {
+		if current := s.faces[clientID]; len(current) > 0 {
+			faces[clientID] = current
+		} else {
+			delete(faces, clientID)
+		}
+	}
+	data, err := json.Marshal(faces)
+	if err != nil {
+		return fmt.Errorf("marshal reference metadata: %w", err)
 	}
 	// 같은 디렉터리에 쓰고 이름을 바꾼다. WriteFile로 바로 쓰면 I/O 오류 전에 유일한
 	// 사본을 잘라 다른 사용자의 메타데이터까지 읽을 수 없게 될 수 있다. rename은
@@ -300,6 +323,21 @@ func (s *referenceStore) save() error {
 		return fmt.Errorf("publish reference metadata: %w", err)
 	}
 	return nil
+}
+
+// storedFaces는 지금 파일에 저장된 맵이다. 파일이 없으면 빈 맵이다. 읽거나 해석하지
+// 못하면 메모리 맵의 사본을 바탕으로 한다 — 손상된 파일 때문에 저장이 계속 막히지
+// 않게 한다. 호출자가 s.mu를 쥐고 있어야 한다.
+func (s *referenceStore) storedFaces() map[string][]referenceFace {
+	data, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return make(map[string][]referenceFace)
+	}
+	var faces map[string][]referenceFace
+	if err != nil || json.Unmarshal(data, &faces) != nil || faces == nil {
+		return maps.Clone(s.faces)
+	}
+	return faces
 }
 
 // clientFaces는 클라이언트 얼굴 기록의 사본이다.
@@ -551,7 +589,7 @@ func (s *Server) handlePostReferenceFace(w http.ResponseWriter, r *http.Request)
 	default:
 		s.references.faces[clientID] = append(s.references.faces[clientID], registered...)
 	}
-	_ = s.references.save()
+	_ = s.references.save(clientID)
 	s.references.mu.Unlock()
 	writeJSON(w, http.StatusCreated, s.references.status(clientID))
 }
@@ -606,7 +644,7 @@ func (s *Server) clearReferenceFaces(w http.ResponseWriter, r *http.Request, cli
 	}
 	s.references.mu.Lock()
 	delete(s.references.faces, clientID)
-	_ = s.references.save()
+	_ = s.references.save(clientID)
 	s.references.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -661,7 +699,7 @@ func (s *Server) handleDeleteReferenceFaceByID(w http.ResponseWriter, r *http.Re
 	} else {
 		s.references.faces[clientID] = remaining
 	}
-	_ = s.references.save()
+	_ = s.references.save(clientID)
 	s.references.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -722,7 +760,7 @@ func (s *referenceStore) deleteClient(clientID string) error {
 	s.mu.Lock()
 	previous, hadPrevious := s.faces[clientID]
 	delete(s.faces, clientID)
-	err := s.save()
+	err := s.save(clientID)
 	if err != nil && hadPrevious {
 		s.faces[clientID] = previous
 	}

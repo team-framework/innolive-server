@@ -143,8 +143,8 @@ func (s *Server) handleSignaling(w http.ResponseWriter, r *http.Request) {
 	// 정상 사용자를 세션 슬롯보다 먼저 막는다(리버스 프록시 뒤 공유 버킷).
 	// 그런 경우 per-IP를 생략하고 전역 상한에만 맡긴다. 프록시가 없는 직결
 	// 환경(XFF 없음)이나 신뢰 프록시가 설정된 환경에서는 그대로 적용된다.
-	ip := clientIPFromForwarded(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), s.signalingTrustedProxies)
-	if r.Header.Get("X-Forwarded-For") != "" && !remoteIsTrustedProxy(r.RemoteAddr, s.signalingTrustedProxies) {
+	ip := s.signalingClientResolver.IP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	if r.Header.Get("X-Forwarded-For") != "" && !s.signalingClientResolver.RemoteTrusted(r.RemoteAddr) {
 		maxPerIP = 0
 	}
 	if !s.signalingConns.tryAcquire(ip, maxConns, maxPerIP) {

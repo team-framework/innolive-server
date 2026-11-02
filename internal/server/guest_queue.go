@@ -7,11 +7,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net"
-	"strings"
 	"sync"
 	"time"
 
+	"inno-live-server/internal/clientip"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/session"
@@ -169,7 +168,7 @@ type GuestQueue struct {
 	admissionTTL    time.Duration
 	guestSessionTTL time.Duration
 	maxGuests       int
-	trustedProxies  []*net.IPNet
+	clientIPs       clientip.Resolver
 	mu              sync.Mutex
 
 	sseMu    sync.Mutex
@@ -200,7 +199,7 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	return &GuestQueue{client: client, sessions: sessions, metrics: registry, trustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.GuestSessionLimit()}, nil
+	return &GuestQueue{client: client, sessions: sessions, metrics: registry, clientIPs: clientip.NewResolver(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.GuestSessionLimit()}, nil
 }
 
 func (q *GuestQueue) Close() error {
@@ -290,66 +289,7 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr, forward
 }
 
 func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
-	return clientIPFromForwarded(remoteAddr, forwardedFor, q.trustedProxies)
-}
-
-func (q *GuestQueue) isTrustedProxy(ip net.IP) bool {
-	return isTrustedProxy(ip, q.trustedProxies)
-}
-
-func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
-	trusted := make([]*net.IPNet, 0, len(cidrs))
-	for _, cidr := range cidrs {
-		_, block, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		trusted = append(trusted, block)
-	}
-	return trusted
-}
-
-func clientIPFromForwarded(remoteAddr, forwardedFor string, trusted []*net.IPNet) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	remote := net.ParseIP(host)
-	if remote == nil || !isTrustedProxy(remote, trusted) {
-		return host
-	}
-
-	// 신뢰된 proxy는 기존 XFF 체인 뒤에 자신이 관찰한 주소를 붙인다. 가장 가까운
-	// 주소부터 클라이언트 방향으로 순회하며 신뢰된 proxy 대역만 건너뛴다. 왼쪽 첫
-	// 값을 읽으면 클라이언트가 임의의 spoofed 주소를 앞에 넣어 우회할 수 있다.
-	parts := strings.Split(forwardedFor, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
-		if candidate != nil && !isTrustedProxy(candidate, trusted) {
-			return candidate.String()
-		}
-	}
-	return host
-}
-
-// remoteIsTrustedProxy는 요청의 RemoteAddr(직접 연결한 상대)가 신뢰 프록시
-// 대역에 속하는지 판단한다. per-IP 상한을 적용해도 되는지 가리는 데 쓴다.
-func remoteIsTrustedProxy(remoteAddr string, trusted []*net.IPNet) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && isTrustedProxy(ip, trusted)
-}
-
-func isTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
-	for _, proxy := range trusted {
-		if proxy != nil && proxy.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return q.clientIPs.IP(remoteAddr, forwardedFor)
 }
 
 func (q *GuestQueue) allowIP(ctx context.Context, ip string) error {

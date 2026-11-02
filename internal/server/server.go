@@ -22,6 +22,7 @@ import (
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
+	"inno-live-server/internal/clientip"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/media"
@@ -66,7 +67,7 @@ type Server struct {
 	userOperationGate interface {
 		BeginOperation(uuid.UUID) (func(), bool)
 	}
-	signalingTrustedProxies []*net.IPNet
+	signalingClientResolver clientip.Resolver
 	signalingConns          signalingConnLimiter
 	ownBroadcasts           ownedBroadcasts
 	quotaLogMu              sync.Mutex
@@ -105,7 +106,7 @@ func New(
 		origins:                 origins,
 		streaming:               streamingProviders,
 		guestReference:          newGuestReferenceGate(),
-		signalingTrustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies),
+		signalingClientResolver: clientip.NewResolver(cfg.GuestQueueTrustedProxies),
 		requireUser:             requireUser,
 	}
 	if len(userAuthenticators) > 0 {

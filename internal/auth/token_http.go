@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"unicode/utf8"
+
+	"inno-live-server/internal/clientip"
 
 	"github.com/google/uuid"
 )
@@ -224,16 +225,8 @@ func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (string, error
 func requestClientInfo(r *http.Request) ClientInfo {
 	return ClientInfo{
 		UserAgent: truncateTokenMetadata(strings.TrimSpace(r.UserAgent()), 512),
-		IPAddress: tokenRemoteIP(r.RemoteAddr),
+		IPAddress: clientip.FromRequest(r),
 	}
-}
-
-func tokenRemoteIP(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
-	if err == nil {
-		return host
-	}
-	return strings.TrimSpace(remoteAddr)
 }
 
 func truncateTokenMetadata(value string, limit int) string {

@@ -232,6 +232,8 @@ reverse proxy 또는 ingress를 거치는 경우, proxy가 서버로 연결할 �
 GUEST_QUEUE_TRUSTED_PROXY_CIDRS=10.42.0.0/16,fd00:42::/64
 ```
 
+게스트 큐뿐 아니라 시그널링 연결 상한과 인증 경로(가입·로그인·재설정의 IP 기준 제한,
+refresh 세션의 IP 기록)도 같은 값으로 클라이언트 IP를 판정한다.
 서버는 직접 연결한 peer가 위 CIDR에 속할 때만 `X-Forwarded-For`를 사용한다. 이때 체인을
 오른쪽부터 읽으며 trusted proxy 주소를 건너뛰고, 가장 가까운 untrusted 주소를 rate-limit
 키로 삼는다. 따라서 클라이언트가 왼쪽에 임의 주소를 덧붙여도 제한을 우회할 수 없다.

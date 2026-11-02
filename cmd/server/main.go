@@ -17,6 +17,7 @@ import (
 	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
 	"inno-live-server/internal/billing"
+	"inno-live-server/internal/clientip"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/database"
 	"inno-live-server/internal/database/migration"
@@ -670,9 +671,11 @@ func main() {
 		}()
 	}
 
+	// 인증 경로도 게스트 큐·시그널링과 같은 신뢰 프록시 판정으로 클라이언트 IP를
+	// 고른다(P1-17). 핸들러는 clientip.FromRequest로 읽는다.
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           auth.MountAuthHTTPWithStreamingProviders(auth.MountAccountLinkHTTP(application.Handler(), tokenService, accountLinks, googleLogin, appleLogin, logger, originConfig, sessionManager.CloseUserSessionsForLogout), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, chzzkConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout),
+		Handler:           clientip.NewResolver(cfg.GuestQueueTrustedProxies).Middleware(auth.MountAuthHTTPWithStreamingProviders(auth.MountAccountLinkHTTP(application.Handler(), tokenService, accountLinks, googleLogin, appleLogin, logger, originConfig, sessionManager.CloseUserSessionsForLogout), tokenService, googleLogin, appleLogin, emailLogin, withdrawal, youtubeConnect, chzzkConnect, streamingAccounts, logger, originConfig, sessionManager.CloseUserSessionsForLogout)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

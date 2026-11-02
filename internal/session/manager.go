@@ -1330,9 +1330,35 @@ type StreamOptions struct {
 // outputURL은 스트림 키가 포함된 완성 URL이므로 로그에 남기지 않는다
 // (egress가 자체 마스킹으로 기록한다). 파이프라인이 이미 돌고 있어도
 // egressSlot을 통해 즉시 프레임이 흐르기 시작한다.
+// startStreamPrecheck는 StartStream이 자리를 잡기 전에 하는 검증이다.
+func startStreamPrecheck(s *Session, options []StreamOptions) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var providers []string
+	if len(options) > 0 {
+		providers = []string{options[0].Provider}
+	}
+	if s.closed {
+		return ErrNotFound
+	}
+	if s.rawTrackID == "" {
+		return ErrNoVideoTrack
+	}
+	if t := s.targets[s.targetProvider(providers)]; t != nil && t.egress != nil && t.stopReason == nil && t.egress.Status().Phase != media.EgressPhaseStopped {
+		return ErrStreamActive
+	}
+	return nil
+}
+
 func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
+		return nil, err
+	}
+	// 자리를 잡기 전에 싼 검증을 먼저 한다. 만석이면 자리를 기다리다 503으로
+	// 끝나 실제 원인(409)이 가려지고, 검증에 걸릴 요청이 자리를 잠깐 쥐어 정상
+	// 요청을 밀어낼 수 있다(P2-8). 잠금을 놓은 뒤 바뀔 수 있으므로 아래에서 다시 본다.
+	if err := startStreamPrecheck(s, options); err != nil {
 		return nil, err
 	}
 	// 자리는 세션 잠금 밖에서 잡는다 — 만석이면 짧게 기다리는데, 그동안 잠금을

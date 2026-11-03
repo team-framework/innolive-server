@@ -28,3 +28,13 @@ jobs:
     steps:
       - name: 코드 변경 없음 — CI 생략
         run: echo "Go 코드·의존성 변경이 없어 빌드와 테스트를 건너뜁니다."
+
+  # race-test를 필수 검사로 둔다(#542). 코드 변경이 없는 PR에서도 같은 이름의 검사가
+  # 보고돼야 필수 검사 대기로 막히지 않는다.
+  race-test:
+    name: race-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: 코드 변경 없음 — race 테스트 생략
+        run: echo "Go 코드·의존성 변경이 없어 race 테스트를 건너뜁니다."

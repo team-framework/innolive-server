@@ -575,7 +575,8 @@ func main() {
 	// iOS 로컬 모드 촬영 시간 업로드. 온디바이스 월 사용량에 합산한다.
 	application.SetLocalTakeRecorder(usageLedger)
 	// 온디바이스 직접 송출 하트비트(#434).
-	application.SetHeartbeatStore(usage.NewHeartbeatStore(databaseConnection.DB))
+	heartbeatStore := usage.NewHeartbeatStore(databaseConnection.DB)
+	application.SetHeartbeatStore(heartbeatStore)
 	// 직접 송출 종료 시 플랫폼 실제 방송 시각 대조(#437).
 	application.SetPlatformTimesStore(usage.NewPlatformTimesStore(databaseConnection.DB))
 	// 방송 한도 집행(#275): 1회 최대·월 방송 시간·입력 없음. 종료 시 함께 멈춘다.
@@ -591,6 +592,8 @@ func main() {
 	analyticsStore := analytics.NewStore(databaseConnection.DB)
 	application.SetAnalytics(analyticsStore)
 	go analyticsStore.RunRetention(limitContext, logger)
+	// 30일 지난 하트비트는 세션별 마지막 한 건만 남긴다(P1-33).
+	go heartbeatStore.RunRetention(limitContext, logger)
 	// 결제 구독 만료(#422): 기간이 끝난 구독을 만료로 바꾸고 플랜을 다시 계산한다.
 	go billing.NewService(databaseConnection.DB).RunExpiry(limitContext, logger, 10*time.Minute)
 	if youtubeConnect != nil {

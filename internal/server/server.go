@@ -1604,10 +1604,17 @@ func sessionError(err error, id string) *apiError {
 		return &apiError{Status: http.StatusConflict, Code: "on_device_processing", Message: "Control anonymization on the sending device."}
 	}
 	if errors.Is(err, session.ErrNotFound) {
-		return &apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}}
+		notFound := sessionNotFound(id)
+		return &notFound
 	}
 	internal := internalError()
 	return &internal
+}
+
+// sessionNotFound는 세션을 찾지 못했을 때의 응답이다. HTTP 핸들러와 시그널링이 같은
+// 본문을 쓴다(P2-7).
+func sessionNotFound(id string) apiError {
+	return apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}}
 }
 
 func writeError(w http.ResponseWriter, err apiError) {

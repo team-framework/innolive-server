@@ -47,7 +47,7 @@ func (s *Server) requireSessionOwner(next sessionHandler) http.HandlerFunc {
 		}
 		sess, err := s.sessions.VerifyOwner(id, token)
 		if errors.Is(err, session.ErrNotFound) {
-			writeError(w, apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": id}})
+			writeError(w, sessionNotFound(id))
 			return
 		}
 		if errors.Is(err, session.ErrUnauthorized) {

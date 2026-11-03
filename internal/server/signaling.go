@@ -318,7 +318,7 @@ func (s *Server) handleOffer(payload map[string]json.RawMessage, onLocalCandidat
 		OnLocalICECandidate: onLocalCandidate,
 	})
 	if errors.Is(err, session.ErrNotFound) {
-		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": request.SessionID}}
+		result := sessionNotFound(request.SessionID)
 		return nil, &result
 	}
 	if errors.Is(err, session.ErrUnauthorized) {
@@ -389,7 +389,7 @@ func (s *Server) handleICECandidate(payload map[string]json.RawMessage, guestIDs
 		SDPMLineIndex: request.SDPLineIndex,
 	})
 	if errors.Is(err, session.ErrNotFound) {
-		apiErr := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": request.SessionID}}
+		apiErr := sessionNotFound(request.SessionID)
 		return nil, &apiErr
 	}
 	if errors.Is(err, session.ErrUnauthorized) {
@@ -417,7 +417,7 @@ const signalingAuthLookupTimeout = 5 * time.Second
 func (s *Server) verifySignalingSession(ctx context.Context, sessionID, ownerToken, accessToken string, guestIDs ...string) (func(), *apiError) {
 	liveSession, err := s.sessions.VerifyOwner(sessionID, ownerToken)
 	if errors.Is(err, session.ErrNotFound) {
-		result := apiError{Status: http.StatusNotFound, Code: "not_found", Message: "Session not found.", Details: map[string]any{"session_id": sessionID}}
+		result := sessionNotFound(sessionID)
 		return nil, &result
 	}
 	if errors.Is(err, session.ErrUnauthorized) {

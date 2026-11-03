@@ -18,6 +18,9 @@ services:
     # host 네트워크: WebRTC UDP mux(50001)·AI gRPC(127.0.0.1:5005x)·Postgres/Redis(localhost)
     # 접근을 한 번에 해결한다. 포트 매핑은 사용하지 않는다.
     network_mode: host
+    # 종료는 HTTP 5초 + 세션 정리(플랫폼 방송 종료·사용 기록) 최대 12초다. 기본 10초면
+    # 정리 도중 SIGKILL을 맞는다(P1-25).
+    stop_grace_period: 30s
     # NVENC 인코딩용 GPU 노출. nvidia 런타임이 libcuda/libnvidia-encode를
     # 컨테이너에 주입한다 - 없으면 h264_nvenc가 libcuda.so.1에서 실패한다.
     runtime: nvidia
@@ -41,5 +44,5 @@ services:
       # Apple 로그인 개인키(.p8). 컨테이너 내 경로가 server-secrets.env 의
       # APPLE_PRIVATE_KEY_PATH 와 일치해야 하므로 호스트 경로를 그대로 마운트한다.
       - "${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:${INNOLIVE_APPLE_KEY_PATH:-/dev/null}:ro"
-    # 재시작 정책은 systemd(innolive-server.service)가 관리한다.
+    # 재시작 정책은 systemd(innolive-server@<slot>.service)가 관리한다.
     restart: "no"

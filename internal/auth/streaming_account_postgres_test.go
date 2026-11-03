@@ -103,7 +103,7 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	// 행 락 기반 refresh token 교체.
 	expiresAt := now.Add(7 * 24 * time.Hour)
 	version := int16(1)
-	if err := store.UpdateRefreshToken(ctx, updated.ID, []byte{7, 8, 9}, &version, &expiresAt); err != nil {
+	if err := store.UpdateRefreshToken(ctx, updated.ID, reconnected.RefreshTokenCiphertext, []byte{7, 8, 9}, &version, &expiresAt); err != nil {
 		t.Fatal(err)
 	}
 	rotated, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
@@ -113,12 +113,12 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if string(rotated.RefreshTokenCiphertext) != string([]byte{7, 8, 9}) || rotated.RefreshTokenExpiresAt == nil {
 		t.Fatalf("refresh token not rotated: %+v", rotated)
 	}
-	if err := store.UpdateRefreshToken(ctx, uuid.New(), []byte{0}, &version, nil); !errors.Is(err, ErrStreamingAccountNotFound) {
+	if err := store.UpdateRefreshToken(ctx, uuid.New(), nil, []byte{0}, &version, nil); !errors.Is(err, ErrStreamingAccountNotFound) {
 		t.Fatalf("unknown id error = %v, want ErrStreamingAccountNotFound", err)
 	}
 
 	// 재연결 필요 표식과 재연결(Upsert)에 의한 해소.
-	if err := store.MarkReconnectRequired(ctx, updated.ID, now); err != nil {
+	if err := store.MarkReconnectRequired(ctx, updated.ID, []byte{7, 8, 9}, now); err != nil {
 		t.Fatal(err)
 	}
 	marked, err := store.Get(ctx, user.ID, StreamingProviderYouTube)
@@ -138,8 +138,10 @@ func TestPostgresStreamingAccountUpsert(t *testing.T) {
 	if cleared.ReconnectRequiredAt != nil {
 		t.Fatalf("ReconnectRequiredAt = %v after reconnect, want nil", cleared.ReconnectRequiredAt)
 	}
-	if err := store.MarkReconnectRequired(ctx, uuid.New(), now); !errors.Is(err, ErrStreamingAccountNotFound) {
-		t.Fatalf("unknown id mark error = %v, want ErrStreamingAccountNotFound", err)
+	// 표식은 거절된 토큰이 아직 저장돼 있을 때만 남는다. 없는 행이나 이미 바뀐
+	// 토큰은 오류 없이 건너뛴다(P1-13).
+	if err := store.MarkReconnectRequired(ctx, uuid.New(), nil, now); err != nil {
+		t.Fatalf("unknown id mark error = %v, want nil", err)
 	}
 
 	// 목록 조회와 삭제.

@@ -177,76 +177,80 @@ func (c Config) GuestSessionLimit() int {
 }
 
 func Load() (Config, error) {
+	var p envParser
 	cfg := Config{
 		HTTPAddr:                   env("HTTP_ADDR", ":8000"),
 		PrivacyMode:                PrivacyMode(env("AI_PRIVACY_MODE", string(PrivacyModeReal))),
 		AIAddress:                  env("AI_GRPC_ADDR", "localhost:50051"),
-		AIInsecure:                 envBool("AI_GRPC_INSECURE", true),
+		AIInsecure:                 p.bool("AI_GRPC_INSECURE", true),
 		AIWireFormat:               WireFormat(env("AI_FRAME_WIRE_FORMAT", string(WireFormatJPEG))),
-		AIFaceSwapEnabled:          envBool("AI_FACE_SWAP_ENABLED", false),
+		AIFaceSwapEnabled:          p.bool("AI_FACE_SWAP_ENABLED", false),
 		AIFailurePolicy:            AIFailurePolicy(env("AI_FAILURE_POLICY", string(FailurePolicyBlackoutLatch))),
-		AITimeoutLatchThreshold:    envInt("AI_TIMEOUT_LATCH_THRESHOLD", 3),
-		AIPreflightTimeout:         envDuration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
-		AIPreflightRequired:        envBool("AI_PREFLIGHT_REQUIRED", false),
-		AIPreflightInterval:        envDuration("AI_PREFLIGHT_INTERVAL", 30*time.Second),
-		AIReadinessTimeout:         envDuration("AI_READINESS_TIMEOUT", 10*time.Second),
+		AITimeoutLatchThreshold:    p.int("AI_TIMEOUT_LATCH_THRESHOLD", 3),
+		AIPreflightTimeout:         p.duration("AI_PREFLIGHT_TIMEOUT", 30*time.Second),
+		AIPreflightRequired:        p.bool("AI_PREFLIGHT_REQUIRED", false),
+		AIPreflightInterval:        p.duration("AI_PREFLIGHT_INTERVAL", 30*time.Second),
+		AIReadinessTimeout:         p.duration("AI_READINESS_TIMEOUT", 10*time.Second),
 		AIControlAddr:              strings.TrimSpace(os.Getenv("AI_CONTROL_ADDR")),
 		AIControlToken:             strings.TrimSpace(os.Getenv("AI_CONTROL_TOKEN")),
 		AIMeImagePath:              strings.TrimSpace(os.Getenv("AI_PRIVACY_ME_IMAGE_PATH")),
 		ReferenceStorePath:         strings.TrimSpace(os.Getenv("REFERENCE_STORE_PATH")),
-		ReferenceDecodeConcurrency: envInt("REFERENCE_DECODE_CONCURRENCY", 4),
+		ReferenceDecodeConcurrency: p.int("REFERENCE_DECODE_CONCURRENCY", 4),
 		FFmpegPath:                 env("FFMPEG_PATH", "ffmpeg"),
-		FFmpegSpawnConcurrency:     envInt("FFMPEG_SPAWN_CONCURRENCY", 3),
-		FFmpegEncoderThreads:       envInt("FFMPEG_ENCODER_THREADS", 1),
-		MaxSessions:                envInt("MAX_SESSIONS", 0),
-		NegotiationTimeout:         envDuration("SESSION_NEGOTIATION_TIMEOUT", 30*time.Second),
+		FFmpegSpawnConcurrency:     p.int("FFMPEG_SPAWN_CONCURRENCY", 3),
+		FFmpegEncoderThreads:       p.int("FFMPEG_ENCODER_THREADS", 1),
+		MaxSessions:                p.int("MAX_SESSIONS", 0),
+		NegotiationTimeout:         p.duration("SESSION_NEGOTIATION_TIMEOUT", 30*time.Second),
 		STUNURLs:                   splitURLs(env("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302")),
 		TURNURLs:                   splitURLs(env("WEBRTC_TURN_URLS", "")),
 		TURNUsername:               strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME")),
 		TURNCredential:             strings.TrimSpace(os.Getenv("WEBRTC_TURN_CREDENTIAL")),
 		AnnouncedIP:                strings.TrimSpace(os.Getenv("WEBRTC_ANNOUNCED_IP")),
-		DisconnectedGracePeriod:    envDurationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
-		WebRTCRecoveryWindow:       envDuration("WEBRTC_RECOVERY_WINDOW", 50*time.Second),
-		WebRTCRecoveryDebounce:     envDuration("WEBRTC_RECOVERY_DEBOUNCE", 2*time.Second),
-		WebRTCRecoveryAttempts:     envInt("WEBRTC_RECOVERY_MAX_ATTEMPTS", 10),
-		AITimeout:                  envDuration("AI_GRPC_TIMEOUT", 5*time.Second),
-		PrivacyFixedDelay:          envDurationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
-		FrameQueueSize:             envInt("AI_FRAME_QUEUE_SIZE", 2),
-		EnableAudioEgress:          envBool("ENABLE_AUDIO_EGRESS", false),
-		EgressLatencyLog:           envBool("EGRESS_LATENCY_LOG", false),
-		EgressAudioOffset:          time.Duration(envInt("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
+		DisconnectedGracePeriod:    p.durationWithSecondsAlias("WEBRTC_DISCONNECTED_GRACE", "WEBRTC_DISCONNECTED_GRACE_SECONDS", 10*time.Second),
+		WebRTCRecoveryWindow:       p.duration("WEBRTC_RECOVERY_WINDOW", 50*time.Second),
+		WebRTCRecoveryDebounce:     p.duration("WEBRTC_RECOVERY_DEBOUNCE", 2*time.Second),
+		WebRTCRecoveryAttempts:     p.int("WEBRTC_RECOVERY_MAX_ATTEMPTS", 10),
+		AITimeout:                  p.duration("AI_GRPC_TIMEOUT", 5*time.Second),
+		PrivacyFixedDelay:          p.durationWithMillisecondsAlias("AI_PRIVACY_FIXED_DELAY", "AI_PRIVACY_FIXED_DELAY_MS", 20*time.Millisecond),
+		FrameQueueSize:             p.int("AI_FRAME_QUEUE_SIZE", 2),
+		EnableAudioEgress:          p.bool("ENABLE_AUDIO_EGRESS", false),
+		EgressLatencyLog:           p.bool("EGRESS_LATENCY_LOG", false),
+		EgressAudioOffset:          time.Duration(p.int("EGRESS_AUDIO_OFFSET_MS", 0)) * time.Millisecond,
 		EgressVideoBitrate:         strings.TrimSpace(os.Getenv("EGRESS_VIDEO_BITRATE")),
 		EgressVideoSize:            strings.TrimSpace(os.Getenv("EGRESS_VIDEO_SIZE")),
 		EgressVideoEncoder:         EgressVideoEncoder(env("EGRESS_VIDEO_ENCODER", string(EgressVideoEncoderX264))),
-		EgressNVENCGPUs:            envInt("EGRESS_NVENC_GPUS", 0),
-		MaxEgressSlots:             envInt("MAX_EGRESS_SLOTS", 0),
-		DecoderPinLongEdge:         envInt("DECODER_PIN_LONG_EDGE", 0),
-		RequireSessionAuth:         envBool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
+		EgressNVENCGPUs:            p.int("EGRESS_NVENC_GPUS", 0),
+		MaxEgressSlots:             p.int("MAX_EGRESS_SLOTS", 0),
+		DecoderPinLongEdge:         p.int("DECODER_PIN_LONG_EDGE", 0),
+		RequireSessionAuth:         p.bool("INNOLIVE_REQUIRE_SESSION_AUTH", true),
 		AdminUserIDs:               splitList(env("ADMIN_USER_IDS", "")),
-		DemoLockdown:               envBool("DEMO_LOCKDOWN", false),
-		EgressSparkUnits:           envInt("EGRESS_SPARK_UNITS", 0),
-		EgressPlasmaUnits:          envInt("EGRESS_PLASMA_UNITS", 0),
-		GuestMaxSessions:           envInt("GUEST_MAX_SESSIONS", 0),
-		BroadcastIdleTimeout:       envDuration("BROADCAST_IDLE_TIMEOUT", 5*time.Minute),
-		GuestQueueEnabled:          envBool("GUEST_QUEUE_ENABLED", false),
+		DemoLockdown:               p.bool("DEMO_LOCKDOWN", false),
+		EgressSparkUnits:           p.int("EGRESS_SPARK_UNITS", 0),
+		EgressPlasmaUnits:          p.int("EGRESS_PLASMA_UNITS", 0),
+		GuestMaxSessions:           p.int("GUEST_MAX_SESSIONS", 0),
+		BroadcastIdleTimeout:       p.duration("BROADCAST_IDLE_TIMEOUT", 5*time.Minute),
+		GuestQueueEnabled:          p.bool("GUEST_QUEUE_ENABLED", false),
 		GuestQueueRedisAddr:        strings.TrimSpace(os.Getenv("GUEST_QUEUE_REDIS_ADDR")),
 		GuestQueueRedisPassword:    os.Getenv("GUEST_QUEUE_REDIS_PASSWORD"),
-		GuestQueueTTL:              envDuration("GUEST_QUEUE_TTL", 10*time.Minute),
-		GuestSessionTTL:            envDuration("GUEST_SESSION_TTL", 10*time.Minute),
-		GuestAdmissionTTL:          envDuration("GUEST_ADMISSION_TTL", time.Minute),
+		GuestQueueTTL:              p.duration("GUEST_QUEUE_TTL", 10*time.Minute),
+		GuestSessionTTL:            p.duration("GUEST_SESSION_TTL", 10*time.Minute),
+		GuestAdmissionTTL:          p.duration("GUEST_ADMISSION_TTL", time.Minute),
 		GuestQueueTrustedProxies:   splitList(env("GUEST_QUEUE_TRUSTED_PROXY_CIDRS", "")),
-		PprofEnabled:               envBool("PPROF_ENABLED", false),
-		UDPMuxPort:                 envInt("WEBRTC_UDP_MUX_PORT", 0),
+		PprofEnabled:               p.bool("PPROF_ENABLED", false),
+		UDPMuxPort:                 p.int("WEBRTC_UDP_MUX_PORT", 0),
 		LogLevel:                   strings.ToUpper(env("LOG_LEVEL", "INFO")),
 		ExperienceQualityIngestKey: strings.TrimSpace(os.Getenv("EXPERIENCE_QUALITY_INGEST_KEY")),
 		DatabaseURL:                strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		DatabaseMaxOpenConns:       envInt("DATABASE_MAX_OPEN_CONNS", 10),
-		DatabaseMaxIdleConns:       envInt("DATABASE_MAX_IDLE_CONNS", 5),
-		DatabaseConnMaxLifetime:    envDuration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
-		DatabaseConnMaxIdleTime:    envDuration("DATABASE_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		DatabaseMaxOpenConns:       p.int("DATABASE_MAX_OPEN_CONNS", 10),
+		DatabaseMaxIdleConns:       p.int("DATABASE_MAX_IDLE_CONNS", 5),
+		DatabaseConnMaxLifetime:    p.duration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
+		DatabaseConnMaxIdleTime:    p.duration("DATABASE_CONN_MAX_IDLE_TIME", 5*time.Minute),
 		DatabaseMigrationMode: DatabaseMigrationMode(
 			env("DATABASE_MIGRATION_MODE", string(DatabaseMigrationModeAuto)),
 		),
+	}
+	if err := p.err(); err != nil {
+		return Config{}, err
 	}
 
 	vodConfig, vodErr := loadVOD()
@@ -521,37 +525,55 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envBool(key string, fallback bool) bool {
+// envParser는 env 값을 읽다가 형식이 틀린 키를 모아 둔다. 기본값으로 조용히
+// 바뀌면 MAX_EGRESS_SLOTS="12" 같은 실수가 무제한 슬롯으로 기동한다(P0-9).
+// 오류에는 키 이름만 남기고 값은 넣지 않는다.
+type envParser struct {
+	errs []error
+}
+
+func (p *envParser) fail(key, want string) {
+	p.errs = append(p.errs, fmt.Errorf("%s must be %s", key, want))
+}
+
+func (p *envParser) err() error {
+	return errors.Join(p.errs...)
+}
+
+func (p *envParser) bool(key string, fallback bool) bool {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
+		p.fail(key, "a boolean")
 		return fallback
 	}
 	return parsed
 }
 
-func envDuration(key string, fallback time.Duration) time.Duration {
+func (p *envParser) duration(key string, fallback time.Duration) time.Duration {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
+		p.fail(key, "a duration with a unit")
 		return fallback
 	}
 	return parsed
 }
 
-func envInt(key string, fallback int) int {
+func (p *envParser) int(key string, fallback int) int {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
+		p.fail(key, "an integer")
 		return fallback
 	}
 	return parsed
@@ -615,36 +637,32 @@ func splitList(value string) []string {
 	return items
 }
 
-func envDurationWithMillisecondsAlias(durationKey, millisecondsKey string, fallback time.Duration) time.Duration {
-	if value := strings.TrimSpace(os.Getenv(durationKey)); value != "" {
-		parsed, err := time.ParseDuration(value)
-		if err == nil {
-			return parsed
-		}
-		return fallback
+func (p *envParser) durationWithMillisecondsAlias(durationKey, millisecondsKey string, fallback time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(durationKey)) != "" {
+		return p.duration(durationKey, fallback)
 	}
 	if value := strings.TrimSpace(os.Getenv(millisecondsKey)); value != "" {
 		milliseconds, err := strconv.ParseFloat(value, 64)
-		if err == nil {
-			return time.Duration(milliseconds * float64(time.Millisecond))
+		if err != nil {
+			p.fail(millisecondsKey, "a number of milliseconds")
+			return fallback
 		}
+		return time.Duration(milliseconds * float64(time.Millisecond))
 	}
 	return fallback
 }
 
-func envDurationWithSecondsAlias(durationKey, secondsKey string, fallback time.Duration) time.Duration {
-	if value := strings.TrimSpace(os.Getenv(durationKey)); value != "" {
-		parsed, err := time.ParseDuration(value)
-		if err == nil {
-			return parsed
-		}
-		return fallback
+func (p *envParser) durationWithSecondsAlias(durationKey, secondsKey string, fallback time.Duration) time.Duration {
+	if strings.TrimSpace(os.Getenv(durationKey)) != "" {
+		return p.duration(durationKey, fallback)
 	}
 	if value := strings.TrimSpace(os.Getenv(secondsKey)); value != "" {
 		seconds, err := strconv.ParseFloat(value, 64)
-		if err == nil {
-			return time.Duration(seconds * float64(time.Second))
+		if err != nil {
+			p.fail(secondsKey, "a number of seconds")
+			return fallback
 		}
+		return time.Duration(seconds * float64(time.Second))
 	}
 	return fallback
 }

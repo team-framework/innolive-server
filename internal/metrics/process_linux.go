@@ -37,16 +37,12 @@ func timevalSeconds(value syscall.Timeval) float64 {
 }
 
 func readChildProcessStats(pid int) (float64, uint64, bool) {
-	schedulerContents, err := os.ReadFile(fmt.Sprintf("/proc/%d/schedstat", pid))
+	statContents, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, 0, false
 	}
-	schedulerFields := strings.Fields(string(schedulerContents))
-	if len(schedulerFields) == 0 {
-		return 0, 0, false
-	}
-	runtimeNanoseconds, err := strconv.ParseUint(schedulerFields[0], 10, 64)
-	if err != nil {
+	cpuSeconds, ok := procStatCPUSeconds(string(statContents))
+	if !ok {
 		return 0, 0, false
 	}
 
@@ -60,5 +56,5 @@ func readChildProcessStats(pid int) (float64, uint64, bool) {
 			}
 		}
 	}
-	return float64(runtimeNanoseconds) / 1e9, residentBytes, true
+	return cpuSeconds, residentBytes, true
 }

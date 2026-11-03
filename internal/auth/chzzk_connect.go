@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,9 @@ import (
 // 응답이 refresh 만료를 따로 주지 않으므로 발급 시각에 더해 기록한다 —
 // 이 값이 있어야 ReconnectRequired 판정이 API 호출 없이 성립한다.
 const chzzkRefreshTokenTTL = 30 * 24 * time.Hour
+
+// chzzkRotationTimeout은 일회용 refresh 회전(플랫폼 호출과 저장)의 상한이다.
+const chzzkRotationTimeout = 30 * time.Second
 
 // ChzzkConnectService는 인가 코드를 토큰으로 교환하고 채널을 식별해 연결을
 // 저장한다. 유튜브 경로와 같은 구조이며, 다른 점은 스코프 검사와 refresh
@@ -177,43 +181,88 @@ func (p *ChzzkAccessTokenProvider) AccessToken(ctx context.Context, userID uuid.
 	if state.token != "" && p.now().Before(state.expiresAt.Add(-accessTokenExpirySlack)) {
 		return state.token, nil
 	}
-	account, err := p.store.Get(ctx, userID, StreamingProviderChzzk)
-	if err != nil {
-		if errors.Is(err, ErrStreamingAccountNotFound) {
+	// 치지직 refresh token은 일회용이다. 회전 응답을 받고 저장하기 전에 요청이
+	// 취소되면 옛 토큰은 이미 소비됐고 새 토큰은 버려져 연결이 영구히 끊긴다.
+	// 회전과 저장은 요청 취소와 분리한다(P1-12).
+	rotateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chzzkRotationTimeout)
+	defer cancel()
+	for attempt := 1; ; attempt++ {
+		account, err := p.store.Get(rotateCtx, userID, StreamingProviderChzzk)
+		if err != nil {
+			if errors.Is(err, ErrStreamingAccountNotFound) {
+				return "", ErrStreamingNotConnected
+			}
+			return "", err
+		}
+		if len(account.RefreshTokenCiphertext) == 0 {
 			return "", ErrStreamingNotConnected
 		}
-		return "", err
-	}
-	if len(account.RefreshTokenCiphertext) == 0 {
-		return "", ErrStreamingNotConnected
-	}
-	refreshToken, err := p.cipher.Decrypt(account.RefreshTokenCiphertext, account.TokenKeyVersion)
-	if err != nil {
-		return "", err
-	}
-	response, err := p.oauth.RefreshAccessToken(ctx, refreshToken)
-	if err != nil {
-		if errors.Is(err, ErrChzzkAuthCodeRejected) {
-			_ = p.store.MarkReconnectRequired(ctx, account.ID, p.now())
-			return "", fmt.Errorf("%w: %v", ErrStreamingReconnectRequired, err)
-		}
-		return "", err
-	}
-	// 회전한 refresh를 먼저 저장하고 나서 access token을 캐시한다. 순서가
-	// 반대면 저장 실패 시 못 쓰는 토큰을 든 채로 성공을 돌려주게 된다.
-	if next := strings.TrimSpace(response.RefreshToken); next != "" && next != refreshToken {
-		ciphertext, version, err := p.cipher.Encrypt(next)
+		refreshToken, err := p.cipher.Decrypt(account.RefreshTokenCiphertext, account.TokenKeyVersion)
 		if err != nil {
 			return "", err
 		}
-		expiresAt := p.now().Add(chzzkRefreshTokenTTL)
-		if err := p.store.UpdateRefreshToken(ctx, account.ID, ciphertext, version, &expiresAt); err != nil {
-			return "", fmt.Errorf("persist rotated refresh token: %w", err)
+		response, err := p.oauth.RefreshAccessToken(rotateCtx, refreshToken)
+		if err != nil {
+			if errors.Is(err, ErrChzzkAuthCodeRejected) {
+				// 다른 프로세스(이관 중인 옛 슬롯)가 같은 토큰을 먼저 회전했으면
+				// 저장된 토큰이 바뀌었다. 그 토큰으로 한 번 더 시도한다(P1-13).
+				if attempt == 1 && p.refreshTokenChanged(rotateCtx, userID, account.RefreshTokenCiphertext) {
+					continue
+				}
+				_ = p.store.MarkReconnectRequired(rotateCtx, account.ID, account.RefreshTokenCiphertext, p.now())
+				return "", fmt.Errorf("%w: %v", ErrStreamingReconnectRequired, err)
+			}
+			return "", err
 		}
+		// 회전한 refresh를 먼저 저장하고 나서 access token을 캐시한다. 순서가
+		// 반대면 저장 실패 시 못 쓰는 토큰을 든 채로 성공을 돌려주게 된다.
+		if next := strings.TrimSpace(response.RefreshToken); next != "" && next != refreshToken {
+			ciphertext, version, err := p.cipher.Encrypt(next)
+			if err != nil {
+				return "", err
+			}
+			expiresAt := p.now().Add(chzzkRefreshTokenTTL)
+			// 그 사이 사용자가 다시 연결했으면 새 연결을 덮지 않는다. 받은 access
+			// token은 유효하므로 그대로 쓴다(P1-13).
+			if err := p.store.UpdateRefreshToken(rotateCtx, account.ID, account.RefreshTokenCiphertext, ciphertext, version, &expiresAt); err != nil && !errors.Is(err, ErrRefreshTokenChanged) {
+				return "", fmt.Errorf("persist rotated refresh token: %w", err)
+			}
+		} else if account.ReconnectRequiredAt != nil {
+			// 갱신에 성공했으니 재연결 필요 표식은 틀렸다(P1-14).
+			_ = p.store.ClearReconnectRequired(rotateCtx, account.ID)
+		}
+		state.token = response.AccessToken
+		state.expiresAt = p.now().Add(time.Duration(response.ExpiresIn) * time.Second)
+		return state.token, nil
 	}
-	state.token = response.AccessToken
-	state.expiresAt = p.now().Add(time.Duration(response.ExpiresIn) * time.Second)
-	return state.token, nil
+}
+
+// refreshTokenChanged는 저장된 refresh token이 used와 다른지 다시 읽어 본다.
+func (p *ChzzkAccessTokenProvider) refreshTokenChanged(ctx context.Context, userID uuid.UUID, used []byte) bool {
+	account, err := p.store.Get(ctx, userID, StreamingProviderChzzk)
+	return err == nil && len(account.RefreshTokenCiphertext) > 0 && !bytes.Equal(account.RefreshTokenCiphertext, used)
+}
+
+// InvalidateAccessToken은 플랫폼이 거절(401)한 access token을 캐시에서 버린다.
+// 다음 호출은 refresh token으로 새로 받는다(P1-15).
+func (p *ChzzkAccessTokenProvider) InvalidateAccessToken(token string) {
+	if p == nil || token == "" {
+		return
+	}
+	p.mu.Lock()
+	states := make([]*userAccessToken, 0, len(p.users))
+	for _, state := range p.users {
+		states = append(states, state)
+	}
+	p.mu.Unlock()
+	for _, state := range states {
+		state.mu.Lock()
+		if state.token == token {
+			state.token = ""
+			state.expiresAt = time.Time{}
+		}
+		state.mu.Unlock()
+	}
 }
 
 func (p *ChzzkAccessTokenProvider) ClearCachedToken(userID uuid.UUID) {

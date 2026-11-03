@@ -47,6 +47,8 @@ var (
 	// errRedundantTransition: 방송이 이미 요청한 상태다(예: enableAutoStop이 먼저
 	// 끝낸 방송에 complete 전환). 종료 목적은 달성된 상태라 EndLive는 성공으로 본다.
 	errRedundantTransition = errors.New("the YouTube broadcast is already in the requested state")
+	// errLiveStreamNotFound는 묶으려는 스트림이 YouTube에 없다는 뜻이다(지운 재사용 스트림).
+	errLiveStreamNotFound = errors.New("the YouTube live stream does not exist")
 	// ErrMadeForKidsRequired: 시청자층(아동용 여부)은 YouTube가 요구하는
 	// 법적 신고 항목이라 서버가 대신 추정하지 않는다 — 미선택이면 거절한다.
 	ErrMadeForKidsRequired = errors.New("made_for_kids must be specified by the user")
@@ -61,6 +63,20 @@ var (
 // auth.YouTubeAccessTokenProvider가 이를 만족한다.
 type AccessTokenProvider interface {
 	AccessToken(ctx context.Context, userID uuid.UUID) (string, error)
+}
+
+// accessTokenInvalidator는 플랫폼이 거절(401)한 access token을 캐시에서 버린다.
+// 버리지 않으면 만료(최대 하루)까지 같은 토큰으로 계속 실패한다(P1-15). 실패한
+// 호출은 그대로 실패로 돌려주고, 다음 호출이 새 토큰을 받는다.
+type accessTokenInvalidator interface {
+	InvalidateAccessToken(token string)
+}
+
+// dropRejectedToken은 tokens가 지원하면 거절된 access token을 버린다.
+func dropRejectedToken(tokens AccessTokenProvider, accessToken string) {
+	if invalidator, ok := tokens.(accessTokenInvalidator); ok {
+		invalidator.InvalidateAccessToken(accessToken)
+	}
 }
 
 // YouTubeProvider는 YouTube Live 방송 라이프사이클 구현이다.
@@ -123,7 +139,19 @@ func (p *YouTubeProvider) Prepare(ctx context.Context, userID uuid.UUID, options
 	if err != nil {
 		return PreparedBroadcast{}, err
 	}
-	if err := p.bind(ctx, accessToken, broadcastID, streamID); err != nil {
+	err = p.bind(ctx, accessToken, broadcastID, streamID)
+	if errors.Is(err, errLiveStreamNotFound) && hasReusableStream(account) {
+		// 저장해 둔 재사용 스트림을 사용자가 YouTube에서 지웠다. 한 번 새로 만들어
+		// 다시 묶는다 — 그러지 않으면 이 채널의 준비가 영구히 실패한다(P1-11).
+		account.StreamID = nil
+		streamID, ingestAddress, streamName, err = p.ensureReusableStream(ctx, accessToken, account)
+		if err == nil {
+			err = p.bind(ctx, accessToken, broadcastID, streamID)
+		}
+	}
+	if err != nil {
+		// 묶지 못한 방송은 채널에 고아로 남는다. 준비는 실패로 끝나므로 지운다(P1-11).
+		p.discardUnboundBroadcast(ctx, accessToken, broadcastID)
 		return PreparedBroadcast{}, err
 	}
 	// 여기까지가 필수 경로다. 카테고리·썸네일은 선택 항목이라 실패해도
@@ -548,6 +576,23 @@ func (p *YouTubeProvider) insertBroadcast(ctx context.Context, accessToken strin
 	return response.ID, nil
 }
 
+// hasReusableStream은 계정에 재사용 스트림이 저장돼 있는지다.
+func hasReusableStream(account auth.StreamingAccount) bool {
+	return account.StreamID != nil && *account.StreamID != ""
+}
+
+// unboundBroadcastCleanupTimeout은 묶지 못한 방송을 지우는 호출의 상한이다.
+const unboundBroadcastCleanupTimeout = 15 * time.Second
+
+// discardUnboundBroadcast는 스트림에 묶지 못한 방송을 지운다. 준비 요청이 취소됐어도
+// 지워야 하므로 요청 취소와 분리한다. 실패해도 준비 실패를 그대로 알린다 — 남은
+// 방송은 시작되지 않아 시청자에게 보이지 않는다.
+func (p *YouTubeProvider) discardUnboundBroadcast(ctx context.Context, accessToken, broadcastID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unboundBroadcastCleanupTimeout)
+	defer cancel()
+	_ = p.do(cleanupCtx, accessToken, http.MethodDelete, p.apiBase+"/liveBroadcasts?id="+broadcastID, "", nil, nil)
+}
+
 func (p *YouTubeProvider) bind(ctx context.Context, accessToken, broadcastID, streamID string) error {
 	path := fmt.Sprintf("/liveBroadcasts/bind?id=%s&streamId=%s&part=id,contentDetails", broadcastID, streamID)
 	return p.post(ctx, accessToken, path, nil, &struct{}{})
@@ -644,6 +689,9 @@ func (p *YouTubeProvider) do(ctx context.Context, accessToken, method, url, cont
 		return fmt.Errorf("request YouTube Live API: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		dropRejectedToken(p.tokens, accessToken)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return decodeYouTubeAPIError(response)
 	}
@@ -694,6 +742,8 @@ func decodeYouTubeAPIError(response *http.Response) error {
 			return ErrPlatformRateLimited
 		case "redundantTransition":
 			return errRedundantTransition
+		case "liveStreamNotFound":
+			return errLiveStreamNotFound
 		case "errorStreamInactive", "invalidTransition":
 			// 스트림에 프레임이 아직 도착하지 않았거나 방송이 전환 가능한
 			// 상태가 아니다 — 재시도로 풀리는 상태라 별도 에러로 구분한다.

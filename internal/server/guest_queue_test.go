@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"inno-live-server/internal/clientip"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/metrics"
 	"inno-live-server/internal/origin"
@@ -22,11 +22,7 @@ import (
 )
 
 func TestGuestQueueClientIPUsesNearestUntrustedForwardedAddress(t *testing.T) {
-	_, proxyNetwork, err := net.ParseCIDR("10.0.0.0/8")
-	if err != nil {
-		t.Fatal(err)
-	}
-	queue := &GuestQueue{trustedProxies: []*net.IPNet{proxyNetwork}}
+	queue := &GuestQueue{clientIPs: clientip.NewResolver([]string{"10.0.0.0/8"})}
 
 	// 클라이언트가 spoofed 값을 앞에 넣고 신뢰된 proxy가 자신이 관찰한 실제 client
 	// 주소를 뒤에 붙였다. 가장 오른쪽의 신뢰되지 않은 주소를 선택해야 한다.
@@ -43,11 +39,7 @@ func TestGuestQueueClientIPUsesNearestUntrustedForwardedAddress(t *testing.T) {
 }
 
 func TestGuestQueueClientIPIgnoresForwardedHeaderFromUntrustedPeer(t *testing.T) {
-	_, proxyNetwork, err := net.ParseCIDR("10.0.0.0/8")
-	if err != nil {
-		t.Fatal(err)
-	}
-	queue := &GuestQueue{trustedProxies: []*net.IPNet{proxyNetwork}}
+	queue := &GuestQueue{clientIPs: clientip.NewResolver([]string{"10.0.0.0/8"})}
 
 	got := queue.clientIP("203.0.113.25:443", "198.51.100.99")
 	if got != "203.0.113.25" {

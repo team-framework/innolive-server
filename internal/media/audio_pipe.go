@@ -31,6 +31,11 @@ const (
 	// 길이다. Opus clock rate에 맞춰 증가해야 FFmpeg가 단조로운 Ogg/Opus
 	// 타임라인을 계속 받을 수 있다.
 	opusSilenceFrameDuration = 20 * time.Millisecond
+	// audioSinkWriteTimeout은 대상 하나의 pipe:3 쓰기를 기다리는 상한이다. 파이프
+	// 버퍼(64 KiB, 약 8초 분량)가 찬 뒤에야 쓰기가 막히므로, 여기까지 오면 그
+	// FFmpeg는 오디오를 읽지 않는 상태다. 기다리는 동안 다른 대상과 mute 전환이
+	// 같은 잠금 뒤에서 멈추므로 짧게 둔다(P0-3).
+	audioSinkWriteTimeout = 250 * time.Millisecond
 )
 
 var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
@@ -235,6 +240,9 @@ func (p *AudioPipe) writeSinkLocked(writeEnd *os.File, sink *audioSink, timestam
 		p.metrics.IncAudioSampleDropped(audioDropNonMonotonic)
 		return
 	}
+	// 파이프가 아닌 출력(테스트의 일반 파일)은 기한을 지원하지 않는다. 그때는
+	// 기존처럼 막힘 없이 쓰인다.
+	_ = writeEnd.SetWriteDeadline(time.Now().Add(audioSinkWriteTimeout))
 	err := sink.ogg.WriteRTP(&rtp.Packet{
 		Header:  rtp.Header{Timestamp: timestamp},
 		Payload: payload,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -51,6 +52,12 @@ const (
 	// egressFreezeMax는 마지막 프레임 반복(정지 화면)을 허용하는 공백 상한이다.
 	// 넘으면 슬레이트로 바꾼다.
 	egressFreezeMax = 3 * time.Second
+	// egressWriteTimeout은 FFmpeg stdin에 프레임 하나를 쓰는 상한이다. RTMP
+	// 인제스트가 멈추면 FFmpeg가 입력을 읽지 않아 쓰기가 막히는데, 기한이 없으면
+	// egress는 streaming으로 보이는 채 재연결도 못 한다(P1-5). 넘기면 쓰기 오류로
+	// 보고 기존 재연결 경로를 탄다. 인코더의 일시적인 지연은 넘기지 않도록 넉넉히
+	// 둔다.
+	egressWriteTimeout = 5 * time.Second
 )
 
 var errReconnectInputTimeout = errors.New("timed out waiting for input frames while reconfiguring RTMP egress")
@@ -282,6 +289,8 @@ type RTMPEgress struct {
 	// 테스트에서 짧게 바꾼다.
 	gapFillAfter time.Duration
 	freezeMax    time.Duration
+	// writeTimeout은 FFmpeg stdin 쓰기 기한이다(egressWriteTimeout).
+	writeTimeout time.Duration
 	// minHeldGeneration은 내보내도 되는 프레임의 최소 익명화 설정 세대다.
 	// 설정이 바뀌면 새 세대로 올려, 바뀌기 전에 처리된 프레임을 정지 화면으로도
 	// 카메라 프레임으로도 내보내지 않게 한다.
@@ -320,6 +329,7 @@ func NewRTMPEgress(path string, logger *slog.Logger, registry *metrics.Registry,
 		reconnectPolicy: defaultReconnectPolicy,
 		gapFillAfter:    egressGapFillAfter,
 		freezeMax:       egressFreezeMax,
+		writeTimeout:    egressWriteTimeout,
 		status: EgressStatus{
 			Phase:     EgressPhaseIdle,
 			TargetURL: maskStreamKey(outputURL),
@@ -522,9 +532,7 @@ func (e *RTMPEgress) Pause() bool {
 	if !e.transition(egressTransition{event: egressTransitionPause}) {
 		return false
 	}
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
+	e.applyAudioMute()
 	return true
 }
 
@@ -541,9 +549,7 @@ func (e *RTMPEgress) Resume() bool {
 	if !e.transition(egressTransition{event: egressTransitionResume}) {
 		return false
 	}
-	if e.audio != nil && !e.inputRecovering() && !e.inputStalledNow() {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), false)
-	}
+	e.applyAudioMute()
 	return true
 }
 
@@ -558,10 +564,8 @@ func (e *RTMPEgress) BeginInputRecovery() bool {
 	}
 	e.status.InputRecovering = true
 	e.status.UpdatedAt = time.Now().UTC()
+	e.applyAudioMuteLocked()
 	e.statusMu.Unlock()
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
 	return true
 }
 
@@ -575,9 +579,7 @@ func (e *RTMPEgress) EndInputRecovery() bool {
 	}
 	e.status.InputRecovering = false
 	e.status.UpdatedAt = time.Now().UTC()
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), userPausePhase(e.status.Phase) || e.inputStalled)
-	}
+	e.applyAudioMuteLocked()
 	e.statusMu.Unlock()
 	return true
 }
@@ -611,9 +613,7 @@ func (e *RTMPEgress) beginInputStall() {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	e.inputStalled = true
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), true)
-	}
+	e.applyAudioMuteLocked()
 }
 
 // endInputStall은 카메라 프레임이 돌아왔을 때 공백 무음을 푼다. pause나 입력
@@ -622,9 +622,7 @@ func (e *RTMPEgress) endInputStall() {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	e.inputStalled = false
-	if e.audio != nil {
-		e.audio.SetMuted(e.currentAudioWriteEnd(), e.status.InputRecovering || userPausePhase(e.status.Phase))
-	}
+	e.applyAudioMuteLocked()
 }
 
 func (e *RTMPEgress) inputStalledNow() bool {
@@ -713,7 +711,26 @@ func (e *RTMPEgress) resetReconnectStatus() {
 // 제거한다. RTMP endpoint가 오류 문구를 그대로 되돌려도 API 응답으로 비밀값이
 // 나가지 않게 한다.
 func (e *RTMPEgress) sanitizeError(cause error) string {
-	return strings.ReplaceAll(cause.Error(), e.outputURL, maskStreamKey(e.outputURL))
+	message := strings.ReplaceAll(cause.Error(), e.outputURL, maskStreamKey(e.outputURL))
+	// 오류가 URL 전체를 싣지 않고 다른 호스트의 URL이나 키만 실을 수 있다. 키 자체도
+	// 가린다(P1-24). 너무 짧은 마지막 경로(예: "live")는 키가 아니라 건너뛴다.
+	if key := streamKeyOf(e.outputURL); len(key) >= minMaskedStreamKey {
+		message = strings.ReplaceAll(message, key, "****")
+	}
+	return message
+}
+
+// minMaskedStreamKey는 키로 보고 가리는 마지막 경로의 최소 길이다. 플랫폼 키는
+// 모두 이보다 길다.
+const minMaskedStreamKey = 8
+
+// streamKeyOf는 출력 URL의 마지막 경로(스트림 키)다.
+func streamKeyOf(url string) string {
+	index := strings.LastIndex(url, "/")
+	if index < 0 || index == len(url)-1 {
+		return ""
+	}
+	return url[index+1:]
 }
 
 // beginReconfiguring은 입력 프레임의 해상도가 바뀌어 새 출력 프로필을
@@ -856,6 +873,16 @@ func (e *RTMPEgress) Run(ctx context.Context) {
 	}
 }
 
+// writeWithDeadline은 w가 쓰기 기한을 지원하면(exec의 stdin 파이프) 기한을 걸고
+// 쓴다. 0 이하의 timeout은 기한 없이 쓴다.
+func writeWithDeadline(w io.Writer, data []byte, timeout time.Duration) error {
+	if deadline, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok && timeout > 0 {
+		_ = deadline.SetWriteDeadline(time.Now().Add(timeout))
+	}
+	_, err := w.Write(data)
+	return err
+}
+
 // collectStartupFrames는 fps·해상도 측정에 쓸 프레임을 모은다. seed는 해상도
 // 재기동 시 이월되는 새 해상도의 첫 프레임으로, 수집 목표 수에 포함된다.
 // deadline이 0이면 첫 시작처럼 시간 제한 없이 기다린다. 재구성·복구 경로는
@@ -917,6 +944,9 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 	// 슬레이트로 채운다.
 	var held []byte
 	var heldGeneration uint64
+	write := func(data []byte) error {
+		return writeWithDeadline(process.stdin, data, e.writeTimeout)
+	}
 	lastInputAt := time.Now()
 	stalled := e.inputStalledNow()
 	writeCamera := func(item frame) (*frame, error) {
@@ -929,7 +959,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			e.metrics.IncEgressFrameDropped()
 			return nil, nil
 		}
-		if _, err := process.stdin.Write(item.data); err != nil {
+		if err := write(item.data); err != nil {
 			return nil, err
 		}
 		noteWritten()
@@ -948,7 +978,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 		if err != nil {
 			return err
 		}
-		if _, err := process.stdin.Write(slate.data); err != nil {
+		if err := write(slate.data); err != nil {
 			return err
 		}
 		noteWritten()
@@ -967,7 +997,7 @@ func (e *RTMPEgress) writeFrames(ctx context.Context, process *ffmpegProcess, pe
 			e.logger.Warn("RTMP egress input stalled; filling gap", "gap", gap, "holding_last_frame", held != nil)
 		}
 		if held != nil && gap < e.freezeMax && e.holdable(heldGeneration) {
-			if _, err := process.stdin.Write(held); err != nil {
+			if err := write(held); err != nil {
 				return err
 			}
 			noteWritten()
@@ -1051,12 +1081,6 @@ func (e *RTMPEgress) clearCancellationSlate() {
 	e.slateMu.Unlock()
 }
 
-func (e *RTMPEgress) inputRecovering() bool {
-	e.statusMu.Lock()
-	defer e.statusMu.Unlock()
-	return e.status.InputRecovering
-}
-
 // currentAudioWriteEnd는 지금 붙어 있는 스트림의 write end다(없으면 nil).
 func (e *RTMPEgress) currentAudioWriteEnd() *os.File {
 	e.audioMu.Lock()
@@ -1076,7 +1100,36 @@ func (e *RTMPEgress) setAudioWriteEnd(writeEnd *os.File) {
 func (e *RTMPEgress) audioShouldMute() bool {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
+	return e.audioShouldMuteLocked()
+}
+
+func (e *RTMPEgress) audioShouldMuteLocked() bool {
 	return e.status.InputRecovering || userPausePhase(e.status.Phase) || e.inputStalled
+}
+
+// applyAudioMute는 지금 상태로 음소거 여부를 판정해 붙어 있는 스트림에 적용한다.
+// 판정과 적용을 statusMu 안에서 한 번에 해야, 동시에 도는 Pause·Resume·Attach가
+// 오래된 판정을 나중에 덮어쓰지 못한다(P0-6). 잠금 순서는 statusMu → audioMu →
+// AudioPipe.mu이고, 막힌 대상의 쓰기는 audioSinkWriteTimeout에서 끊긴다.
+func (e *RTMPEgress) applyAudioMute() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.applyAudioMuteLocked()
+}
+
+func (e *RTMPEgress) applyAudioMuteLocked() {
+	if e.audio != nil {
+		e.audio.SetMuted(e.currentAudioWriteEnd(), e.audioShouldMuteLocked())
+	}
+}
+
+// attachAudio는 새 FFmpeg의 pipe:3을 붙인다. 판정과 Attach를 statusMu 안에서
+// 하므로 그 사이에 들어온 Pause가 아직 없는 스트림에 적용되고 사라지지 않는다.
+func (e *RTMPEgress) attachAudio(writeEnd *os.File) error {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.setAudioWriteEnd(writeEnd)
+	return e.audio.Attach(writeEnd, e.audioShouldMuteLocked())
 }
 
 func (e *RTMPEgress) shouldWriteCancellationSlate() bool {
@@ -1284,7 +1337,7 @@ func (e *RTMPEgress) start(ctx context.Context, width, height uint16, fps int) (
 	}
 	e.setAudioWriteEnd(audioWriteEnd)
 	if audioWriteEnd != nil {
-		if err := e.audio.Attach(audioWriteEnd, e.audioShouldMute()); err != nil {
+		if err := e.attachAudio(audioWriteEnd); err != nil {
 			_ = audioWriteEnd.Close()
 			process.close()
 			return nil, fmt.Errorf("attach audio egress pipe: %w", err)

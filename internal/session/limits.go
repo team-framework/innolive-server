@@ -112,6 +112,22 @@ func (s *Session) MarkHeartbeat(at time.Time) {
 	s.heartbeatNano.Store(at.UnixNano())
 }
 
+// AllowHeartbeatRecord는 at에 받은 하트비트를 저장해도 되는지다. 마지막 저장에서
+// minInterval이 지나지 않았으면 false다. 몰아 보낸 보고가 행을 그만큼 쌓지 않게
+// 한다(P1-33).
+func (s *Session) AllowHeartbeatRecord(at time.Time, minInterval time.Duration) bool {
+	now := at.UnixNano()
+	for {
+		last := s.heartbeatRecordedNano.Load()
+		if last != 0 && now-last < int64(minInterval) {
+			return false
+		}
+		if s.heartbeatRecordedNano.CompareAndSwap(last, now) {
+			return true
+		}
+	}
+}
+
 // HeartbeatIdleSince는 직접 송출의 입력 없음 시계가 시작된 시각이다. 마지막
 // 하트비트와 라이브 전환 중 늦은 쪽이다.
 func (s *Session) HeartbeatIdleSince() time.Time {

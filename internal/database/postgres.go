@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -13,6 +15,9 @@ import (
 )
 
 const connectTimeout = 5 * time.Second
+
+// gormLogWriter는 GORM 로그를 받는다. 기본 로거와 같은 곳(stdout)이고, 테스트에서 바꾼다.
+var gormLogWriter gormlogger.Writer = log.New(os.Stdout, "\r\n", log.LstdFlags)
 
 type Options struct {
 	URL string
@@ -61,7 +66,16 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 		// gorm.ErrDuplicatedKey 같은 공통 에러로 변환한다.
 		TranslateError: true,
 
-		Logger: gormlogger.Default.LogMode(logMode),
+		// 값을 치환한 SQL을 남기지 않는다. 느린 쿼리 경고와 디버그 로그에 토큰 해시·
+		// 이메일 같은 바인드 값이 그대로 나간다(P1-18). 행이 없는 조회는 정상 흐름이라
+		// 경고하지 않는다. 나머지는 기본 로거 설정과 같다.
+		Logger: gormlogger.New(gormLogWriter, gormlogger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logMode,
+			IgnoreRecordNotFoundError: true,
+			ParameterizedQueries:      true,
+			Colorful:                  true,
+		}),
 
 		// false가 기본값이다.
 		// 인증 데이터의 일관성을 위해 GORM 기본 transaction을 유지한다.

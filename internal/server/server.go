@@ -22,6 +22,7 @@ import (
 	"inno-live-server/internal/ai"
 	"inno-live-server/internal/analytics"
 	"inno-live-server/internal/auth"
+	"inno-live-server/internal/clientip"
 	"inno-live-server/internal/config"
 	"inno-live-server/internal/experiencequality"
 	"inno-live-server/internal/media"
@@ -66,7 +67,7 @@ type Server struct {
 	userOperationGate interface {
 		BeginOperation(uuid.UUID) (func(), bool)
 	}
-	signalingTrustedProxies []*net.IPNet
+	signalingClientResolver clientip.Resolver
 	signalingConns          signalingConnLimiter
 	ownBroadcasts           ownedBroadcasts
 	quotaLogMu              sync.Mutex
@@ -105,7 +106,7 @@ func New(
 		origins:                 origins,
 		streaming:               streamingProviders,
 		guestReference:          newGuestReferenceGate(),
-		signalingTrustedProxies: parseTrustedProxyCIDRs(cfg.GuestQueueTrustedProxies),
+		signalingClientResolver: clientip.NewResolver(cfg.GuestQueueTrustedProxies),
 		requireUser:             requireUser,
 	}
 	if len(userAuthenticators) > 0 {
@@ -503,6 +504,17 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, _ *http.Request, liv
 //
 // 준비 옵션은 저장된 방송 설정(PUT /sessions/{id}/broadcast)이 단일 출처다 —
 // 요청 바디로 덮어쓰는 경로를 두면 설정 화면과 실제 방송이 어긋난다.
+// platformChangeTimeout은 플랫폼 방송을 만들거나 바꾸는 왕복의 상한이다. 호출
+// 하나는 15초에 끊기고, 준비는 생성·스트림·바인드 등 여러 호출로 이뤄진다.
+const platformChangeTimeout = 2 * time.Minute
+
+// platformChangeContext는 플랫폼 상태를 바꾸는 왕복에 쓴다. 클라이언트가 중간에
+// 끊어도 왕복을 끝까지 마쳐, 만들다 만 방송이 플랫폼에 고아로 남지 않게 한다(P1-10).
+// 요청에 실린 값(송출 연결 등)은 그대로 물려받는다.
+func platformChangeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), platformChangeTimeout)
+}
+
 func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liveSession *session.Session) {
 	request := struct {
 		Provider string `json:"provider"`
@@ -530,8 +542,10 @@ func (s *Server) handlePrepareStream(w http.ResponseWriter, r *http.Request, liv
 	if providerName == "" {
 		providerName = auth.StreamingProvider(liveSession.Provider)
 	}
+	platformCtx, cancel := platformChangeContext(r.Context())
+	defer cancel()
 	// 송출 채널을 먼저 확정한다. 이후 확인·준비는 모두 이 채널로 간다.
-	ctx, failure := s.streamingAccountContext(r.Context(), liveSession.UserID, providerName, requestedAccount)
+	ctx, failure := s.streamingAccountContext(platformCtx, liveSession.UserID, providerName, requestedAccount)
 	if failure != nil {
 		writeError(w, *failure)
 		return
@@ -718,9 +732,11 @@ func (s *Server) handleGoLive(w http.ResponseWriter, r *http.Request, liveSessio
 	}
 	failures := make([]goLiveFailure, 0, len(providers))
 	var firstFailure *apiError
+	platformCtx, cancel := platformChangeContext(r.Context())
+	defer cancel()
 	for _, name := range providers {
 		providerName := auth.StreamingProvider(name)
-		failure := s.goLiveTarget(r.Context(), liveSession, providerName)
+		failure := s.goLiveTarget(platformCtx, liveSession, providerName)
 		if failure == nil {
 			continue
 		}
@@ -1483,12 +1499,33 @@ func (w *reqWriter) Flush() {
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if id == "" {
+		if !safeRequestID(id) {
 			id = uuid.NewString()
 		}
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(&reqWriter{ResponseWriter: w, requestID: id}, r)
 	})
+}
+
+// maxRequestIDLength는 클라이언트가 보낸 X-Request-ID를 그대로 쓰는 최대 길이다.
+const maxRequestIDLength = 128
+
+// safeRequestID는 클라이언트가 보낸 요청 ID를 응답·로그에 그대로 실어도 되는지다.
+// 길이 제한 없이 받으면 로그를 부풀리고, 제어 문자는 로그를 위조한다(P2-9). 영문·숫자와
+// "-_.:"만 받고 나머지는 새로 만든다.
+func safeRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLength {
+		return false
+	}
+	for _, char := range id {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case char == '-', char == '_', char == '.', char == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // truncateOrigin은 로그에 남길 Origin 길이를 제한한다. Origin은 인증 전

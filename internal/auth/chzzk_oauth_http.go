@@ -43,6 +43,11 @@ func (h *tokenHTTPHandler) handleChzzkConnect(w http.ResponseWriter, r *http.Req
 		h.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
+	// 인증 미들웨어를 거치지 않으므로 시연 모드(#490)를 여기서 확인한다(P1-19).
+	if err := h.service.demoLockdown().Admit(userID); err != nil {
+		h.writeDemoLockdown(w, r)
+		return
+	}
 	code, state, err := decodeChzzkConnectRequest(w, r)
 	if err != nil {
 		h.logChzzkConnectFailure(r, "invalid_request", err)

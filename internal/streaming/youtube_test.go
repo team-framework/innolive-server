@@ -90,12 +90,15 @@ func (s *memoryStore) Get(_ context.Context, userID uuid.UUID, provider auth.Str
 	return auth.StreamingAccount{}, auth.ErrStreamingAccountNotFound
 }
 
-func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, ciphertext []byte, version *int16, expiresAt *time.Time) error {
+func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, previous, ciphertext []byte, version *int16, expiresAt *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, ok := s.accounts[id]
 	if !ok {
 		return auth.ErrStreamingAccountNotFound
+	}
+	if !bytes.Equal(account.RefreshTokenCiphertext, previous) {
+		return auth.ErrRefreshTokenChanged
 	}
 	account.RefreshTokenCiphertext = ciphertext
 	account.TokenKeyVersion = version
@@ -104,15 +107,27 @@ func (s *memoryStore) UpdateRefreshToken(_ context.Context, id uuid.UUID, cipher
 	return nil
 }
 
-func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, at time.Time) error {
+func (s *memoryStore) ClearReconnectRequired(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if account, ok := s.accounts[id]; ok {
+		account.ReconnectRequiredAt = nil
+		s.accounts[id] = account
+	}
+	return nil
+}
+
+func (s *memoryStore) MarkReconnectRequired(_ context.Context, id uuid.UUID, rejected []byte, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, ok := s.accounts[id]
 	if !ok {
 		return auth.ErrStreamingAccountNotFound
 	}
-	account.ReconnectRequiredAt = &at
-	s.accounts[id] = account
+	if bytes.Equal(account.RefreshTokenCiphertext, rejected) {
+		account.ReconnectRequiredAt = &at
+		s.accounts[id] = account
+	}
 	return nil
 }
 
@@ -153,6 +168,10 @@ type youtubeAPIStub struct {
 	lastBroadcast    map[string]any
 	bindQuery        string
 	blockLive        bool
+	// bindFailures는 실패시킬 bind 호출 수, bindFailStatus·bindFailBody는 그 응답이다.
+	bindFailures   int
+	bindFailStatus int
+	bindFailBody   string
 	// 선택 항목(카테고리·썸네일) 기록·실패 주입.
 	videoUpdates       int
 	lastVideoUpdate    map[string]any
@@ -251,6 +270,12 @@ func (s *youtubeAPIStub) handler(t *testing.T) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/liveBroadcasts/bind"):
 			s.binds++
 			s.bindQuery = r.URL.RawQuery
+			if s.bindFailures > 0 {
+				s.bindFailures--
+				w.WriteHeader(s.bindFailStatus)
+				_, _ = w.Write([]byte(s.bindFailBody))
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"broadcast-id-1"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/liveBroadcasts"):

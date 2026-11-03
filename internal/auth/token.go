@@ -161,6 +161,9 @@ type AccessClaims struct {
 type ClientInfo struct {
 	UserAgent string
 	IPAddress string
+	// RateLimitIP는 IP 기준 제한에 쓰는 주소다. 신뢰하지 않는 프록시 뒤라 실제
+	// 클라이언트를 모르면 비어 있고, 그때는 IP 기준 제한을 건너뛴다. 저장하지 않는다.
+	RateLimitIP string
 }
 
 type TokenPair struct {

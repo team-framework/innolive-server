@@ -154,6 +154,9 @@ func (m *Manager) ReleaseUpgradeHold(id string) {
 func (m *Manager) expireUpgradeOffer(id string, offer *UpgradeOffer) {
 	s, err := m.Get(id)
 	if err != nil {
+		// Delete가 보류를 반납한 뒤 경합한 OfferUpgrade가 보류를 잡았을 수 있다.
+		// 세션이 없으면 남은 보류는 주인이 없으므로 반납한다(P1-3).
+		m.ReleaseUpgradeHold(id)
 		return
 	}
 	s.mu.Lock()

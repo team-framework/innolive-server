@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"os"
@@ -33,7 +34,9 @@ const (
 	signupEmailRateKeyPrefix = "rl:signup:email:"
 	signupResendKeyPrefix    = "rl:signup:resend:"
 	codeAttemptKeyPrefix     = "rl:code:attempt:"
+	codeEmailAttemptPrefix   = "rl:code:email:"
 	loginFailureKeyPrefix    = "rl:login:fail:"
+	loginIPAttemptKeyPrefix  = "rl:login:ip:"
 
 	emailSignupIPLimitDefault        = 10
 	emailSignupEmailLimitDefault     = 5
@@ -44,6 +47,14 @@ const (
 	emailLoginFailureWindowDefault   = 15 * time.Minute
 	emailLoginFailureDelayDefault    = 100 * time.Millisecond
 	emailLoginMaxDelay               = 2 * time.Second
+	// emailLoginIPMaxAttempts는 한 IP가 로그인 실패 창 안에 시도할 수 있는 수다.
+	// 성공도 센다 — 이메일을 바꿔 가며 추측하면 이메일별 상한에 걸리지 않는다(P0-11).
+	emailLoginIPMaxAttempts = 60
+	// emailCodeEmailMaxAttempts는 한 이메일에 대해 토큰을 바꿔 가며 틀릴 수 있는
+	// 인증 코드 시도의 누적 상한이다(P1-22). 토큰별 상한만 있으면 재발송마다 다시
+	// 추측할 수 있다.
+	emailCodeEmailMaxAttempts   = 20
+	emailCodeEmailAttemptWindow = 24 * time.Hour
 )
 
 var (
@@ -195,6 +206,9 @@ type VerificationEmailSender interface {
 	SendVerificationCode(ctx context.Context, recipient, code string, purpose EmailPurpose) error
 }
 
+// smtpSendTimeout은 인증 메일 한 통을 보내는 상한이다.
+const smtpSendTimeout = 30 * time.Second
+
 type smtpVerificationEmailSender struct {
 	config EmailAuthConfig
 }
@@ -211,19 +225,32 @@ func (s *smtpVerificationEmailSender) SendVerificationCode(ctx context.Context, 
 		return err
 	}
 
+	// 서버가 연결만 받고 응답하지 않으면 발송이 기한 없이 멈춰 가입·재설정 요청을
+	// 붙잡는다(P1-16). 연결 전체에 기한을 건다.
+	deadline := time.Now().Add(smtpSendTimeout)
+	if requestDeadline, ok := ctx.Deadline(); ok && requestDeadline.Before(deadline) {
+		deadline = requestDeadline
+	}
 	address := fmt.Sprintf("%s:%d", s.config.SMTPHost, s.config.SMTPPort)
-	var connection *smtp.Client
+	dialer := &net.Dialer{Deadline: deadline}
+	var raw net.Conn
 	var err error
 	if s.config.ImplicitTLS {
-		raw, dialErr := tls.Dial("tcp", address, &tls.Config{ServerName: s.config.SMTPHost, MinVersion: tls.VersionTLS12})
-		if dialErr != nil {
-			return fmt.Errorf("connect SMTP: %w", dialErr)
-		}
-		connection, err = smtp.NewClient(raw, s.config.SMTPHost)
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: s.config.SMTPHost, MinVersion: tls.VersionTLS12}}
+		raw, err = tlsDialer.DialContext(ctx, "tcp", address)
 	} else {
-		connection, err = smtp.Dial(address)
+		raw, err = dialer.DialContext(ctx, "tcp", address)
 	}
 	if err != nil {
+		return fmt.Errorf("connect SMTP: %w", err)
+	}
+	if err := raw.SetDeadline(deadline); err != nil {
+		_ = raw.Close()
+		return fmt.Errorf("connect SMTP: %w", err)
+	}
+	connection, err := smtp.NewClient(raw, s.config.SMTPHost)
+	if err != nil {
+		_ = raw.Close()
 		return fmt.Errorf("connect SMTP: %w", err)
 	}
 	defer connection.Quit()
@@ -426,6 +453,11 @@ func signupEmailRateKey(email string) string { return signupEmailRateKeyPrefix +
 func signupResendKey(email string) string    { return signupResendKeyPrefix + email }
 func codeAttemptKey(token string) string     { return codeAttemptKeyPrefix + token }
 func loginFailureKey(email string) string    { return loginFailureKeyPrefix + email }
+func loginIPAttemptKey(ip string) string     { return loginIPAttemptKeyPrefix + ip }
+
+func codeEmailAttemptKey(purpose EmailPurpose, email string) string {
+	return codeEmailAttemptPrefix + string(purpose) + ":" + email
+}
 
 type EmailAccountStore interface {
 	EmailAlreadyRegistered(context.Context, string) (bool, error)
@@ -779,6 +811,14 @@ func (s *EmailAuthService) consumeVerification(ctx context.Context, token, code 
 	if (pending.Purpose == EmailPurposePasswordReset) != passwordReset {
 		return PendingEmailSignup{}, ErrEmailVerificationInvalid
 	}
+	emailAttempts, err := s.limiter.Increment(ctx, codeEmailAttemptKey(pending.Purpose, pending.Email), emailCodeEmailAttemptWindow)
+	if err != nil {
+		return PendingEmailSignup{}, err
+	}
+	if emailAttempts > emailCodeEmailMaxAttempts {
+		_ = s.pending.Delete(ctx, token)
+		return PendingEmailSignup{}, ErrEmailVerificationInvalid
+	}
 	codeHash, err := s.pending.VerificationCodeHash(ctx, token)
 	if err != nil {
 		return PendingEmailSignup{}, err
@@ -791,6 +831,7 @@ func (s *EmailAuthService) consumeVerification(ctx context.Context, token, code 
 	if _, err := s.pending.ConsumeVerificationCode(ctx, token); err != nil {
 		return PendingEmailSignup{}, err
 	}
+	_ = s.limiter.ClearKey(ctx, codeEmailAttemptKey(pending.Purpose, pending.Email))
 	return pending, nil
 }
 
@@ -843,17 +884,28 @@ func (s *EmailAuthService) Login(ctx context.Context, email, password string, cl
 	if err != nil {
 		return TokenPair{}, ErrEmailCredentialsInvalid
 	}
+	// 비교하기 전에 시도를 예약한다. 실패 수를 읽고 나중에 올리면 동시에 보낸
+	// 요청이 모두 같은 값을 읽어 상한을 넘겨 비교한다(P0-11). 성공하면 지운다.
 	failureKey := loginFailureKey(email)
-	failures, err := s.limiter.Count(ctx, failureKey)
+	attempts, err := s.limiter.Increment(ctx, failureKey, s.config.LoginFailureWindow)
 	if err != nil {
 		return TokenPair{}, err
 	}
-	if failures >= int64(s.config.LoginMaxFailures) {
+	if attempts > int64(s.config.LoginMaxFailures) {
 		return TokenPair{}, ErrEmailLoginThrottled
+	}
+	if client.RateLimitIP != "" {
+		ipAttempts, err := s.limiter.Increment(ctx, loginIPAttemptKey(client.RateLimitIP), s.config.LoginFailureWindow)
+		if err != nil {
+			return TokenPair{}, err
+		}
+		if ipAttempts > emailLoginIPMaxAttempts {
+			return TokenPair{}, ErrEmailLoginThrottled
+		}
 	}
 	// 최근 실패가 늘수록 지연을 키워, 계정을 잠그지 않으면서도 비밀번호 무차별 대입을
 	// 틀릴 때마다 느리게 만든다.
-	if delay := loginFailureDelay(failures, s.config.LoginFailureDelay); delay > 0 {
+	if delay := loginFailureDelay(attempts-1, s.config.LoginFailureDelay); delay > 0 {
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
@@ -862,13 +914,9 @@ func (s *EmailAuthService) Login(ctx context.Context, email, password string, cl
 	}
 	account, user, err := s.accounts.FindEmailAccount(ctx, email)
 	if err != nil {
-		if errors.Is(err, ErrEmailCredentialsInvalid) {
-			_, _ = s.limiter.Increment(ctx, failureKey, s.config.LoginFailureWindow)
-		}
 		return TokenPair{}, err
 	}
 	if bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)) != nil || user.Status != UserStatusActive {
-		_, _ = s.limiter.Increment(ctx, failureKey, s.config.LoginFailureWindow)
 		return TokenPair{}, ErrEmailCredentialsInvalid
 	}
 	_ = s.limiter.ClearKey(ctx, failureKey)

@@ -112,6 +112,10 @@ func restartEffects(targets []string) []session.RestartEffect {
 	return effects
 }
 
+// upgradeConnectionCheckTimeout은 화질 제안의 플랫폼 연결 확인 하나의 상한이다.
+// 테스트에서 줄인다.
+var upgradeConnectionCheckTimeout = 5 * time.Second
+
 // addableProviders는 지금 대상에 더할 수 있는 플랫폼이다 — 서버가 지원하고 사용자
 // 계정이 연결된 것만. 이미 제안한 세션은 조회하지 않는다.
 func (s *Server) addableProviders(ctx context.Context, live *session.Session, targets []string) []string {
@@ -131,7 +135,11 @@ func (s *Server) addableProviders(ctx context.Context, live *session.Session, ta
 		if !ok {
 			continue
 		}
-		connected, err := checker.Connected(ctx, live.UserID)
+		// 확인은 토큰 갱신(플랫폼 왕복)일 수 있다. 한도 집행 루프가 모든 세션을 한
+		// 고루틴에서 돌므로 하나가 멈추면 집행 전체가 멈춘다(P1-29).
+		checkCtx, cancel := context.WithTimeout(ctx, upgradeConnectionCheckTimeout)
+		connected, err := checker.Connected(checkCtx, live.UserID)
+		cancel()
 		if err != nil {
 			s.logger.Warn("upgrade offer connection check failed", "session_id", live.ID, "provider", name, "error", err)
 			continue

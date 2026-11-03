@@ -292,15 +292,20 @@ type Session struct {
 	// 라이브 전환에서도 다시 시작한다 — 첫 하트비트 전의 공백을 입력 없음으로
 	// 보지 않는다.
 	heartbeatNano atomic.Int64
+	// heartbeatRecordedNano는 마지막으로 저장한 하트비트를 받은 시각이다(P1-33).
+	heartbeatRecordedNano atomic.Int64
 	// directStops는 서버가 끝낸 직접 송출 대상과 사유다(#436). 앱만 연결을 끊을
 	// 수 있으므로 다음 하트비트 응답으로 넘기고 비운다. Session.mu로 보호한다.
 	directStops map[string]string
 	// videoTrack·pipelineDone은 해상도 변경(#283)이 같은 트랙으로 파이프라인을
 	// 다시 띄우는 데 쓴다. pipelineDone은 현재 파이프라인이 끝나면 닫힌다.
 	// resolutionMu는 변경 요청을 하나씩 처리한다.
-	videoTrack       *webrtc.TrackRemote
-	pipelineDone     chan struct{}
-	resolutionMu     sync.Mutex
+	videoTrack   *webrtc.TrackRemote
+	pipelineDone chan struct{}
+	resolutionMu sync.Mutex
+	// aiSettingsMu는 익명화·화면 블러·블러 설정 변경을 하나씩 processor에
+	// 적용한다. 적용은 진행 중인 AI 호출을 기다리므로 Session.mu 밖에서 한다(P1-1).
+	aiSettingsMu     sync.Mutex
 	resolutionSwitch *ResolutionSwitchState
 	// aiTarget은 지금 영상 파이프라인이 배정받은 AI 워커 주소다. 그 워커가 응답
 	// 불가가 되면 파이프라인을 다시 띄워 다른 워커로 옮긴다(#499). aiMovedAt은 마지막
@@ -374,11 +379,14 @@ type Manager struct {
 	// 않은 teardown 호출을 추적한다. graceful shutdown은 hook이 쓰는 의존성을 닫기
 	// 전에 이 작업들을 기다린다.
 	deleting sync.WaitGroup
+	// platformCleanups는 진행 중인 플랫폼 방송 정리 고루틴이다(P1-26).
+	platformCleanups sync.WaitGroup
 	// pipelines는 아직 살아 있는 미디어 파이프라인(FFmpeg 쌍)을 가진 세션을
 	// 추적한다. map에서 제거됐지만 아직 종료되지 않은 세션도 포함하며, 종료
 	// 유예 시간 동안 재연결 반복으로 프로세스가 중복 배정되지 않도록
-	// MaxSessions 사용량에 계속 포함한다.
-	pipelines map[string]struct{}
+	// MaxSessions 사용량에 계속 포함한다. 값은 세션의 실행 중인 파이프라인 수다 —
+	// 카메라를 전환하면 이전 파이프라인이 끝나기 전에 새 파이프라인이 뜬다(P1-4).
+	pipelines map[string]int
 
 	// broadcastCleanup은 세션이 끝날 때 남은 플랫폼 방송을 치우는 훅이다.
 	// 세션 계층은 플랫폼 provider를 몰라야 하므로(역방향 결합) 서버가 조립
@@ -466,6 +474,15 @@ func (m *Manager) endDirectUsageLocked(s *Session, t *streamTarget, reason strin
 	t.usageID = ""
 }
 
+// endDirectUsages는 세션의 직접 송출 세대를 모두 닫는다.
+func (m *Manager) endDirectUsages(s *Session, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.targets {
+		m.endDirectUsageLocked(s, t, reason)
+	}
+}
+
 // SetDirectBroadcastEnded는 직접 송출 세대가 닫힐 때 부를 훅을 등록한다(#437).
 // 서버가 플랫폼의 실제 방송 시각을 읽어 실사용 기록과 대조한다. 서버 조립 직후
 // 한 번만 호출한다.
@@ -505,7 +522,13 @@ func (m *Manager) disposeBroadcast(userID uuid.UUID, broadcast PlatformBroadcast
 	if m.broadcastCleanup == nil || phase == BroadcastPhaseIdle || broadcast.BroadcastID == "" {
 		return
 	}
-	go m.broadcastCleanup(userID, broadcast, phase)
+	// 종료(WaitForDeletes)가 기다리도록 센다. 기다리지 않으면 프로세스가 먼저 끝나
+	// 라이브 종료 호출이 나가지 않고 방송이 autoStop까지 남는다(P1-26).
+	m.platformCleanups.Add(1)
+	go func() {
+		defer m.platformCleanups.Done()
+		m.broadcastCleanup(userID, broadcast, phase)
+	}()
 }
 
 // streamPauseController는 일시 중지·재개 제어에 필요한 egress 동작만
@@ -555,7 +578,7 @@ func NewManager(cfg config.Config, logger *slog.Logger, registry *metrics.Regist
 		ice:                         iceServers,
 		sessions:                    make(map[string]*Session),
 		pendingUsers:                make(map[uuid.UUID]*pendingCreate),
-		pipelines:                   make(map[string]struct{}),
+		pipelines:                   make(map[string]int),
 		pendingWithdrawalBroadcasts: make(map[uuid.UUID][]pendingBroadcastCleanup),
 		pendingWithdrawalSessions:   make(map[uuid.UUID][]*Session),
 	}
@@ -593,6 +616,24 @@ func (m *Manager) Capacity() (active, limit int) {
 	active = len(m.sessions) + m.pending
 	m.mu.RUnlock()
 	return active, m.cfg.MaxSessions
+}
+
+// pipelineStarted·pipelineDone은 세션의 실행 중인 파이프라인 수를 센다. 이전
+// 파이프라인의 종료가 새 파이프라인의 등록을 지우면 안 된다(P1-4).
+func (m *Manager) pipelineStarted(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pipelines[id]++
+}
+
+func (m *Manager) pipelineDone(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pipelines[id] <= 1 {
+		delete(m.pipelines, id)
+		return
+	}
+	m.pipelines[id]--
 }
 
 // capacityInUseLocked는 실행 중인 세션, 진행 중인 예약, 종료 중인 FFmpeg 쌍이
@@ -1083,6 +1124,9 @@ func (m *Manager) CloseUserSessionsForWithdrawal(ctx context.Context, userID uui
 	}
 
 	for _, liveSession := range sessions {
+		// 직접 송출 세대는 egress가 없어 서버가 닫는다. 방송을 떼어내기 전에 닫아야
+		// 플랫폼 시각 대조(#437)가 방송 정보를 받는다(P1-35).
+		m.endDirectUsages(liveSession, "user_withdrawal")
 		taken := takeWithdrawalBroadcasts(liveSession)
 		liveSession.close("user_withdrawal", m.logger)
 		m.recordSessionEnded(liveSession, "user_withdrawal")
@@ -1308,9 +1352,35 @@ type StreamOptions struct {
 // outputURL은 스트림 키가 포함된 완성 URL이므로 로그에 남기지 않는다
 // (egress가 자체 마스킹으로 기록한다). 파이프라인이 이미 돌고 있어도
 // egressSlot을 통해 즉시 프레임이 흐르기 시작한다.
+// startStreamPrecheck는 StartStream이 자리를 잡기 전에 하는 검증이다.
+func startStreamPrecheck(s *Session, options []StreamOptions) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var providers []string
+	if len(options) > 0 {
+		providers = []string{options[0].Provider}
+	}
+	if s.closed {
+		return ErrNotFound
+	}
+	if s.rawTrackID == "" {
+		return ErrNoVideoTrack
+	}
+	if t := s.targets[s.targetProvider(providers)]; t != nil && t.egress != nil && t.stopReason == nil && t.egress.Status().Phase != media.EgressPhaseStopped {
+		return ErrStreamActive
+	}
+	return nil
+}
+
 func (m *Manager) StartStream(id, outputURL string, options ...StreamOptions) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
+		return nil, err
+	}
+	// 자리를 잡기 전에 싼 검증을 먼저 한다. 만석이면 자리를 기다리다 503으로
+	// 끝나 실제 원인(409)이 가려지고, 검증에 걸릴 요청이 자리를 잠깐 쥐어 정상
+	// 요청을 밀어낼 수 있다(P2-8). 잠금을 놓은 뒤 바뀔 수 있으므로 아래에서 다시 본다.
+	if err := startStreamPrecheck(s, options); err != nil {
 		return nil, err
 	}
 	// 자리는 세션 잠금 밖에서 잡는다 — 만석이면 짧게 기다리는데, 그동안 잠금을
@@ -1584,8 +1654,10 @@ func (m *Manager) StopStreamWithReason(id, reason string, providers ...string) (
 			s.UpdatedAt = time.Now().UTC()
 			return s, PlatformBroadcast{}, BroadcastPhaseIdle, nil
 		}
-		if t.phase == BroadcastPhasePrepared || (s.AIProcessing == AIProcessingOnDevice && t.egress == nil && t.phase == BroadcastPhaseLive) {
-			if t.phase == BroadcastPhaseLive && reason != "user_requested" {
+		// 이관 재개(StartStream)에 실패한 서버 처리 대상도 egress 없는 live로 남는다.
+		// 놓아주지 않으면 멈출 길이 없다(P1-38).
+		if t.phase == BroadcastPhasePrepared || (t.egress == nil && t.phase == BroadcastPhaseLive) {
+			if s.AIProcessing == AIProcessingOnDevice && t.phase == BroadcastPhaseLive && reason != "user_requested" {
 				// 사용자가 아니라 서버가 끝낸 직접 송출은 앱이 모르므로 알린다.
 				if s.directStops == nil {
 					s.directStops = make(map[string]string)
@@ -1719,57 +1791,60 @@ func (m *Manager) ResumeStream(id string, providers ...string) (*Session, error)
 // 꺼져 있는 동안에는 원본 프레임이 두 출력으로 그대로 나가고, 빠른 재활성화를
 // 위해 기존 gRPC bidi stream은 열어 둔다.
 func (m *Manager) SetAnonymizationEnabled(id string, enabled bool) (*Session, error) {
+	return m.changeAISetting(id, func(s *Session) {
+		s.anonymizationEnabled = enabled
+	}, func(processor *media.Processor) {
+		processor.SetAnonymizationEnabled(enabled)
+	}, "anonymization changed", "enabled", enabled)
+}
+
+// changeAISetting은 세션의 AI 처리 설정을 바꾼다. 세션 상태는 Session.mu 안에서
+// 바꾸고, processor 적용은 그 밖에서 한다. processor는 진행 중인 AI 호출이 끝나야
+// 설정을 바꾸므로(최대 AI 타임아웃) 잠금을 쥔 채 기다리면 같은 세션의 조회와 다른
+// API가 모두 멈춘다(P1-1). 적용 뒤에는 바뀌기 전에 처리된 프레임이 입력 공백 때
+// 정지 화면으로 다시 나가지 않게 한다(#311). 그사이 새로 붙은 egress도 포함하도록
+// 적용 뒤의 목록을 쓴다.
+func (m *Manager) changeAISetting(id string, update func(*Session), apply func(*media.Processor), message string, attrs ...any) (*Session, error) {
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
 	}
+	s.aiSettingsMu.Lock()
+	defer s.aiSettingsMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil, ErrNotFound
 	}
 	if s.AIProcessing == AIProcessingOnDevice {
+		s.mu.Unlock()
 		return nil, ErrOnDeviceProcessing
 	}
-	s.anonymizationEnabled = enabled
-	if s.processor != nil {
-		s.processor.SetAnonymizationEnabled(enabled)
-		// 바뀌기 전에 처리된 프레임이 입력 공백 때 정지 화면으로 다시
-		// 나가지 않게 한다(#311).
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
+	update(s)
+	processor := s.processor
 	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("anonymization changed", "session_id", s.ID, "enabled", enabled)
+	s.mu.Unlock()
+
+	if processor != nil {
+		apply(processor)
+		s.mu.Lock()
+		for _, egress := range activeEgressesLocked(s) {
+			egress.InvalidateHeldFrame(processor.PrivacyGeneration())
+		}
+		s.mu.Unlock()
+	}
+	m.logger.Info(message, append([]any{"session_id", s.ID}, attrs...)...)
 	return s, nil
 }
 
 // SetScreenBlurEnabled는 송출을 끊지 않고 화면 전체 블러를 켜고 끈다(#465).
 // 켜져 있는 동안 두 출력 모두 AI 결과 대신 화면 전체 블러가 나간다.
 func (m *Manager) SetScreenBlurEnabled(id string, enabled bool) (*Session, error) {
-	s, err := m.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, ErrNotFound
-	}
-	if s.AIProcessing == AIProcessingOnDevice {
-		return nil, ErrOnDeviceProcessing
-	}
-	s.screenBlurEnabled = enabled
-	if s.processor != nil {
-		s.processor.SetScreenBlurEnabled(enabled)
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
-	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("screen blur changed", "session_id", s.ID, "enabled", enabled)
-	return s, nil
+	return m.changeAISetting(id, func(s *Session) {
+		s.screenBlurEnabled = enabled
+	}, func(processor *media.Processor) {
+		processor.SetScreenBlurEnabled(enabled)
+	}, "screen blur changed", "enabled", enabled)
 }
 
 // SetMosaicConfig는 송출을 끊지 않고 다음 프레임부터 블러 강도·영역을 바꾼다(#483).
@@ -1779,28 +1854,11 @@ func (m *Manager) SetMosaicConfig(id string, cfg media.MosaicConfig) (*Session, 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	s, err := m.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, ErrNotFound
-	}
-	if s.AIProcessing == AIProcessingOnDevice {
-		return nil, ErrOnDeviceProcessing
-	}
-	s.mosaicConfig = cfg.Clone()
-	if s.processor != nil {
-		s.processor.SetMosaicConfig(cfg)
-		for _, egress := range activeEgressesLocked(s) {
-			egress.InvalidateHeldFrame(s.processor.PrivacyGeneration())
-		}
-	}
-	s.UpdatedAt = time.Now().UTC()
-	m.logger.Info("mosaic config changed", "session_id", s.ID, "mosaic_config", cfg)
-	return s, nil
+	return m.changeAISetting(id, func(s *Session) {
+		s.mosaicConfig = cfg.Clone()
+	}, func(processor *media.Processor) {
+		processor.SetMosaicConfig(cfg)
+	}, "mosaic config changed", "mosaic_config", cfg)
 }
 
 func pauseEgress(egress streamPauseController) error {
@@ -1901,6 +1959,8 @@ func (m *Manager) WaitForDeletes(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		m.deleting.Wait()
+		// 삭제가 끝나면 그 삭제가 시작한 플랫폼 방송 정리도 기다린다.
+		m.platformCleanups.Wait()
 		close(done)
 	}()
 	select {
@@ -2242,14 +2302,8 @@ func (m *Manager) startVideoPipeline(ctx context.Context, s *Session, track *web
 	go func() {
 		defer close(pipelineDone)
 		defer releaseAI()
-		m.mu.Lock()
-		m.pipelines[s.ID] = struct{}{}
-		m.mu.Unlock()
-		defer func() {
-			m.mu.Lock()
-			delete(m.pipelines, s.ID)
-			m.mu.Unlock()
-		}()
+		m.pipelineStarted(s.ID)
+		defer m.pipelineDone(s.ID)
 		media.RunTrack(
 			trackCtx,
 			m.logger.With("session_id", s.ID),

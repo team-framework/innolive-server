@@ -265,23 +265,22 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 		"width", outputWidth, "height", outputHeight,
 		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
 
-	// repin은 방향이 바뀐 키프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
-	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	// repin은 방향이 바뀐 키프레임이다. 쓰기 고루틴이 구간을 끝내기 전에만 쓰고,
+	// runSegment가 돌아온 뒤에만 읽는다.
 	var repin *frame
-
-	metadata := make(chan frame, decoderMetadataQueue)
-	writeError := make(chan error, 1)
 	var stalled atomic.Bool
-	go func() {
-		defer close(metadata)
-		defer process.stdin.Close()
-		index := uint64(0)
-		// observed*는 관측 전용이며 이 고루틴 안에서만 쓴다(레이스 없음).
-		observedWidth, observedHeight := width, height
-		write := func(item frame) (bool, error) {
-			// 키프레임에서만 치수를 읽을 수 있다. 인터프레임은 ErrKeyframeRequired로
-			// 걸러진다. 같은 방향이면 관측만 남기고(#122), 방향이 바뀌면 이 구간을
-			// 끝내고 그 키프레임으로 새 디코더를 띄운다(#449).
+	// observed*는 관측 전용이며 쓰기 고루틴 안에서만 쓴다(레이스 없음).
+	observedWidth, observedHeight := width, height
+	index := uint64(0)
+	rawSize := rawFrameSize(outputWidth, outputHeight)
+	err = t.runSegment(ctx, segment{
+		process: process,
+		queue:   decoderMetadataQueue,
+		stalled: &stalled,
+		// 키프레임에서만 치수를 읽을 수 있다. 인터프레임은 ErrKeyframeRequired로
+		// 걸러진다. 같은 방향이면 관측만 남기고(#122), 방향이 바뀌면 이 구간을
+		// 끝내고 그 키프레임으로 새 디코더를 띄운다(#449).
+		accept: func(item frame) (frame, bool, bool) {
 			if inputWidth, inputHeight, err := vp8KeyframeDimensions(item.data); err == nil &&
 				(inputWidth != observedWidth || inputHeight != observedHeight) {
 				t.logger.Info("VP8 input resolution changed",
@@ -291,73 +290,42 @@ func (t *FFmpegTranscoder) decodeVP8Segment(ctx context.Context, first frame, wi
 				observedWidth, observedHeight = inputWidth, inputHeight
 				if orientationChanged(width, height, inputWidth, inputHeight) {
 					repin = &item
-					return true, nil
+					return item, false, true
 				}
 			}
+			return item, true, false
+		},
+		write: func(item frame) (frame, error) {
 			item.width, item.height = outputWidth, outputHeight
 			if err := writeIVFFrame(process.stdin, item.data, index); err != nil {
-				return false, err
+				return item, err
 			}
 			index++
 			// 프레임이 이제 압축 큐와 디코더 stdin 역압을 지났다. 경계를 표시해 읽기 루프가
 			// 합쳐진 "decode" 단계를 대기와 FFmpeg 왕복으로 나누게 한다(#177).
 			item.decodeInAt = time.Now()
-			return false, t.sendDecodeMetadata(ctx, metadata, item, &stalled)
-		}
-		if _, err := write(first); err != nil {
-			writeError <- err
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				writeError <- ctx.Err()
-				return
-			case item, ok := <-input:
-				if !ok {
-					writeError <- nil
-					return
+			return item, nil
+		},
+		read: func(item frame) (frame, error) {
+			decoded, err := t.readDecodedFrame(process.stdout, rawSize)
+			if err != nil {
+				if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
+					return item, errDecoderStalled
 				}
-				done, err := write(item)
-				if err != nil || done {
-					writeError <- err
-					return
-				}
+				return item, fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
 			}
-		}
-	}()
-
-	rawSize := rawFrameSize(outputWidth, outputHeight)
-	for item := range metadata {
-		var decoded []byte
-		if t.options.WireFormat == config.WireFormatRaw {
-			decoded, err = readRawFrame(process.stdout, rawSize)
-		} else {
-			decoded, err = readJPEG(process.stdout)
-		}
-		if err != nil {
-			if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
-				return nil, errDecoderStalled
-			}
-			return nil, fmt.Errorf("read decoded frame from FFmpeg decoder: %w", err)
-		}
-		item.data = decoded
-		// 합쳐진 "decode" 단계를 나눈다. pre_decode_wait는 압축 큐와 stdin 역압,
-		// ffmpeg_decode는 디코더 왕복이다. 뒤쪽 "decode" 관측까지 남는 시간은
-		// decoderOutput 큐 대기다(#177).
-		t.metrics.ObserveStage("pre_decode_wait", item.decodeInAt.Sub(item.stageAt))
-		t.metrics.ObserveStage("ffmpeg_decode", time.Since(item.decodeInAt))
-		select {
-		case output <- item:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		if errors.Is(err, errDecoderStalled) {
-			return nil, errDecoderStalled
-		}
-		return nil, fmt.Errorf("write VP8 stream to FFmpeg decoder: %w", err)
+			item.data = decoded
+			// 합쳐진 "decode" 단계를 나눈다. pre_decode_wait는 압축 큐와 stdin 역압,
+			// ffmpeg_decode는 디코더 왕복이다. 뒤쪽 "decode" 관측까지 남는 시간은
+			// decoderOutput 큐 대기다(#177).
+			t.metrics.ObserveStage("pre_decode_wait", item.decodeInAt.Sub(item.stageAt))
+			t.metrics.ObserveStage("ffmpeg_decode", time.Since(item.decodeInAt))
+			return item, nil
+		},
+		writeFailed: func(err error) error { return fmt.Errorf("write VP8 stream to FFmpeg decoder: %w", err) },
+	}, first, input, output)
+	if err != nil {
+		return nil, err
 	}
 	return repin, nil
 }
@@ -409,82 +377,50 @@ func (t *FFmpegTranscoder) encodeVP8Segment(ctx context.Context, first frame, in
 	}
 	defer process.close()
 
-	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
-	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 구간을 끝내기 전에만 쓰고,
+	// runSegment가 돌아온 뒤에만 읽는다.
 	var resized *frame
-
 	expectedRawSize := rawFrameSize(first.width, first.height)
-	metadata := make(chan frame, 64)
-	writeError := make(chan error, 1)
-	go func() {
-		defer close(metadata)
-		defer process.stdin.Close()
-		write := func(item frame) (bool, error) {
+	headerRead := false
+	err = t.runSegment(ctx, segment{
+		process: process,
+		queue:   64,
+		accept: func(item frame) (frame, bool, bool) {
 			if resolutionChanged(item, first.width, first.height) {
 				resized = &item
-				return true, nil
+				return item, false, true
 			}
+			return item, true, false
+		},
+		write: func(item frame) (frame, error) {
 			if err := t.validateEncoderInput(item.data, expectedRawSize); err != nil {
-				return false, err
+				return item, err
 			}
-			if _, err := process.stdin.Write(item.data); err != nil {
-				return false, err
-			}
-			select {
-			case metadata <- item:
-				return false, nil
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
-		}
-		if _, err := write(first); err != nil {
-			writeError <- err
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				writeError <- ctx.Err()
-				return
-			case item, ok := <-input:
-				if !ok {
-					writeError <- nil
-					return
+			_, err := process.stdin.Write(item.data)
+			return item, err
+		},
+		read: func(item frame) (frame, error) {
+			if !headerRead {
+				header := make([]byte, 32)
+				if _, err := io.ReadFull(process.stdout, header); err != nil {
+					return item, fmt.Errorf("read FFmpeg encoder IVF header: %w", err)
 				}
-				done, err := write(item)
-				if err != nil || done {
-					writeError <- err
-					return
+				if string(header[:4]) != "DKIF" || string(header[8:12]) != "VP80" {
+					return item, errors.New("FFmpeg encoder returned an invalid VP8 IVF stream")
 				}
+				headerRead = true
 			}
-		}
-	}()
-
-	headerRead := false
-	for item := range metadata {
-		if !headerRead {
-			header := make([]byte, 32)
-			if _, err := io.ReadFull(process.stdout, header); err != nil {
-				return nil, fmt.Errorf("read FFmpeg encoder IVF header: %w", err)
+			encoded, _, err := readIVFFrame(process.stdout)
+			if err != nil {
+				return item, fmt.Errorf("read VP8 frame from FFmpeg encoder: %w", err)
 			}
-			if string(header[:4]) != "DKIF" || string(header[8:12]) != "VP80" {
-				return nil, errors.New("FFmpeg encoder returned an invalid VP8 IVF stream")
-			}
-			headerRead = true
-		}
-		encoded, _, err := readIVFFrame(process.stdout)
-		if err != nil {
-			return nil, fmt.Errorf("read VP8 frame from FFmpeg encoder: %w", err)
-		}
-		item.data = encoded
-		select {
-		case output <- item:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return nil, fmt.Errorf("write frame stream to FFmpeg encoder: %w", err)
+			item.data = encoded
+			return item, nil
+		},
+		writeFailed: func(err error) error { return fmt.Errorf("write frame stream to FFmpeg encoder: %w", err) },
+	}, first, input, output)
+	if err != nil {
+		return nil, err
 	}
 	return resized, nil
 }

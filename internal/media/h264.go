@@ -90,95 +90,64 @@ func (t *FFmpegTranscoder) decodeH264Segment(ctx context.Context, bootstrap *h26
 		"width", outputWidth, "height", outputHeight,
 		"pin_long_edge", t.options.PinLongEdge, "wire_format", t.options.WireFormat)
 
-	// repin은 방향이 바뀐 IDR이다. 쓰기 고루틴이 metadata를 닫기 전에만 쓰고,
-	// 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	// repin은 방향이 바뀐 IDR이다. 쓰기 고루틴이 구간을 끝내기 전에만 쓰고,
+	// runSegment가 돌아온 뒤에만 읽는다.
 	var repin *h264Repin
-	metadata := make(chan frame, decoderMetadataQueue)
-	writeError := make(chan error, 1)
 	var stalled atomic.Bool
-	go func() {
-		defer close(metadata)
-		defer process.stdin.Close()
-		// observed*는 퍼블리셔가 보내오는 입력 해상도를 관측만 하기 위한 것으로,
-		// 이 고루틴 안에서만 읽고 쓴다(공유 상태가 아니라 레이스가 없다).
-		observedWidth, observedHeight := width, height
-		write := func(item frame) error {
-			item.width, item.height = outputWidth, outputHeight
-			if _, err := process.stdin.Write(item.data); err != nil {
-				return err
-			}
-			return t.sendDecodeMetadata(ctx, metadata, item, &stalled)
-		}
-		if err := write(first); err != nil {
-			writeError <- err
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				writeError <- ctx.Err()
-				return
-			case item, ok := <-input:
-				if !ok {
-					writeError <- nil
-					return
-				}
-				data, idr, inputWidth, inputHeight := bootstrap.prepare(item.data)
-				if len(data) == 0 {
-					continue
-				}
-				// 새 SPS 치수를 frame 메타데이터에 반영하지는 않는다 — 디코더가
-				// 출력을 위에서 고정한 규격으로 되돌리므로 실제 페이로드 크기는
-				// 그대로이고, 메타데이터만 바꾸면 하위 단계와 어긋난다(#122).
-				// 퍼블리셔가 어디까지 올라오는지 관측만 남긴다.
-				if inputWidth != 0 && inputHeight != 0 &&
-					(inputWidth != observedWidth || inputHeight != observedHeight) {
-					t.logger.Info("H.264 input resolution changed",
-						"from_width", observedWidth, "from_height", observedHeight,
-						"to_width", inputWidth, "to_height", inputHeight,
-						"decoder_locked_width", outputWidth, "decoder_locked_height", outputHeight)
-					observedWidth, observedHeight = inputWidth, inputHeight
-				}
-				item.data = data
-				// 방향 전환은 새 SPS를 실은 IDR에서만 반영한다. 디코더를 그 IDR부터
-				// 다시 띄워야 첫 픽처를 디코드할 수 있다.
-				if idr && inputWidth != 0 && inputHeight != 0 && orientationChanged(width, height, inputWidth, inputHeight) {
-					repin = &h264Repin{item: item, width: inputWidth, height: inputHeight}
-					writeError <- nil
-					return
-				}
-				if err := write(item); err != nil {
-					writeError <- err
-					return
-				}
-			}
-		}
-	}()
-
+	// observed*는 퍼블리셔가 보내오는 입력 해상도를 관측만 하기 위한 것으로,
+	// 쓰기 고루틴 안에서만 읽고 쓴다(공유 상태가 아니라 레이스가 없다).
+	observedWidth, observedHeight := width, height
 	rawSize := rawFrameSize(outputWidth, outputHeight)
-	for item := range metadata {
-		if t.options.WireFormat == config.WireFormatRaw {
-			item.data, err = readRawFrame(process.stdout, rawSize)
-		} else {
-			item.data, err = readJPEG(process.stdout)
-		}
-		if err != nil {
-			if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
-				return nil, errDecoderStalled
+	err = t.runSegment(ctx, segment{
+		process: process,
+		queue:   decoderMetadataQueue,
+		stalled: &stalled,
+		accept: func(item frame) (frame, bool, bool) {
+			data, idr, inputWidth, inputHeight := bootstrap.prepare(item.data)
+			if len(data) == 0 {
+				return item, false, false
 			}
-			return nil, fmt.Errorf("read decoded frame from FFmpeg H.264 decoder: %w", err)
-		}
-		select {
-		case output <- item:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		if errors.Is(err, errDecoderStalled) {
-			return nil, errDecoderStalled
-		}
-		return nil, fmt.Errorf("write H.264 stream to FFmpeg decoder: %w", err)
+			// 새 SPS 치수를 frame 메타데이터에 반영하지는 않는다 — 디코더가
+			// 출력을 위에서 고정한 규격으로 되돌리므로 실제 페이로드 크기는
+			// 그대로이고, 메타데이터만 바꾸면 하위 단계와 어긋난다(#122).
+			// 퍼블리셔가 어디까지 올라오는지 관측만 남긴다.
+			if inputWidth != 0 && inputHeight != 0 &&
+				(inputWidth != observedWidth || inputHeight != observedHeight) {
+				t.logger.Info("H.264 input resolution changed",
+					"from_width", observedWidth, "from_height", observedHeight,
+					"to_width", inputWidth, "to_height", inputHeight,
+					"decoder_locked_width", outputWidth, "decoder_locked_height", outputHeight)
+				observedWidth, observedHeight = inputWidth, inputHeight
+			}
+			item.data = data
+			// 방향 전환은 새 SPS를 실은 IDR에서만 반영한다. 디코더를 그 IDR부터
+			// 다시 띄워야 첫 픽처를 디코드할 수 있다.
+			if idr && inputWidth != 0 && inputHeight != 0 && orientationChanged(width, height, inputWidth, inputHeight) {
+				repin = &h264Repin{item: item, width: inputWidth, height: inputHeight}
+				return item, false, true
+			}
+			return item, true, false
+		},
+		write: func(item frame) (frame, error) {
+			item.width, item.height = outputWidth, outputHeight
+			_, err := process.stdin.Write(item.data)
+			return item, err
+		},
+		read: func(item frame) (frame, error) {
+			decoded, err := t.readDecodedFrame(process.stdout, rawSize)
+			if err != nil {
+				if errors.Is(decodeSegmentError(err, &stalled), errDecoderStalled) {
+					return item, errDecoderStalled
+				}
+				return item, fmt.Errorf("read decoded frame from FFmpeg H.264 decoder: %w", err)
+			}
+			item.data = decoded
+			return item, nil
+		},
+		writeFailed: func(err error) error { return fmt.Errorf("write H.264 stream to FFmpeg decoder: %w", err) },
+	}, first, input, output)
+	if err != nil {
+		return nil, err
 	}
 	return repin, nil
 }
@@ -214,70 +183,40 @@ func (t *FFmpegTranscoder) encodeH264Segment(ctx context.Context, first frame, i
 	}
 	defer process.close()
 
-	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 metadata를 닫기 전에만
-	// 쓰고, 읽기 루프가 metadata를 다 비운 뒤에만 읽는다.
+	// resized는 크기가 바뀐 첫 프레임이다. 쓰기 고루틴이 구간을 끝내기 전에만 쓰고,
+	// runSegment가 돌아온 뒤에만 읽는다.
 	var resized *frame
-
-	metadata := make(chan frame, 64)
-	writeError := make(chan error, 1)
-	go func() {
-		defer close(metadata)
-		defer process.stdin.Close()
-		write := func(item frame) (bool, error) {
+	expectedRawSize := rawFrameSize(first.width, first.height)
+	reader := h264AccessUnitReader{reader: process.stdout}
+	err = t.runSegment(ctx, segment{
+		process: process,
+		queue:   64,
+		accept: func(item frame) (frame, bool, bool) {
 			if resolutionChanged(item, first.width, first.height) {
 				resized = &item
-				return true, nil
+				return item, false, true
 			}
-			if err := t.validateEncoderInput(item.data, rawFrameSize(first.width, first.height)); err != nil {
-				return false, err
+			return item, true, false
+		},
+		write: func(item frame) (frame, error) {
+			if err := t.validateEncoderInput(item.data, expectedRawSize); err != nil {
+				return item, err
 			}
-			if _, err := process.stdin.Write(item.data); err != nil {
-				return false, err
+			_, err := process.stdin.Write(item.data)
+			return item, err
+		},
+		read: func(item frame) (frame, error) {
+			data, err := reader.Read()
+			if err != nil {
+				return item, fmt.Errorf("read H.264 access unit from FFmpeg encoder: %w", err)
 			}
-			select {
-			case metadata <- item:
-				return false, nil
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
-		}
-		if _, err := write(first); err != nil {
-			writeError <- err
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				writeError <- ctx.Err()
-				return
-			case item, ok := <-input:
-				if !ok {
-					writeError <- nil
-					return
-				}
-				done, err := write(item)
-				if err != nil || done {
-					writeError <- err
-					return
-				}
-			}
-		}
-	}()
-
-	reader := h264AccessUnitReader{reader: process.stdout}
-	for item := range metadata {
-		item.data, err = reader.Read()
-		if err != nil {
-			return nil, fmt.Errorf("read H.264 access unit from FFmpeg encoder: %w", err)
-		}
-		select {
-		case output <- item:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if err := <-writeError; err != nil && !errors.Is(err, context.Canceled) {
-		return nil, fmt.Errorf("write frame stream to FFmpeg H.264 encoder: %w", err)
+			item.data = data
+			return item, nil
+		},
+		writeFailed: func(err error) error { return fmt.Errorf("write frame stream to FFmpeg H.264 encoder: %w", err) },
+	}, first, input, output)
+	if err != nil {
+		return nil, err
 	}
 	return resized, nil
 }

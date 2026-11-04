@@ -11,10 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"inno-live-server/internal/config"
+
+	"github.com/google/uuid"
 )
 
 var ErrUnsupported = errors.New("unsupported media")
@@ -89,13 +92,18 @@ type Service struct {
 	store     atomic.Pointer[Store]
 	cursorKey []byte
 	sweepWake chan struct{}
+	// FreeBytes는 VOD 루트가 있는 파일 시스템의 남은 바이트다. 테스트에서 바꾼다.
+	FreeBytes func(path string) (uint64, error)
+	uploadMu  sync.Mutex
+	uploads   map[uuid.UUID]int
+	uploading int
 }
 
 func New(c config.VODConfig, db *Store, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Service{Config: c, Logger: logger, Probe: FFProbe{}, Now: func() time.Time { return time.Now().UTC() }}
+	s := &Service{Config: c, Logger: logger, Probe: FFProbe{}, Now: func() time.Time { return time.Now().UTC() }, FreeBytes: diskFreeBytes}
 	s.sweepWake = make(chan struct{}, 1)
 	s.cursorKey = make([]byte, 32)
 	if _, err := rand.Read(s.cursorKey); err != nil {

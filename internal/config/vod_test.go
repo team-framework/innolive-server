@@ -65,3 +65,27 @@ func TestVODWorkerLimitValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestVODUploadLimits(t *testing.T) {
+	t.Setenv("VOD_ENABLED", "true")
+	t.Setenv("VOD_WORKER_GPUS", "a:1=GPU-0")
+	c, err := loadVOD()
+	if err != nil || c.MaxActiveJobsPerUser != 3 || c.MaxUploadsPerUser != 1 || c.MaxConcurrentUploads != 4 || c.DiskReserveMiB != 10240 {
+		t.Fatalf("upload limit defaults: %+v %v", c, err)
+	}
+	t.Setenv("VOD_MAX_ACTIVE_JOBS_PER_USER", "5")
+	t.Setenv("VOD_MAX_UPLOADS_PER_USER", "2")
+	t.Setenv("VOD_MAX_CONCURRENT_UPLOADS", "8")
+	t.Setenv("VOD_DISK_RESERVE_MIB", "0")
+	if c, err = loadVOD(); err != nil || c.MaxActiveJobsPerUser != 5 || c.MaxUploadsPerUser != 2 || c.MaxConcurrentUploads != 8 || c.DiskReserveMiB != 0 {
+		t.Fatalf("upload limit overrides: %+v %v", c, err)
+	}
+	for key, value := range map[string]string{"VOD_MAX_ACTIVE_JOBS_PER_USER": "0", "VOD_MAX_UPLOADS_PER_USER": "bad", "VOD_MAX_CONCURRENT_UPLOADS": "0", "VOD_DISK_RESERVE_MIB": "-1"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, value)
+			if _, err := loadVOD(); err == nil {
+				t.Fatal("invalid upload limit accepted")
+			}
+		})
+	}
+}

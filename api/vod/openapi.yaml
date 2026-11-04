@@ -49,6 +49,12 @@ info:
       0은 종료 직후 파기이다. 스위퍼 주기를 더해 기한을 넘겨서는 안 된다.
     - VOD_RESULT_RETENTION_SEC: 성공 완료 후 결과 보존 기간, 양의 정수 초.
       무기한 보관이나 다운로드 시 기한 연장은 허용하지 않는다.
+    - VOD_MAX_ACTIVE_JOBS_PER_USER: 사용자별 끝나지 않은 작업(uploaded·queued·processing·paused) 상한, 양의 정수, 기본 3.
+      도달하면 429/too_many_jobs(details.max_active_jobs)이다.
+    - VOD_MAX_UPLOADS_PER_USER: 사용자별 동시 업로드 상한, 양의 정수, 기본 1. 넘으면 429/upload_in_progress이다.
+    - VOD_MAX_CONCURRENT_UPLOADS: 서버 전체 동시 업로드 상한, 양의 정수, 기본 4. 넘으면 429/uploads_busy이다.
+    - VOD_DISK_RESERVE_MIB: 업로드 상한(M + 1048576 바이트)을 받고도 VOD 루트 디스크에 남아야 할 여유, 0 이상 MiB, 기본 10240.
+      여유가 모자라거나 수신 중 디스크가 가득 차면 507/insufficient_storage이다.
     VOD 활성화 시 M > 2147483648 또는 D > 3600 설정은 시작 오류이며 더 작은 양의 값은 허용한다.
     기본값은 M=2147483648(2 GiB), D=3600(60분), 결과 보존 기간=604800초(7일)이다.
     상한 초과 오류 응답의 details에 적용 상한(max_upload_bytes, max_request_bytes,
@@ -283,11 +289,13 @@ paths:
         '422':
           $ref: '#/components/responses/InvalidMedia'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/UploadLimited'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
     get:
       tags: [VOD]
       operationId: listVodJobs
@@ -780,6 +788,36 @@ components:
           $ref: '#/components/headers/NoStore'
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    UploadLimited:
+      description: |
+        too_many_jobs — 사용자의 끝나지 않은 작업이 VOD_MAX_ACTIVE_JOBS_PER_USER에 도달함. details.max_active_jobs 제공.
+        upload_in_progress — 같은 사용자의 업로드가 VOD_MAX_UPLOADS_PER_USER만큼 진행 중.
+        uploads_busy — 서버 전체 동시 업로드가 VOD_MAX_CONCURRENT_UPLOADS에 도달함.
+        rate_limited — 요청 빈도 제한. 모두 Retry-After 초 이후 재시도한다.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    InsufficientStorage:
+      description: |
+        insufficient_storage — VOD 루트 디스크 여유가 업로드 상한과 VOD_DISK_RESERVE_MIB를 합친 값보다 작거나,
+        수신 중 디스크가 가득 참. 작업을 만들지 않고 받은 파일을 지운다.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
       content:
         application/json:
           schema:

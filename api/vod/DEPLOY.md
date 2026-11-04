@@ -22,6 +22,10 @@
 | `VOD_MIN_FREE_MIB` | `4096` MiB | GPU 여유 메모리 기준이며 디스크 여유 공간 기준이 아님: `internal/config/vod.go:36,56`, `internal/vod/worker.go:120-137`, `internal/ai/vod.go:43-46`. 실제 GPU 여유량·조정값은 **운영에서 확인 필요** |
 | `VOD_MAX_CONCURRENCY` | `1` | 양의 정수, 전체 VOD lease 수 제한과 GPU당 1개 제한: `internal/config/vod.go:36,89-93,119`, `internal/ai/vod.go:36-45`. 증설 시 실제 용량은 **운영에서 확인 필요** |
 | `VOD_UPLOAD_TIMEOUT` | `30m` | Go duration 형식, 양수: `internal/config/vod.go:37,77-87,119`. 요청 context와 업로드 read deadline에 적용: `internal/vod/http.go:90-94` |
+| `VOD_MAX_ACTIVE_JOBS_PER_USER` | `3` | 양의 정수, 사용자별 끝나지 않은 작업 상한. 도달하면 429 `too_many_jobs`: `internal/config/vod.go`, `internal/vod/upload_limits.go` |
+| `VOD_MAX_UPLOADS_PER_USER` | `1` | 양의 정수, 사용자별 동시 업로드 상한. 넘으면 429 `upload_in_progress`. 슬롯(프로세스)별로 센다: `internal/vod/upload_limits.go` |
+| `VOD_MAX_CONCURRENT_UPLOADS` | `4` | 양의 정수, 슬롯 전체 동시 업로드 상한. 넘으면 429 `uploads_busy`: `internal/vod/upload_limits.go` |
+| `VOD_DISK_RESERVE_MIB` | `10240` MiB | 0 이상. VOD 루트 디스크 여유가 업로드 상한 + 1 MiB + 이 값보다 작으면 507 `insufficient_storage`, 수신 중 ENOSPC도 507. AI 워커와 같은 디스크를 쓰므로 라이브 보호용 예약분: `internal/vod/upload_limits.go`, `internal/vod/http.go` |
 | 리버스 프록시 업로드 제한 | 전체 multipart를 최소 `2148532224` B까지 전달할 수 있는지 확인 | 서버 본문 상한은 파일 상한 + `1048576` B: `internal/vod/http.go:95-103`. PM 운영 확인: Caddy 사용, `request_body max_size` 미설정(무제한), CDN 없음. Caddy 버전·추가 timeout·라우팅은 **운영에서 확인 필요**. 상세 검토는 2절 참조. Caddy 설정 경로는 레포 밖 운영 env에서 읽음: `deploy/apply-release.sh:26-30` |
 | `DATABASE_MIGRATION_MODE` | 운영 `auto` 유지(PM 확인, `/etc/innolive/server.env`) | 코드 기본 `auto`: `internal/config/config.go:247-249`. 버전 19 확인을 위해 임의로 `auto`를 `versioned`로 바꾸지 않음 |
 
@@ -175,7 +179,8 @@ docker exec "innolive-server-${VOD_SLOT}" printenv \
   VOD_ENABLED AI_PRIVACY_MODE AI_GRPC_INSECURE AI_GRPC_ADDR AI_GRPC_TARGETS \
   VOD_WORKER_GPUS VOD_ROOT VOD_MAX_UPLOAD_BYTES VOD_MAX_DURATION_SEC \
   VOD_RESULT_RETENTION_SEC VOD_ORIGINAL_RETENTION_SEC VOD_SWEEP_INTERVAL \
-  VOD_MIN_FREE_MIB VOD_MAX_CONCURRENCY VOD_UPLOAD_TIMEOUT
+  VOD_MIN_FREE_MIB VOD_MAX_CONCURRENCY VOD_UPLOAD_TIMEOUT \
+  VOD_MAX_ACTIVE_JOBS_PER_USER VOD_MAX_UPLOADS_PER_USER VOD_MAX_CONCURRENT_UPLOADS VOD_DISK_RESERVE_MIB
 ```
 
 ### (e) 업로드·상태·다운로드·삭제와 라이브 우선 스모크

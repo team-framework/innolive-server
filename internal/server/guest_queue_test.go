@@ -342,3 +342,104 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 	}
 	t.Fatal(msg)
 }
+
+func TestGuestQueueStatusReadsWithoutQueueLockOrAdmission(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	queue := &GuestQueue{client: client, sessions: newGuestQueueTestManager(t, 2), ttl: time.Minute, admissionTTL: time.Minute, maxGuests: 1}
+	guest, id := "guest", "ticket"
+	ctx := context.Background()
+	if err := client.HSet(ctx, guestTicketKey+id, "guest", guestHash(guest), "status", "waiting").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ZAdd(ctx, guestQueueKey, redis.Z{Score: 1, Member: id}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 게스트 슬롯이 비어 있어도 Status는 입장을 허가하지 않고, 잠금을 쥔 요청을 기다리지 않는다.
+	queue.mu.Lock()
+	done := make(chan struct{})
+	var ticket guestTicket
+	go func() {
+		defer close(done)
+		ticket, err = queue.Status(ctx, guest, id)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		queue.mu.Unlock()
+		t.Fatal("Status waited for the queue lock")
+	}
+	queue.mu.Unlock()
+	if err != nil || ticket.Status != "waiting" || ticket.Position != 1 {
+		t.Fatalf("Status = %+v, %v; want waiting at position 1", ticket, err)
+	}
+
+	redisServer.Close()
+	if _, err := queue.Status(ctx, guest, id); err != ErrGuestQueueUnavailable {
+		t.Fatalf("Status with Redis down error = %v, want ErrGuestQueueUnavailable", err)
+	}
+}
+
+func TestGuestQueueSweepAdmitsWaitingGuestAfterSlotFrees(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(redisServer.Close)
+	manager := newGuestQueueTestManager(t, 2)
+	occupant, _, err := manager.CreateForGuest("occupant", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewGuestQueue(context.Background(), config.Config{
+		GuestQueueEnabled:   true,
+		GuestQueueRedisAddr: redisServer.Addr(),
+		GuestQueueTTL:       time.Minute,
+		GuestAdmissionTTL:   time.Minute,
+		GuestSessionTTL:     time.Minute,
+		GuestMaxSessions:    1,
+	}, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ticket, err := queue.CreateOrGet(ctx, "guest", "203.0.113.1:443", "")
+	if err != nil || ticket.Status != "waiting" {
+		t.Fatalf("CreateOrGet = %+v, %v; want waiting while the guest slot is full", ticket, err)
+	}
+
+	// 세션 종료 훅 없이 슬롯만 비운다. 다음 입장 허가는 sweep이 맡는다.
+	if err := manager.Delete(occupant.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Status를 거치지 않고 Redis를 직접 읽어, 요청 없이도 입장이 허가되는지 본다.
+	reader := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = reader.Close() })
+	deadline := time.Now().Add(3 * guestQueueSweepInterval)
+	for status := ticket.Status; status != "admitted"; {
+		if time.Now().After(deadline) {
+			t.Fatalf("ticket status = %q, want admitted by sweep", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+		if status, err = reader.HGet(ctx, guestTicketKey+ticket.ID, "status").Result(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- queue.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not stop the sweep")
+	}
+}

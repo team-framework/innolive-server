@@ -27,6 +27,9 @@ const (
 	guestQueueChannel    = "innolive:guest:queue:changed"
 	guestQueueMaxWaiting = 100
 	guestSSEMaxPerTicket = 4
+	// guestQueueSweepInterval는 만료 정리와 입장 허가를 도는 주기다. Status는 읽기만
+	// 하므로, 예약 만료 뒤 다음 대기자가 이 주기 안에 입장 허가를 받는다.
+	guestQueueSweepInterval = time.Second
 )
 
 var (
@@ -170,6 +173,8 @@ type GuestQueue struct {
 	maxGuests       int
 	clientIPs       clientip.Resolver
 	mu              sync.Mutex
+	stopSweep       context.CancelFunc
+	sweepDone       chan struct{}
 
 	sseMu    sync.Mutex
 	sseConns map[string]int
@@ -199,12 +204,40 @@ func NewGuestQueue(ctx context.Context, cfg config.Config, sessions *session.Man
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	return &GuestQueue{client: client, sessions: sessions, metrics: registry, clientIPs: clientip.NewResolver(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.GuestSessionLimit()}, nil
+	queue := &GuestQueue{client: client, sessions: sessions, metrics: registry, clientIPs: clientip.NewResolver(cfg.GuestQueueTrustedProxies), ttl: cfg.GuestQueueTTL, admissionTTL: cfg.GuestAdmissionTTL, guestSessionTTL: cfg.GuestSessionTTL, maxGuests: cfg.GuestSessionLimit()}
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	queue.stopSweep = stopSweep
+	queue.sweepDone = make(chan struct{})
+	go queue.sweep(sweepCtx)
+	return queue, nil
+}
+
+// sweep은 만료 정리와 입장 허가를 주기적으로 돈다. 요청마다 돌리면 알림 한 번에 모든
+// SSE 연결이 q.mu를 차례로 잡아, 대기열이 찰수록 입장·취소 요청이 그만큼 밀린다.
+// Redis 오류는 다음 주기에 다시 시도한다.
+func (q *GuestQueue) sweep(ctx context.Context) {
+	defer close(q.sweepDone)
+	ticker := time.NewTicker(guestQueueSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runCtx, cancel := context.WithTimeout(ctx, guestQueueSweepInterval)
+			_ = q.SessionClosed(runCtx)
+			cancel()
+		}
+	}
 }
 
 func (q *GuestQueue) Close() error {
 	if q == nil || q.client == nil {
 		return nil
+	}
+	if q.stopSweep != nil {
+		q.stopSweep()
+		<-q.sweepDone
 	}
 	q.bcast.mu.Lock()
 	q.bcast.stopLocked()
@@ -247,10 +280,10 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr, forward
 					return guestTicket{}, ErrGuestQueueUnavailable
 				}
 			} else {
-				return q.statusLocked(ctx, hash, id)
+				return q.ticketStatus(ctx, hash, id)
 			}
 		} else {
-			return q.statusLocked(ctx, hash, id)
+			return q.ticketStatus(ctx, hash, id)
 		}
 	} else if err != redis.Nil {
 		return guestTicket{}, ErrGuestQueueUnavailable
@@ -285,7 +318,7 @@ func (q *GuestQueue) CreateOrGet(ctx context.Context, guest, remoteAddr, forward
 	if changed {
 		q.publish(ctx)
 	}
-	return q.statusLocked(ctx, hash, id)
+	return q.ticketStatus(ctx, hash, id)
 }
 
 func (q *GuestQueue) clientIP(remoteAddr, forwardedFor string) string {
@@ -314,30 +347,19 @@ func (q *GuestQueue) allowIP(ctx context.Context, ip string) error {
 	return nil
 }
 
+// Status는 ticket을 읽기만 한다. SSE 연결마다 변경 알림에 불리므로 q.mu를 잡지 않고,
+// 정리와 입장 허가는 sweep과 상태를 바꾸는 요청이 맡는다.
 func (q *GuestQueue) Status(ctx context.Context, guest, id string) (guestTicket, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	changed, err := q.cleanupAndAdmit(ctx)
-	if err != nil {
-		return guestTicket{}, err
+	if q == nil || q.client == nil {
+		return guestTicket{}, ErrGuestQueueUnavailable
 	}
-	if changed {
-		q.publish(ctx)
-	}
-	return q.statusLocked(ctx, guestHash(guest), id)
+	return q.ticketStatus(ctx, guestHash(guest), id)
 }
 
 func (q *GuestQueue) Heartbeat(ctx context.Context, guest, id string) (guestTicket, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	changed, err := q.cleanupAndAdmit(ctx)
-	if err != nil {
-		return guestTicket{}, err
-	}
-	if changed {
-		q.publish(ctx)
-	}
-	result, err := q.statusLocked(ctx, guestHash(guest), id)
+	result, err := q.ticketStatus(ctx, guestHash(guest), id)
 	if err != nil {
 		return guestTicket{}, err
 	}
@@ -359,7 +381,7 @@ func (q *GuestQueue) Heartbeat(ctx context.Context, guest, id string) (guestTick
 			return guestTicket{}, ErrGuestAdmissionInvalid
 		}
 	}
-	return q.statusLocked(ctx, guestHash(guest), id)
+	return q.ticketStatus(ctx, guestHash(guest), id)
 }
 
 func (q *GuestQueue) Cancel(ctx context.Context, guest, id string) error {
@@ -478,7 +500,9 @@ func (q *GuestQueue) SessionClosed(ctx context.Context) error {
 	return nil
 }
 
-func (q *GuestQueue) statusLocked(ctx context.Context, hash, id string) (guestTicket, error) {
+// ticketStatus는 q.mu 없이 불러도 된다. 두 번의 읽기 사이에 입장 허가가 끼면
+// 순번만 빠진 결과를 돌려주고, 다음 알림에서 바뀐 상태를 다시 읽는다.
+func (q *GuestQueue) ticketStatus(ctx context.Context, hash, id string) (guestTicket, error) {
 	values, err := q.client.HGetAll(ctx, guestTicketKey+id).Result()
 	if err != nil {
 		return guestTicket{}, ErrGuestQueueUnavailable

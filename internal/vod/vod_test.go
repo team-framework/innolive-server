@@ -522,3 +522,52 @@ func TestActiveDownloadStopsOnDeleteOrExpiry(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadFileMIME(t *testing.T) {
+	for _, tc := range []struct {
+		mime string
+		code int
+	}{{"video/mp4", 201}, {"video/quicktime", 201}, {"application/octet-stream", 201}, {"video/webm", 415}} {
+		t.Run(tc.mime, func(t *testing.T) {
+			s := testService(t)
+			s.Probe = fakeProbe{60, nil}
+			b := new(bytes.Buffer)
+			m := multipart.NewWriter(b)
+			headers := textproto.MIMEHeader{}
+			headers.Set("Content-Disposition", `form-data; name="file"; filename="clip.mov"`)
+			headers.Set("Content-Type", tc.mime)
+			p, e := m.CreatePart(headers)
+			if e != nil {
+				t.Fatal(e)
+			}
+			_, _ = p.Write([]byte("video"))
+			_ = m.Close()
+			w := request(t, handler(s), "POST", "/vod/jobs", uuid.New(), b, m.FormDataContentType())
+			if w.Code != tc.code {
+				t.Fatalf("%s = %d: %s", tc.mime, w.Code, w.Body.String())
+			}
+			if tc.code == 415 && !strings.Contains(w.Body.String(), `"code":"unsupported_media_type"`) {
+				t.Fatal(w.Body.String())
+			}
+		})
+	}
+}
+
+func TestFFProbeAcceptsQuickTimeH264(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	path := filepath.Join(t.TempDir(), "sample.mov")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=5", "-t", "1", "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", "-f", "mov", path)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, b)
+	}
+	if m, err := (FFProbe{}).Probe(ctx, path); err != nil || m.Duration != 1 || m.Frames != 5 {
+		t.Fatal(m, err)
+	}
+}

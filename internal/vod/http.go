@@ -124,8 +124,10 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad_request")
 		return
 	}
+	// MIME은 1차 거르기다. iOS가 .mov를 video/quicktime으로 보내므로 허용하고,
+	// 컨테이너·코덱은 아래 probe가 실제 바이트로 판정한다.
 	mime := part.Header.Get("Content-Type")
-	if mime != "video/mp4" && mime != "application/octet-stream" {
+	if mime != "video/mp4" && mime != "video/quicktime" && mime != "application/octet-stream" {
 		fail(w, 415, "unsupported_media_type")
 		return
 	}

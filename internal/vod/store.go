@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,12 +53,11 @@ type Job struct {
 }
 
 func (Job) TableName() string { return "vod_jobs" }
+
+var terminalStatuses = []string{"done", "failed", "cancelled", "expired"}
+
 func (j Job) Terminal() bool {
-	switch j.Status {
-	case "done", "failed", "cancelled", "expired":
-		return true
-	}
-	return false
+	return slices.Contains(terminalStatuses, j.Status)
 }
 
 type DeletionLog struct {
@@ -85,6 +85,14 @@ func (s *Store) Get(ctx context.Context, id, user uuid.UUID) (Job, error) {
 	var j Job
 	err := s.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND deleted_at IS NULL", id, user).Take(&j).Error
 	return j, err
+}
+
+// CountActive는 사용자의 끝나지 않은 작업 수다.
+func (s *Store) CountActive(ctx context.Context, user uuid.UUID) (int64, error) {
+	var n int64
+	err := s.DB.WithContext(ctx).Model(&Job{}).
+		Where("user_id = ? AND deleted_at IS NULL AND status NOT IN ?", user, terminalStatuses).Count(&n).Error
+	return n, err
 }
 func (s *Store) All(ctx context.Context) ([]Job, error) {
 	var jobs []Job

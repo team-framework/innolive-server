@@ -87,6 +87,11 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release, ok := s.admitUpload(w, r.Context(), db, user)
+	if !ok {
+		return
+	}
+	defer release()
 	ctx, cancel := context.WithTimeout(r.Context(), s.Config.UploadTimeout)
 	defer cancel()
 	rc := http.NewResponseController(w)
@@ -168,6 +173,10 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	var capErr *http.MaxBytesError
 	if errors.Is(e, errUploadTooLarge) || errors.As(e, &capErr) {
 		tooLarge()
+		return
+	}
+	if isNoSpace(e) || isNoSpace(syncErr) || isNoSpace(closeErr) {
+		fail(w, 507, "insufficient_storage")
 		return
 	}
 	if e != nil {

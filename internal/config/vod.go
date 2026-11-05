@@ -32,12 +32,20 @@ type VODConfig struct {
 	SweepInterval     time.Duration
 	UploadTimeout     time.Duration
 	WorkerGPUs        map[string]string
+	// 업로드 제한(V-1). 사용자별 끝나지 않은 작업 수, 사용자별·서버 전체 동시
+	// 업로드 수, 업로드 상한 위에 남겨 둘 디스크 여유다. VOD 루트는 AI 워커와
+	// 디스크를 같이 쓰므로 가득 차면 라이브에도 영향이 간다.
+	MaxActiveJobsPerUser int
+	MaxUploadsPerUser    int
+	MaxConcurrentUploads int
+	DiskReserveMiB       int64
 }
 
 func DefaultVOD() VODConfig {
 	return VODConfig{Root: "/var/lib/innolive/vod", MaxUploadBytes: VODWorkerMaxUploadBytes, MaxDuration: VODWorkerMaxDuration,
 		Concurrency: 1, MinFreeMiB: 4096, ResultRetention: 7 * 24 * time.Hour, OriginalRetention: 24 * time.Hour,
-		SweepInterval: time.Minute, UploadTimeout: 30 * time.Minute, WorkerGPUs: map[string]string{}}
+		SweepInterval: time.Minute, UploadTimeout: 30 * time.Minute, WorkerGPUs: map[string]string{},
+		MaxActiveJobsPerUser: 3, MaxUploadsPerUser: 1, MaxConcurrentUploads: 4, DiskReserveMiB: 10240}
 }
 
 func loadVOD() (VODConfig, error) {
@@ -56,7 +64,7 @@ func loadVOD() (VODConfig, error) {
 	for _, v := range []struct {
 		key  string
 		dest *int64
-	}{{"VOD_MAX_UPLOAD_BYTES", &c.MaxUploadBytes}, {"VOD_MIN_FREE_MIB", &c.MinFreeMiB}} {
+	}{{"VOD_MAX_UPLOAD_BYTES", &c.MaxUploadBytes}, {"VOD_MIN_FREE_MIB", &c.MinFreeMiB}, {"VOD_DISK_RESERVE_MIB", &c.DiskReserveMiB}} {
 		if raw := os.Getenv(v.key); raw != "" {
 			n, e := strconv.ParseInt(raw, 10, 64)
 			if e != nil {
@@ -96,10 +104,16 @@ func loadVOD() (VODConfig, error) {
 			*v.dest = n
 		}
 	}
-	if raw := os.Getenv("VOD_MAX_CONCURRENCY"); raw != "" {
-		c.Concurrency, err = strconv.Atoi(raw)
-		if err != nil {
-			return c, fmt.Errorf("invalid VOD_MAX_CONCURRENCY")
+	for _, v := range []struct {
+		key  string
+		dest *int
+	}{{"VOD_MAX_CONCURRENCY", &c.Concurrency}, {"VOD_MAX_ACTIVE_JOBS_PER_USER", &c.MaxActiveJobsPerUser},
+		{"VOD_MAX_UPLOADS_PER_USER", &c.MaxUploadsPerUser}, {"VOD_MAX_CONCURRENT_UPLOADS", &c.MaxConcurrentUploads}} {
+		if raw := os.Getenv(v.key); raw != "" {
+			*v.dest, err = strconv.Atoi(raw)
+			if err != nil {
+				return c, fmt.Errorf("invalid %s", v.key)
+			}
 		}
 	}
 	for _, entry := range splitList(os.Getenv("VOD_WORKER_GPUS")) {
@@ -126,7 +140,8 @@ func (c VODConfig) Validate() error {
 	if !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) == "/" {
 		return fmt.Errorf("VOD_ROOT must be an absolute dedicated directory")
 	}
-	if c.MaxUploadBytes <= 0 || c.MaxUploadBytes > 1<<60 || c.MaxDuration <= 0 || c.Concurrency < 1 || c.MinFreeMiB < 0 || c.ResultRetention <= 0 || c.OriginalRetention < 0 || c.OriginalRetention > 24*time.Hour || c.SweepInterval <= 0 || c.SweepInterval > time.Hour || c.UploadTimeout <= 0 {
+	if c.MaxUploadBytes <= 0 || c.MaxUploadBytes > 1<<60 || c.MaxDuration <= 0 || c.Concurrency < 1 || c.MinFreeMiB < 0 || c.ResultRetention <= 0 || c.OriginalRetention < 0 || c.OriginalRetention > 24*time.Hour || c.SweepInterval <= 0 || c.SweepInterval > time.Hour || c.UploadTimeout <= 0 ||
+		c.MaxActiveJobsPerUser < 1 || c.MaxUploadsPerUser < 1 || c.MaxConcurrentUploads < 1 || c.DiskReserveMiB < 0 {
 		return fmt.Errorf("invalid VOD limits or retention settings")
 	}
 	return nil

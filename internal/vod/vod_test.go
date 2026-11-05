@@ -67,7 +67,11 @@ func testService(t *testing.T) *Service {
 	cfg := config.DefaultVOD()
 	cfg.Enabled = true
 	cfg.Root = t.TempDir()
-	return New(cfg, NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := New(cfg, NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// 업로드 테스트가 실행 머신의 디스크 여유에 좌우되지 않게 한다. 디스크 검사는
+	// TestUploadRejectsWhenDiskIsShort가 따로 본다.
+	s.FreeBytes = func(string) (uint64, error) { return 1 << 50, nil }
+	return s
 }
 func createJob(t *testing.T, s *Service, state string) Job {
 	t.Helper()

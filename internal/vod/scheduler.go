@@ -24,11 +24,14 @@ type Engine struct {
 	Memory  MemoryProbe
 	mu      sync.Mutex
 	running map[string]bool
+	// pending은 목록을 받지 못해 아직 정리하지 못한 워커다. Tick이 다시 시도하고,
+	// 그때까지 그 워커의 GPU에는 새 작업을 배정하지 않는다(V-3).
+	pending map[string]bool
 	wg      sync.WaitGroup
 }
 
 func NewEngine(s *Service, p *ai.Pool, w Worker, m MemoryProbe) *Engine {
-	return &Engine{Service: s, Pool: p, Worker: w, Memory: m, running: map[string]bool{}}
+	return &Engine{Service: s, Pool: p, Worker: w, Memory: m, running: map[string]bool{}, pending: map[string]bool{}}
 }
 
 const leaderKey int64 = 52120261026
@@ -80,8 +83,9 @@ func (e *Engine) lead(parent context.Context, conn *sql.Conn) {
 		<-ctx.Done()
 		return
 	}
-	// Resume only after every old worker has acknowledged pause/cancel. An
-	// unreachable process may still use the GPU, so takeover waits fail-closed.
+	// Resume a job only after its old worker has acknowledged pause/cancel. An
+	// unreachable process may still use the GPU, so its jobs and GPU stay
+	// fail-closed while other workers' jobs proceed.
 	if err := e.Reconcile(ctx); err != nil {
 		e.Service.Logger.Warn("vod reconciliation pending", "error", err)
 		return
@@ -106,6 +110,10 @@ func (e *Engine) lead(parent context.Context, conn *sql.Conn) {
 		}
 	}
 }
+
+// Reconcile runs once when this slot becomes leader. A worker or job that cannot
+// be settled stays fail-closed on its own and is retried by Tick; it no longer
+// stops the whole queue (V-3). Only a database read failure aborts.
 func (e *Engine) Reconcile(ctx context.Context) error {
 	db := e.Service.store.Load()
 	jobs, err := db.All(ctx)
@@ -120,65 +128,137 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 		if e.Service.Config.WorkerGPUs[target.Address] == "" {
 			continue
 		}
-		call, cancel := context.WithTimeout(ctx, 5*time.Second)
-		list, err := e.Worker.List(call, target.Address)
-		cancel()
-		if err != nil {
-			return err
-		}
-		for _, v := range list {
-			j, exists := known[v.JobId]
-			// A failed runtime can retain its terminal snapshot after this job
-			// resumed elsewhere. Do not restore that old checkpoint or target.
-			if exists && v.State == pb.VodJobState_VOD_JOB_STATE_FAILED && v.ErrorCode == "RUNTIME_FAILED" && j.WorkerTarget != target.Address {
-				continue
-			}
-			call, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if !exists || j.DeletedAt != nil {
-				_, err = e.Worker.Cancel(call, target.Address, v.JobId)
-			} else if v.State == pb.VodJobState_VOD_JOB_STATE_PROCESSING {
-				v, err = e.Worker.Pause(call, target.Address, v.JobId)
-			}
-			cancel()
-			if err != nil {
-				return err
-			}
-			if exists && j.DeletedAt == nil {
-				j.WorkerTarget = target.Address
-				if err = e.apply(ctx, &j, v); err != nil {
-					return err
-				}
-				known[v.JobId] = j
-			}
-		}
+		e.reconcileTarget(ctx, target.Address, known)
 	}
 	// Explicitly query recorded targets, including ones removed from the pool.
 	for _, j := range known {
 		if j.WorkerTarget == "" {
 			continue
 		}
-		call, cancel := context.WithTimeout(ctx, 5*time.Second)
+		var err error
 		if j.DeletedAt != nil {
-			_, err = e.Worker.Cancel(call, j.WorkerTarget, j.ID.String())
-			if err == nil {
-				j.WorkerTarget = ""
-				err = db.Save(ctx, &j)
-			}
+			err = e.cancelDeleted(ctx, &j)
 		} else {
-			var v *pb.VodJobStatus
-			v, err = e.Worker.Pause(call, j.WorkerTarget, j.ID.String())
-			if err == nil {
-				err = e.apply(ctx, &j, v)
-			} else if workerMissing(err) {
-				err = e.applyFailure(ctx, &j, mapRPCFailure(err), false)
-			}
+			err = e.reconcileJob(ctx, &j)
 		}
-		cancel()
 		if err != nil {
-			return err
+			e.Service.Logger.Warn("vod job reconciliation pending", "job_id", j.ID, "target", j.WorkerTarget, "error", err)
 		}
 	}
 	return nil
+}
+
+// reconcileTarget pauses or cancels what a worker reports. A worker that cannot
+// list or settle its jobs is marked pending: its GPU gets no new work until a
+// later Tick settles it, because the unreachable process may still use it.
+func (e *Engine) reconcileTarget(ctx context.Context, target string, known map[string]Job) {
+	settled := e.settleTarget(ctx, target, known)
+	e.mu.Lock()
+	if settled {
+		delete(e.pending, target)
+	} else {
+		e.pending[target] = true
+	}
+	e.mu.Unlock()
+}
+func (e *Engine) settleTarget(ctx context.Context, target string, known map[string]Job) bool {
+	call, cancel := context.WithTimeout(ctx, 5*time.Second)
+	list, err := e.Worker.List(call, target)
+	cancel()
+	if err != nil {
+		e.Service.Logger.Warn("vod worker reconciliation pending", "target", target, "error", err)
+		return false
+	}
+	settled := true
+	for _, v := range list {
+		j, exists := known[v.JobId]
+		// A failed runtime can retain its terminal snapshot after this job
+		// resumed elsewhere. Do not restore that old checkpoint or target.
+		if exists && v.State == pb.VodJobState_VOD_JOB_STATE_FAILED && v.ErrorCode == "RUNTIME_FAILED" && j.WorkerTarget != target {
+			continue
+		}
+		// A local runner owns this job; pausing it here would fight the runner.
+		e.mu.Lock()
+		running := e.running[v.JobId]
+		e.mu.Unlock()
+		if running {
+			continue
+		}
+		call, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if !exists || j.DeletedAt != nil {
+			_, err = e.Worker.Cancel(call, target, v.JobId)
+		} else if v.State == pb.VodJobState_VOD_JOB_STATE_PROCESSING {
+			v, err = e.Worker.Pause(call, target, v.JobId)
+		}
+		cancel()
+		if err == nil && exists && j.DeletedAt == nil {
+			j.WorkerTarget = target
+			if err = e.apply(ctx, &j, v); err == nil {
+				known[v.JobId] = j
+			}
+		}
+		if err != nil {
+			e.Service.Logger.Warn("vod job reconciliation pending", "job_id", v.JobId, "target", target, "error", err)
+			settled = false
+		}
+	}
+	return settled
+}
+
+// reconcileJob settles a processing job that no local runner owns: after leader
+// takeover, or after its runner exited without saving its final state (V-4).
+func (e *Engine) reconcileJob(ctx context.Context, j *Job) error {
+	if j.WorkerTarget == "" || e.targetRemoved(j.WorkerTarget) {
+		return e.releaseTarget(ctx, j)
+	}
+	call, cancel := context.WithTimeout(ctx, 3*time.Second)
+	v, err := e.Worker.Pause(call, j.WorkerTarget, j.ID.String())
+	cancel()
+	switch {
+	case err == nil:
+		return e.apply(ctx, j, v)
+	case workerMissing(err):
+		return e.applyFailure(ctx, j, mapRPCFailure(err), false)
+	default:
+		// The worker may still be processing; keep the job until it answers.
+		return err
+	}
+}
+
+// cancelDeleted asks the recorded worker to drop a deleted job's run.
+func (e *Engine) cancelDeleted(ctx context.Context, j *Job) error {
+	if e.targetRemoved(j.WorkerTarget) {
+		return e.releaseTarget(ctx, j)
+	}
+	call, cancel := context.WithTimeout(ctx, 3*time.Second)
+	_, err := e.Worker.Cancel(call, j.WorkerTarget, j.ID.String())
+	cancel()
+	if err != nil {
+		return err
+	}
+	j.WorkerTarget = ""
+	if err = e.Service.store.Load().Save(ctx, j); errors.Is(err, ErrConflict) {
+		return nil
+	}
+	return err
+}
+
+// targetRemoved reports a worker that left the pool. The server can never reach
+// it again; an AI worker replacement (#515) removes it and then stops it.
+func (e *Engine) targetRemoved(target string) bool {
+	return target != "" && e.Pool.Target(target) == nil
+}
+
+// releaseTarget drops a worker the server can no longer reach. A live job pauses
+// and resumes from its checkpoint on another worker; a deleted or finished job
+// only forgets the target so the sweeper does not wait for an ack that cannot come.
+func (e *Engine) releaseTarget(ctx context.Context, j *Job) error {
+	if j.DeletedAt == nil && !j.Terminal() {
+		return e.applyFailure(ctx, j, workerFailures["rpc:NotFound"], false)
+	}
+	j.WorkerTarget = ""
+	j.UpdatedAt = e.Service.Now()
+	return e.Service.store.Load().Save(ctx, j)
 }
 func (e *Engine) Tick(ctx context.Context) error {
 	db := e.Service.store.Load()
@@ -196,25 +276,55 @@ func (e *Engine) Tick(ctx context.Context) error {
 			}
 		}
 	}
-	// Cancel jobs deleted while no local runner exists (including queued jobs).
-	for _, j := range jobs {
-		if j.DeletedAt == nil || j.WorkerTarget == "" {
-			continue
+	// Retry workers whose jobs could not be listed at takeover.
+	e.mu.Lock()
+	var pending []string
+	for target := range e.pending {
+		pending = append(pending, target)
+	}
+	e.mu.Unlock()
+	if len(pending) > 0 {
+		known := map[string]Job{}
+		for _, j := range jobs {
+			known[j.ID.String()] = j
 		}
+		for _, target := range pending {
+			if e.targetRemoved(target) {
+				e.mu.Lock()
+				delete(e.pending, target)
+				e.mu.Unlock()
+				continue
+			}
+			e.reconcileTarget(ctx, target, known)
+		}
+	}
+	for i := range jobs {
+		j := &jobs[i]
 		e.mu.Lock()
 		running := e.running[j.ID.String()]
 		e.mu.Unlock()
 		if running {
 			continue
 		}
-		call, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err := e.Worker.Cancel(call, j.WorkerTarget, j.ID.String())
-		cancel()
+		// Work on a copy: a failed save must not leave the scheduling loop below
+		// with a status the database does not have.
+		job := *j
+		var err error
+		switch {
+		case job.DeletedAt != nil && job.WorkerTarget != "":
+			// Cancel jobs deleted while no local runner exists (including queued jobs).
+			err = e.cancelDeleted(ctx, &job)
+		case job.DeletedAt == nil && job.Status == "processing":
+			// No runner owns it: the last runner exited before saving its outcome,
+			// or its worker left the pool (V-3, V-4).
+			err = e.reconcileJob(ctx, &job)
+		default:
+			continue
+		}
 		if err == nil {
-			j.WorkerTarget = ""
-			if err = db.Save(ctx, &j); err != nil && !errors.Is(err, ErrConflict) {
-				return err
-			}
+			*j = job
+		} else if !errors.Is(err, ErrConflict) {
+			e.Service.Logger.Warn("vod job reconciliation pending", "job_id", j.ID, "target", j.WorkerTarget, "error", err)
 		}
 	}
 	call, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -223,6 +333,13 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.mu.Lock()
+	for target := range e.pending {
+		if gpu := e.Service.Config.WorkerGPUs[target]; gpu != "" {
+			free[gpu] = -1
+		}
+	}
+	e.mu.Unlock()
 	for _, j := range jobs {
 		if j.DeletedAt != nil || (j.Status != "queued" && j.Status != "paused") {
 			continue
@@ -400,6 +517,14 @@ func (e *Engine) runJob(ctx context.Context, j Job, lease *ai.VODLease) {
 			}
 		}
 		j = current
+		if e.targetRemoved(lease.Target) {
+			// Pause and cancel can no longer reach a worker that left the pool. Give
+			// up the lease so the queue moves on; the job resumes elsewhere (V-3).
+			if err := e.releaseTarget(ctx, &j); err != nil {
+				e.Service.Logger.Warn("vod job release pending", "job_id", j.ID, "target", lease.Target, "error", err)
+			}
+			return
+		}
 		if j.DeletedAt != nil {
 			call, c := context.WithTimeout(ctx, 3*time.Second)
 			_, err = e.Worker.Cancel(call, lease.Target, j.ID.String())

@@ -487,3 +487,214 @@ func TestReconcileIgnoresRuntimeFailureFromPreviousWorker(t *testing.T) {
 		t.Fatal(current, err)
 	}
 }
+
+// poolWorker는 GRPCWorker처럼 풀에 없는 대상과 막힌 대상에 Unavailable을 돌려준다.
+type poolWorker struct {
+	*fakeWorker
+	pool *ai.Pool
+	mu   sync.Mutex
+	down map[string]bool
+}
+
+func (w *poolWorker) setDown(target string, down bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.down[target] = down
+}
+func (w *poolWorker) reach(target string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pool.Target(target) == nil {
+		return status.Error(codes.Unavailable, "worker removed")
+	}
+	if w.down[target] {
+		return status.Error(codes.Unavailable, "worker unreachable")
+	}
+	return nil
+}
+func (w *poolWorker) Start(ctx context.Context, target string, r *pb.StartVodJobRequest) (*pb.VodJobStatus, error) {
+	if err := w.reach(target); err != nil {
+		return nil, err
+	}
+	return w.fakeWorker.Start(ctx, target, r)
+}
+func (w *poolWorker) Get(ctx context.Context, target, id string) (*pb.VodJobStatus, error) {
+	if err := w.reach(target); err != nil {
+		return nil, err
+	}
+	return w.fakeWorker.Get(ctx, target, id)
+}
+func (w *poolWorker) Pause(ctx context.Context, target, id string) (*pb.VodJobStatus, error) {
+	if err := w.reach(target); err != nil {
+		return nil, err
+	}
+	return w.fakeWorker.Pause(ctx, target, id)
+}
+func (w *poolWorker) Cancel(ctx context.Context, target, id string) (*pb.VodJobStatus, error) {
+	if err := w.reach(target); err != nil {
+		return nil, err
+	}
+	return w.fakeWorker.Cancel(ctx, target, id)
+}
+func (w *poolWorker) List(ctx context.Context, target string) ([]*pb.VodJobStatus, error) {
+	if err := w.reach(target); err != nil {
+		return nil, err
+	}
+	return w.fakeWorker.List(ctx, target)
+}
+func (w *poolWorker) LiveStreams(ctx context.Context, target string) (uint64, error) {
+	if err := w.reach(target); err != nil {
+		return 0, err
+	}
+	return w.fakeWorker.LiveStreams(ctx, target)
+}
+func usePoolWorker(e *Engine, f *fakeWorker) *poolWorker {
+	w := &poolWorker{fakeWorker: f, pool: e.Pool, down: map[string]bool{}}
+	e.Worker = w
+	return w
+}
+func currentJob(t *testing.T, s *Service, j Job) Job {
+	t.Helper()
+	var got Job
+	if err := s.store.Load().DB.Where("id = ?", j.ID).Take(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestReconcileReleasesJobsOnRemovedWorker(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	usePoolWorker(e, f)
+	orphan := createJob(t, s, "processing")
+	orphan.WorkerTarget = "removed:1"
+	orphan.CheckpointToken = "saved"
+	saveJob(t, s, &orphan)
+	deleted := createJob(t, s, "processing")
+	deleted.WorkerTarget = "removed:1"
+	deleted.DeletedAt = &deleted.CreatedAt
+	s.Finish(&deleted, "cancelled")
+	saveJob(t, s, &deleted)
+
+	if err := e.Reconcile(ctx); err != nil {
+		t.Fatalf("a removed worker blocked reconciliation: %v", err)
+	}
+	got := currentJob(t, s, orphan)
+	if got.Status != "paused" || got.WorkerTarget != "" || got.CheckpointToken != "saved" {
+		t.Fatalf("removed worker job = status %s target %q checkpoint %q", got.Status, got.WorkerTarget, got.CheckpointToken)
+	}
+	if got := currentJob(t, s, deleted); got.WorkerTarget != "" {
+		t.Fatalf("deleted job kept removed target %q", got.WorkerTarget)
+	}
+	// 놓은 작업은 체크포인트부터 다른 워커에서 다시 시작한다.
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.starts) == 1 && f.starts[0].JobId == orphan.ID.String() && f.starts[0].CheckpointToken == "saved"
+	})
+}
+
+func TestReconcileIsolatesUnresponsiveWorker(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	w := usePoolWorker(e, f)
+	stuck := createJob(t, s, "processing")
+	stuck.WorkerTarget = "a:1"
+	saveJob(t, s, &stuck)
+	f.jobs[stuck.ID.String()] = &pb.VodJobStatus{JobId: stuck.ID.String(), State: pb.VodJobState_VOD_JOB_STATE_PROCESSING, WorkerTarget: "a:1", Progress: &pb.VodProgress{FramesTotal: 1800}}
+	queued := createJob(t, s, "queued")
+	w.setDown("a:1", true)
+
+	if err := e.Reconcile(ctx); err != nil {
+		t.Fatalf("an unresponsive worker blocked reconciliation: %v", err)
+	}
+	// 응답 없는 워커는 GPU를 쓰고 있을 수 있어 그 작업은 processing으로 둔다.
+	if got := currentJob(t, s, stuck); got.Status != "processing" || got.WorkerTarget != "a:1" {
+		t.Fatalf("unresponsive worker job = status %s target %q", got.Status, got.WorkerTarget)
+	}
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.starts) == 1 && f.starts[0].JobId == queued.ID.String() && f.jobs[queued.ID.String()].WorkerTarget == "c:1"
+	})
+
+	w.setDown("a:1", false)
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentJob(t, s, stuck); got.Status != "paused" || got.WorkerTarget != "" {
+		t.Fatalf("recovered worker job = status %s target %q", got.Status, got.WorkerTarget)
+	}
+}
+
+func TestRunnerReleasesLeaseWhenWorkerRemoved(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	usePoolWorker(e, f)
+	first := createJob(t, s, "queued")
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var target string
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if v := f.jobs[first.ID.String()]; v != nil {
+			target = v.WorkerTarget
+		}
+		return target != ""
+	})
+	if err := e.Pool.RemoveTarget(target); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		got := currentJob(t, s, first)
+		return got.Status == "paused" && got.WorkerTarget == ""
+	})
+	// 동시성 1인 큐의 lease가 풀려, 놓인 작업이 남은 워커에서 다시 돈다.
+	eventually(t, func() bool {
+		if err := e.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		v := f.jobs[first.ID.String()]
+		return len(f.starts) == 2 && v.WorkerTarget != target
+	})
+}
+
+func TestProcessingJobRecoversAfterFailedStatusSave(t *testing.T) {
+	s, e, f, ctx := setupEngine(t)
+	db := s.store.Load().DB
+	if err := db.Exec(`CREATE FUNCTION reject_failed_status() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected status save failure'; END $$ LANGUAGE plpgsql`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TRIGGER reject_failed_status BEFORE UPDATE ON vod_jobs
+		FOR EACH ROW WHEN (NEW.status = 'failed') EXECUTE FUNCTION reject_failed_status()`).Error; err != nil {
+		t.Fatal(err)
+	}
+	f.startErr = status.Error(codes.InvalidArgument, "rejected")
+	j := createJob(t, s, "queued")
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.wg.Wait()
+	if got := currentJob(t, s, j); got.Status != "processing" || got.WorkerTarget == "" {
+		t.Fatalf("setup: failed save left status %s target %q", got.Status, got.WorkerTarget)
+	}
+
+	if err := db.Exec("DROP TRIGGER reject_failed_status ON vod_jobs").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.wg.Wait()
+	if got := currentJob(t, s, j); got.Status == "processing" {
+		t.Fatalf("job stayed processing after its runner exited: target %q", got.WorkerTarget)
+	}
+}

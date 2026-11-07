@@ -231,8 +231,10 @@ FROM vod_deletion_logs WHERE job_id = :'vod_job_id'::uuid ORDER BY deleted_at;
 SQL
 find "/var/lib/innolive-ai/vod/${VOD_JOB_ID}" -maxdepth 2 -type f -printf '%P\n'
 journalctl -u 'innolive-server@*' --since '30 minutes ago' --no-pager \
-  | rg -o 'vod_file_destroyed|vod_retention_worker_unconfirmed|vod retention retry required|vod reconciliation pending|vod scheduling deferred'
+  | rg -o 'vod_file_destroyed|vod_retention_worker_unconfirmed|vod retention retry required|vod reconciliation pending|vod worker reconciliation pending|vod job reconciliation pending|vod job release pending|vod scheduling deferred'
 ```
+
+응답 없는 워커는 그 워커의 작업만 processing으로 두고(`vod worker reconciliation pending`·`vod job reconciliation pending`) 그 GPU에는 새 작업을 배정하지 않는다. 다른 워커의 작업은 계속 배정한다. AI 워커 교체로 풀에서 빠진 워커의 작업은 일시 중지로 돌려 남은 워커에서 체크포인트부터 다시 처리한다.
 
 `VOD_JOB_ID`는 스모크 응답에서 받은 UUID인지 검증한 뒤 사용한다.
 

@@ -84,7 +84,7 @@ func (s *gormWithdrawalAccountStore) UserState(ctx context.Context, userID uuid.
 	return WithdrawalUserActive, nil
 }
 
-func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, _ time.Time) error {
+func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, now time.Time) error {
 	if s == nil || s.db == nil {
 		return ErrWithdrawalUnavailable
 	}
@@ -100,7 +100,7 @@ func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID
 		if user.Status != UserStatusActive {
 			return ErrUserInactive
 		}
-		if err := clearVODOriginalFilenames(tx, userID); err != nil {
+		if err := deleteVODJobs(tx, userID, now); err != nil {
 			return err
 		}
 

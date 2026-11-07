@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -62,4 +63,57 @@ func TestUserOperationGateIsolatesUsersAndRejectsDuplicateWithdrawal(t *testing.
 	}
 	releaseOther()
 	releaseTarget()
+}
+
+func TestUserOperationGateCancelsCancellableWorkWhenWithdrawalStarts(t *testing.T) {
+	gate := NewUserOperationGate()
+	userID := uuid.New()
+
+	transferCtx, releaseTransfer, admitted := gate.BeginCancellableOperation(context.Background(), userID)
+	if !admitted {
+		t.Fatal("cancellable operation was not admitted")
+	}
+	releaseWork, admitted := gate.BeginOperation(userID)
+	if !admitted {
+		t.Fatal("operation was not admitted")
+	}
+	withdrawalDone := make(chan error, 1)
+	go func() {
+		owner, err := gate.BeginWithdrawal(context.Background(), userID)
+		if err == nil {
+			owner()
+		}
+		withdrawalDone <- err
+	}()
+
+	select {
+	case <-transferCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("withdrawal did not cancel the cancellable operation")
+	}
+	releaseTransfer()
+	// 일반 작업은 취소하지 않고 끝날 때까지 기다린다.
+	select {
+	case err := <-withdrawalDone:
+		t.Fatalf("withdrawal finished before the ordinary operation ended: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseWork()
+	if err := <-withdrawalDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUserOperationGateRejectsCancellableWorkDuringWithdrawal(t *testing.T) {
+	gate := NewUserOperationGate()
+	userID := uuid.New()
+
+	owner, err := gate.BeginWithdrawal(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner()
+	if _, _, admitted := gate.BeginCancellableOperation(context.Background(), userID); admitted {
+		t.Fatal("cancellable operation admitted while withdrawal owns the gate")
+	}
 }

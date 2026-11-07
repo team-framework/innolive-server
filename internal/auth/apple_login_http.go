@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -65,14 +63,8 @@ type appleLoginRequest struct {
 
 func decodeAppleLoginRequest(w http.ResponseWriter, r *http.Request) (appleLoginRequest, error) {
 	var request appleLoginRequest
-	r.Body = http.MaxBytesReader(w, r.Body, maxAppleLoginRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeSingleJSON(w, r, maxAppleLoginRequestBody, &request); err != nil {
 		return appleLoginRequest{}, err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return appleLoginRequest{}, errors.New("request body must contain one JSON object")
 	}
 	request.AuthorizationCode = strings.TrimSpace(request.AuthorizationCode)
 	request.Nonce = strings.TrimSpace(request.Nonce)

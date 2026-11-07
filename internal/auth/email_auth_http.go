@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -204,7 +202,7 @@ type emailSignupV2Request struct {
 
 func decodeEmailSignupV2Request(w http.ResponseWriter, r *http.Request) (emailSignupV2Request, error) {
 	var request emailSignupV2Request
-	if err := decodeSingleJSON(w, r, &request); err != nil {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil {
 		return emailSignupV2Request{}, err
 	}
 	request.Email = strings.TrimSpace(request.Email)
@@ -226,7 +224,7 @@ type emailLoginRequest struct {
 
 func decodeEmailSignupRequest(w http.ResponseWriter, r *http.Request) (emailSignupRequest, error) {
 	var request emailSignupRequest
-	if err := decodeSingleJSON(w, r, &request); err != nil {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil {
 		return emailSignupRequest{}, err
 	}
 	request.Email = strings.TrimSpace(request.Email)
@@ -238,7 +236,7 @@ func decodeEmailSignupRequest(w http.ResponseWriter, r *http.Request) (emailSign
 
 func decodeEmailVerificationRequest(w http.ResponseWriter, r *http.Request) (emailVerificationRequest, error) {
 	var request emailVerificationRequest
-	if err := decodeSingleJSON(w, r, &request); err != nil {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil {
 		return emailVerificationRequest{}, err
 	}
 	request.VerificationCode = strings.TrimSpace(request.VerificationCode)
@@ -250,7 +248,7 @@ func decodeEmailVerificationRequest(w http.ResponseWriter, r *http.Request) (ema
 
 func decodeEmailLoginRequest(w http.ResponseWriter, r *http.Request) (emailLoginRequest, error) {
 	var request emailLoginRequest
-	if err := decodeSingleJSON(w, r, &request); err != nil {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil {
 		return emailLoginRequest{}, err
 	}
 	request.Email = strings.TrimSpace(request.Email)
@@ -258,19 +256,6 @@ func decodeEmailLoginRequest(w http.ResponseWriter, r *http.Request) (emailLogin
 		return emailLoginRequest{}, errors.New("email and password are required")
 	}
 	return request, nil
-}
-
-func decodeSingleJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxEmailAuthRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("request body must contain one JSON object")
-	}
-	return nil
 }
 
 // handlePasswordReset은 이메일 인증으로 비밀번호를 바꾸는 첫 단계다(#388). 로그인 여부와
@@ -289,7 +274,7 @@ func (h *tokenHTTPHandler) handlePasswordReset(w http.ResponseWriter, r *http.Re
 		Email       string `json:"email"`
 		NewPassword string `json:"new_password"`
 	}{}
-	if err := decodeSingleJSON(w, r, &request); err != nil || strings.TrimSpace(request.Email) == "" || request.NewPassword == "" {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil || strings.TrimSpace(request.Email) == "" || request.NewPassword == "" {
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset request.")
 		return
 	}
@@ -327,7 +312,7 @@ func (h *tokenHTTPHandler) handlePasswordResetVerify(w http.ResponseWriter, r *h
 		ResetToken       string `json:"reset_token"`
 		VerificationCode string `json:"verification_code"`
 	}{}
-	if err := decodeSingleJSON(w, r, &request); err != nil || strings.TrimSpace(request.ResetToken) == "" {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil || strings.TrimSpace(request.ResetToken) == "" {
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid password reset verification request.")
 		return
 	}

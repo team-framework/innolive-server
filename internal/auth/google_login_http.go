@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -61,14 +59,8 @@ func decodeGoogleLoginRequest(w http.ResponseWriter, r *http.Request) (string, e
 	request := struct {
 		IDToken string `json:"id_token"`
 	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxGoogleLoginRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeSingleJSON(w, r, maxGoogleLoginRequestBody, &request); err != nil {
 		return "", err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return "", errors.New("request body must contain one JSON object")
 	}
 	request.IDToken = strings.TrimSpace(request.IDToken)
 	if request.IDToken == "" {

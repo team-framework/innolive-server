@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -108,14 +106,8 @@ func decodeChzzkConnectRequest(w http.ResponseWriter, r *http.Request) (string, 
 		Code  string `json:"code"`
 		State string `json:"state"`
 	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxChzzkConnectRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeSingleJSON(w, r, maxChzzkConnectRequestBody, &request); err != nil {
 		return "", "", err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return "", "", errors.New("request body must contain one JSON object")
 	}
 	request.Code = strings.TrimSpace(request.Code)
 	if request.Code == "" {

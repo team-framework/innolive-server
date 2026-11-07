@@ -206,20 +206,27 @@ func decodeRefreshRequest(w http.ResponseWriter, r *http.Request) (string, error
 	request := struct {
 		RefreshToken string `json:"refresh_token"`
 	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxTokenRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeSingleJSON(w, r, maxTokenRequestBody, &request); err != nil {
 		return "", err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return "", errors.New("request body must contain one JSON object")
 	}
 	request.RefreshToken = strings.TrimSpace(request.RefreshToken)
 	if request.RefreshToken == "" {
 		return "", errors.New("refresh_token is required")
 	}
 	return request.RefreshToken, nil
+}
+
+func decodeSingleJSON(w http.ResponseWriter, r *http.Request, limit int64, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func requestClientInfo(r *http.Request) ClientInfo {

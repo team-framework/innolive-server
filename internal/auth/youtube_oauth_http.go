@@ -1,9 +1,7 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 
@@ -102,14 +100,8 @@ func decodeYouTubeConnectRequest(w http.ResponseWriter, r *http.Request) (string
 		ServerAuthCode string `json:"server_auth_code"`
 		CodeSource     string `json:"code_source"`
 	}{}
-	r.Body = http.MaxBytesReader(w, r.Body, maxYouTubeConnectRequestBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeSingleJSON(w, r, maxYouTubeConnectRequestBody, &request); err != nil {
 		return "", "", err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return "", "", errors.New("request body must contain one JSON object")
 	}
 	request.ServerAuthCode = strings.TrimSpace(request.ServerAuthCode)
 	if request.ServerAuthCode == "" {

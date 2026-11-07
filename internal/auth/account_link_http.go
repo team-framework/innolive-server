@@ -55,7 +55,7 @@ func (h *tokenHTTPHandler) handleNativeAccountSetup(w http.ResponseWriter, r *ht
 		Email      string `json:"email"`
 		Password   string `json:"password"`
 	}{}
-	if err := decodeSingleJSON(w, r, &request); err != nil || strings.TrimSpace(request.SetupToken) == "" || strings.TrimSpace(request.Email) == "" || request.Password == "" {
+	if err := decodeSingleJSON(w, r, maxEmailAuthRequestBody, &request); err != nil || strings.TrimSpace(request.SetupToken) == "" || strings.TrimSpace(request.Email) == "" || request.Password == "" {
 		h.writeError(w, r, http.StatusBadRequest, "bad_request", "Invalid account setup request.")
 		return
 	}

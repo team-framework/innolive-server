@@ -25,7 +25,7 @@ func (s *Server) configureVOD() {
 	}
 	service := vod.New(s.cfg.VOD, nil, s.logger)
 	s.vod = &vodRuntime{service: service}
-	service.Register(s.mux, func(h http.Handler) http.Handler { return s.requireUser(s.withUserOperation(h)) })
+	service.Register(s.mux, func(h http.Handler) http.Handler { return s.requireUser(s.withCancellableUserOperation(h)) })
 }
 func (s *Server) startVOD(ctx context.Context) func() {
 	if !s.cfg.VOD.Enabled || s.vod == nil {

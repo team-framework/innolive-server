@@ -84,7 +84,7 @@ func (s *gormWithdrawalAccountStore) UserState(ctx context.Context, userID uuid.
 	return WithdrawalUserActive, nil
 }
 
-func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, _ time.Time) error {
+func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID uuid.UUID, now time.Time) error {
 	if s == nil || s.db == nil {
 		return ErrWithdrawalUnavailable
 	}
@@ -100,7 +100,7 @@ func (s *gormWithdrawalAccountStore) MarkUserDeleted(ctx context.Context, userID
 		if user.Status != UserStatusActive {
 			return ErrUserInactive
 		}
-		if err := clearVODOriginalFilenames(tx, userID); err != nil {
+		if err := deleteVODJobs(tx, userID, now); err != nil {
 			return err
 		}
 
@@ -171,6 +171,14 @@ func (s *AccountWithdrawalService) BeginOperation(userID uuid.UUID) (func(), boo
 		return func() {}, true
 	}
 	return s.gate.BeginOperation(userID)
+}
+
+// BeginCancellableOperation은 탈퇴가 시작되면 취소되는 사용자 범위 작업을 들인다.
+func (s *AccountWithdrawalService) BeginCancellableOperation(ctx context.Context, userID uuid.UUID) (context.Context, func(), bool) {
+	if s == nil || s.gate == nil {
+		return ctx, func() {}, true
+	}
+	return s.gate.BeginCancellableOperation(ctx, userID)
 }
 
 func (s *AccountWithdrawalService) beginWithdrawal(ctx context.Context, userID uuid.UUID) (func(), error) {

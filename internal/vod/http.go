@@ -97,6 +97,10 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(s.Config.UploadTimeout))
 	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
+	// 본문 읽기는 컨텍스트를 보지 않는다. 계정 탈퇴가 요청 컨텍스트를 끊으면 읽기
+	// 기한을 당겨 전송을 바로 멈춘다(V-12).
+	stopAbort := context.AfterFunc(r.Context(), func() { _ = rc.SetReadDeadline(time.Now()) })
+	defer stopAbort()
 	maxBytes := s.Config.MaxUploadBytes
 	tooLarge := func() {
 		fail(w, 413, "upload_too_large", map[string]any{"max_upload_bytes": maxBytes, "max_request_bytes": maxBytes + 1048576})
@@ -419,6 +423,10 @@ func (s *Service) result(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ctx.Done():
+				// 계정 탈퇴가 요청을 끊었으면 느린 클라이언트에 막힌 쓰기도 멈춘다(V-12).
+				if r.Context().Err() != nil {
+					_ = rc.SetWriteDeadline(time.Now())
+				}
 				return
 			case <-ticker.C:
 				current, e := db.Get(ctx, j.ID, j.UserID)

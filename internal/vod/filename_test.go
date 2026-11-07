@@ -366,3 +366,74 @@ func TestOriginalFilenameMigration(t *testing.T) {
 	}
 	assertFilenameNULL(t, s, j)
 }
+
+func TestAccountWithdrawalCancelsAndPurgesVODJobs(t *testing.T) {
+	s := testService(t)
+	db := s.store.Load().DB
+	if err := db.AutoMigrate(&auth.User{}, &auth.EmailAccount{}, &auth.OAuthAccount{}, &auth.RefreshSession{}, &auth.StreamingAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	processing := createJob(t, s, "processing")
+	// 워커가 취소를 확인하지 않아도 탈퇴한 사용자의 파일은 기다리지 않는다.
+	processing.WorkerTarget = "unreachable"
+	saveJob(t, s, &processing)
+	done := createJob(t, s, "done")
+	done.UserID = processing.UserID
+	s.Finish(&done, "done")
+	saveJob(t, s, &done)
+	queued := createJob(t, s, "queued")
+	queued.UserID = processing.UserID
+	saveJob(t, s, &queued)
+	other := createJob(t, s, "done")
+	s.Finish(&other, "done")
+	saveJob(t, s, &other)
+	for _, j := range []Job{processing, done, queued, other} {
+		writeFile(t, s.Path(j, "original"))
+		writeFile(t, s.Path(j, "result"))
+	}
+	if err := db.Create(&auth.User{ID: processing.UserID, Status: auth.UserStatusActive}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	withdrawal, err := auth.NewAccountWithdrawalService(auth.NewGormWithdrawalAccountStore(db), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = withdrawal.Withdraw(context.Background(), processing.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []struct {
+		job    Job
+		status string
+	}{{processing, "cancelled"}, {done, "done"}, {queued, "cancelled"}} {
+		var got Job
+		if err := db.Where("id = ?", want.job.ID).Take(&got).Error; err != nil {
+			t.Fatal(err)
+		}
+		if got.DeletedAt == nil || got.Status != want.status || got.OriginalDeleteAt == nil || got.OriginalDeleteAt.After(s.Now()) {
+			t.Fatalf("job %s after withdrawal: status=%s deleted_at=%v original_delete_at=%v", want.status, got.Status, got.DeletedAt, got.OriginalDeleteAt)
+		}
+		if err := s.store.Load().Save(context.Background(), &want.job); !errors.Is(err, ErrConflict) {
+			t.Fatal("withdrawal allowed stale worker write", err)
+		}
+	}
+	if err := s.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range []Job{processing, done, queued} {
+		for _, kind := range []string{"original", "result"} {
+			if _, err := os.Stat(s.Path(j, kind)); !os.IsNotExist(err) {
+				t.Fatalf("%s %s survived withdrawal sweep: %v", j.Status, kind, err)
+			}
+		}
+	}
+	got, err := s.store.Load().Get(context.Background(), other.ID, other.UserID)
+	if err != nil || got.Status != "done" {
+		t.Fatal("other user's job changed", err)
+	}
+	// 끝난 작업의 원본은 탈퇴와 무관하게 스위퍼가 바로 지운다. 결과는 남아야 한다.
+	if _, err := os.Stat(s.Path(other, "result")); err != nil {
+		t.Fatalf("other user's result removed: %v", err)
+	}
+}

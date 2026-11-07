@@ -28,6 +28,8 @@ type withdrawalGateEntry struct {
 	deleted    bool
 	operations int
 	changed    chan struct{}
+	// cancels는 탈퇴가 시작되면 끊어도 되는 작업(VOD 전송)의 취소 함수다.
+	cancels map[*context.CancelFunc]struct{}
 }
 
 func NewUserOperationGate() *UserOperationGate {
@@ -57,6 +59,48 @@ func (g *UserOperationGate) BeginOperation(userID uuid.UUID) (release func(), ad
 	var once sync.Once
 	return func() {
 		once.Do(func() { g.endOperation(userID, entry) })
+	}, true
+}
+
+// BeginCancellableOperation은 탈퇴가 시작되면 취소되는 사용자 범위 작업을 들인다.
+// 수십 분 걸리는 VOD 업로드·다운로드가 탈퇴를 붙잡지 않게 한다. 탈퇴는 여전히 이
+// 작업이 release될 때까지 기다리므로, 작업은 돌려준 컨텍스트를 따라 빨리 끝나야 한다.
+func (g *UserOperationGate) BeginCancellableOperation(ctx context.Context, userID uuid.UUID) (context.Context, func(), bool) {
+	if g == nil || userID == uuid.Nil {
+		return ctx, func() {}, true
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	key := &cancel
+
+	// 입장과 취소 등록을 한 잠금 안에서 해, 그 사이에 시작한 탈퇴가 이 작업을
+	// 취소하지 못하고 전송이 끝날 때까지 기다리는 일이 없게 한다.
+	g.mu.Lock()
+	entry := g.users[userID]
+	if entry == nil {
+		entry = &withdrawalGateEntry{changed: make(chan struct{})}
+		g.users[userID] = entry
+	}
+	if entry.withdrawing || entry.deleted {
+		g.mu.Unlock()
+		cancel()
+		return nil, nil, false
+	}
+	entry.operations++
+	if entry.cancels == nil {
+		entry.cancels = make(map[*context.CancelFunc]struct{})
+	}
+	entry.cancels[key] = struct{}{}
+	g.mu.Unlock()
+
+	var once sync.Once
+	return operationCtx, func() {
+		once.Do(func() {
+			g.mu.Lock()
+			delete(entry.cancels, key)
+			g.mu.Unlock()
+			cancel()
+			g.endOperation(userID, entry)
+		})
 	}, true
 }
 
@@ -100,6 +144,9 @@ func (g *UserOperationGate) BeginWithdrawal(ctx context.Context, userID uuid.UUI
 		return nil, ErrUserInactive
 	}
 	entry.withdrawing = true
+	for cancel := range entry.cancels {
+		(*cancel)()
+	}
 	for entry.operations > 0 {
 		changed := entry.changed
 		g.mu.Unlock()

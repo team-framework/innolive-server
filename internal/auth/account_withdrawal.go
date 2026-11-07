@@ -173,6 +173,14 @@ func (s *AccountWithdrawalService) BeginOperation(userID uuid.UUID) (func(), boo
 	return s.gate.BeginOperation(userID)
 }
 
+// BeginCancellableOperation은 탈퇴가 시작되면 취소되는 사용자 범위 작업을 들인다.
+func (s *AccountWithdrawalService) BeginCancellableOperation(ctx context.Context, userID uuid.UUID) (context.Context, func(), bool) {
+	if s == nil || s.gate == nil {
+		return ctx, func() {}, true
+	}
+	return s.gate.BeginCancellableOperation(ctx, userID)
+}
+
 func (s *AccountWithdrawalService) beginWithdrawal(ctx context.Context, userID uuid.UUID) (func(), error) {
 	if s == nil || s.gate == nil {
 		return nil, ErrWithdrawalUnavailable

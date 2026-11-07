@@ -283,6 +283,34 @@ func (s *Server) withUserOperation(next http.Handler) http.Handler {
 	})
 }
 
+// withCancellableUserOperation은 withUserOperation과 같지만, 계정 탈퇴가 시작되면
+// 요청 컨텍스트를 끊는다. 수십 분 걸리는 VOD 업로드·다운로드가 탈퇴를 붙잡아
+// 탈퇴 요청이 타임아웃되지 않게 한다(V-12).
+func (s *Server) withCancellableUserOperation(next http.Handler) http.Handler {
+	type cancellableGate interface {
+		BeginCancellableOperation(context.Context, uuid.UUID) (context.Context, func(), bool)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gate, cancellable := s.userOperationGate.(cancellableGate)
+		if !cancellable || r.Method == http.MethodOptions {
+			s.withUserOperation(next).ServeHTTP(w, r)
+			return
+		}
+		userID, authenticated := auth.UserIDFromContext(r.Context())
+		if !authenticated {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx, release, admitted := gate.BeginCancellableOperation(r.Context(), userID)
+		if !admitted {
+			writeError(w, apiError{Status: http.StatusConflict, Code: "withdrawal_in_progress", Message: "Account deletion is already in progress. Retry shortly."})
+			return
+		}
+		defer release()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // ClearUserReferenceData는 인증된 사용자의 워커 화이트리스트와 저장된 얼굴
 // 메타데이터를 지운다. 워커 정리를 먼저 해, 메모리 임베딩이 살아 있는데 성공으로
 // 알리는 일이 없게 한다.
